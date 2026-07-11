@@ -1,0 +1,20 @@
+{
+  "fixture_set": "client-anonymized-v1",
+  "fixture_mode": "anonymized_client",
+  "parser_eval_report_env": "MONDAY_REPORT_PARSER_EVAL_REPORT",
+  "families": [
+    { "id": "ddr", "evidence_files": ["fixtures/ddr/anonymized_ddr.pdf"], "expected": { "parser": "pdf_text_v1", "locator_type": "pdf", "failure_extracted": true }, "notes": "Daily drilling report with failures and NPT evidence." },
+    { "id": "bha", "evidence_files": ["fixtures/bha/anonymized_bha.xlsx"], "expected": { "parser": "xlsx_text_v1", "locator_type": "excel" }, "notes": "BHA context and tool serial evidence." },
+    { "id": "mwd_lwd", "evidence_files": ["fixtures/mwd_lwd/anonymized_mwd_lwd.pdf"], "expected": { "parser": "pdf_text_v1", "locator_type": "pdf" }, "notes": "MWD/LWD service-company report." },
+    { "id": "rss", "evidence_files": ["fixtures/rss/anonymized_rss.pdf"], "expected": { "parser": "pdf_text_v1", "locator_type": "pdf" }, "notes": "RSS run evidence." },
+    { "id": "mud_motor", "evidence_files": ["fixtures/mud_motor/anonymized_motor.pdf"], "expected": { "parser": "pdf_text_v1", "locator_type": "pdf" }, "notes": "Mud motor failure or run report." },
+    { "id": "bit_record", "evidence_files": ["fixtures/bit/anonymized_bit_record.xlsx"], "expected": { "parser": "xlsx_text_v1", "locator_type": "excel" }, "notes": "Bit run and dull-grade evidence." },
+    { "id": "mud_report", "evidence_files": ["fixtures/mud/anonymized_mud_report.pdf"], "expected": { "parser": "pdf_text_v1", "locator_type": "pdf" }, "notes": "Mud properties and operational context." },
+    { "id": "npt_report", "evidence_files": ["fixtures/npt/anonymized_npt.csv"], "expected": { "parser": "csv_text_v1", "locator_type": "csv" }, "notes": "NPT rows with responsible company and hours." },
+    { "id": "scanned_pdf", "evidence_files": ["fixtures/scanned/anonymized_scanned_ddr.pdf"], "expected": { "parser": "ocr_text_v1", "locator_type": "image", "failure_extracted": true }, "notes": "Image-only PDF requiring OCR." },
+    { "id": "excel_workbook", "evidence_files": ["fixtures/excel/anonymized_service_quality.xlsx"], "expected": { "parser": "xlsx_text_v1", "locator_type": "excel" }, "notes": "Workbook with sheet/row citation requirements." },
+    { "id": "email_with_attachment", "evidence_files": ["fixtures/email/anonymized_ops_update.eml"], "expected": { "parser": "email_text_v1", "locator_type": "email" }, "notes": "Email body plus attachment evidence." },
+    { "id": "corrupted_file", "evidence_files": ["fixtures/corrupted/anonymized_corrupted.bin"], "expected": { "job_status": "failed", "job_result": "no_text_extracted" }, "notes": "Parser failure and validation-path fixture." },
+    { "id": "duplicate_file", "evidence_files": ["fixtures/duplicate/anonymized_duplicate_ddr.pdf"], "expected": { "parser": "pdf_text_v1", "locator_type": "pdf", "duplicate_sha256_of": "ddr" }, "notes": "Duplicate detection and lineage fixture." }
+  ]
+}

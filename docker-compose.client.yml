@@ -1,0 +1,31 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: monday-report-postgres
+    environment:
+      POSTGRES_DB: monday_report
+      POSTGRES_USER: monday_report
+      POSTGRES_PASSWORD: monday_report_local_only
+    ports:
+      - "55432:5432"
+    volumes:
+      - monday_report_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monday_report -d monday_report"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    container_name: monday-report-redis
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  monday_report_postgres:
