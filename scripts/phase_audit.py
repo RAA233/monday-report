@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -14,8 +15,8 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 ROOT = Path(__file__).resolve().parents[1]
-API_BASE = "http://127.0.0.1:8000"
-WEB_BASE = "http://127.0.0.1:5173"
+API_BASE = os.getenv("MONDAY_REPORT_API_BASE", "http://127.0.0.1:8000")
+WEB_BASE = os.getenv("MONDAY_REPORT_WEB_BASE", "http://127.0.0.1:5173")
 
 
 def main() -> int:

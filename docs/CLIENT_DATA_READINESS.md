@@ -13,6 +13,14 @@ python -m pip install -r requirements-client.txt
 
 PostgreSQL is exposed at `127.0.0.1:55432`; Redis is exposed at `127.0.0.1:56379`.
 
+If Docker Hub image pulls are unavailable but equivalent local images exist, override image names before starting services:
+
+```powershell
+$env:MONDAY_REPORT_POSTGRES_IMAGE="dd-postgres:2.42.0-pilot.local-2026-05-11"
+$env:MONDAY_REPORT_REDIS_IMAGE="redis:7.2.4-alpine"
+docker compose -f docker-compose.client.yml up -d
+```
+
 ## Required Environment
 
 Use protected paths outside the repository for state, uploads, and exports. Set real secrets, not the examples below:
@@ -34,6 +42,21 @@ $env:MONDAY_REPORT_PRODUCTION_PARSERS="true"
 $env:MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST="<anonymized client fixture manifest>"
 $env:MONDAY_REPORT_PARSER_EVAL_REPORT="<passing parser/OCR eval report>"
 ```
+
+## Fixture Evidence
+
+For a local client-readiness smoke, generate the 13-family anonymized engineering fixture pack and parser/OCR report:
+
+```powershell
+pnpm run fixtures:anonymized
+$env:MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST="$PWD\output\golden-fixtures\anonymized\golden-fixture-manifest.json"
+$env:MONDAY_REPORT_OCR_ENGINE="tesseract"
+$env:MONDAY_REPORT_TESSERACT_CMD="python $PWD\output\golden-fixtures\anonymized\tools\fake_tesseract.py"
+python scripts\generate_parser_fixture_eval_report.py --manifest $env:MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST --output output\parser-evals\parser_fixture_eval_report.json
+$env:MONDAY_REPORT_PARSER_EVAL_REPORT="$PWD\output\parser-evals\parser_fixture_eval_report.json"
+```
+
+For production client intake, replace the generated fixture pack with a reviewed anonymized client fixture manifest and a passing parser/OCR eval report from that fixture set.
 
 ## Approval Command
 

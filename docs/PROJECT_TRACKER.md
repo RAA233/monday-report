@@ -10,14 +10,14 @@ The executable MVP path is now phase-gated end to end. It can bootstrap a clean 
 |---|---|---|---|
 | Accepted now | Pass | Executable local MVP is working for synthetic/demo data: chat, upload, parser worker, typed citations, validation, exports, signed downloads, audit, and readiness gates. | Keep every slice behind `pnpm run audit:all`. |
 | Safe operating mode | Watch | The app is safe for local/demo testing only. State is local JSON, worker is inline, and client mode blocks unsafe operations until readiness is green. | Do not ingest real client packages yet. |
-| Real-client blockers | Watch | PostgreSQL/RLS, Redis workers, production OCR engine configuration/evals, `MONDAY_REPORT_PARSER_EVAL_REPORT`, local model runtime, external scanner posture, signing/API/retention config, and a complete anonymized golden fixture manifest remain open. | Close blockers before switching to real client mode. |
+| Real-client blockers | Watch | Active PostgreSQL/Redis adapters and generated anonymized fixture evidence are available for local approval smoke tests. Production intake still requires reviewed anonymized client fixtures, production OCR, approved secrets, and tenant storage. | Replace generated fixture evidence with reviewed client evidence before production intake. |
 | Next execution order | Pending | Golden fixture pack, OCR fixture/eval hardening, parser eval hardening, local LLM extraction router, PostgreSQL repository, Redis worker. | Start with fixtures and parser/eval coverage before persistence migration. |
 
 ## Current Tracker
 
 - Working now: chat-first workflow, direct/ZIP upload, SHA-256 storage, malware baseline blocking, parser-worker queue, source chunks, failure extraction, validation tasks, Monday Report creation, JSON/CSV/HTML/PDF/XLSX exports, signed source/export downloads, redacted audit logs, and readiness reporting.
 - Recently added: typed source locators, readable citation labels, source-file actions directly from chat citation cards, manifest-backed golden fixture readiness, manifest-driven parser/OCR eval report generation, parser/OCR eval report readiness, Gemma 4 E2B local AI default, single-file partner preview packaging, PyMuPDF-backed page-aware PDF chunks, native PDF table row citations, and configurable local OCR extraction into image-page chunks.
-- Real-client posture: not ready. The system correctly reports `not_ready` until production infrastructure, parser/OCR/model, security configuration, and golden fixture coverage are completed.
+- Real-client posture: locally approvable with live Postgres/Redis plus fixture evidence. The system reports `ready` only when active PostgreSQL, active Redis, local AI, security configuration, and golden fixture/eval evidence all pass; production intake remains not ready until generated fixtures are replaced by reviewed anonymized client evidence.
 - Operator command: run `pnpm run audit:all` after every meaningful code change; run `pnpm run package:partner-approval` before sending the partner ZIP; run `pnpm run package:client-approval` to write the current real-client approval/blocker report.
 
 ## Phase Gate Rule

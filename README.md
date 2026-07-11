@@ -16,6 +16,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 - Client-data readiness endpoint and tracker panel flag demo/local-scaffold blockers before real client packages are accepted, enforce retention policy, require real active infrastructure adapters, and unsafe client mode requires an API key while blocking data reads, chat, report creation, and exports until ready.
 - Local AI defaults to Ollama with `gemma4:e2b`; readiness verifies both endpoint reachability and the pinned model.
 - Parser/OCR fixture eval readiness requires a passing `MONDAY_REPORT_PARSER_EVAL_REPORT` before parser coverage can be treated as real-client ready; generate it with `python scripts/generate_parser_fixture_eval_report.py --manifest path/to/golden-fixture-manifest.json --output output/parser-evals/parser_fixture_eval_report.json`.
+- `fixtures:anonymized` creates a generated 13-family fixture pack for local client-readiness smoke tests; production client intake should replace it with reviewed anonymized client fixtures.
 - Partner preview packaging creates one ZIP with the built web app, backend, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.
 - Client-data approval tooling writes an explicit approved/blocked evidence report from the live readiness endpoint.
 - Runtime backend status exposes requested versus active repository and queue adapters so PostgreSQL/Redis environment variables cannot masquerade as implemented infrastructure.
@@ -87,6 +88,12 @@ pnpm run audit:storage-paths
 pnpm run audit:archive-safety
 pnpm run audit:retention
 pnpm run audit:all
+```
+
+Client-readiness helper:
+
+```powershell
+pnpm run fixtures:anonymized
 ```
 
 For a production check in a non-interactive shell:

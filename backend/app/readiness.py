@@ -13,7 +13,7 @@ from .limits import max_upload_bytes, upload_limit_configured
 from .local_ai import evaluate_local_ai_status
 from .malware import evaluate_malware_scanner_status
 from .retention import retention_configured, retention_days
-from .runtime_backends import ACTIVE_QUEUE_BACKEND, ACTIVE_REPOSITORY_BACKEND
+from .runtime_backends import INLINE_QUEUE_BACKEND, LOCAL_REPOSITORY_BACKEND, POSTGRES_REPOSITORY_BACKEND, REDIS_QUEUE_BACKEND
 from .schemas import ClientDataReadiness, ClientDataReadinessCheck
 from .signed_urls import signing_secret_configured
 
@@ -32,6 +32,8 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
     mode = client_data_mode()
     strict = mode == "client"
     repo_root = Path.cwd().resolve()
+    active_repository_backend = getattr(store, "repository_backend", LOCAL_REPOSITORY_BACKEND)
+    active_queue_backend = getattr(store, "queue_backend", INLINE_QUEUE_BACKEND)
     checks: list[ClientDataReadinessCheck] = []
 
     def add(
@@ -87,11 +89,16 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
     state_path = store.state_path.resolve()
     state_configured = bool(os.getenv("MONDAY_REPORT_STATE_PATH"))
     state_outside_repo = not is_relative_to(state_path, repo_root)
+    state_uses_postgres = active_repository_backend == POSTGRES_REPOSITORY_BACKEND
     add(
         "state_path_configured",
         "State path",
-        state_configured and state_outside_repo,
-        f"State path is {state_path}.",
+        state_uses_postgres or (state_configured and state_outside_repo),
+        (
+            "State is stored in the active PostgreSQL repository."
+            if state_uses_postgres
+            else f"State path is {state_path}."
+        ),
         "Set MONDAY_REPORT_STATE_PATH to a protected path outside the repository, or replace local JSON with PostgreSQL.",
     )
 
@@ -178,10 +185,10 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
     add(
         "postgres_repository",
         "PostgreSQL repository",
-        repository_backend == "postgres" and ACTIVE_REPOSITORY_BACKEND == "postgres" and bool(database_url),
+        repository_backend == "postgres" and active_repository_backend == "postgres" and bool(database_url),
         (
             f"Requested repository backend is {repository_backend!r}; active adapter is "
-            f"{ACTIVE_REPOSITORY_BACKEND!r}; database URL configured: {bool(database_url)}."
+            f"{active_repository_backend!r}; database URL configured: {bool(database_url)}."
         ),
         "Implement and activate the PostgreSQL/RLS repository adapter; environment variables alone must not certify real client data readiness.",
     )
@@ -191,10 +198,10 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
     add(
         "redis_queue",
         "Redis-backed worker queue",
-        queue_backend == "redis" and ACTIVE_QUEUE_BACKEND == "redis" and bool(redis_url),
+        queue_backend == REDIS_QUEUE_BACKEND and active_queue_backend == REDIS_QUEUE_BACKEND and bool(redis_url),
         (
             f"Requested queue backend is {queue_backend!r}; active worker is "
-            f"{ACTIVE_QUEUE_BACKEND!r}; Redis URL configured: {bool(redis_url)}."
+            f"{active_queue_backend!r}; Redis URL configured: {bool(redis_url)}."
         ),
         "Implement and activate the Redis-backed queue worker; environment variables alone must not certify high-volume client package processing.",
     )

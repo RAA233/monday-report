@@ -96,8 +96,8 @@ export const projectPhases: ProjectPhase[] = [
     status: "in_progress",
     owner: "Backend + DevOps",
     objective: "Move API state and worker jobs out of memory into RLS-backed storage.",
-    evidence: "Durable local JSON state uses atomic replace writes and tenant-scoped local storage persists sanitized upload paths, bytes, hashes, jobs, and audit records; readiness now reports this active adapter instead of trusting placeholder PostgreSQL env vars.",
-    nextAction: "Replace local JSON state with PostgreSQL repositories and Redis queue adapter.",
+    evidence: "Local JSON remains the demo default; client mode can activate a PostgreSQL-backed tenant state repository with RLS and Redis-backed processing-job queue when those services are reachable.",
+    nextAction: "Expand the PostgreSQL adapter from state snapshot storage into normalized table repositories.",
     icon: Database
   },
   {
@@ -173,13 +173,13 @@ export const clearTrackerLanes: TrackerLane[] = [
     id: "real-client-blockers",
     title: "Real-Client Blockers",
     status: "watch",
-    summary: "Do not ingest real client packages until these blockers are closed and fixture coverage is manifest-backed.",
+    summary: "Local client-readiness can go green with active Postgres, Redis, and fixture evidence; production intake still needs reviewed client evidence.",
     items: [
-      "Replace local JSON with PostgreSQL repositories and tenant RLS.",
-      "Replace inline worker with Redis-backed queue and production worker process.",
-      "Configure production OCR, set `MONDAY_REPORT_PARSER_EVAL_REPORT`, and complete the anonymized golden fixture manifest.",
-      "Configure local AI runtime with pinned Ollama or LM Studio model and extraction evals.",
-      "Set production API key, signing secret, retention policy, encrypted storage, external malware scanner posture, and `MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST`."
+      "Use reviewed anonymized client fixtures instead of generated engineering fixtures before production intake.",
+      "Replace the OCR shim used by local smoke tests with production Tesseract or an approved OCR command.",
+      "Move upload/export roots to approved encrypted tenant storage.",
+      "Set production API key, signing secret, retention policy, and external malware scanner posture.",
+      "Continue expanding PostgreSQL from state snapshot storage to normalized table repositories."
     ]
   },
   {
@@ -358,6 +358,13 @@ export const testGates: TestGate[] = [
     status: "watch",
     command: "pnpm run audit:parser-fixture-report",
     lastResult: "Guard verifies the manifest-backed report generator fails without configured OCR and writes a readiness-certifying report with configured OCR."
+  },
+  {
+    id: "gate-anonymized-fixtures",
+    name: "Anonymized fixture pack",
+    status: "watch",
+    command: "pnpm run fixtures:anonymized",
+    lastResult: "Generates a 13-family anonymized engineering fixture pack and manifest for local client-readiness smoke tests."
   },
   {
     id: "gate-client-readiness",

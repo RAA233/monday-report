@@ -4,6 +4,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import time
 import zipfile
 import zlib
@@ -22,6 +23,18 @@ from .archive_limits import max_zip_entries, max_zip_uncompressed_bytes
 from .audit_safety import sanitize_audit_metadata
 from .malware import MalwareScanResult, scan_upload_content
 from .ocr import extract_ocr_text
+from .queue_backend import (
+    active_queue_backend,
+    enqueue_processing_job,
+    pop_processing_job_ids,
+    sync_processing_queue,
+)
+from .runtime_backends import (
+    LOCAL_REPOSITORY_BACKEND,
+    POSTGRES_REPOSITORY_BACKEND,
+    database_url,
+    requested_repository_backend,
+)
 from .schemas import (
     AuditIntegrityStatus,
     AuditLog,
@@ -80,6 +93,8 @@ class LocalStateStore:
     """
 
     def __init__(self) -> None:
+        self.repository_backend = getattr(self, "repository_backend", LOCAL_REPOSITORY_BACKEND)
+        self.queue_backend = active_queue_backend()
         default_path = Path.cwd() / ".local_data" / "monday_report_state.json"
         default_storage_root = Path.cwd() / ".local_data" / "storage"
         default_export_root = Path.cwd() / ".local_data" / "exports"
@@ -108,11 +123,14 @@ class LocalStateStore:
         self.report_exports: dict[UUID, ReportExport] = {}
         self.audit_logs: list[AuditLog] = []
 
-        if self.state_path.exists():
+        if self._state_exists():
             self.refresh()
         else:
             self._seed()
             self.save()
+
+    def _state_exists(self) -> bool:
+        return self.state_path.exists()
 
     def refresh(self) -> None:
         payload = self._read_state_payload()
@@ -135,6 +153,18 @@ class LocalStateStore:
 
     def save(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._state_payload()
+        tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self._replace_state_file(tmp_path)
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _state_payload(self) -> dict[str, object]:
         payload = {
             "tenant": self.tenant.model_dump(mode="json"),
             "user": self.user.model_dump(mode="json"),
@@ -150,15 +180,7 @@ class LocalStateStore:
             "report_exports": self._dump_map(self.report_exports),
             "audit_logs": [item.model_dump(mode="json") for item in self.audit_logs],
         }
-        tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-        try:
-            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            self._replace_state_file(tmp_path)
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        return payload
 
     def _read_state_payload(self) -> dict[str, object] | None:
         for attempt in range(STATE_READ_RETRIES):
@@ -208,7 +230,7 @@ class LocalStateStore:
                 "state.bootstrap",
                 "tenant",
                 self.tenant.id,
-                {"store": "local_json", "demo_seed": False},
+                {"store": self.repository_backend, "demo_seed": False},
                 save=False,
             )
             return
@@ -241,7 +263,7 @@ class LocalStateStore:
             reason="High-severity MWD failure requires reviewer confirmation before official Monday Report export.",
             priority="high",
         )
-        self.audit("state.seed", "tenant", self.tenant.id, {"store": "local_json"}, save=False)
+        self.audit("state.seed", "tenant", self.tenant.id, {"store": self.repository_backend}, save=False)
 
     def create_workspace(self, payload: WorkspaceCreate) -> Workspace:
         self.refresh()
@@ -429,6 +451,7 @@ class LocalStateStore:
                 payload={"storage_uri": file_record.storage_uri},
             )
             self.jobs[job.id] = job
+            self._enqueue_processing_job(job.id)
             created_job_ids.append(str(job.id))
 
         if created_job_ids or reused_job_ids:
@@ -453,9 +476,12 @@ class LocalStateStore:
         self.refresh()
         processed = 0
         processed_upload_ids: set[UUID] = set()
+        redis_job_ids = self._redis_processing_job_ids()
 
         for job in self.jobs.values():
             if job.status != ProcessingStatus.QUEUED:
+                continue
+            if redis_job_ids is not None and job.id not in redis_job_ids:
                 continue
 
             job.attempts += 1
@@ -608,6 +634,19 @@ class LocalStateStore:
         if processed:
             self.save()
         return processed
+
+    def _enqueue_processing_job(self, job_id: UUID) -> None:
+        if self.queue_backend != "redis":
+            return
+        enqueue_processing_job(job_id)
+
+    def _redis_processing_job_ids(self) -> set[UUID] | None:
+        self.queue_backend = active_queue_backend()
+        if self.queue_backend != "redis":
+            return None
+        queued_job_ids = [job.id for job in self.jobs.values() if job.status == ProcessingStatus.QUEUED]
+        sync_processing_queue(queued_job_ids)
+        return set(pop_processing_job_ids())
 
     def parsed_citations_for_workspace(self, workspace_id: UUID, limit: int = 6) -> list[Citation]:
         self.refresh()
@@ -2300,4 +2339,113 @@ class LocalStateStore:
         return parts or ["upload.bin"]
 
 
-store = LocalStateStore()
+class PostgresStateStore(LocalStateStore):
+    """PostgreSQL-backed MVP state repository with tenant-scoped RLS.
+
+    The application data model still uses the LocalStateStore domain methods,
+    but the durable state payload is stored in PostgreSQL instead of a local
+    JSON file. This is the first active repository adapter for client-mode
+    readiness and keeps the migration path small while normalized repositories
+    continue to mature.
+    """
+
+    repository_backend = POSTGRES_REPOSITORY_BACKEND
+    STATE_TABLE = "monday_report_state_snapshots"
+
+    def __init__(self, url: str) -> None:
+        self.database_url = url
+        self._ensure_repository_schema()
+        super().__init__()
+
+    def _state_exists(self) -> bool:
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                self._set_tenant_scope(cursor)
+                cursor.execute(
+                    f"select 1 from {self.STATE_TABLE} where tenant_slug = %s limit 1",
+                    (self.tenant.slug,),
+                )
+                return cursor.fetchone() is not None
+
+    def _read_state_payload(self) -> dict[str, object] | None:
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                self._set_tenant_scope(cursor)
+                cursor.execute(
+                    f"select payload from {self.STATE_TABLE} where tenant_slug = %s",
+                    (self.tenant.slug,),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    return None
+                payload = row[0]
+                return payload if isinstance(payload, dict) else json.loads(str(payload))
+
+    def save(self) -> None:
+        from psycopg.types.json import Jsonb
+
+        payload = self._state_payload()
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                self._set_tenant_scope(cursor)
+                cursor.execute(
+                    f"""
+                    insert into {self.STATE_TABLE} (tenant_slug, tenant_id, payload)
+                    values (%s, %s, %s)
+                    on conflict (tenant_slug)
+                    do update set
+                      tenant_id = excluded.tenant_id,
+                      payload = excluded.payload,
+                      updated_at = now()
+                    """,
+                    (self.tenant.slug, self.tenant.id, Jsonb(payload)),
+                )
+
+    def _ensure_repository_schema(self) -> None:
+        statements = [
+            f"""
+            create table if not exists {self.STATE_TABLE} (
+              tenant_slug text primary key,
+              tenant_id uuid not null,
+              payload jsonb not null,
+              created_at timestamptz not null default now(),
+              updated_at timestamptz not null default now()
+            )
+            """,
+            f"alter table {self.STATE_TABLE} enable row level security",
+            f"alter table {self.STATE_TABLE} force row level security",
+            f"drop policy if exists tenant_isolation_{self.STATE_TABLE} on {self.STATE_TABLE}",
+            f"""
+            create policy tenant_isolation_{self.STATE_TABLE}
+            on {self.STATE_TABLE}
+            using (tenant_slug = current_setting('app.tenant_slug', true))
+            with check (tenant_slug = current_setting('app.tenant_slug', true))
+            """,
+        ]
+        with self._connect() as connection:
+            with connection.cursor() as cursor:
+                for statement in statements:
+                    cursor.execute(statement)
+
+    def _connect(self):
+        import psycopg
+
+        return psycopg.connect(self.database_url, connect_timeout=2)
+
+    def _set_tenant_scope(self, cursor) -> None:
+        cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
+
+
+def create_store() -> LocalStateStore:
+    if requested_repository_backend() == POSTGRES_REPOSITORY_BACKEND and database_url():
+        try:
+            return PostgresStateStore(database_url())
+        except Exception as exc:  # noqa: BLE001 - app must start so readiness can report the blocker.
+            print(
+                f"WARN: PostgreSQL repository unavailable; falling back to local JSON: {exc.__class__.__name__}",
+                file=sys.stderr,
+            )
+    return LocalStateStore()
+
+
+store = create_store()

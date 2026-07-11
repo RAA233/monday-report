@@ -129,7 +129,7 @@ def client_data_readiness() -> ClientDataReadiness:
 
 @app.get("/runtime/backends", response_model=RuntimeBackendStatus)
 def runtime_backends() -> RuntimeBackendStatus:
-    return runtime_backend_status(evaluate_client_data_readiness(store))
+    return runtime_backend_status(evaluate_client_data_readiness(store), store)
 
 
 @app.get("/local-ai/status", response_model=LocalAIStatus)

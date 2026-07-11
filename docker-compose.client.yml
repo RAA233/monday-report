@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: ${MONDAY_REPORT_POSTGRES_IMAGE:-postgres:16-alpine}
     container_name: monday-report-postgres
     environment:
       POSTGRES_DB: monday_report
@@ -17,7 +17,7 @@ services:
       retries: 20
 
   redis:
-    image: redis:7-alpine
+    image: ${MONDAY_REPORT_REDIS_IMAGE:-redis:7-alpine}
     container_name: monday-report-redis
     ports:
       - "56379:6379"
