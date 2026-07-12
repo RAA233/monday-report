@@ -17,7 +17,8 @@ const views = [
   { label: "Explorer", title: /Failure explorer/i, file: "06-explorer.png" },
   { label: "Validation", title: /Validation queue/i, file: "07-validation.png" },
   { label: "Tracker", title: /Project tracker/i, file: "08-tracker.png" },
-  { label: "Architecture", title: /Local AI-first architecture/i, file: "09-architecture.png" }
+  { label: "Roadmap", title: /Product roadmap/i, file: "09-roadmap.png" },
+  { label: "Architecture", title: /Local AI-first architecture/i, file: "10-architecture.png" }
 ];
 
 const checks = [];

@@ -196,7 +196,7 @@ def build_pdf(tracker: dict[str, list[dict[str, str]]], readiness: dict[str, Any
     story.append(
         summary_table(
             [
-                ("Local MVP", "PASS", "Upload, parser, validation, exports, chat, audit, and signed downloads pass."),
+                ("Local MVP", "PASS", "Upload, parser, validation, exports, chat, roadmap, audit, and signed downloads pass."),
                 (
                     "Client data",
                     str(readiness.get("status", "not_ready")).replace("_", " ").upper(),
@@ -206,7 +206,7 @@ def build_pdf(tracker: dict[str, list[dict[str, str]]], readiness: dict[str, Any
                 (
                     "Next quality focus",
                     "WATCH",
-                    "Controlled client-package dry runs, normalized repositories, local LLM extraction, OCR and scanner hardening.",
+                    "Roadmap lane pull: citation-backed drafts, normalized repositories, package dry runs, OCR and scanner hardening.",
                 ),
             ],
             styles,
@@ -220,7 +220,7 @@ def build_pdf(tracker: dict[str, list[dict[str, str]]], readiness: dict[str, Any
     story.append(Paragraph("Current Meaning", styles["Heading2"]))
     story.append(
         Paragraph(
-            "The local client-approval environment is approved: PostgreSQL/RLS state, Redis queue, security config, local AI, reviewed fixture attestation, and parser/OCR eval evidence all pass. Next work is controlled client-package dry runs and production hardening.",
+            "The local client-approval environment is approved: PostgreSQL/RLS state, Redis queue, security config, local AI, reviewed fixture attestation, and parser/OCR eval evidence all pass. Next work follows the roadmap lanes through citation-backed drafts, controlled package dry runs, and production hardening.",
             styles["Body"],
         )
     )

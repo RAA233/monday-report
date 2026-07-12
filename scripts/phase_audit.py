@@ -169,7 +169,7 @@ def check_processing_workflow() -> dict[str, object]:
             "application/zip",
         )
         jobs_before = request_json("GET", f"{API_BASE}/processing-jobs?upload_id={upload['upload']['id']}")
-        worker = run_worker_until_progress()
+        worker = run_worker_until_progress(upload["upload"]["id"])
         jobs_after = request_json("GET", f"{API_BASE}/processing-jobs?upload_id={upload['upload']['id']}")
         files_after = request_json("GET", f"{API_BASE}/uploads/{upload['upload']['id']}/files")
         documents = request_json("GET", f"{API_BASE}/documents?workspace_id={workspace_id}")
@@ -252,13 +252,16 @@ def request_json(method: str, url: str, body: dict | None = None) -> object:
         return json.loads(response.read().decode("utf-8"))
 
 
-def run_worker_until_progress(max_attempts: int = 4) -> subprocess.CompletedProcess[str]:
+def run_worker_until_progress(upload_id: str | None = None, max_attempts: int = 4) -> subprocess.CompletedProcess[str]:
     last_result: subprocess.CompletedProcess[str] | None = None
     for attempt in range(max_attempts):
+        worker_env = os.environ.copy()
+        if upload_id:
+            worker_env["MONDAY_REPORT_WORKER_UPLOAD_ID"] = upload_id
         last_result = subprocess.run(
             [sys.executable, "-m", "backend.app.worker"],
             cwd=ROOT,
-            env=os.environ.copy(),
+            env=worker_env,
             capture_output=True,
             text=True,
             timeout=30,

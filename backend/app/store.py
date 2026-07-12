@@ -61,6 +61,7 @@ from .schemas import (
 )
 
 INVALID_STORAGE_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
+UNSAFE_TEXT_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")
 RESERVED_STORAGE_NAMES = {
     "AUX",
     "CON",
@@ -480,14 +481,16 @@ class LocalStateStore:
         )
         return upload
 
-    def process_queued_jobs(self) -> int:
+    def process_queued_jobs(self, upload_id: UUID | None = None, max_jobs: int | None = None) -> int:
         self.refresh()
         processed = 0
         processed_upload_ids: set[UUID] = set()
-        redis_job_ids = self._redis_processing_job_ids()
+        redis_job_ids = None if upload_id is not None else self._redis_processing_job_ids(max_jobs=max_jobs)
 
         for job in self.jobs.values():
             if job.status != ProcessingStatus.QUEUED:
+                continue
+            if upload_id is not None and job.upload_id != upload_id:
                 continue
             if redis_job_ids is not None and job.id not in redis_job_ids:
                 continue
@@ -635,6 +638,8 @@ class LocalStateStore:
                     },
                     save=False,
                 )
+            if max_jobs is not None and processed >= max_jobs:
+                break
 
         for upload_id in processed_upload_ids:
             self._sync_upload_job_status(upload_id, audit_terminal=True)
@@ -648,13 +653,13 @@ class LocalStateStore:
             return
         enqueue_processing_job(job_id)
 
-    def _redis_processing_job_ids(self) -> set[UUID] | None:
+    def _redis_processing_job_ids(self, max_jobs: int | None = None) -> set[UUID] | None:
         self.queue_backend = active_queue_backend()
         if self.queue_backend != "redis":
             return None
         queued_job_ids = [job.id for job in self.jobs.values() if job.status == ProcessingStatus.QUEUED]
         sync_processing_queue(queued_job_ids)
-        return set(pop_processing_job_ids())
+        return set(pop_processing_job_ids(limit=max_jobs or 100))
 
     def parsed_citations_for_workspace(self, workspace_id: UUID, limit: int = 6) -> list[Citation]:
         self.refresh()
@@ -2567,9 +2572,7 @@ class LocalStateStore:
         else:
             return "unsupported_probe_v1", "", {"extraction": "unsupported"}
 
-        clean_text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+", " ", raw_text)
-        clean_text = re.sub(r"\s+", " ", clean_text).strip()
-        return parser_name, clean_text, metadata
+        return parser_name, LocalStateStore._clean_extracted_text(raw_text), metadata
 
     @staticmethod
     def _chunk_records(text: str, parser_name: str, parser_metadata: dict[str, object]) -> list[dict[str, object]]:
@@ -2584,6 +2587,7 @@ class LocalStateStore:
                     page_text = page.get("text")
                     if not isinstance(page_number, int) or not isinstance(page_text, str):
                         continue
+                    page_text = LocalStateStore._clean_extracted_text(page_text)
                     for chunk_text in LocalStateStore._chunk_text(page_text):
                         records.append({"text": chunk_text, "page": page_number})
                 tables = parser_metadata.get("tables")
@@ -2652,16 +2656,21 @@ class LocalStateStore:
 
     @staticmethod
     def _pdf_table_row_text(header: object, row: list[object]) -> str:
-        cells = [str(cell).strip() for cell in row]
+        cells = [LocalStateStore._clean_extracted_text(str(cell)) for cell in row]
         if isinstance(header, list) and len(header) == len(row):
             pairs = [
-                f"{str(column).strip()}: {value}"
+                f"{LocalStateStore._clean_extracted_text(str(column))}: {value}"
                 for column, value in zip(header, cells)
-                if str(column).strip() and value
+                if LocalStateStore._clean_extracted_text(str(column)) and value
             ]
             if pairs:
                 return "; ".join(pairs)
         return " | ".join(value for value in cells if value)
+
+    @staticmethod
+    def _clean_extracted_text(text: str) -> str:
+        without_controls = UNSAFE_TEXT_CONTROL_CHARS.sub(" ", text)
+        return re.sub(r"\s+", " ", without_controls).strip()
 
     @staticmethod
     def _count_nonempty_lines(text: str) -> int:
@@ -3130,7 +3139,7 @@ class PostgresStateStore(LocalStateStore):
     def save(self) -> None:
         from psycopg.types.json import Jsonb
 
-        payload = self._state_payload()
+        payload = self._postgres_safe_json(self._state_payload())
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 self._set_tenant_scope(cursor)
@@ -3146,6 +3155,16 @@ class PostgresStateStore(LocalStateStore):
                     """,
                     (self.tenant.slug, self.tenant.id, Jsonb(payload)),
                 )
+
+    @classmethod
+    def _postgres_safe_json(cls, value):
+        if isinstance(value, str):
+            return UNSAFE_TEXT_CONTROL_CHARS.sub(" ", value)
+        if isinstance(value, list):
+            return [cls._postgres_safe_json(item) for item in value]
+        if isinstance(value, dict):
+            return {key: cls._postgres_safe_json(item) for key, item in value.items()}
+        return value
 
     def _ensure_repository_schema(self) -> None:
         statements = [

@@ -96,10 +96,12 @@ def run_guard() -> list[dict[str, object]]:
     checks.append(assert_check("Direct ZIP upload", upload["file"]["sha256"] == sha256(content).hexdigest(), upload_id))
     checks.append(validate_malware_block(workspace_id))
 
+    worker_env = os.environ.copy()
+    worker_env["MONDAY_REPORT_WORKER_UPLOAD_ID"] = upload_id
     worker = subprocess.run(
         [sys.executable, "-m", "backend.app.worker"],
         cwd=ROOT,
-        env=os.environ.copy(),
+        env=worker_env,
         capture_output=True,
         text=True,
         timeout=60,

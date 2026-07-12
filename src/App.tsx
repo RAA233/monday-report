@@ -6,6 +6,7 @@ import {
   FilePenLine,
   Gauge,
   LayoutDashboard,
+  Map,
   MessageSquareText,
   SearchCheck,
   ShieldCheck,
@@ -18,6 +19,7 @@ import { ChatAnalyst } from "./components/ChatAnalyst";
 import { Dashboard } from "./components/Dashboard";
 import { FailureExplorer } from "./components/FailureExplorer";
 import { SecurityStrip } from "./components/PipelineBoard";
+import { ProductRoadmap } from "./components/ProductRoadmap";
 import { ProjectTracker } from "./components/ProjectTracker";
 import { ReportStudio } from "./components/ReportStudio";
 import { UploadPanel } from "./components/UploadPanel";
@@ -47,6 +49,7 @@ type ViewKey =
   | "explorer"
   | "validation"
   | "tracker"
+  | "roadmap"
   | "architecture";
 
 const navItems: Array<{
@@ -61,6 +64,7 @@ const navItems: Array<{
   { key: "explorer", label: "Explorer", icon: SearchCheck },
   { key: "validation", label: "Validation", icon: ClipboardCheck },
   { key: "tracker", label: "Tracker", icon: Gauge },
+  { key: "roadmap", label: "Roadmap", icon: Map },
   { key: "architecture", label: "Architecture", icon: Database }
 ];
 
@@ -198,6 +202,7 @@ export function App(): JSX.Element {
           <ValidationQueue events={events} onStatusChange={updateValidationStatus} />
         )}
         {activeView === "tracker" && <ProjectTracker />}
+        {activeView === "roadmap" && <ProductRoadmap />}
         {activeView === "architecture" && <ArchitectureView />}
       </div>
     </div>

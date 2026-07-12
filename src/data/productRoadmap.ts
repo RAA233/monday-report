@@ -1,0 +1,270 @@
+export type RoadmapStatus = "complete" | "active" | "queued" | "watch";
+export type RoadmapTone = "good" | "info" | "warning" | "danger" | "neutral";
+
+export interface CapabilitySignal {
+  id: string;
+  label: string;
+  value: string;
+  detail: string;
+  tone: RoadmapTone;
+}
+
+export interface RoadmapItem {
+  id: string;
+  title: string;
+  owner: string;
+  status: RoadmapStatus;
+  gate: string;
+  evidence: string;
+  next: string;
+}
+
+export interface RoadmapLane {
+  id: string;
+  label: string;
+  intent: string;
+  status: RoadmapStatus;
+  items: RoadmapItem[];
+}
+
+export interface ReleaseGate {
+  id: string;
+  label: string;
+  status: RoadmapStatus;
+  command: string;
+  evidence: string;
+}
+
+export interface RoadmapRisk {
+  id: string;
+  risk: string;
+  owner: string;
+  control: string;
+  severity: "low" | "medium" | "high";
+}
+
+export const capabilitySignals: CapabilitySignal[] = [
+  {
+    id: "signal-report-intelligence",
+    label: "Report intelligence",
+    value: "MR-DDR-2",
+    detail: "Normal report sections, casing schematic, timeline, AI plan, and branded exports are live.",
+    tone: "good"
+  },
+  {
+    id: "signal-local-ai",
+    label: "Local AI default",
+    value: "gemma4:e2b",
+    detail: "Ollama runtime is the default posture with hosted fallback disabled for client mode.",
+    tone: "good"
+  },
+  {
+    id: "signal-client-data",
+    label: "Client data gate",
+    value: "approved",
+    detail: "Client-mode readiness requires PostgreSQL, Redis, protected storage, signing, OCR, and audit evidence.",
+    tone: "good"
+  },
+  {
+    id: "signal-roadmap",
+    label: "Roadmap proof",
+    value: "guarded",
+    detail: "Navigation, UI screenshots, tracker gate, and audit wiring are checked by audit:roadmap.",
+    tone: "info"
+  }
+];
+
+export const roadmapLanes: RoadmapLane[] = [
+  {
+    id: "lane-now",
+    label: "Now",
+    intent: "Stabilize the high-end MVP around chat, report authoring, and auditable client-data readiness.",
+    status: "active",
+    items: [
+      {
+        id: "item-chat-command-center",
+        title: "Chat command center",
+        owner: "Frontend + AI",
+        status: "complete",
+        gate: "audit:chat-workflow",
+        evidence: "Workflow steps, insight cards, risk register, tool actions, citations, and export actions render in chat.",
+        next: "Connect report-draft actions to parsed client evidence with stricter schema outputs."
+      },
+      {
+        id: "item-report-studio",
+        title: "Advanced report studio",
+        owner: "Frontend + drilling SME",
+        status: "active",
+        gate: "audit:report-template",
+        evidence: "MR-DDR-2 templates include standard sections, casing rows, schematic, AI plan, timeline, and exports.",
+        next: "Add reviewed normal-report variants for mud, BHA, survey, bits, approvals, and morning handover."
+      }
+    ]
+  },
+  {
+    id: "lane-next",
+    label: "Next",
+    intent: "Turn the open-source daily-report corpus into repeatable extraction and drafting proof.",
+    status: "queued",
+    items: [
+      {
+        id: "item-forge-evals",
+        title: "FORGE corpus evals",
+        owner: "AI/data",
+        status: "queued",
+        gate: "audit:forge-corpus",
+        evidence: "Local ignored 16A(78)-32_Daily_Reports folder is detected and summarized without committing raw PDFs.",
+        next: "Promote representative report formats into reviewed eval manifests and extraction targets."
+      },
+      {
+        id: "item-citation-drafts",
+        title: "Citation-backed AI drafts",
+        owner: "AI/data + backend",
+        status: "queued",
+        gate: "audit:source-lineage",
+        evidence: "Parser chunks carry typed locators for PDFs, office files, email, tables, and OCR pages.",
+        next: "Require every AI-generated morning report claim to map back to source locators."
+      }
+    ]
+  },
+  {
+    id: "lane-harden",
+    label: "Harden",
+    intent: "Remove fragile runtime paths and make every client operation reversible, traceable, and permissioned.",
+    status: "active",
+    items: [
+      {
+        id: "item-normalized-storage",
+        title: "Normalized Postgres repositories",
+        owner: "Backend",
+        status: "watch",
+        gate: "audit:runtime-backends",
+        evidence: "Client mode uses PostgreSQL/RLS snapshot state and Redis queue with readiness checks.",
+        next: "Move failures, documents, validation tasks, report artifacts, and audit events into normalized tables."
+      },
+      {
+        id: "item-security-controls",
+        title: "Security controls",
+        owner: "Security + QA",
+        status: "active",
+        gate: "audit:all",
+        evidence: "Signed URLs, API auth, redaction, malware baseline, retention, storage paths, and archive safety pass.",
+        next: "Add external malware scanner adapter and admin evidence viewer before broad client pilots."
+      }
+    ]
+  },
+  {
+    id: "lane-package",
+    label: "Package",
+    intent: "Prepare partner and client pilots with one-command launch, import, export, and approval evidence.",
+    status: "queued",
+    items: [
+      {
+        id: "item-partner-installer",
+        title: "Partner preview installer",
+        owner: "Release engineering",
+        status: "complete",
+        gate: "audit:partner-package",
+        evidence: "Preview ZIP carries app, API, worker loop, Gemma 4 E2B defaults, sample import, and smoke launcher.",
+        next: "Convert preview ZIP into a signed installer when external code-signing materials are available."
+      },
+      {
+        id: "item-import-export",
+        title: "Import and export hardening",
+        owner: "Frontend + backend",
+        status: "active",
+        gate: "test:e2e",
+        evidence: "Upload, parse, validate, JSON/CSV/HTML/PDF/XLSX export, signed downloads, and idempotency pass.",
+        next: "Add report-template diff checks against reviewed daily-report references."
+      }
+    ]
+  },
+  {
+    id: "lane-pilot",
+    label: "Client Pilot",
+    intent: "Move from local approval to controlled client evidence pilots with full audit and rollback posture.",
+    status: "queued",
+    items: [
+      {
+        id: "item-client-dry-run",
+        title: "Controlled client dry run",
+        owner: "QA + product",
+        status: "queued",
+        gate: "ga:readiness",
+        evidence: "Strict GA readiness currently reports GA_READY with zero blockers in client mode.",
+        next: "Run a timed client package pilot using approved env and sanitized acceptance data."
+      },
+      {
+        id: "item-approval-ledger",
+        title: "Approval ledger",
+        owner: "Security + product",
+        status: "queued",
+        gate: "package:client-approval",
+        evidence: "Client approval JSON records readiness checks and approval scope.",
+        next: "Add signer identity, dataset scope, and client acceptance notes to the dispatch package."
+      }
+    ]
+  }
+];
+
+export const releaseGates: ReleaseGate[] = [
+  {
+    id: "gate-design",
+    label: "Design",
+    status: "complete",
+    command: "test:ui",
+    evidence: "Screenshots cover chat, studio, upload, dashboard, explorer, validation, tracker, roadmap, and architecture."
+  },
+  {
+    id: "gate-build",
+    label: "Build",
+    status: "complete",
+    command: "build",
+    evidence: "TypeScript and Vite production build pass."
+  },
+  {
+    id: "gate-audit",
+    label: "Audit",
+    status: "active",
+    command: "audit:all",
+    evidence: "Full local audit chain covers API, parser, reports, security, readiness, and package approval."
+  },
+  {
+    id: "gate-package",
+    label: "Package",
+    status: "active",
+    command: "package:partner-preview",
+    evidence: "Single ZIP package remains the current partner testing artifact."
+  },
+  {
+    id: "gate-pilot",
+    label: "Pilot",
+    status: "queued",
+    command: "package:client-approval",
+    evidence: "Client pilot starts only after approved env, readiness JSON, and acceptance scope are attached."
+  }
+];
+
+export const roadmapRisks: RoadmapRisk[] = [
+  {
+    id: "risk-schema-drift",
+    risk: "Daily-report formats drift across contractors and wells.",
+    owner: "Drilling SME",
+    control: "Versioned MR-DDR schema variants and reference-format evals.",
+    severity: "medium"
+  },
+  {
+    id: "risk-ai-claim-source",
+    risk: "AI draft text could overstate claims without a source locator.",
+    owner: "AI/data",
+    control: "Citation-required draft generation and validation-blocked exports.",
+    severity: "high"
+  },
+  {
+    id: "risk-client-package",
+    risk: "Partner package can be confused with client-approved production dispatch.",
+    owner: "Release engineering",
+    control: "Separate partner preview and client approval ledgers with visible scope labels.",
+    severity: "medium"
+  }
+];

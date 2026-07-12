@@ -2,21 +2,21 @@
 
 ## Current Phase
 
-The executable MVP path is now phase-gated end to end and the local client-data approval environment is green. It bootstraps a clean client tenant without startup failure records, requires an API key in client mode, rejects oversized uploads at the API boundary, enforces configured ZIP entry and uncompressed-size limits, blocks unsafe client-mode data operations until readiness is green, activates PostgreSQL/RLS state and Redis-backed queue processing in client mode, exposes requested versus active runtime backends, stores accepted bytes under sanitized tenant-scoped paths, verifies SHA-256, applies configurable retention to expired data artifacts, requires explicit client-mode malware scanner configuration, blocks baseline malware signatures before processing, downloads uploaded source files through signed URLs, requires a real signing secret for client-mode signed URLs, defaults local AI to Ollama `gemma4:e2b` and verifies model availability, safely expands ZIP packages, parses text/CSV/XLSX/DOCX/EML/PyMuPDF-backed PDF child files and native PDF table rows into typed document chunks, preserves page/table/row-aware PDF citations, extracts configured local OCR into `ocr_text_v1` chunks with image-page citations, evaluates parser/OCR fixture reports and reviewed fixture attestation before parser coverage can certify readiness, extracts cited MWD signal-loss failures with NPT/company fields, opens and updates validation tasks, creates Monday Report JSON, blocks official exports while validation remains open, exports JSON/CSV/HTML/PDF/XLSX artifacts, downloads exports through signed URLs, answers chat with citations, records redacted hash-chain audit events, creates a single-file partner preview ZIP, and writes approved real-client readiness evidence. Remaining work is production hardening: normalized PostgreSQL repositories, production OCR command management, local LLM extraction, polished report templates, controlled client-package dry runs, and external malware scanning.
+The executable MVP path is now phase-gated end to end and the local client-data approval environment is green. It bootstraps a clean client tenant without startup failure records, requires an API key in client mode, rejects oversized uploads at the API boundary, enforces configured ZIP entry and uncompressed-size limits, blocks unsafe client-mode data operations until readiness is green, activates PostgreSQL/RLS state and Redis-backed queue processing in client mode, exposes requested versus active runtime backends, stores accepted bytes under sanitized tenant-scoped paths, verifies SHA-256, applies configurable retention to expired data artifacts, requires explicit client-mode malware scanner configuration, blocks baseline malware signatures before processing, downloads uploaded source files through signed URLs, defaults local AI to Ollama `gemma4:e2b`, parses text/CSV/XLSX/DOCX/EML/PyMuPDF-backed PDF child files and native PDF table rows into typed document chunks, preserves page/table/row-aware PDF citations, extracts configured local OCR into `ocr_text_v1` chunks with image-page citations, extracts cited MWD signal-loss failures with NPT/company fields, opens validation tasks, creates Monday Report JSON, exports JSON/CSV/HTML/PDF/XLSX artifacts, answers chat with citations and structured workflow cards, renders the Product Roadmap cockpit, records redacted hash-chain audit events, creates a single-file partner preview ZIP, and writes approved real-client readiness evidence. Remaining work follows the roadmap lanes: citation-backed AI drafts, reviewed normal-format variants, normalized PostgreSQL repositories, controlled client-package dry runs, production OCR command management, and external malware scanning.
 
 ## Clear Tracker Snapshot
 
 | Lane | Status | Meaning | Next Action |
 |---|---|---|---|
-| Accepted now | Pass | Executable MVP is working with chat, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
+| Accepted now | Pass | Executable MVP is working with chat, report studio, roadmap, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
 | Safe operating mode | Pass | Demo mode remains local; approved client mode uses PostgreSQL/RLS state, Redis queue, protected storage, API key, signing secret, and reviewed fixture/eval evidence. | Keep secrets out of Git and regenerate approval after environment changes. |
 | Real-client approval | Pass | Live client approval reports `APPROVED`; GA readiness reports `GA_READY`; readiness has zero blockers. | Run controlled client-package dry runs before broad distribution. |
-| Next execution order | Pending | Client dry runs, FORGE template promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening. | Start with screenshot-backed QA and controlled client-package trials. |
+| Next execution order | Pending | Pull roadmap lanes in order: citation-backed drafts, FORGE template promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Start with screenshot-backed QA and controlled client-package trials. |
 
 ## Current Tracker
 
 - Working now: chat-first workflow, direct/ZIP upload, SHA-256 storage, malware baseline blocking, parser-worker queue, source chunks, failure extraction, validation tasks, Monday Report creation, JSON/CSV/HTML/PDF/XLSX exports, signed source/export downloads, redacted audit logs, and readiness reporting.
-- Recently added: typed source locators, readable citation labels, source-file actions directly from chat citation cards, manifest-backed golden fixture readiness, manifest-driven parser/OCR eval report generation, parser/OCR eval report readiness, Gemma 4 E2B local AI default, single-file partner preview packaging, PyMuPDF-backed page-aware PDF chunks, native PDF table row citations, and configurable local OCR extraction into image-page chunks.
+- Recently added: typed source locators, readable citation labels, source-file actions directly from chat citation cards, command-center chat workflow, advanced Report Studio, Product Roadmap cockpit, manifest-backed fixture readiness, Gemma 4 E2B local AI default, single-file partner preview packaging, page-aware PDF chunks, native PDF table row citations, and configurable local OCR extraction into image-page chunks.
 - Real-client posture: approved in the local client environment with active PostgreSQL, active Redis, local AI, security configuration, golden fixture/eval evidence, and reviewed fixture attestation all passing.
 - Operator command: run `pnpm run audit:all` after every meaningful code change; run `pnpm run package:partner-approval` before sending the partner ZIP; run `pnpm run package:client-approval` to write the current real-client approval/blocker report.
 
@@ -43,6 +43,8 @@ Every implementation slice must pass these checks before it is considered accept
 - Source citation action guard: `pnpm run audit:source-citations`
 - Runtime mock-data guard: `pnpm run audit:runtime-mock-data`
 - Tracker clarity guard: `pnpm run audit:tracker-clarity`
+- Product roadmap guard: `pnpm run audit:roadmap`
+- Extracted text sanitization guard: `pnpm run audit:text-sanitization`
 - Golden fixture readiness guard: `pnpm run audit:golden-fixtures`
 - Parser/OCR fixture eval guard: `pnpm run audit:parser-fixture-evals`
 - Parser/OCR eval report generator guard: `pnpm run audit:parser-fixture-report`
@@ -84,6 +86,8 @@ pnpm run audit:citation-format
 pnpm run audit:source-citations
 pnpm run audit:runtime-mock-data
 pnpm run audit:tracker-clarity
+pnpm run audit:roadmap
+pnpm run audit:text-sanitization
 pnpm run audit:golden-fixtures
 pnpm run audit:parser-fixture-evals
 pnpm run audit:parser-fixture-report
@@ -121,6 +125,8 @@ pnpm run audit:all
 | 06 | Active | Local AI extraction | Deterministic scaffold extracts cited MWD failures, NPT hours, company, and validation tasks from parsed chunks; local AI defaults to Ollama `gemma4:e2b` and verifies the pinned model is available | Wire Ollama/LM Studio router, strict schemas, confidence scoring, and metrics |
 | 07 | Complete | Validated exports | E2E verifies unresolved validation blocks export, validates extracted failures, creates report, exports JSON/CSV/HTML/PDF/XLSX artifacts, inspects artifact signatures, and downloads through signed URLs | Polish report templates |
 | 08 | Complete | Real-client readiness | Live client-data approval is APPROVED with PostgreSQL/RLS, Redis, API key, signing secret, protected storage, retention, malware scanner, parser/OCR evals, reviewed fixture attestation, and local Gemma runtime | Run controlled client-package dry runs and maintain approval evidence |
+| 09 | Active | Morning report studio | Chat command center and Report Studio now show workflow steps, insight cards, risk register, tool actions, technical telemetry, normal report controls, casing/well schematic, AI plan checks, timeline, and draft export | Connect parsed FORGE/client evidence into citation-backed local AI draft generation |
+| 10 | Complete | Roadmap cockpit | Product Roadmap view, typed roadmap data, UI screenshot coverage, tracker gate, and `audit:roadmap` guard are wired | Use roadmap lanes to pull the next client-pilot hardening slice |
 
 ## Audit Notes
 
@@ -140,6 +146,8 @@ pnpm run audit:all
 - CSV, Excel, Word, and email chunks carry typed locator metadata for citation review.
 - Chat citations render typed locator labels with source filenames.
 - Chat citations can request signed source-file links from the evidence card.
+- Product Roadmap is a guarded app surface; `audit:roadmap` verifies data, navigation, tracker gate, UI screenshot coverage, and `audit:all` wiring.
+- Extracted text is scrubbed before chunking and before PostgreSQL JSONB persistence so PDF/table control characters cannot block corpus processing.
 - Golden fixture readiness requires `MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST` to reference an `anonymized_client` manifest with all required fixture families and real files; real-client readiness also requires a reviewed anonymized-client attestation.
 - Parser/OCR eval readiness requires `MONDAY_REPORT_PARSER_EVAL_REPORT` to reference a passing report covering all required fixture families with passing checks; `scripts/generate_parser_fixture_eval_report.py` creates that report from `MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST`, and incomplete reports warn in demo mode and fail in client mode.
 - Image files and scanned PDFs route through `ocr_route_v1`, create file-level validation tasks, and emit `ocr.route` when OCR is unconfigured.

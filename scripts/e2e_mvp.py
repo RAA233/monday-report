@@ -71,9 +71,12 @@ def run_e2e() -> list[dict[str, object]]:
     checks.append(assert_check("ZIP upload created", upload["file"]["byte_size"] == len(content), upload_id))
     checks.append(validate_blocked_upload(workspace_id))
 
+    worker_env = os.environ.copy()
+    worker_env["MONDAY_REPORT_WORKER_UPLOAD_ID"] = upload_id
     worker = subprocess.run(
         [sys.executable, "-m", "backend.app.worker"],
         cwd=ROOT,
+        env=worker_env,
         capture_output=True,
         text=True,
         timeout=30,
