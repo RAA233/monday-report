@@ -2413,8 +2413,30 @@ class LocalStateStore:
         )
         if match:
             return float(match.group(1))
+
+        explicit_patterns = (
+            r"\bnpt\s*(?:hours?|hrs?|hr)?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\b",
+            r"\bnon[- ]productive\s*time\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*(?:hours?|hrs?|hr)?\b",
+            r"\b(?:npt|non[- ]productive\s*time)\b.{0,48}?\b([0-9]+(?:\.[0-9]+)?)\s*(?:hours?|hrs?|hr)\b",
+            r"\b([0-9]+(?:\.[0-9]+)?)\s*(?:hours?|hrs?|hr)\b.{0,48}?\b(?:npt|non[- ]productive\s*time)\b",
+        )
+        for pattern in explicit_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return float(match.group(1))
+
         if "npt" in text.lower():
-            candidates = [float(value) for value in re.findall(r"\b([0-9]+(?:\.[0-9]+)?)\b", text)]
+            candidates: list[float] = []
+            for value, unit in re.findall(
+                r"\b([0-9]+(?:\.[0-9]+)?)\s*(ft|feet|in|inch|ppg|psi|bbl|rpm|gpm)?\b",
+                text,
+                re.IGNORECASE,
+            ):
+                if unit:
+                    continue
+                number = float(value)
+                if 0 < number <= 240:
+                    candidates.append(number)
             if candidates:
                 return candidates[-1]
         return 0.0
@@ -2508,6 +2530,11 @@ class LocalStateStore:
                 locator["row_start"] = row_start
             if isinstance(row_end, int) and row_end > 0:
                 locator["row_end"] = row_end
+            if chunk_context:
+                for key in ["field", "label", "section"]:
+                    value = chunk_context.get(key)
+                    if isinstance(value, str) and value.strip():
+                        locator[key] = value.strip()[:120]
         elif locator_type == "image":
             page = chunk_context.get("page") if chunk_context else None
             if isinstance(page, int) and page > 0:
@@ -2596,6 +2623,9 @@ class LocalStateStore:
                         if not isinstance(table, dict):
                             continue
                         records.extend(LocalStateStore._pdf_table_chunk_records(table))
+                report_profile = parser_metadata.get("report_profile")
+                if parser_name == "pdf_text_v1" and isinstance(report_profile, dict):
+                    records.extend(LocalStateStore._pdf_report_profile_chunk_records(report_profile))
                 if records:
                     return records
         return [{"text": chunk_text} for chunk_text in LocalStateStore._chunk_text(text)]
@@ -2666,6 +2696,214 @@ class LocalStateStore:
             if pairs:
                 return "; ".join(pairs)
         return " | ".join(value for value in cells if value)
+
+    @staticmethod
+    def _extract_pdf_report_profile(
+        pages: list[dict[str, object]],
+        tables: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        page_lines = LocalStateStore._pdf_page_lines(pages)
+        full_text = "\n".join(line for _, line in page_lines)
+        lower_text = full_text.lower()
+        fields: dict[str, str] = {}
+        field_sources: dict[str, dict[str, object]] = {}
+        sections: dict[str, str] = {}
+        section_sources: dict[str, dict[str, object]] = {}
+
+        field_specs: dict[str, list[tuple[str, str]]] = {
+            "report_no": [
+                ("report no", r"\b(?:report\s*(?:no\.?|number|#)|ddr\s*(?:no\.?|#)?)\s*[:#-]\s*([A-Za-z0-9._/-]{1,40})"),
+            ],
+            "well": [
+                ("well", r"\b(?:well|well name)\s*[:#-]\s*([A-Za-z0-9()/_ .-]{2,80})"),
+            ],
+            "rig": [
+                ("rig", r"\b(?:rig|rig name)\s*[:#-]\s*([A-Za-z0-9()/_ .-]{2,80})"),
+            ],
+            "operator": [
+                ("operator", r"\b(?:operator|company representative)\s*[:#-]\s*([A-Za-z0-9()/_ .-]{2,80})"),
+            ],
+            "hole_size": [
+                ("hole size", r"\b(?:hole\s*size|hole)\s*[:#-]?\s*([0-9]{1,2}(?:\.[0-9]{1,3})?)\s*(?:in|inch|\")"),
+            ],
+            "md_ft": [
+                ("md", r"\b(?:md|measured depth)\s*[:#-]?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{4,6}(?:\.[0-9]+)?)\s*(?:ft|feet|')?"),
+            ],
+            "tvd_ft": [
+                ("tvd", r"\b(?:tvd|true vertical depth)\s*[:#-]?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{4,6}(?:\.[0-9]+)?)\s*(?:ft|feet|')?"),
+            ],
+            "mud_weight": [
+                ("mud weight", r"\b(?:mud\s*(?:weight|wt|density)|mw)\s*[:#-]?\s*([0-9]{1,2}(?:\.[0-9]+)?)\s*(?:ppg|lb/gal)"),
+            ],
+        }
+        for field, specs in field_specs.items():
+            match = LocalStateStore._match_pdf_profile_line(page_lines, specs)
+            if match:
+                fields[field] = match["value"]
+                field_sources[field] = {
+                    "page": match["page"],
+                    "label": match["label"],
+                    "confidence": 0.9,
+                }
+
+        section_specs: dict[str, list[tuple[str, str]]] = {
+            "present_operations": [
+                ("present operations", r"\b(?:present operations?|current operations?|operations summary)\s*[:#-]\s*(.{8,260})"),
+            ],
+            "next_operations": [
+                ("next operations", r"\b(?:next operations?|next 24\s*hr plan|next 24 hours?|plan forward)\s*[:#-]\s*(.{8,260})"),
+            ],
+            "safety": [
+                ("safety", r"\b(?:safety|hse|well control)\s*[:#-]\s*(.{8,260})"),
+            ],
+            "casing": [
+                ("casing", r"\b(?:casing|casing status|casing program)\s*[:#-]\s*(.{8,260})"),
+            ],
+            "bha": [
+                ("bha", r"\b(?:bha|bottom hole assembly|bit and bha)\s*[:#-]\s*(.{8,260})"),
+            ],
+            "survey": [
+                ("survey", r"\b(?:survey|survey data|directional survey)\s*[:#-]\s*(.{8,260})"),
+            ],
+            "time_breakdown": [
+                ("time breakdown", r"\b(?:time breakdown|24\s*hr activity|activity timeline)\s*[:#-]\s*(.{8,260})"),
+            ],
+        }
+        for section, specs in section_specs.items():
+            match = LocalStateStore._match_pdf_profile_line(page_lines, specs, max_length=260)
+            if match:
+                sections[section] = match["value"]
+                section_sources[section] = {
+                    "page": match["page"],
+                    "label": match["label"],
+                    "confidence": 0.82,
+                }
+
+        section_presence = {
+            "daily_drilling_report": any(marker in lower_text for marker in ["daily drilling report", "ddr"]),
+            "well_job_info": any(marker in lower_text for marker in ["well", "rig", "operator"]),
+            "drilling_parameters": any(marker in lower_text for marker in ["hole size", "mud weight", "tvd", "measured depth"]),
+            "mud_bha_survey": any(marker in lower_text for marker in ["mud", "bha", "survey", "mwd", "lwd"]),
+            "casing": "casing" in lower_text or "shoe" in lower_text,
+            "time_breakdown": "time breakdown" in lower_text or "24 hr" in lower_text or "activity timeline" in lower_text,
+            "npt": "npt" in lower_text or any(LocalStateStore._pdf_table_mentions(table, ["npt", "non-productive"]) for table in tables),
+        }
+        marker_score = sum(1 for value in section_presence.values() if value)
+        field_score = len(fields) + len(sections)
+        if field_score < 2 and marker_score < 2:
+            return None
+        confidence = min(0.97, 0.35 + field_score * 0.045 + marker_score * 0.035)
+        document_type = "daily_drilling_report" if section_presence["daily_drilling_report"] or marker_score >= 4 else "pdf_report"
+        return {
+            "profile_version": "pdf_report_profile_v1",
+            "document_type": document_type,
+            "confidence": round(confidence, 3),
+            "field_count": len(fields),
+            "section_count": len(sections),
+            "fields": fields,
+            "field_sources": field_sources,
+            "sections": sections,
+            "section_sources": section_sources,
+            "section_presence": section_presence,
+        }
+
+    @staticmethod
+    def _pdf_page_lines(pages: list[dict[str, object]]) -> list[tuple[int, str]]:
+        lines: list[tuple[int, str]] = []
+        for page in pages:
+            page_number = page.get("page")
+            text = page.get("text")
+            if not isinstance(page_number, int) or not isinstance(text, str):
+                continue
+            for line in text.splitlines():
+                clean_line = LocalStateStore._clean_extracted_text(line)
+                if clean_line:
+                    lines.append((page_number, clean_line))
+        return lines
+
+    @staticmethod
+    def _match_pdf_profile_line(
+        page_lines: list[tuple[int, str]],
+        patterns: list[tuple[str, str]],
+        max_length: int = 120,
+    ) -> dict[str, object] | None:
+        for page_number, line in page_lines:
+            for label, pattern in patterns:
+                match = re.search(pattern, line, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                value = LocalStateStore._clean_report_profile_value(match.group(1), max_length=max_length)
+                if value:
+                    return {"page": page_number, "label": label, "value": value}
+        return None
+
+    @staticmethod
+    def _clean_report_profile_value(value: str, max_length: int = 120) -> str:
+        cleaned = LocalStateStore._clean_extracted_text(value)
+        cleaned = re.split(
+            r"\b(?:report no|well|rig|operator|hole size|md|tvd|mud weight|present operations|next operations|safety|casing|bha|survey|time breakdown)\b\s*[:#-]",
+            cleaned,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(" .;|")
+        return cleaned[:max_length].strip(" .;|")
+
+    @staticmethod
+    def _pdf_table_mentions(table: dict[str, object], markers: list[str]) -> bool:
+        rows = table.get("rows")
+        if not isinstance(rows, list):
+            return False
+        text = " ".join(
+            " ".join(str(cell) for cell in row)
+            for row in rows
+            if isinstance(row, list)
+        ).lower()
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _pdf_report_profile_chunk_records(profile: dict[str, object]) -> list[dict[str, object]]:
+        field_sources = profile.get("field_sources")
+        section_sources = profile.get("section_sources")
+        fields = profile.get("fields")
+        sections = profile.get("sections")
+        records: list[dict[str, object]] = []
+        if isinstance(fields, dict):
+            for field, value in fields.items():
+                if not isinstance(field, str) or not isinstance(value, str) or not value.strip():
+                    continue
+                source = field_sources.get(field, {}) if isinstance(field_sources, dict) else {}
+                page = source.get("page") if isinstance(source, dict) else None
+                label = source.get("label") if isinstance(source, dict) else None
+                records.append(
+                    {
+                        "text": f"PDF report field {LocalStateStore._humanize_report_key(field)}: {value}",
+                        "page": page if isinstance(page, int) and page > 0 else 1,
+                        "field": field,
+                        "label": str(label or field),
+                        "section": "well_job_information",
+                    }
+                )
+        if isinstance(sections, dict):
+            for section, value in sections.items():
+                if not isinstance(section, str) or not isinstance(value, str) or not value.strip():
+                    continue
+                source = section_sources.get(section, {}) if isinstance(section_sources, dict) else {}
+                page = source.get("page") if isinstance(source, dict) else None
+                label = source.get("label") if isinstance(source, dict) else None
+                records.append(
+                    {
+                        "text": f"PDF report section {LocalStateStore._humanize_report_key(section)}: {value}",
+                        "page": page if isinstance(page, int) and page > 0 else 1,
+                        "field": section,
+                        "label": str(label or section),
+                        "section": section,
+                    }
+                )
+        return records
+
+    @staticmethod
+    def _humanize_report_key(value: str) -> str:
+        return value.replace("_", " ").strip().title()
 
     @staticmethod
     def _clean_extracted_text(text: str) -> str:
@@ -2814,15 +3052,19 @@ class LocalStateStore:
                     tables.extend(LocalStateStore._extract_pdf_page_tables(page, page_index))
                 text_parts = [str(page["text"]) for page in pages]
                 text_parts.extend(LocalStateStore._pdf_table_preview_text(table) for table in tables)
+                report_profile = LocalStateStore._extract_pdf_report_profile(pages, tables)
+                metadata: dict[str, object] = {
+                    "page_count": document.page_count,
+                    "pages_with_text": len(pages),
+                    "pages": pages,
+                    "tables": tables,
+                    "table_count": len(tables),
+                }
+                if report_profile is not None:
+                    metadata["report_profile"] = report_profile
                 return (
                     "\n".join(part for part in text_parts if part.strip()),
-                    {
-                        "page_count": document.page_count,
-                        "pages_with_text": len(pages),
-                        "pages": pages,
-                        "tables": tables,
-                        "table_count": len(tables),
-                    },
+                    metadata,
                 )
         except Exception as exc:
             return "", {"page_count": LocalStateStore._pdf_page_count(content), "pymupdf_error": exc.__class__.__name__}

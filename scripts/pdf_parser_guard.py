@@ -25,7 +25,27 @@ def main() -> int:
         workspace = next(iter(store.workspaces.values()))
         pdf_content = build_pdf_fixture(
             [
-                "DDR package cover page for Monday Report parser guard.",
+                "\n".join(
+                    [
+                        "Daily Drilling Report",
+                        "Report No: DDR-042",
+                        "NPT marker: MWD signal loss is detailed in the table.",
+                        "Well: FORGE 16A(78)-32",
+                        "Rig: Frontier Rig 16",
+                        "Operator: Monday Report",
+                        "Hole Size: 12.25 in",
+                        "MD: 8620 ft",
+                        "TVD: 7980 ft",
+                        "Mud Weight: 10.2 ppg",
+                        "Present Operations: Drilling ahead at 12.25 in hole while monitoring hole cleaning.",
+                        "Next Operations: Continue drilling and confirm casing readiness.",
+                        "Safety: BOP tested and safety meeting completed.",
+                        "Casing: Surface 13.375 in shoe at 1629 ft; intermediate 9.625 in planned at 6500 ft.",
+                        "BHA: PDC bit with RSS, MWD, and LWD assembly.",
+                        "Survey: Survey data accepted with no quality flags.",
+                        "Time Breakdown: Drill ahead, circulate, survey, and condition mud.",
+                    ]
+                ),
                 "PDF DDR summary. Review the NPT table for failure evidence.",
             ],
         )
@@ -78,6 +98,32 @@ def main() -> int:
             )
         )
 
+        report_profile = parser_metadata.get("report_profile", {})
+        profile_fields = report_profile.get("fields", {}) if isinstance(report_profile, dict) else {}
+        profile_sections = report_profile.get("sections", {}) if isinstance(report_profile, dict) else {}
+        section_presence = report_profile.get("section_presence", {}) if isinstance(report_profile, dict) else {}
+        checks.append(
+            assert_check(
+                "PDF report profile extracts drilling-report fields",
+                isinstance(report_profile, dict)
+                and report_profile.get("document_type") == "daily_drilling_report"
+                and float(report_profile.get("confidence", 0)) >= 0.7
+                and profile_fields.get("report_no") == "DDR-042"
+                and profile_fields.get("well") == "FORGE 16A(78)-32"
+                and profile_fields.get("rig") == "Frontier Rig 16"
+                and profile_fields.get("operator") == "Monday Report"
+                and profile_fields.get("hole_size") == "12.25"
+                and profile_fields.get("md_ft") == "8620"
+                and profile_fields.get("tvd_ft") == "7980"
+                and profile_fields.get("mud_weight") == "10.2"
+                and "Drilling ahead" in profile_sections.get("present_operations", "")
+                and "Continue drilling" in profile_sections.get("next_operations", "")
+                and section_presence.get("mud_bha_survey") is True
+                and section_presence.get("time_breakdown") is True,
+                report_profile,
+            )
+        )
+
         chunks = client.get(f"/documents/{pdf_document.get('id')}/chunks").json() if pdf_document.get("id") else []
         pdf_chunks = [chunk for chunk in chunks if chunk.get("locator_type") == "pdf"]
         located_pages = {chunk.get("locator", {}).get("page") for chunk in pdf_chunks}
@@ -107,6 +153,21 @@ def main() -> int:
             )
         )
 
+        profile_chunks = [
+            chunk
+            for chunk in pdf_chunks
+            if chunk.get("locator", {}).get("field") in {"well", "present_operations", "time_breakdown"}
+        ]
+        checks.append(
+            assert_check(
+                "PDF profile fields become cited source chunks",
+                len(profile_chunks) >= 3
+                and any(chunk.get("locator", {}).get("field") == "well" for chunk in profile_chunks)
+                and any("Drilling ahead" in chunk.get("text", "") for chunk in profile_chunks),
+                profile_chunks,
+            )
+        )
+
         failures = [
             item
             for item in client.get(f"/failures?workspace_id={workspace.id}").json()
@@ -123,6 +184,26 @@ def main() -> int:
                     for failure in failures
                 ),
                 failures,
+            )
+        )
+
+        draft_response = client.get(f"/workspaces/{workspace.id}/report-draft")
+        draft = draft_response.json() if draft_response.status_code == 200 else {}
+        checks.append(
+            assert_check(
+                "PDF report profile pre-fills Report Studio draft",
+                draft_response.status_code == 200
+                and draft.get("report_no") == "DDR-042"
+                and draft.get("well") == "FORGE 16A(78)-32"
+                and draft.get("rig") == "Frontier Rig 16"
+                and draft.get("hole_size") == "12.25"
+                and draft.get("md_ft") == "8620"
+                and draft.get("tvd_ft") == "7980"
+                and draft.get("mud_weight") == "10.2"
+                and "Drilling ahead" in draft.get("present_ops", "")
+                and "Continue drilling" in draft.get("next_ops", "")
+                and any("PDF report profile" in item for item in draft.get("evidence_summary", [])),
+                draft,
             )
         )
 

@@ -108,7 +108,7 @@ export const projectPhases: ProjectPhase[] = [
     status: "complete",
     owner: "AI/data",
     objective: "Parse ZIP, PDF, Excel, Word, CSV, email, images, and scanned pages with source lineage.",
-    evidence: "Worker parses text, CSV, XLSX, DOCX, EML, PyMuPDF PDF text, native PDF rows, and configured OCR output into typed locators; reviewed 13-family fixture manifest and parser/OCR eval report pass.",
+    evidence: "Worker parses text, CSV, XLSX, DOCX, EML, PyMuPDF PDF text, native PDF rows, pdf_report_profile_v1 fields/sections, and configured OCR output into typed locators; reviewed 13-family fixture manifest and parser/OCR eval report pass.",
     nextAction: "Maintain reviewed fixture/eval evidence as parser families evolve.",
     icon: FileSearch
   },
@@ -173,7 +173,7 @@ export const clearTrackerLanes: TrackerLane[] = [
     items: [
       "Chat-first UI with API fallback, structured workflow steps, insight cards, risk register, command actions, citations, and source-backed answers.",
       "Direct and ZIP uploads with hashing, malware baseline checks, safe storage paths, and signed downloads.",
-      "Parser worker covers text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF text, native PDF table rows, OCR routing/extraction, typed locators, manifest-driven parser/OCR eval reports, and source citation actions.",
+      "Parser worker covers text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF text, native PDF table rows, pdf_report_profile_v1 DDR fields/sections, OCR routing/extraction, typed locators, manifest-driven parser/OCR eval reports, and source citation actions.",
       "Partner preview ZIP includes the built app, API, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.",
       "Validation-gated Monday Report exports JSON, CSV, HTML, PDF, and XLSX with signed artifact downloads.",
       "Report Studio provides a technical morning-report console with standard daily-report sections, readiness telemetry, control matrix, source-backed draft generation, casing/well schematic, AI plan/execute checks, timeline, and draft export.",
@@ -273,7 +273,7 @@ export const testGates: TestGate[] = [
     name: "Parser chunking",
     status: "pass",
     command: "GET /documents and /documents/{id}/chunks",
-    lastResult: "Worker persists parsed document records and source chunks for text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF files, and native PDF table rows inside ZIPs."
+    lastResult: "Worker persists parsed document records and source chunks for text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF files, native PDF table rows, and PDF report profile fields/sections inside ZIPs."
   },
   {
     id: "gate-source-lineage",
@@ -308,7 +308,7 @@ export const testGates: TestGate[] = [
     name: "Source-backed report draft",
     status: "pass",
     command: "pnpm run audit:report-draft",
-    lastResult: "Guard verifies parsed documents, chunks, citations, failures, validation tasks, and audit events produce form-ready Report Studio draft fields."
+    lastResult: "Guard verifies parsed documents, chunks, citations, failures, validation tasks, PDF profile hints, and audit events produce form-ready Report Studio draft fields."
   },
   {
     id: "gate-roadmap",
@@ -336,7 +336,7 @@ export const testGates: TestGate[] = [
     name: "PDF text parser",
     status: "pass",
     command: "pnpm run audit:pdf-parser",
-    lastResult: "Guard verifies two-page PDFs parse with PyMuPDF, native table rows become page/table/row citations, cited extraction uses the table row, and audit events stay sealed."
+    lastResult: "Guard verifies PyMuPDF DDR profiles extract report fields/sections, create cited chunks, prefill Report Studio, cite native table rows, and avoid treating casing depths as NPT hours."
   },
   {
     id: "gate-forge-corpus",

@@ -563,6 +563,62 @@ def report_draft_operations_log(document_titles: list[str], failure_count: int, 
     )
 
 
+def report_draft_pdf_profiles(documents: list) -> list[dict[str, object]]:
+    profiles: list[dict[str, object]] = []
+    for document in documents:
+        metadata = getattr(document, "metadata", {})
+        if not isinstance(metadata, dict):
+            continue
+        parser_metadata = metadata.get("parser", {})
+        if not isinstance(parser_metadata, dict):
+            continue
+        profile = parser_metadata.get("report_profile")
+        if isinstance(profile, dict):
+            profiles.append(profile)
+    return sorted(
+        profiles,
+        key=lambda item: (
+            float(item.get("confidence", 0)) if isinstance(item.get("confidence"), (int, float)) else 0,
+            int(item.get("field_count", 0)) if isinstance(item.get("field_count"), int) else 0,
+            int(item.get("section_count", 0)) if isinstance(item.get("section_count"), int) else 0,
+        ),
+        reverse=True,
+    )
+
+
+def report_draft_profile_field(profiles: list[dict[str, object]], field: str) -> str:
+    for profile in profiles:
+        fields = profile.get("fields")
+        if not isinstance(fields, dict):
+            continue
+        value = fields.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def report_draft_profile_section(profiles: list[dict[str, object]], section: str) -> str:
+    for profile in profiles:
+        sections = profile.get("sections")
+        if not isinstance(sections, dict):
+            continue
+        value = sections.get(section)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def report_draft_profile_note(profiles: list[dict[str, object]]) -> str | None:
+    if not profiles:
+        return None
+    profile = profiles[0]
+    document_type = str(profile.get("document_type", "pdf_report")).replace("_", " ")
+    confidence = profile.get("confidence", 0)
+    field_count = profile.get("field_count", 0)
+    section_count = profile.get("section_count", 0)
+    return f"PDF report profile: {document_type}, confidence {confidence}, {field_count} field(s), {section_count} section(s)."
+
+
 @app.get("/workspaces/{workspace_id}/report-draft", response_model=ReportDraftResponse)
 def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     store.refresh()
@@ -593,6 +649,7 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     open_tasks = store._open_validation_tasks_for_workspace(workspace_id)
     source_text = " ".join(chunk.text[:1200] for chunk in chunks[:20])
     document_titles = [document.title for document in documents[:6]]
+    pdf_profiles = report_draft_pdf_profiles(documents)
     citations = dedupe_citations(
         store.parsed_citations_for_workspace(workspace_id, limit=8)
         + [citation for failure in failures for citation in failure.citations]
@@ -601,16 +658,25 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     total_npt = sum(failure.npt_hours for failure in failures)
     evidence_scope = f"{len(documents)} parsed document(s), {len(chunks)} chunk(s), {len(citations)} citation(s)"
     latest_source = ", ".join(document_titles[:3]) if document_titles else "no parsed source titles available"
+    present_from_pdf = report_draft_profile_section(pdf_profiles, "present_operations")
+    next_from_pdf = report_draft_profile_section(pdf_profiles, "next_operations")
+    safety_from_pdf = report_draft_profile_section(pdf_profiles, "safety")
+    casing_from_pdf = report_draft_profile_section(pdf_profiles, "casing")
+    bha_from_pdf = report_draft_profile_section(pdf_profiles, "bha")
+    survey_from_pdf = report_draft_profile_section(pdf_profiles, "survey")
+    time_from_pdf = report_draft_profile_section(pdf_profiles, "time_breakdown")
 
     if top_failure:
+        present_prefix = f"{present_from_pdf} " if present_from_pdf else ""
         present_ops = (
-            f"Source-backed review covers {evidence_scope}. Highest-risk extracted item: "
+            f"{present_prefix}Source-backed review covers {evidence_scope}. Highest-risk extracted item: "
             f"{top_failure.event_type} - {top_failure.summary} "
             f"({top_failure.npt_hours:.1f} hr NPT, {top_failure.severity})."
         )
     else:
+        present_prefix = f"{present_from_pdf} " if present_from_pdf else ""
         present_ops = (
-            f"Source-backed review covers {evidence_scope}. No structured failure records are extracted yet; "
+            f"{present_prefix}Source-backed review covers {evidence_scope}. No structured failure records are extracted yet; "
             "complete source review before client issue."
         )
 
@@ -620,36 +686,51 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     ]
     if open_tasks:
         risk_items.append(f"{len(open_tasks)} open validation task(s) must be closed before official export.")
+    for label, note in [("Casing", casing_from_pdf), ("BHA", bha_from_pdf), ("Survey", survey_from_pdf)]:
+        if note:
+            risk_items.append(f"{label} source note: {note}")
     risks = " ".join(risk_items) if risk_items else "No extracted high-risk item is available; confirm source coverage and safety barriers."
+    evidence_summary = [
+        f"Latest sources: {latest_source}.",
+        f"Failure scope: {len(failures)} record(s), {total_npt:.1f} total NPT hour(s).",
+        "Official outputs remain validation-gated and citation-backed.",
+    ]
+    profile_note = report_draft_profile_note(pdf_profiles)
+    if profile_note:
+        evidence_summary.insert(1, profile_note)
+    operations_log = report_draft_operations_log(document_titles, len(failures), len(open_tasks))
+    if time_from_pdf:
+        operations_log = f"00:00-06:00 | {time_from_pdf}\n" + "\n".join(operations_log.splitlines()[1:])
 
     response = ReportDraftResponse(
         workspace_id=workspace_id,
-        report_no=f"MR-SRC-{len(documents):03d}",
-        well=workspace.asset or workspace.name,
-        rig=workspace.name,
-        operator=store.tenant.name or "Monday Report",
+        report_no=report_draft_profile_field(pdf_profiles, "report_no") or f"MR-SRC-{len(documents):03d}",
+        well=report_draft_profile_field(pdf_profiles, "well") or workspace.asset or workspace.name,
+        rig=report_draft_profile_field(pdf_profiles, "rig") or workspace.name,
+        operator=report_draft_profile_field(pdf_profiles, "operator") or store.tenant.name or "Monday Report",
         phase=workspace.campaign or "Source-backed morning report",
-        hole_size=report_draft_hole_hint(source_text),
-        md_ft=report_draft_depth_hint(source_text, "md"),
-        tvd_ft=report_draft_depth_hint(source_text, "tvd"),
-        mud_weight=report_draft_mud_hint(source_text),
+        hole_size=report_draft_profile_field(pdf_profiles, "hole_size") or report_draft_hole_hint(source_text),
+        md_ft=report_draft_profile_field(pdf_profiles, "md_ft") or report_draft_depth_hint(source_text, "md"),
+        tvd_ft=report_draft_profile_field(pdf_profiles, "tvd_ft") or report_draft_depth_hint(source_text, "tvd"),
+        mud_weight=report_draft_profile_field(pdf_profiles, "mud_weight") or report_draft_mud_hint(source_text),
         present_ops=present_ops,
         next_ops=(
-            "Normalize the latest source reports into well/job information, present operations, drilling parameters, "
-            "mud/BHA/survey, casing, timeline, NPT, risks, and approvals; then export only after validation closure."
+            f"{next_from_pdf} Validate source citations and export only after validation closure."
+            if next_from_pdf
+            else (
+                "Normalize the latest source reports into well/job information, present operations, drilling parameters, "
+                "mud/BHA/survey, casing, timeline, NPT, risks, and approvals; then export only after validation closure."
+            )
         ),
-        safety=(
+        safety=safety_from_pdf
+        or (
             "Confirm BOP, well-control, pressure-control barriers, lifting exposure, and HSE observations against "
             "the latest daily report before client issue."
         ),
         risks=risks,
         casing_program=report_draft_casing_program(source_text),
-        operations_log=report_draft_operations_log(document_titles, len(failures), len(open_tasks)),
-        evidence_summary=[
-            f"Latest sources: {latest_source}.",
-            f"Failure scope: {len(failures)} record(s), {total_npt:.1f} total NPT hour(s).",
-            "Official outputs remain validation-gated and citation-backed.",
-        ],
+        operations_log=operations_log,
+        evidence_summary=evidence_summary,
         source_document_count=len(documents),
         source_chunk_count=len(chunks),
         failure_count=len(failures),
