@@ -3,6 +3,7 @@ import type { JSX } from "react";
 import {
   ClipboardCheck,
   Database,
+  FilePenLine,
   Gauge,
   LayoutDashboard,
   MessageSquareText,
@@ -18,6 +19,7 @@ import { Dashboard } from "./components/Dashboard";
 import { FailureExplorer } from "./components/FailureExplorer";
 import { SecurityStrip } from "./components/PipelineBoard";
 import { ProjectTracker } from "./components/ProjectTracker";
+import { ReportStudio } from "./components/ReportStudio";
 import { UploadPanel } from "./components/UploadPanel";
 import { ValidationQueue } from "./components/ValidationQueue";
 import {
@@ -37,7 +39,15 @@ import {
 } from "./lib/api";
 import { summarizeMetrics } from "./lib/analytics";
 
-type ViewKey = "dashboard" | "upload" | "chat" | "explorer" | "validation" | "tracker" | "architecture";
+type ViewKey =
+  | "dashboard"
+  | "upload"
+  | "chat"
+  | "studio"
+  | "explorer"
+  | "validation"
+  | "tracker"
+  | "architecture";
 
 const navItems: Array<{
   key: ViewKey;
@@ -45,6 +55,7 @@ const navItems: Array<{
   icon: LucideIcon;
 }> = [
   { key: "chat", label: "Local AI Chat", icon: MessageSquareText },
+  { key: "studio", label: "Report Studio", icon: FilePenLine },
   { key: "upload", label: "Upload", icon: UploadCloud },
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { key: "explorer", label: "Explorer", icon: SearchCheck },
@@ -179,6 +190,7 @@ export function App(): JSX.Element {
             workspaceId={apiWorkspaceId ?? undefined}
           />
         )}
+        {activeView === "studio" && <ReportStudio />}
         {activeView === "explorer" && (
           <FailureExplorer events={events} filters={filters} onFiltersChange={setFilters} />
         )}

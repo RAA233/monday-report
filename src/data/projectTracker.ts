@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   ClipboardList,
   Database,
+  FileText,
   FileSearch,
   Gauge,
   LockKeyhole,
@@ -139,6 +140,16 @@ export const projectPhases: ProjectPhase[] = [
     evidence: "Client-data readiness endpoint, runtime backend status, tracker panel, API auth guard, upload guard, archive safety guard, infrastructure readiness guard, retention guard, malware guard, storage path guard, client-operation guard, signed source-file URLs, upload-size limit, local AI status, redacted audit hash chain, and audit command report pass/warn/fail posture.",
     nextAction: "Replace local JSON with PostgreSQL/RLS, wire Redis workers, external malware scanning, production parsers, and local model runtime.",
     icon: LockKeyhole
+  },
+  {
+    id: "phase-09",
+    name: "Morning report studio",
+    status: "in_progress",
+    owner: "Frontend + drilling SME",
+    objective: "Turn real daily drilling report patterns into a branded authoring and preview workflow.",
+    evidence: "Report Studio drafts from scratch, applies a FORGE-style structure, renders casing schematics, and exports a Markdown draft.",
+    nextAction: "Connect parsed FORGE/client evidence into AI-assisted draft generation and production HTML/PDF/XLSX exports.",
+    icon: FileText
   }
 ];
 
@@ -154,6 +165,7 @@ export const clearTrackerLanes: TrackerLane[] = [
       "Parser worker covers text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF text, native PDF table rows, OCR routing/extraction, typed locators, manifest-driven parser/OCR eval reports, and source citation actions.",
       "Partner preview ZIP includes the built app, API, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.",
       "Validation-gated Monday Report exports JSON, CSV, HTML, PDF, and XLSX with signed artifact downloads.",
+      "Report Studio provides a branded morning-report authoring surface with FORGE-style sections, casing schematic, timeline, and draft export.",
       "`audit:all` is the accepted local proof gate after every slice."
     ]
   },
@@ -189,6 +201,7 @@ export const clearTrackerLanes: TrackerLane[] = [
     summary: "The next high-value work should convert the local MVP into production-grade ingestion and extraction.",
     items: [
       "Build a reviewed manifest-backed golden fixture pack for DDR, BHA, MWD/LWD, RSS, mud motor, bit, mud, scanned PDF, Excel, email, corrupted, and duplicate files.",
+      "Promote the local FORGE open-source daily-report corpus into reviewed templates and extraction evals without committing raw ignored PDFs.",
       "Run `generate_parser_fixture_eval_report.py` and set `MONDAY_REPORT_PARSER_EVAL_REPORT` from the passing report.",
       "Harden OCR extraction on anonymized scanned-PDF fixtures and production engine configuration.",
       "Wire local LLM extraction router, strict schemas, confidence scoring, and metrics.",
@@ -281,6 +294,13 @@ export const testGates: TestGate[] = [
     status: "pass",
     command: "pnpm run audit:pdf-parser",
     lastResult: "Guard verifies two-page PDFs parse with PyMuPDF, native table rows become page/table/row citations, cited extraction uses the table row, and audit events stay sealed."
+  },
+  {
+    id: "gate-forge-corpus",
+    name: "FORGE daily-report corpus",
+    status: "watch",
+    command: "pnpm run audit:forge-corpus",
+    lastResult: "Guard inspects the local ignored 16A(78)-32_Daily_Reports folder, verifies drilling/completion report markers, and writes output/forge-corpus/forge_corpus_summary.json."
   },
   {
     id: "gate-ocr-routing",

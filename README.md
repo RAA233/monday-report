@@ -5,6 +5,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 ## What Is Implemented
 
 - React SaaS workspace with local AI chat as the main surface, plus upload, dashboard, failure explorer, validation queue, and architecture screens.
+- Report Studio lets users write morning drilling reports from scratch, apply a FORGE-style daily-report structure, preview Monday Report branding, render casing schematics and activity timelines, and export a draft Markdown report.
 - Chat calls the FastAPI scaffold when available, exposes local AI runtime status, and falls back to deterministic local analysis when offline.
 - Backend scaffold uses durable local JSON state so API and worker share uploads, jobs, and redacted hash-chain audit logs before PostgreSQL/Redis lands.
 - Browser ZIP/file/folder intake with configurable byte limits, sanitized tenant-scoped storage paths, local byte storage, real SHA-256 hashes, report-family classification, duplicate candidates, configurable OCR routing/extraction, and parser gap warnings.
@@ -16,6 +17,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 - Client-data readiness endpoint and tracker panel flag demo/local-scaffold blockers before real client packages are accepted, enforce retention policy, require real active infrastructure adapters, and unsafe client mode requires an API key while blocking data reads, chat, report creation, and exports until ready.
 - Local AI defaults to Ollama with `gemma4:e2b`; readiness verifies both endpoint reachability and the pinned model.
 - Parser/OCR fixture eval readiness requires a passing `MONDAY_REPORT_PARSER_EVAL_REPORT`; real-client approval also requires the referenced fixture manifest to carry a reviewed anonymized-client attestation.
+- The local `16A(78)-32_Daily_Reports/` open-source FORGE corpus is ignored by Git; `audit:forge-corpus` parses representative PDFs, verifies drilling/completion markers, and writes `output/forge-corpus/forge_corpus_summary.json`.
 - `fixtures:anonymized` creates a generated 13-family fixture pack for local smoke tests only; production client intake must use reviewed anonymized client fixtures, not generated evidence.
 - Partner preview packaging creates one ZIP with the built web app, backend, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.
 - Client-data approval tooling writes an explicit approved/blocked evidence report from the live readiness endpoint.
@@ -70,6 +72,7 @@ pnpm run audit:golden-fixtures
 pnpm run audit:parser-fixture-evals
 pnpm run audit:parser-fixture-report
 pnpm run audit:pdf-parser
+pnpm run audit:forge-corpus
 pnpm run audit:ocr-routing
 pnpm run audit:ocr-extraction
 pnpm run audit:local-ai
@@ -126,6 +129,7 @@ The output is `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.j
 - Replace local JSON state with PostgreSQL repositories and Redis-backed workers.
 - Replace local file storage with production object storage and queued Python parser workers.
 - Harden OCR/PDF extraction on reviewed anonymized client fixtures, configure a production OCR engine, and complete customer-grade golden fixture coverage using `docs/GOLDEN_FIXTURE_MANIFEST.example.json`; then run `generate_parser_fixture_eval_report.py` and set `MONDAY_REPORT_PARSER_EVAL_REPORT` to the passing report.
+- Promote the open-source FORGE daily-report corpus into reviewed extraction templates and export fixtures without committing the raw ignored PDF folder.
 - Add Postgres migrations from `db/schema.sql`.
 - Add auth/SSO, tenant-aware request context, persistent audit hardening, and source preview authorization.
 - Replace deterministic extraction with local LLM provider abstraction and evaluation sets before using customer data.
