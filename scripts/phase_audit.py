@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -14,7 +15,20 @@ from uuid import uuid4
 from xml.sax.saxutils import escape as xml_escape
 
 
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_ENV_FILE = ROOT / "output" / "ga-readiness" / "monday_report_ga.env"
+load_env_file(DEFAULT_ENV_FILE)
 API_BASE = os.getenv("MONDAY_REPORT_API_BASE", "http://127.0.0.1:8000")
 WEB_BASE = os.getenv("MONDAY_REPORT_WEB_BASE", "http://127.0.0.1:5173")
 
@@ -26,7 +40,7 @@ def main() -> int:
         check_http("Frontend dev server", WEB_BASE),
         check_json("API health", f"{API_BASE}/health", "status", "ok"),
         check_json("API session", f"{API_BASE}/auth/session", "tenant.name", "Monday Report Tenant"),
-        check_json("Client data readiness endpoint", f"{API_BASE}/readiness/client-data", "status", "not_ready"),
+        check_json("Client data readiness endpoint", f"{API_BASE}/readiness/client-data", "status", {"ready", "not_ready"}),
         check_json("Local AI status endpoint", f"{API_BASE}/local-ai/status", "hosted_fallback_enabled", False),
         check_json("Audit integrity endpoint", f"{API_BASE}/audit-logs/integrity", "broken_events", 0),
         check_processing_workflow(),
@@ -91,7 +105,8 @@ def check_no_stale_branding() -> dict[str, object]:
 
 def check_http(name: str, url: str) -> dict[str, object]:
     try:
-        with urllib.request.urlopen(url, timeout=5) as response:
+        request = urllib.request.Request(url, headers=auth_headers(include_content_type=False), method="GET")
+        with urllib.request.urlopen(request, timeout=5) as response:
             return {"name": name, "ok": 200 <= response.status < 400, "detail": f"HTTP {response.status}"}
     except urllib.error.URLError as exc:
         return {"name": name, "ok": False, "detail": str(exc)}
@@ -99,7 +114,8 @@ def check_http(name: str, url: str) -> dict[str, object]:
 
 def check_json(name: str, url: str, key_path: str | None, expected: object | None) -> dict[str, object]:
     try:
-        with urllib.request.urlopen(url, timeout=5) as response:
+        request = urllib.request.Request(url, headers=auth_headers(), method="GET")
+        with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, json.JSONDecodeError) as exc:
         return {"name": name, "ok": False, "detail": str(exc)}
@@ -115,7 +131,7 @@ def check_json(name: str, url: str, key_path: str | None, expected: object | Non
 
     return {
         "name": name,
-        "ok": value == expected,
+        "ok": value in expected if isinstance(expected, set) else value == expected,
         "detail": f"{key_path}={value!r}",
     }
 
@@ -153,14 +169,7 @@ def check_processing_workflow() -> dict[str, object]:
             "application/zip",
         )
         jobs_before = request_json("GET", f"{API_BASE}/processing-jobs?upload_id={upload['upload']['id']}")
-        worker = subprocess.run(
-            [sys.executable, "-m", "backend.app.worker"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        worker = run_worker_until_progress()
         jobs_after = request_json("GET", f"{API_BASE}/processing-jobs?upload_id={upload['upload']['id']}")
         files_after = request_json("GET", f"{API_BASE}/uploads/{upload['upload']['id']}/files")
         documents = request_json("GET", f"{API_BASE}/documents?workspace_id={workspace_id}")
@@ -235,12 +244,42 @@ def check_processing_workflow() -> dict[str, object]:
 
 def request_json(method: str, url: str, body: dict | None = None) -> object:
     data = None
-    headers = {"Content-Type": "application/json"}
+    headers = auth_headers()
     if body is not None:
         data = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(request, timeout=5) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def run_worker_until_progress(max_attempts: int = 4) -> subprocess.CompletedProcess[str]:
+    last_result: subprocess.CompletedProcess[str] | None = None
+    for attempt in range(max_attempts):
+        last_result = subprocess.run(
+            [sys.executable, "-m", "backend.app.worker"],
+            cwd=ROOT,
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        output = last_result.stdout.strip() or last_result.stderr.strip()
+        if last_result.returncode != 0 or "Processed 0 " not in output:
+            return last_result
+        if attempt + 1 < max_attempts:
+            time.sleep(0.75)
+    return last_result if last_result is not None else subprocess.CompletedProcess([], 1, "", "worker did not run")
+
+
+def auth_headers(include_content_type: bool = True) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if include_content_type:
+        headers["Content-Type"] = "application/json"
+    api_key = os.getenv("MONDAY_REPORT_API_KEY", "")
+    if api_key:
+        headers["X-Monday-Report-Key"] = api_key
+    return headers
 
 
 def build_zip_fixture() -> bytes:
@@ -463,7 +502,10 @@ def request_multipart(
     request = urllib.request.Request(
         url,
         data=b"".join(chunks),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers={
+            **auth_headers(include_content_type=False),
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=5) as response:

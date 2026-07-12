@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -315,6 +316,9 @@ def request_json_expect_error(
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
+    api_key = os.getenv("MONDAY_REPORT_API_KEY", "")
+    if api_key:
+        headers["X-Monday-Report-Key"] = api_key
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -356,7 +360,7 @@ def validate_export_artifact(export: dict[str, object]) -> dict[str, object]:
 def export_file_path(storage_uri: str) -> Path:
     if not storage_uri.startswith("export://"):
         raise ValueError(f"Unsupported export URI: {storage_uri}")
-    root = (ROOT / ".local_data" / "exports").resolve()
+    root = Path(os.getenv("MONDAY_REPORT_EXPORT_ROOT", str(ROOT / ".local_data" / "exports"))).resolve()
     path = root
     for part in [item for item in storage_uri.removeprefix("export://").split("/") if item]:
         path /= part
