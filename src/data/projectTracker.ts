@@ -166,6 +166,8 @@ export const clearTrackerLanes: TrackerLane[] = [
       "Partner preview ZIP includes the built app, API, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.",
       "Validation-gated Monday Report exports JSON, CSV, HTML, PDF, and XLSX with signed artifact downloads.",
       "Report Studio provides a branded morning-report authoring surface with FORGE-style sections, casing schematic, timeline, and draft export.",
+      "Official exports include GA-style metrics, validation posture, source coverage, casing rows, timeline, branded HTML/PDF output, and expanded XLSX sections.",
+      "GA readiness guard separates software-owned checks from configuration, infrastructure, and reviewed-evidence blockers.",
       "`audit:all` is the accepted local proof gate after every slice."
     ]
   },
@@ -352,6 +354,13 @@ export const testGates: TestGate[] = [
     lastResult: "Repeated report exports reuse an existing verified artifact, audit reuse, and avoid duplicate export records."
   },
   {
+    id: "gate-report-template",
+    name: "Report export template",
+    status: "pass",
+    command: "pnpm run audit:report-template",
+    lastResult: "Guard verifies JSON/HTML/PDF/XLSX exports include GA-style metrics, casing schematic, timeline, and branded operations sections."
+  },
+  {
     id: "gate-e2e",
     name: "Full E2E workflow",
     status: "pass",
@@ -441,6 +450,13 @@ export const testGates: TestGate[] = [
     status: "pass",
     command: "pnpm run audit:infra-readiness",
     lastResult: "Guard verifies placeholder PostgreSQL/Redis URLs do not make client mode ready while local_json and inline_worker remain active."
+  },
+  {
+    id: "gate-ga-readiness",
+    name: "GA readiness classification",
+    status: "watch",
+    command: "pnpm run audit:ga-readiness",
+    lastResult: "Guard verifies software-owned GA checks pass and classifies remaining blockers as configuration, infrastructure, or reviewed evidence/approval."
   },
   {
     id: "gate-runtime-backends",

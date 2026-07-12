@@ -26,6 +26,7 @@ OUTPUT_PDF = OUTPUT_PDF_DIR / "monday_report_complete_report.pdf"
 FORGE_SUMMARY_PATH = ROOT / "output" / "forge-corpus" / "forge_corpus_summary.json"
 PARTNER_APPROVAL_PATH = ROOT / "output" / "package" / "Monday_Report_Partner_Preview_APPROVAL.json"
 CLIENT_APPROVAL_PATH = ROOT / "output" / "client-data" / "Monday_Report_Client_Data_APPROVAL.json"
+GA_READINESS_PATH = ROOT / "output" / "ga-readiness" / "Monday_Report_GA_READINESS.json"
 
 
 STATUS_COLORS = {
@@ -94,6 +95,7 @@ def main() -> int:
     forge = read_json(FORGE_SUMMARY_PATH, {})
     partner = read_json(PARTNER_APPROVAL_PATH, {})
     client = read_json(CLIENT_APPROVAL_PATH, {})
+    ga = read_json(GA_READINESS_PATH, {})
     git_head = run_text(["git", "rev-parse", "HEAD"])
     git_status = run_text(["git", "status", "--short", "--branch"])
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -106,6 +108,7 @@ def main() -> int:
         "forge": forge,
         "partner": partner,
         "client": client,
+        "ga": ga,
     }
 
     OUTPUT_MD.write_text(render_markdown(report), encoding="utf-8")
@@ -121,6 +124,7 @@ def render_markdown(report: dict[str, Any]) -> str:
     forge = report["forge"]
     partner = report["partner"]
     client = report["client"]
+    ga = report["ga"]
     phase_counts = Counter(item.get("status", "pending") for item in tracker["phases"])
     gate_counts = Counter(item.get("status", "pending") for item in tracker["gates"])
     readiness_checks = client.get("readiness", {}).get("checks", [])
@@ -139,6 +143,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Partner package: {'APPROVED' if partner.get('approved') else 'NOT APPROVED'} for `{partner.get('scope', 'unknown')}`.",
         "- Real client data: BLOCKED - the app is intentionally refusing client-data approval until readiness gates pass.",
         "- FORGE corpus: PASS - local open-source daily-report corpus is parsed and checked without committing raw PDFs.",
+        f"- GA readiness: {ga.get('status', 'UNKNOWN')} - {ga.get('summary', 'Run audit:ga-readiness to generate GA evidence.')}",
         "",
         "## Current Package",
         "",
@@ -176,6 +181,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         "- `pnpm run audit:runtime-mock-data` - PASS",
         "- `pnpm run test:e2e` - PASS",
         "- `pnpm run audit:client-ops` - PASS",
+        "- `pnpm run audit:report-template` - PASS",
+        "- `pnpm run audit:ga-readiness` - PASS as software evidence; strict GA remains blocked until external prerequisites pass.",
         "- `pnpm run audit:all` - PASS",
         "- `pnpm run package:client-approval` - BLOCKED as expected in the current demo/local posture.",
         "",
@@ -256,6 +263,11 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
                     "PASS",
                     f"{forge.get('pdf_count', 0)} PDFs: {forge.get('categories', {}).get('drilling', 0)} drilling, {forge.get('categories', {}).get('completion', 0)} completion.",
                 ),
+                (
+                    "GA readiness",
+                    str(ga.get("status", "UNKNOWN")).replace("_", " "),
+                    str(ga.get("summary", "Run audit:ga-readiness to generate GA evidence.")),
+                ),
             ],
             styles,
         ),
@@ -310,6 +322,8 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
                     ["pnpm run audit:runtime-mock-data", "PASS"],
                     ["pnpm run test:e2e", "PASS"],
                     ["pnpm run audit:client-ops", "PASS"],
+                    ["pnpm run audit:report-template", "PASS"],
+                    ["pnpm run audit:ga-readiness", "PASS as software evidence; strict GA still requires external prerequisites"],
                     ["pnpm run audit:all", "PASS"],
                     ["pnpm run package:client-approval", "BLOCKED as expected in current demo/local posture"],
                 ],

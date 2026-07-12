@@ -84,6 +84,21 @@ STATE_REPLACE_RETRIES = 5
 STATE_REPLACE_RETRY_DELAY_SECONDS = 0.03
 
 
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _summary_sentence(failures: list[FailureRecord], fallback: str) -> str:
+    if not failures:
+        return fallback
+    top_failures = sorted(failures, key=lambda item: (item.npt_hours, item.confidence), reverse=True)[:3]
+    fragments = [
+        f"{failure.event_type} from {failure.company} ({failure.npt_hours:g} NPT hrs)"
+        for failure in top_failures
+    ]
+    return "Primary operational focus: " + "; ".join(fragments) + "."
+
+
 class LocalStateStore:
     """Durable local store for the executable MVP scaffold.
 
@@ -692,6 +707,19 @@ class LocalStateStore:
         open_tasks = self._open_validation_tasks_for_workspace(payload.workspace_id)
         total_npt = sum(failure.npt_hours for failure in failures)
         high_failures = [failure for failure in failures if failure.severity in {"High", "Critical"}]
+        workspace = self.workspaces[payload.workspace_id]
+        parsed_documents = [
+            document
+            for document in self.parsed_documents.values()
+            if document.workspace_id == payload.workspace_id
+        ]
+        citation_count = sum(len(failure.citations) for failure in failures)
+        validated_count = sum(1 for failure in failures if failure.validation_status == ValidationStatus.VALIDATED)
+        average_confidence = (
+            sum(failure.confidence for failure in failures) / len(failures)
+            if failures
+            else 0
+        )
         report = MondayReport(
             tenant_id=self.tenant.id,
             workspace_id=payload.workspace_id,
@@ -703,6 +731,22 @@ class LocalStateStore:
                 "period": {
                     "start": payload.period_start.isoformat(),
                     "end": payload.period_end.isoformat(),
+                },
+                "workspace": {
+                    "name": workspace.name,
+                    "asset": workspace.asset,
+                    "campaign": workspace.campaign,
+                },
+                "generated_at": utc_iso(),
+                "metrics": {
+                    "failure_count": len(failures),
+                    "high_or_critical_failures": len(high_failures),
+                    "total_npt_hours": round(total_npt, 2),
+                    "validated_failures": validated_count,
+                    "open_validation_tasks": len(open_tasks),
+                    "citation_count": citation_count,
+                    "parsed_documents": len(parsed_documents),
+                    "average_confidence": round(average_confidence, 3),
                 },
                 "executive_summary": [
                     {
@@ -717,19 +761,51 @@ class LocalStateStore:
                 "validation": {
                     "open_tasks": len(open_tasks),
                     "status": "requires_review" if open_tasks else "ready_for_approval",
+                    "validated_failures": validated_count,
                 },
                 "source_coverage": {
-                    "documents": len(
-                        [
-                            document
-                            for document in self.parsed_documents.values()
-                            if document.workspace_id == payload.workspace_id
-                        ]
+                    "documents": len(parsed_documents),
+                    "citations": citation_count,
+                    "document_titles": [document.title for document in parsed_documents[:12]],
+                },
+                "morning_report": {
+                    "present_operations": _summary_sentence(
+                        failures,
+                        "No extracted failures in scope; continue source-backed monitoring before client issue.",
                     ),
-                    "citations": sum(len(failure.citations) for failure in failures),
+                    "next_24_hours": [
+                        "Resolve or confirm every open validation task before issuing an official report.",
+                        "Review cited source files for high-severity or high-NPT events.",
+                        "Update casing, BHA, mud, survey, and activity timeline sections from the latest DDR evidence.",
+                    ],
+                    "casing_schematic": [
+                        {"name": "Conductor", "od": "20 in", "top_ft": 0, "shoe_ft": 130, "status": "reference"},
+                        {"name": "Surface", "od": "13.375 in", "top_ft": 0, "shoe_ft": 1629, "status": "reference"},
+                        {"name": "Intermediate", "od": "9.625 in", "top_ft": 0, "shoe_ft": 6500, "status": "plan"},
+                        {"name": "Production", "od": "7 in", "top_ft": 0, "shoe_ft": 10987, "status": "plan"},
+                    ],
+                    "activity_timeline": [
+                        {
+                            "time": "00:00-06:00",
+                            "activity": "Review overnight source evidence and validate extracted NPT/failure records.",
+                        },
+                        {
+                            "time": "06:00-12:00",
+                            "activity": "Confirm safety, well-control, casing, and BHA status for morning handover.",
+                        },
+                        {
+                            "time": "12:00-18:00",
+                            "activity": "Close validation gaps, attach source citations, and update recommended actions.",
+                        },
+                        {
+                            "time": "18:00-24:00",
+                            "activity": "Prepare branded Monday Report export package after approval gate passes.",
+                        },
+                    ],
                 },
                 "data_quality_notes": [
-                    "Generated by the executable local scaffold; production template polish and local LLM extraction remain hardening items."
+                    "Official exports are blocked until validation tasks are closed.",
+                    "Casing and timeline sections use the FORGE-style daily-report structure and should be source-confirmed before client issue.",
                 ],
             },
         )
@@ -986,7 +1062,30 @@ class LocalStateStore:
     def _render_report_html(report: MondayReport) -> str:
         summary = report.report_json.get("executive_summary", [])
         failures = report.report_json.get("failure_summary", [])
+        metrics = report.report_json.get("metrics", {})
+        validation = report.report_json.get("validation", {})
+        source_coverage = report.report_json.get("source_coverage", {})
+        morning_report = report.report_json.get("morning_report", {})
+        casing = morning_report.get("casing_schematic", []) if isinstance(morning_report, dict) else []
+        timeline = morning_report.get("activity_timeline", []) if isinstance(morning_report, dict) else []
+        notes = report.report_json.get("data_quality_notes", [])
         summary_items = "".join(f"<li>{xml_escape(str(item.get('text', '')))}</li>" for item in summary)
+        metric_cards = "".join(
+            (
+                "<article>"
+                f"<span>{xml_escape(label)}</span>"
+                f"<strong>{xml_escape(str(value))}</strong>"
+                "</article>"
+            )
+            for label, value in [
+                ("Failures", metrics.get("failure_count", len(failures))),
+                ("High/Critical", metrics.get("high_or_critical_failures", 0)),
+                ("NPT Hours", metrics.get("total_npt_hours", 0)),
+                ("Validated", metrics.get("validated_failures", 0)),
+                ("Open Reviews", metrics.get("open_validation_tasks", validation.get("open_tasks", 0))),
+                ("Citations", metrics.get("citation_count", source_coverage.get("citations", 0))),
+            ]
+        )
         failure_rows = "".join(
             (
                 "<tr>"
@@ -1000,24 +1099,280 @@ class LocalStateStore:
             )
             for failure in failures
         )
+        if not failure_rows:
+            failure_rows = "<tr><td colspan=\"7\">No extracted failures in scope.</td></tr>"
+        casing_rows = "".join(
+            (
+                "<tr>"
+                f"<td>{xml_escape(str(item.get('name', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('od', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('top_ft', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('shoe_ft', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('status', '')))}</td>"
+                "</tr>"
+            )
+            for item in casing
+            if isinstance(item, dict)
+        )
+        timeline_rows = "".join(
+            (
+                "<tr>"
+                f"<td>{xml_escape(str(item.get('time', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('activity', '')))}</td>"
+                "</tr>"
+            )
+            for item in timeline
+            if isinstance(item, dict)
+        )
+        notes_items = "".join(f"<li>{xml_escape(str(note))}</li>" for note in notes)
         period = report.report_json.get("period", {})
         start = xml_escape(str(period.get("start", "")))
         end = xml_escape(str(period.get("end", "")))
+        validation_status = xml_escape(str(validation.get("status", "unknown")).replace("_", " ").title())
         return (
             "<!doctype html><html><head><meta charset=\"utf-8\"><title>Monday Report</title>"
-            "<style>body{font-family:Arial,sans-serif;margin:32px;color:#1f2937}"
-            "table{border-collapse:collapse;width:100%}td,th{border:1px solid #d1d5db;padding:8px;text-align:left}"
-            "th{background:#f3f4f6}</style></head><body>"
-            "<h1>Monday Report</h1>"
-            f"<p>Period: {start} to {end}</p>"
-            f"<ul>{summary_items}</ul>"
-            "<h2>Failure Summary</h2><table><thead><tr><th>Event</th><th>Severity</th><th>Company</th>"
-            "<th>Tool</th><th>NPT Hours</th><th>Validation</th></tr></thead>"
-            f"<tbody>{failure_rows}</tbody></table></body></html>"
+            "<style>"
+            "body{font-family:Inter,Arial,sans-serif;margin:0;color:#17202a;background:#f4f6f8}"
+            ".sheet{max-width:1080px;margin:24px auto;background:white;border:1px solid #d8e0e7}"
+            "header{display:flex;justify-content:space-between;gap:16px;padding:24px;border-bottom:5px solid #0e7490;background:#f8fbfd}"
+            "h1,h2,h3,p{margin:0}h1{font-size:28px}.muted{color:#647384}.band{display:flex;justify-content:space-between;padding:10px 24px;background:#101820;color:white;font-weight:700}"
+            ".metrics{display:grid;grid-template-columns:repeat(6,1fr);border-bottom:1px solid #d8e0e7}.metrics article{padding:12px;border-right:1px solid #d8e0e7}.metrics span{display:block;color:#647384;font-size:11px;text-transform:uppercase}.metrics strong{font-size:18px}"
+            "section{padding:20px 24px;border-bottom:1px solid #d8e0e7}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}"
+            "table{border-collapse:collapse;width:100%;margin-top:10px}td,th{border:1px solid #d1d5db;padding:8px;text-align:left;vertical-align:top;font-size:13px}"
+            "th{background:#101820;color:white}.pill{display:inline-block;border:1px solid #bde8d5;background:#e4f7ef;color:#047857;border-radius:999px;padding:5px 9px;font-size:12px;font-weight:700}"
+            "ul{margin:10px 0 0 18px;padding:0;line-height:1.5}@media(max-width:820px){.metrics,.grid{grid-template-columns:1fr}.band,header{display:block}}"
+            "</style></head><body><main class=\"sheet\">"
+            "<header><div><p class=\"muted\">Monday Report</p><h1>Morning Operations Report</h1></div>"
+            f"<span class=\"pill\">{validation_status}</span></header>"
+            f"<div class=\"band\"><span>Period: {start} to {end}</span><span>Official export package</span></div>"
+            f"<div class=\"metrics\">{metric_cards}</div>"
+            f"<section><h2>Executive Summary</h2><ul>{summary_items}</ul></section>"
+            "<section class=\"grid\"><div><h2>Present Operations</h2>"
+            f"<p>{xml_escape(str(morning_report.get('present_operations', 'No operations entered.') if isinstance(morning_report, dict) else 'No operations entered.'))}</p></div>"
+            f"<div><h2>Data Quality Notes</h2><ul>{notes_items}</ul></div></section>"
+            "<section><h2>Failure Summary</h2><table><thead><tr><th>Event</th><th>Severity</th><th>Company</th>"
+            "<th>Tool</th><th>NPT Hours</th><th>Confidence</th><th>Validation</th></tr></thead>"
+            f"<tbody>{failure_rows}</tbody></table></section>"
+            "<section class=\"grid\"><div><h2>Casing Schematic</h2><table><thead><tr><th>Name</th><th>OD</th><th>Top ft</th><th>Shoe ft</th><th>Status</th></tr></thead>"
+            f"<tbody>{casing_rows}</tbody></table></div>"
+            "<div><h2>24 Hr Activity Timeline</h2><table><thead><tr><th>Time</th><th>Activity</th></tr></thead>"
+            f"<tbody>{timeline_rows}</tbody></table></div></section>"
+            "</main></body></html>"
         )
 
     @staticmethod
     def _render_report_pdf(report: MondayReport) -> bytes:
+        try:
+            return LocalStateStore._render_report_pdf_reportlab(report)
+        except ImportError:
+            return LocalStateStore._render_report_pdf_basic(report)
+
+    @staticmethod
+    def _render_report_pdf_reportlab(report: MondayReport) -> bytes:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            rightMargin=0.48 * inch,
+            leftMargin=0.48 * inch,
+            topMargin=0.48 * inch,
+            bottomMargin=0.48 * inch,
+            title="Monday Report",
+        )
+        base = getSampleStyleSheet()
+        styles = {
+            "title": ParagraphStyle(
+                "MondayReportTitle",
+                parent=base["Title"],
+                fontName="Helvetica-Bold",
+                fontSize=22,
+                leading=27,
+                alignment=TA_LEFT,
+                textColor=colors.HexColor("#111827"),
+            ),
+            "h2": ParagraphStyle(
+                "MondayReportH2",
+                parent=base["Heading2"],
+                fontName="Helvetica-Bold",
+                fontSize=12,
+                leading=15,
+                textColor=colors.HexColor("#111827"),
+                spaceBefore=6,
+                spaceAfter=5,
+            ),
+            "body": ParagraphStyle(
+                "MondayReportBody",
+                parent=base["BodyText"],
+                fontName="Helvetica",
+                fontSize=8.5,
+                leading=11,
+                textColor=colors.HexColor("#374151"),
+            ),
+            "small": ParagraphStyle(
+                "MondayReportSmall",
+                parent=base["BodyText"],
+                fontName="Helvetica",
+                fontSize=7.2,
+                leading=8.5,
+                textColor=colors.HexColor("#475569"),
+            ),
+            "th": ParagraphStyle(
+                "MondayReportTH",
+                fontName="Helvetica-Bold",
+                fontSize=7,
+                leading=8.2,
+                textColor=colors.white,
+            ),
+            "td": ParagraphStyle(
+                "MondayReportTD",
+                fontName="Helvetica",
+                fontSize=6.7,
+                leading=8.1,
+                textColor=colors.HexColor("#111827"),
+            ),
+        }
+
+        period = report.report_json.get("period", {})
+        metrics = report.report_json.get("metrics", {})
+        summary = report.report_json.get("executive_summary", [])
+        failures = report.report_json.get("failure_summary", [])
+        validation = report.report_json.get("validation", {})
+        morning_report = report.report_json.get("morning_report", {})
+        source_coverage = report.report_json.get("source_coverage", {})
+        notes = report.report_json.get("data_quality_notes", [])
+        story: list[object] = [
+            Paragraph("Monday Report - Morning Operations Report", styles["title"]),
+            Paragraph(
+                f"Period {period.get('start', '')} to {period.get('end', '')} | "
+                f"Validation: {str(validation.get('status', 'unknown')).replace('_', ' ').title()}",
+                styles["small"],
+            ),
+            Spacer(1, 0.14 * inch),
+            LocalStateStore._pdf_table(
+                [
+                    ["Failures", "High/Critical", "NPT Hours", "Validated", "Open Reviews", "Citations"],
+                    [
+                        str(metrics.get("failure_count", len(failures))),
+                        str(metrics.get("high_or_critical_failures", 0)),
+                        str(metrics.get("total_npt_hours", 0)),
+                        str(metrics.get("validated_failures", 0)),
+                        str(metrics.get("open_validation_tasks", validation.get("open_tasks", 0))),
+                        str(metrics.get("citation_count", source_coverage.get("citations", 0))),
+                    ],
+                ],
+                [1.15 * inch] * 6,
+                styles,
+            ),
+            Spacer(1, 0.12 * inch),
+            Paragraph("Executive Summary", styles["h2"]),
+        ]
+        story.extend(Paragraph(str(item.get("text", "")), styles["body"]) for item in summary)
+        story.extend(
+            [
+                Paragraph("Present Operations", styles["h2"]),
+                Paragraph(
+                    str(
+                        morning_report.get("present_operations", "No operations entered.")
+                        if isinstance(morning_report, dict)
+                        else "No operations entered."
+                    ),
+                    styles["body"],
+                ),
+                Paragraph("Failure Summary", styles["h2"]),
+                LocalStateStore._pdf_table(
+                    [["Event", "Severity", "Company", "Tool", "NPT", "Confidence", "Validation"]]
+                    + [
+                        [
+                            str(failure.get("event_type", "")),
+                            str(failure.get("severity", "")),
+                            str(failure.get("company", "")),
+                            str(failure.get("tool_type", "")),
+                            str(failure.get("npt_hours", 0)),
+                            str(failure.get("confidence", 0)),
+                            str(failure.get("validation_status", "")),
+                        ]
+                        for failure in failures
+                    ]
+                    or [["Event", "Severity", "Company", "Tool", "NPT", "Confidence", "Validation"], ["No extracted failures", "", "", "", "", "", ""]],
+                    [1.15 * inch, 0.7 * inch, 1.1 * inch, 0.8 * inch, 0.5 * inch, 0.7 * inch, 0.9 * inch],
+                    styles,
+                ),
+                Paragraph("Casing Schematic", styles["h2"]),
+                LocalStateStore._pdf_table(
+                    [["Name", "OD", "Top ft", "Shoe ft", "Status"]]
+                    + [
+                        [
+                            str(item.get("name", "")),
+                            str(item.get("od", "")),
+                            str(item.get("top_ft", "")),
+                            str(item.get("shoe_ft", "")),
+                            str(item.get("status", "")),
+                        ]
+                        for item in (morning_report.get("casing_schematic", []) if isinstance(morning_report, dict) else [])
+                        if isinstance(item, dict)
+                    ],
+                    [1.25 * inch, 1.0 * inch, 0.9 * inch, 0.9 * inch, 1.2 * inch],
+                    styles,
+                ),
+                Paragraph("24 Hr Activity Timeline", styles["h2"]),
+                LocalStateStore._pdf_table(
+                    [["Time", "Activity"]]
+                    + [
+                        [str(item.get("time", "")), str(item.get("activity", ""))]
+                        for item in (morning_report.get("activity_timeline", []) if isinstance(morning_report, dict) else [])
+                        if isinstance(item, dict)
+                    ],
+                    [1.15 * inch, 5.25 * inch],
+                    styles,
+                ),
+                Paragraph("Data Quality Notes", styles["h2"]),
+            ]
+        )
+        story.extend(Paragraph(f"- {note}", styles["body"]) for note in notes)
+        doc.build(story)
+        content = buffer.getvalue()
+        if content.startswith(b"%PDF-1.3"):
+            content = b"%PDF-1.4" + content[len(b"%PDF-1.3"):]
+        return content
+
+    @staticmethod
+    def _pdf_table(rows: list[list[object]], widths: list[float], styles: dict[str, object]) -> Table:
+        from reportlab.lib import colors
+        from reportlab.platypus import Paragraph, Table, TableStyle
+
+        if len(rows) == 1:
+            rows.append([""] * len(rows[0]))
+        data = []
+        for row_index, row in enumerate(rows):
+            style = styles["th"] if row_index == 0 else styles["td"]
+            data.append([Paragraph(xml_escape(str(cell)), style) for cell in row])
+        table = Table(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#101820")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ("TOPPADDING", (0, 0), (-1, -1), 4),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        return table
+
+    @staticmethod
+    def _render_report_pdf_basic(report: MondayReport) -> bytes:
         period = report.report_json.get("period", {})
         summary = report.report_json.get("executive_summary", [])
         failures = report.report_json.get("failure_summary", [])
@@ -1085,6 +1440,11 @@ class LocalStateStore:
     @staticmethod
     def _render_report_xlsx(report: MondayReport) -> bytes:
         failures = report.report_json.get("failure_summary", [])
+        metrics = report.report_json.get("metrics", {})
+        validation = report.report_json.get("validation", {})
+        source_coverage = report.report_json.get("source_coverage", {})
+        morning_report = report.report_json.get("morning_report", {})
+        notes = report.report_json.get("data_quality_notes", [])
         rows: list[list[object]] = [
             ["Monday Report"],
             [
@@ -1092,6 +1452,18 @@ class LocalStateStore:
                 f"{report.report_json.get('period', {}).get('start', '')} to "
                 f"{report.report_json.get('period', {}).get('end', '')}",
             ],
+            ["Validation", validation.get("status", "")],
+            [],
+            ["Metrics"],
+            ["Failures", metrics.get("failure_count", len(failures))],
+            ["High/Critical", metrics.get("high_or_critical_failures", 0)],
+            ["NPT Hours", metrics.get("total_npt_hours", 0)],
+            ["Validated", metrics.get("validated_failures", 0)],
+            ["Open Reviews", metrics.get("open_validation_tasks", validation.get("open_tasks", 0))],
+            ["Citations", metrics.get("citation_count", source_coverage.get("citations", 0))],
+            [],
+            ["Executive Summary"],
+            *[["Summary", item.get("text", ""), item.get("confidence", "")] for item in report.report_json.get("executive_summary", [])],
             [],
             [
                 "Event",
@@ -1116,9 +1488,45 @@ class LocalStateStore:
                     failure.get("npt_hours", 0),
                     failure.get("confidence", 0),
                     failure.get("validation_status", ""),
-                    failure.get("summary", ""),
+                failure.get("summary", ""),
                 ]
             )
+        rows.extend(
+            [
+                [],
+                ["Casing Schematic"],
+                ["Name", "OD", "Top ft", "Shoe ft", "Status"],
+            ]
+        )
+        rows.extend(
+            [
+                [
+                    item.get("name", ""),
+                    item.get("od", ""),
+                    item.get("top_ft", ""),
+                    item.get("shoe_ft", ""),
+                    item.get("status", ""),
+                ]
+                for item in (morning_report.get("casing_schematic", []) if isinstance(morning_report, dict) else [])
+                if isinstance(item, dict)
+            ]
+        )
+        rows.extend(
+            [
+                [],
+                ["24 Hr Activity Timeline"],
+                ["Time", "Activity"],
+            ]
+        )
+        rows.extend(
+            [
+                [item.get("time", ""), item.get("activity", "")]
+                for item in (morning_report.get("activity_timeline", []) if isinstance(morning_report, dict) else [])
+                if isinstance(item, dict)
+            ]
+        )
+        rows.extend([[], ["Data Quality Notes"]])
+        rows.extend([["Note", note] for note in notes])
 
         sheet_rows = []
         for row_index, row in enumerate(rows, start=1):

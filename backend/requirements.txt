@@ -3,5 +3,6 @@ uvicorn[standard]>=0.30,<1
 pydantic>=2.8,<3
 python-multipart>=0.0.9,<1
 PyMuPDF>=1.24,<2
+reportlab>=4.2,<5
 psycopg[binary]>=3.2,<4
 redis>=5,<7

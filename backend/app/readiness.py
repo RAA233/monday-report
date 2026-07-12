@@ -190,7 +190,7 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
             f"Requested repository backend is {repository_backend!r}; active adapter is "
             f"{active_repository_backend!r}; database URL configured: {bool(database_url)}."
         ),
-        "Implement and activate the PostgreSQL/RLS repository adapter; environment variables alone must not certify real client data readiness.",
+        "Activate the PostgreSQL/RLS repository with a reachable database and validated production schema; environment variables alone must not certify real client data readiness.",
     )
 
     queue_backend = os.getenv("MONDAY_REPORT_QUEUE_BACKEND", "inline_worker")
@@ -203,7 +203,7 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
             f"Requested queue backend is {queue_backend!r}; active worker is "
             f"{active_queue_backend!r}; Redis URL configured: {bool(redis_url)}."
         ),
-        "Implement and activate the Redis-backed queue worker; environment variables alone must not certify high-volume client package processing.",
+        "Activate the Redis-backed queue with a reachable Redis service and worker process; environment variables alone must not certify high-volume client package processing.",
     )
 
     local_ai_status = evaluate_local_ai_status(store.tenant.local_llm_policy)

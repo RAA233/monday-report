@@ -25,6 +25,14 @@ docker compose -f docker-compose.client.yml up -d
 
 Use protected paths outside the repository for state, uploads, and exports. Set real secrets, not the examples below:
 
+To generate a local env file with non-committed secrets and protected local paths:
+
+```powershell
+pnpm run ga:env
+```
+
+The generated file is written to `output/ga-readiness/monday_report_ga.env`. Keep it local; it contains secrets and is ignored by Git.
+
 ```powershell
 $env:MONDAY_REPORT_CLIENT_DATA_MODE="client"
 $env:MONDAY_REPORT_REPOSITORY_BACKEND="postgres"
@@ -80,10 +88,22 @@ After replacing the generated pack, run a new parser/OCR eval report from that r
 
 ## Approval Command
 
-Run this after starting the API:
+Run the non-strict GA evidence command at any time to classify remaining blockers:
+
+```powershell
+pnpm run audit:ga-readiness
+```
+
+Run strict GA readiness after starting the API and applying the client-mode environment:
+
+```powershell
+pnpm run ga:readiness
+```
+
+Run the final client-data approval command after strict readiness is green:
 
 ```powershell
 pnpm run package:client-approval
 ```
 
-The command writes `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.json`. A `BLOCKED` result is expected until every readiness check passes.
+The approval command writes `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.json`. A `BLOCKED` result is expected until every readiness check passes.

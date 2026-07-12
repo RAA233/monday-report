@@ -14,6 +14,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 - Worker foundation safely expands ZIP packages with configurable entry and uncompressed-size limits, parses text, CSV, XLSX, DOCX, EML, PyMuPDF-backed embedded-text PDF files, and native PDF table rows into typed chunks with source lineage. Image/scanned-PDF files route to OCR review when no local engine is configured, or to `ocr_text_v1` chunks when `MONDAY_REPORT_OCR_ENGINE=tesseract` and `MONDAY_REPORT_TESSERACT_CMD` are configured.
 - Extraction scaffold creates cited MWD signal-loss failure records, NPT hours, company attribution, and validation tasks from parsed chunks.
 - Validation API updates extracted records, Monday Report API creates report JSON, and export API blocks unresolved official exports before writing hashed JSON/CSV/HTML/PDF/XLSX artifacts with signed download URLs.
+- Official report exports now include metrics, validation posture, source coverage, FORGE-style casing schematic rows, 24 hr activity timeline, branded HTML/PDF output, and expanded XLSX sections.
 - Client-data readiness endpoint and tracker panel flag demo/local-scaffold blockers before real client packages are accepted, enforce retention policy, require real active infrastructure adapters, and unsafe client mode requires an API key while blocking data reads, chat, report creation, and exports until ready.
 - Local AI defaults to Ollama with `gemma4:e2b`; readiness verifies both endpoint reachability and the pinned model.
 - Parser/OCR fixture eval readiness requires a passing `MONDAY_REPORT_PARSER_EVAL_REPORT`; real-client approval also requires the referenced fixture manifest to carry a reviewed anonymized-client attestation.
@@ -21,6 +22,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 - `fixtures:anonymized` creates a generated 13-family fixture pack for local smoke tests only; production client intake must use reviewed anonymized client fixtures, not generated evidence.
 - Partner preview packaging creates one ZIP with the built web app, backend, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.
 - Client-data approval tooling writes an explicit approved/blocked evidence report from the live readiness endpoint.
+- GA readiness tooling separates software-owned checks from configuration, infrastructure, and reviewed-evidence blockers, and can generate a local client-mode env file with non-committed secrets.
 - Runtime backend status exposes requested versus active repository and queue adapters so PostgreSQL/Redis environment variables cannot masquerade as implemented infrastructure.
 - Fresh environments start without seeded failure records; set client tenant/user identity with environment variables before the first API start.
 - Extract drilling failure/NPT records from uploaded evidence with companies, wells, rigs, BHA/tool context, severity, confidence, validation status, cost impact, and source citations.
@@ -81,8 +83,10 @@ pnpm run audit:partner-approval
 pnpm run audit:client-approval
 pnpm run audit:client-ops
 pnpm run audit:report-export-idempotency
+pnpm run audit:report-template
 pnpm run audit:runtime-backends
 pnpm run audit:infra-readiness
+pnpm run audit:ga-readiness
 pnpm run audit:integrity
 pnpm run audit:auth
 pnpm run audit:redaction
@@ -97,7 +101,11 @@ Client-readiness helper:
 
 ```powershell
 pnpm run fixtures:anonymized
+pnpm run ga:env
+pnpm run audit:ga-readiness
 ```
+
+`pnpm run ga:readiness` runs strict GA approval evidence and exits non-zero until real-client readiness is fully green.
 
 For a production check in a non-interactive shell:
 
