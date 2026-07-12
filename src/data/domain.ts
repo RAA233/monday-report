@@ -20,6 +20,7 @@ export type ReportFamily =
   | "Completion report"
   | "NPT report"
   | "Lessons learned"
+  | "Text report"
   | "Email"
   | "Image/OCR"
   | "Archive"

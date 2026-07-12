@@ -46,6 +46,7 @@ const reportFamilyRules: Array<[ReportFamily, RegExp]> = [
   ["Completion report", /completion/i],
   ["NPT report", /\bnpt\b|non.productive/i],
   ["Lessons learned", /lesson|after.action|end.of.well|eowr/i],
+  ["Text report", /\.(txt|md|log)$/i],
   ["Email", /\.(eml|msg)$/i],
   ["Image/OCR", /\.(png|jpg|jpeg|tif|tiff|bmp)$/i],
   ["Archive", /\.(zip|7z|rar)$/i]

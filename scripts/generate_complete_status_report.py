@@ -57,6 +57,9 @@ class HorizontalStatusChart(Flowable):
         self.canv.drawString(0, self.height - 10, self.title)
 
         total = sum(self.counts.values()) or 1
+        self.canv.setFont("Helvetica", 7.5)
+        self.canv.setFillColor(colors.HexColor("#64748B"))
+        self.canv.drawRightString(self.width, self.height - 10, f"Total {total}")
         x = 0
         y = self.height - 36
         bar_height = 16
@@ -67,6 +70,11 @@ class HorizontalStatusChart(Flowable):
             segment_width = self.width * value / total
             self.canv.setFillColor(STATUS_COLORS.get(key, colors.HexColor("#64748B")))
             self.canv.rect(x, y, segment_width, bar_height, fill=1, stroke=0)
+            if segment_width >= 42:
+                self.canv.setFillColor(colors.white)
+                self.canv.setFont("Helvetica-Bold", 6.8)
+                percent = round((value / total) * 100)
+                self.canv.drawCentredString(x + segment_width / 2, y + 4.5, f"{value} / {percent}%")
             x += segment_width
 
         self.canv.setStrokeColor(colors.HexColor("#CBD5E1"))
@@ -82,9 +90,10 @@ class HorizontalStatusChart(Flowable):
             self.canv.setFillColor(STATUS_COLORS.get(key, colors.HexColor("#64748B")))
             self.canv.rect(legend_x, legend_y, 8, 8, fill=1, stroke=0)
             self.canv.setFillColor(colors.HexColor("#374151"))
-            label = f"{label_text(key)}: {value}"
+            percent = round((value / total) * 100)
+            label = f"{label_text(key)}: {value} ({percent}%)"
             self.canv.drawString(legend_x + 12, legend_y, label)
-            legend_x += max(88, len(label) * 4.8)
+            legend_x += max(104, len(label) * 4.6)
 
 
 def main() -> int:

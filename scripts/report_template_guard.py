@@ -133,6 +133,18 @@ def configure_guard_env(tmp_root: Path) -> None:
     os.environ["MONDAY_REPORT_STATE_PATH"] = str(tmp_root / "state.json")
     os.environ["MONDAY_REPORT_STORAGE_ROOT"] = str(tmp_root / "storage")
     os.environ["MONDAY_REPORT_EXPORT_ROOT"] = str(tmp_root / "exports")
+    for key in [
+        "MONDAY_REPORT_API_KEY",
+        "VITE_MONDAY_REPORT_API_KEY",
+        "MONDAY_REPORT_SIGNING_SECRET",
+        "MONDAY_REPORT_REPOSITORY_BACKEND",
+        "MONDAY_REPORT_DATABASE_URL",
+        "DATABASE_URL",
+        "MONDAY_REPORT_QUEUE_BACKEND",
+        "MONDAY_REPORT_REDIS_URL",
+        "REDIS_URL",
+    ]:
+        os.environ.pop(key, None)
 
 
 def pdf_contains(content: bytes, markers: list[str]) -> bool:

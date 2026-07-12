@@ -60,6 +60,9 @@ class StatusBarChart(Flowable):
         self.canv.drawString(0, self.height - 12, self.title)
 
         total = sum(self.counts.values()) or 1
+        self.canv.setFont("Helvetica", 7.5)
+        self.canv.setFillColor(colors.HexColor("#64748B"))
+        self.canv.drawRightString(self.width, self.height - 12, f"Total {total}")
         x = 0
         y = self.height - 42
         bar_width = self.width
@@ -71,6 +74,11 @@ class StatusBarChart(Flowable):
             segment_width = bar_width * (value / total)
             self.canv.setFillColor(STATUS_COLORS.get(key, colors.HexColor("#64748B")))
             self.canv.rect(x, y, segment_width, bar_height, fill=1, stroke=0)
+            if segment_width >= 44:
+                self.canv.setFillColor(colors.white)
+                self.canv.setFont("Helvetica-Bold", 7)
+                percent = round((value / total) * 100)
+                self.canv.drawCentredString(x + segment_width / 2, y + 5, f"{value} / {percent}%")
             x += segment_width
         self.canv.setStrokeColor(colors.HexColor("#CBD5E1"))
         self.canv.rect(0, y, bar_width, bar_height, fill=0, stroke=1)
@@ -85,9 +93,10 @@ class StatusBarChart(Flowable):
             self.canv.setFillColor(STATUS_COLORS.get(key, colors.HexColor("#64748B")))
             self.canv.rect(legend_x, legend_y, 8, 8, fill=1, stroke=0)
             self.canv.setFillColor(colors.HexColor("#374151"))
-            label = f"{label_text(key)}: {value}"
+            percent = round((value / total) * 100)
+            label = f"{label_text(key)}: {value} ({percent}%)"
             self.canv.drawString(legend_x + 12, legend_y, label)
-            legend_x += max(88, len(label) * 4.5)
+            legend_x += max(104, len(label) * 4.4)
 
 
 def main() -> int:
@@ -191,13 +200,13 @@ def build_pdf(tracker: dict[str, list[dict[str, str]]], readiness: dict[str, Any
                 (
                     "Client data",
                     str(readiness.get("status", "not_ready")).replace("_", " ").upper(),
-                    f"Mode: {readiness.get('mode', 'unknown')}. Real-client intake remains gated.",
+                    f"Mode: {readiness.get('mode', 'unknown')}. Ready: {readiness.get('ready', False)}.",
                 ),
                 ("Full audit", "PASS", "`pnpm run audit:all` passed in the latest execution slice."),
                 (
-                    "Next blocker",
+                    "Next quality focus",
                     "WATCH",
-                    "Parser eval report, production OCR config, local AI runtime, PostgreSQL/RLS, Redis.",
+                    "Controlled client-package dry runs, normalized repositories, local LLM extraction, OCR and scanner hardening.",
                 ),
             ],
             styles,
@@ -211,7 +220,7 @@ def build_pdf(tracker: dict[str, list[dict[str, str]]], readiness: dict[str, Any
     story.append(Paragraph("Current Meaning", styles["Heading2"]))
     story.append(
         Paragraph(
-            "The executable local MVP is accepted for demo/synthetic operation. Real-client data remains intentionally blocked until production infrastructure, security configuration, production OCR, local AI, and anonymized fixture coverage are complete.",
+            "The local client-approval environment is approved: PostgreSQL/RLS state, Redis queue, security config, local AI, reviewed fixture attestation, and parser/OCR eval evidence all pass. Next work is controlled client-package dry runs and production hardening.",
             styles["Body"],
         )
     )

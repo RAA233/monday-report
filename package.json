@@ -9,6 +9,8 @@
     "worker:once": "python -m backend.app.worker",
     "audit:phase": "python scripts/phase_audit.py",
     "test:e2e": "python scripts/e2e_mvp.py",
+    "test:client-functions": "python scripts/client_mode_function_guard.py",
+    "test:ui": "node scripts/ui_quality_e2e.mjs",
     "audit:client-data": "python scripts/client_data_readiness.py",
     "audit:bootstrap": "python scripts/client_bootstrap_smoke.py",
     "audit:state-persistence": "python scripts/state_persistence_guard.py",
@@ -49,6 +51,7 @@
     "build": "tsc && vite build",
     "fixtures:anonymized": "python scripts/build_anonymized_fixture_pack.py",
     "report:complete": "python scripts/generate_complete_status_report.py",
+    "report:ui-screenshots": "python scripts/generate_ui_screenshot_pdf.py",
     "ga:env": "python scripts/generate_ga_client_env.py",
     "ga:readiness": "python scripts/ga_readiness_guard.py --strict",
     "package:partner-preview": "python scripts/build_partner_preview_package.py",
@@ -65,6 +68,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.6.0",
+    "playwright": "^1.61.1",
     "typescript": "^5.8.3",
     "vite": "^7.0.0"
   }

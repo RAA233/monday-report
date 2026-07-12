@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "output" / "ga-readiness"
 OUTPUT_JSON = OUTPUT_DIR / "Monday_Report_GA_READINESS.json"
 OUTPUT_MD = OUTPUT_DIR / "Monday_Report_GA_READINESS.md"
+DEFAULT_ENV_FILE = OUTPUT_DIR / "monday_report_ga.env"
 
 SOFTWARE_CHECK_IDS = {
     "demo_seed_removed",
@@ -42,6 +44,7 @@ EVIDENCE_CHECK_IDS = {"parser_fixture_evals", "golden_fixture_coverage", "review
 
 def main() -> int:
     args = parse_args()
+    load_env_file(Path(args.env_file)) if args.env_file else None
     command_results = run_software_commands() if not args.skip_commands else []
     readiness, backends, local_ai = read_in_process_readiness()
     result = build_result(command_results, readiness, backends, local_ai)
@@ -58,7 +61,23 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate Monday Report GA readiness evidence.")
     parser.add_argument("--strict", action="store_true", help="Exit non-zero unless all real-client GA checks pass.")
     parser.add_argument("--skip-commands", action="store_true", help="Do not rerun software-owned guard commands.")
+    parser.add_argument(
+        "--env-file",
+        default=str(DEFAULT_ENV_FILE),
+        help="Optional env file to load before evaluating readiness. Existing process env vars take precedence.",
+    )
     return parser.parse_args()
+
+
+def load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
 
 
 def run_software_commands() -> list[dict[str, Any]]:
