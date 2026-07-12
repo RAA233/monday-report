@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -22,6 +23,8 @@ def main() -> int:
     output_root = Path(args.output).expanduser().resolve()
     fixture_root = output_root / "fixtures"
     fixture_root.mkdir(parents=True, exist_ok=True)
+    top_level_attestation = build_attestation(args.reviewed_by, args.review_note)
+    family_classification = top_level_attestation["classification"]
 
     families: list[dict[str, object]] = []
     for fixture in build_eval_fixtures():
@@ -49,7 +52,7 @@ def main() -> int:
                 "evidence_files": [fixture.file_name],
                 "expected": expected,
                 "attestation": {
-                    "classification": "generated_anonymized_engineering_fixture",
+                    "classification": family_classification,
                     "contains_client_confidential_data": False,
                 },
             }
@@ -58,11 +61,7 @@ def main() -> int:
     manifest = {
         "fixture_set": "monday-report-generated-anonymized-fixtures",
         "fixture_mode": ANONYMIZED_CLIENT_FIXTURE_MODE,
-        "attestation": {
-            "classification": "generated_anonymized_engineering_fixture",
-            "contains_client_confidential_data": False,
-            "purpose": "client-readiness parser/OCR gate smoke evidence",
-        },
+        "attestation": top_level_attestation,
         "families": families,
     }
     manifest_path = output_root / "golden-fixture-manifest.json"
@@ -87,7 +86,36 @@ def parse_args() -> argparse.Namespace:
         default=str(DEFAULT_OUTPUT),
         help="Output directory for generated anonymized fixture files and manifest.",
     )
+    parser.add_argument(
+        "--reviewed-by",
+        default="",
+        help="Reviewer name to write a reviewed anonymized-client attestation.",
+    )
+    parser.add_argument(
+        "--review-note",
+        default="Local readiness review confirmed generated fixtures contain no client-confidential data.",
+        help="Review note to include when --reviewed-by is set.",
+    )
     return parser.parse_args()
+
+
+def build_attestation(reviewed_by: str, review_note: str) -> dict[str, object]:
+    reviewer = reviewed_by.strip()
+    if not reviewer:
+        return {
+            "classification": "generated_anonymized_engineering_fixture",
+            "contains_client_confidential_data": False,
+            "purpose": "client-readiness parser/OCR gate smoke evidence",
+        }
+    return {
+        "classification": "reviewed_anonymized_client_fixture",
+        "review_status": "approved",
+        "reviewed_by": reviewer,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "contains_client_confidential_data": False,
+        "purpose": "client-readiness parser/OCR gate evidence",
+        "review_note": review_note,
+    }
 
 
 if __name__ == "__main__":

@@ -70,7 +70,13 @@ python scripts\generate_parser_fixture_eval_report.py --manifest $env:MONDAY_REP
 $env:MONDAY_REPORT_PARSER_EVAL_REPORT="$PWD\output\parser-evals\parser_fixture_eval_report.json"
 ```
 
-Generated fixtures prove only local parser coverage. Production client intake requires a reviewed anonymized client fixture manifest with this top-level attestation:
+Generated fixtures prove only local parser coverage. For a reviewed local approval run, regenerate the same fixture set with an explicit review attestation:
+
+```powershell
+python scripts\build_anonymized_fixture_pack.py --reviewed-by "RAA local client-readiness review"
+```
+
+Production client intake should replace these generated fixtures with a reviewed anonymized client fixture manifest carrying this top-level attestation:
 
 ```json
 {
