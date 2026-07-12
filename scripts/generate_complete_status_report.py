@@ -130,6 +130,14 @@ def render_markdown(report: dict[str, Any]) -> str:
     readiness_checks = client.get("readiness", {}).get("checks", [])
     readiness_counts = Counter(item.get("status", "warn") for item in readiness_checks)
     partner_package = partner.get("package", {})
+    client_approved = bool(client.get("approved"))
+    client_status = "APPROVED" if client_approved else "BLOCKED"
+    client_summary = str(client.get("summary", "Run package:client-approval to generate client approval evidence."))
+    ga_audit_result = (
+        "PASS - strict GA ready"
+        if ga.get("status") == "GA_READY"
+        else "PASS as software evidence; strict GA remains blocked until external prerequisites pass."
+    )
 
     lines = [
         "# Monday Report Complete Status Report",
@@ -141,7 +149,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "- Local MVP: PASS - chat-first app, upload, parsing, validation, exports, signed downloads, audit chain, and tracker are operational.",
         f"- Partner package: {'APPROVED' if partner.get('approved') else 'NOT APPROVED'} for `{partner.get('scope', 'unknown')}`.",
-        "- Real client data: BLOCKED - the app is intentionally refusing client-data approval until readiness gates pass.",
+        f"- Real client data: {client_status} - {client_summary}",
         "- FORGE corpus: PASS - local open-source daily-report corpus is parsed and checked without committing raw PDFs.",
         f"- GA readiness: {ga.get('status', 'UNKNOWN')} - {ga.get('summary', 'Run audit:ga-readiness to generate GA evidence.')}",
         "",
@@ -182,21 +190,24 @@ def render_markdown(report: dict[str, Any]) -> str:
         "- `pnpm run test:e2e` - PASS",
         "- `pnpm run audit:client-ops` - PASS",
         "- `pnpm run audit:report-template` - PASS",
-        "- `pnpm run audit:ga-readiness` - PASS as software evidence; strict GA remains blocked until external prerequisites pass.",
+        f"- `pnpm run audit:ga-readiness` - {ga_audit_result}",
         "- `pnpm run audit:all` - PASS",
-        "- `pnpm run package:client-approval` - BLOCKED as expected in the current demo/local posture.",
+        f"- `pnpm run package:client-approval` - {client_status}",
         "",
-        "## Real-Client Data Blockers",
+        "## Real-Client Data Approval Checks",
         "",
     ]
 
     blocking = client.get("blocking_checks") or [
         check for check in readiness_checks if check.get("status") in {"warn", "fail"}
     ]
-    for check in blocking:
-        lines.append(
-            f"- {check.get('label', check.get('id', 'check'))}: {check.get('status', 'unknown').upper()} - {check.get('detail', '')}"
-        )
+    if blocking:
+        for check in blocking:
+            lines.append(
+                f"- {check.get('label', check.get('id', 'check'))}: {check.get('status', 'unknown').upper()} - {check.get('detail', '')}"
+            )
+    else:
+        lines.append("- None. All client-data readiness checks passed.")
 
     lines.extend(
         [
@@ -206,8 +217,8 @@ def render_markdown(report: dict[str, Any]) -> str:
             "1. Promote FORGE corpus patterns into reviewed report templates and extraction evals.",
             "2. Connect Report Studio to parsed evidence and local Gemma-assisted draft generation with citations.",
             "3. Upgrade production PDF/XLSX exports to match the new branded morning-report layout.",
-            "4. Complete reviewed anonymized fixture attestation and parser/OCR eval reports.",
-            "5. Move real client mode to approved storage, PostgreSQL/RLS, Redis workers, configured API key, signing secret, malware scanner, and retention policy.",
+            "4. Maintain reviewed anonymized fixture attestation and parser/OCR eval reports as fixtures evolve.",
+            "5. Run a controlled client-package dry run with the approved client-mode environment before broad distribution.",
             "",
             "## Git State",
             "",
@@ -234,6 +245,14 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
     gate_counts = Counter(item.get("status", "pending") for item in gates)
     readiness_counts = Counter(item.get("status", "warn") for item in readiness_checks)
     partner_package = partner.get("package", {})
+    client_approved = bool(client.get("approved"))
+    client_status = "APPROVED" if client_approved else "BLOCKED"
+    client_summary = str(client.get("summary", "Run package:client-approval to generate client approval evidence."))
+    ga_audit_result = (
+        "PASS - strict GA ready"
+        if ga.get("status") == "GA_READY"
+        else "PASS as software evidence; strict GA still requires external prerequisites"
+    )
 
     doc = SimpleDocTemplate(
         str(output_path),
@@ -258,7 +277,7 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
                     "APPROVED" if partner.get("approved") else "NOT APPROVED",
                     f"{partner.get('scope', 'unknown')} - SHA {partner_package.get('sha256', 'missing')}",
                 ),
-                ("Real client data", "BLOCKED", "Approval fails closed until readiness gates and reviewed fixture attestation pass."),
+                ("Real client data", client_status, client_summary),
                 (
                     "FORGE corpus",
                     "PASS",
@@ -324,9 +343,9 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
                     ["pnpm run test:e2e", "PASS"],
                     ["pnpm run audit:client-ops", "PASS"],
                     ["pnpm run audit:report-template", "PASS"],
-                    ["pnpm run audit:ga-readiness", "PASS as software evidence; strict GA still requires external prerequisites"],
+                    ["pnpm run audit:ga-readiness", ga_audit_result],
                     ["pnpm run audit:all", "PASS"],
-                    ["pnpm run package:client-approval", "BLOCKED as expected in current demo/local posture"],
+                    ["pnpm run package:client-approval", client_status],
                 ],
                 [3.1 * inch, 3.8 * inch],
                 styles,
@@ -360,7 +379,7 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
             PageBreak(),
             Paragraph("Real-Client Readiness", styles["Heading1"]),
             Paragraph(
-                "Current posture is intentionally blocked for real client data. This is a safety result, not a runtime failure.",
+                client_summary,
                 styles["Body"],
             ),
             Spacer(1, 0.1 * inch),
@@ -388,8 +407,8 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
                 "Promote FORGE corpus patterns into reviewed report templates and extraction evals.",
                 "Connect Report Studio to parsed evidence and local Gemma-assisted draft generation with citations.",
                 "Upgrade production PDF/XLSX exports to match the new branded morning-report layout.",
-                "Complete reviewed anonymized fixture attestation and parser/OCR eval reports.",
-                "Move real client mode to approved storage, PostgreSQL/RLS, Redis workers, configured API key, signing secret, malware scanner, and retention policy.",
+                "Maintain reviewed anonymized fixture attestation and parser/OCR eval reports as fixtures evolve.",
+                "Run a controlled client-package dry run with the approved client-mode environment before broad distribution.",
             ],
             styles,
         )
@@ -404,7 +423,7 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
                     ["Partner package", str(partner_package.get("path", "missing"))],
                     ["SHA256", str(partner_package.get("sha256", "missing"))],
                     ["Default AI", f"{partner.get('default_local_ai', {}).get('runtime', 'unknown')} / {partner.get('default_local_ai', {}).get('model', 'unknown')}"],
-                    ["Real client data", "Not approved"],
+                    ["Real client data", client_status],
                 ],
                 [1.5 * inch, 5.4 * inch],
                 styles,
