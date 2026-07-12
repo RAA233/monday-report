@@ -8,6 +8,7 @@ import {
   ClipboardList,
   Cpu,
   Download,
+  FileSearch,
   FileText,
   Gauge,
   HardHat,
@@ -20,6 +21,8 @@ import {
 } from "lucide-react";
 import { Badge } from "./Badge";
 import type { LucideIcon } from "lucide-react";
+import { getReportDraft, type ApiReportDraft } from "../lib/api";
+import { formatSourceCitation } from "../lib/citationFormat";
 
 interface ReportForm {
   reportDate: string;
@@ -78,6 +81,10 @@ interface ControlMatrixItem {
   detail: string;
 }
 
+interface ReportStudioProps {
+  workspaceId?: string;
+}
+
 const defaultCasingProgram = [
   "Conductor | 20 in | 0 | 130 | Set",
   "Surface | 13.375 in | 0 | 1629 | Set",
@@ -92,8 +99,13 @@ const defaultOperationsLog = [
   "18:00-24:00 | Continue drilling and prepare morning handover."
 ].join("\n");
 
-export function ReportStudio(): JSX.Element {
+export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
   const [form, setForm] = useState<ReportForm>(() => initialReportForm());
+  const [evidenceDraft, setEvidenceDraft] = useState<ApiReportDraft | null>(null);
+  const [draftStatus, setDraftStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [draftMessage, setDraftMessage] = useState(
+    "Source draft pulls parsed workspace evidence into this editable report."
+  );
 
   const casing = useMemo(() => parseCasingProgram(form.casingProgram), [form.casingProgram]);
   const activities = useMemo(() => parseOperationsLog(form.operationsLog), [form.operationsLog]);
@@ -105,8 +117,8 @@ export function ReportStudio(): JSX.Element {
   const aiPlan = useMemo(() => buildAiExecutionPlan(form, casing, activities), [form, casing, activities]);
   const clientChecks = useMemo(() => buildClientIssueChecklist(form, casing, activities), [form, casing, activities]);
   const studioMetrics = useMemo(
-    () => buildStudioMetrics(form, casing, activities, clientChecks),
-    [form, casing, activities, clientChecks]
+    () => buildStudioMetrics(form, casing, activities, clientChecks, evidenceDraft),
+    [form, casing, activities, clientChecks, evidenceDraft]
   );
 
   function updateField(field: keyof ReportForm, value: string): void {
@@ -131,6 +143,47 @@ export function ReportStudio(): JSX.Element {
       operationsLog: current.operationsLog.trim() ? current.operationsLog : defaultOperationsLog,
       casingProgram: current.casingProgram.trim() ? current.casingProgram : defaultCasingProgram
     }));
+  }
+
+  async function applyEvidenceDraft(): Promise<void> {
+    if (!workspaceId) {
+      setDraftStatus("error");
+      setDraftMessage("Connect to the local API workspace before building a source-backed draft.");
+      return;
+    }
+
+    setDraftStatus("loading");
+    setDraftMessage("Building source-backed draft from parsed documents, citations, and validation tasks...");
+    try {
+      const draft = await getReportDraft(workspaceId);
+      setEvidenceDraft(draft);
+      setForm((current) => ({
+        ...current,
+        reportDate: draft.report_date || current.reportDate,
+        reportNo: draft.report_no || current.reportNo,
+        well: draft.well || current.well,
+        rig: draft.rig || current.rig,
+        operator: draft.operator || current.operator,
+        phase: draft.phase || current.phase,
+        holeSize: draft.hole_size || current.holeSize,
+        mdFt: draft.md_ft || current.mdFt,
+        tvdFt: draft.tvd_ft || current.tvdFt,
+        mudWeight: draft.mud_weight || current.mudWeight,
+        presentOps: draft.present_ops || current.presentOps,
+        nextOps: draft.next_ops || current.nextOps,
+        safety: draft.safety || current.safety,
+        risks: draft.risks || current.risks,
+        casingProgram: draft.casing_program || current.casingProgram,
+        operationsLog: draft.operations_log || current.operationsLog
+      }));
+      setDraftStatus("ready");
+      setDraftMessage(
+        `Source-backed draft ready from ${draft.source_document_count} document(s), ${draft.source_chunk_count} chunk(s), and ${draft.citation_count} citation(s).`
+      );
+    } catch (error) {
+      setDraftStatus("error");
+      setDraftMessage(error instanceof Error ? error.message : "Source draft failed.");
+    }
   }
 
   function applyForgeTemplate(): void {
@@ -159,9 +212,12 @@ export function ReportStudio(): JSX.Element {
   }
 
   function downloadDraft(): void {
-    const blob = new Blob([renderMarkdownReport(form, summary, casing, activities, standardSections, aiPlan, clientChecks)], {
-      type: "text/markdown;charset=utf-8"
-    });
+    const blob = new Blob(
+      [renderMarkdownReport(form, summary, casing, activities, standardSections, aiPlan, clientChecks, evidenceDraft)],
+      {
+        type: "text/markdown;charset=utf-8"
+      }
+    );
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -266,6 +322,15 @@ export function ReportStudio(): JSX.Element {
           />
 
           <div className="studio-actions">
+            <button
+              className="primary-action"
+              type="button"
+              onClick={() => void applyEvidenceDraft()}
+              disabled={draftStatus === "loading"}
+            >
+              <FileSearch size={18} aria-hidden="true" />
+              {draftStatus === "loading" ? "Building..." : "Source draft"}
+            </button>
             <button className="primary-action" type="button" onClick={applyAiDraft}>
               <WandSparkles size={18} aria-hidden="true" />
               AI draft
@@ -279,6 +344,9 @@ export function ReportStudio(): JSX.Element {
               Export draft
             </button>
           </div>
+          <p className={`studio-draft-status studio-draft-status-${draftStatus}`} role="status">
+            {draftMessage}
+          </p>
         </form>
 
         <aside className="studio-preview" aria-label="Branded report preview">
@@ -290,6 +358,7 @@ export function ReportStudio(): JSX.Element {
             standardSections={standardSections}
             aiPlan={aiPlan}
             clientChecks={clientChecks}
+            evidenceDraft={evidenceDraft}
           />
         </aside>
       </section>
@@ -317,6 +386,9 @@ function StudioMetricCard({ metric }: { metric: StudioMetric }): JSX.Element {
 }
 
 function studioMetricIcon(label: string): JSX.Element {
+  if (label === "Evidence") {
+    return <FileSearch size={19} aria-hidden="true" />;
+  }
   if (label === "Completeness") {
     return <BarChart3 size={19} aria-hidden="true" />;
   }
@@ -371,6 +443,7 @@ interface DailyReportPreviewProps {
   standardSections: StandardReportSection[];
   aiPlan: AiExecutionStep[];
   clientChecks: string[];
+  evidenceDraft: ApiReportDraft | null;
 }
 
 function DailyReportPreview({
@@ -380,7 +453,8 @@ function DailyReportPreview({
   activities,
   standardSections,
   aiPlan,
-  clientChecks
+  clientChecks,
+  evidenceDraft
 }: DailyReportPreviewProps): JSX.Element {
   const controlMatrix = buildControlMatrix(form, casing, activities, clientChecks);
 
@@ -421,6 +495,8 @@ function DailyReportPreview({
           </article>
         ))}
       </section>
+
+      {evidenceDraft && <EvidenceDraftPanel draft={evidenceDraft} />}
 
       <section className="report-section">
         <div className="report-section-title">
@@ -523,6 +599,51 @@ function DailyReportPreview({
         </div>
       </section>
     </div>
+  );
+}
+
+function EvidenceDraftPanel({ draft }: { draft: ApiReportDraft }): JSX.Element {
+  const visibleCitations = draft.citations.slice(0, 4);
+  const gateLabel = draft.validation_gate === "clear" ? "clear" : `${draft.open_validation_tasks} open`;
+
+  return (
+    <section className="report-section evidence-draft-panel" aria-label="Source-backed draft evidence">
+      <div className="report-section-title">
+        <FileSearch size={17} aria-hidden="true" />
+        <h3>Source-backed draft evidence</h3>
+      </div>
+      <div className="evidence-stat-grid">
+        <ReportFact label="Documents" value={`${draft.source_document_count}`} />
+        <ReportFact label="Chunks" value={`${draft.source_chunk_count}`} />
+        <ReportFact label="Failures" value={`${draft.failure_count}`} />
+        <ReportFact label="Gate" value={gateLabel} />
+      </div>
+      <div className="evidence-summary-list">
+        {draft.evidence_summary.map((item) => (
+          <p key={item}>{item}</p>
+        ))}
+      </div>
+      <div className="evidence-citation-list">
+        {visibleCitations.length > 0 ? (
+          visibleCitations.map((citation) => (
+            <article key={citation.id}>
+              <strong>{formatSourceCitation(citation.locator_type, citation.locator)}</strong>
+              <span>{citation.snippet}</span>
+            </article>
+          ))
+        ) : (
+          <article>
+            <strong>No citation cards yet</strong>
+            <span>Import and process source reports to populate citation-backed report language.</span>
+          </article>
+        )}
+      </div>
+      <ul className="evidence-confidence-list">
+        {draft.confidence_notes.slice(0, 3).map((note) => (
+          <li key={note}>{note}</li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -754,7 +875,8 @@ function buildStudioMetrics(
   form: ReportForm,
   casing: CasingInterval[],
   activities: ActivitySegment[],
-  clientChecks: string[]
+  clientChecks: string[],
+  evidenceDraft: ApiReportDraft | null
 ): StudioMetric[] {
   const requiredFields: Array<keyof ReportForm> = [
     "reportDate",
@@ -774,6 +896,16 @@ function buildStudioMetrics(
   const completion = Math.round((completeFields / requiredFields.length) * 100);
   const blockers = clientChecks.filter((item) => item.startsWith("Add") || item.startsWith("Confirm")).length;
   return [
+    {
+      label: "Evidence",
+      value: evidenceDraft
+        ? `${evidenceDraft.source_document_count}/${evidenceDraft.source_chunk_count}`
+        : "manual",
+      detail: evidenceDraft
+        ? `${evidenceDraft.citation_count} citation(s), validation ${evidenceDraft.validation_gate.replace("_", " ")}.`
+        : "Use Source draft to populate report fields from workspace evidence.",
+      tone: evidenceDraft ? (evidenceDraft.source_document_count > 0 ? "good" : "warning") : "info",
+    },
     {
       label: "Format",
       value: "MR-DDR-2",
@@ -865,7 +997,8 @@ function renderMarkdownReport(
   activities: ActivitySegment[],
   standardSections: StandardReportSection[],
   aiPlan: AiExecutionStep[],
-  clientChecks: string[]
+  clientChecks: string[],
+  evidenceDraft: ApiReportDraft | null
 ): string {
   const casingRows = casing
     .map((item) => `- ${item.name}: ${item.od}, ${item.topFt.toLocaleString()} to ${item.shoeFt.toLocaleString()} ft, ${item.status}`)
@@ -876,6 +1009,7 @@ function renderMarkdownReport(
     .join("\n");
   const aiPlanRows = aiPlan.map((item) => `- ${item.step}: ${item.status} - ${item.detail}`).join("\n");
   const checklistRows = clientChecks.map((item) => `- ${item}`).join("\n");
+  const evidenceRows = evidenceDraft ? renderEvidenceMarkdown(evidenceDraft) : [];
   return [
     "# Monday Report Morning Drilling Report",
     "",
@@ -890,6 +1024,7 @@ function renderMarkdownReport(
     "## Executive Summary",
     summary,
     "",
+    ...evidenceRows,
     "## Standard Daily Report Format",
     standardRows,
     "",
@@ -918,4 +1053,35 @@ function renderMarkdownReport(
     checklistRows,
     ""
   ].join("\n");
+}
+
+function renderEvidenceMarkdown(draft: ApiReportDraft): string[] {
+  const citationRows =
+    draft.citations.length > 0
+      ? draft.citations
+          .slice(0, 8)
+          .map(
+            (citation) =>
+              `- ${formatSourceCitation(citation.locator_type, citation.locator)}: ${citation.snippet}`
+          )
+      : ["- No citation cards yet."];
+  const confidenceRows = draft.confidence_notes.map((note) => `- ${note}`);
+  return [
+    "## Source-Backed Draft Evidence",
+    `Documents: ${draft.source_document_count}`,
+    `Chunks: ${draft.source_chunk_count}`,
+    `Failures: ${draft.failure_count}`,
+    `Open validation tasks: ${draft.open_validation_tasks}`,
+    `Validation gate: ${draft.validation_gate.replace("_", " ")}`,
+    "",
+    "### Evidence Summary",
+    ...draft.evidence_summary.map((item) => `- ${item}`),
+    "",
+    "### Citations",
+    ...citationRows,
+    "",
+    "### Confidence Notes",
+    ...confidenceRows,
+    "",
+  ];
 }

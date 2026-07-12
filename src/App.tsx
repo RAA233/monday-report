@@ -194,7 +194,7 @@ export function App(): JSX.Element {
             workspaceId={apiWorkspaceId ?? undefined}
           />
         )}
-        {activeView === "studio" && <ReportStudio />}
+        {activeView === "studio" && <ReportStudio workspaceId={apiWorkspaceId ?? undefined} />}
         {activeView === "explorer" && (
           <FailureExplorer events={events} filters={filters} onFiltersChange={setFilters} />
         )}

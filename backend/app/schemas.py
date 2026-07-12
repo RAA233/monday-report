@@ -246,6 +246,36 @@ class ChatResponse(BaseModel):
     tool_actions: list[ChatToolAction] = Field(default_factory=list)
 
 
+class ReportDraftResponse(BaseModel):
+    workspace_id: UUID
+    generated_at: datetime = Field(default_factory=utc_now)
+    report_date: date = Field(default_factory=lambda: utc_now().date())
+    report_no: str
+    well: str
+    rig: str
+    operator: str
+    phase: str
+    hole_size: str
+    md_ft: str
+    tvd_ft: str
+    mud_weight: str
+    present_ops: str
+    next_ops: str
+    safety: str
+    risks: str
+    casing_program: str
+    operations_log: str
+    evidence_summary: list[str] = Field(default_factory=list)
+    source_document_count: int
+    source_chunk_count: int
+    failure_count: int
+    open_validation_tasks: int
+    citation_count: int
+    validation_gate: Literal["clear", "review_required"]
+    citations: list[Citation] = Field(default_factory=list)
+    confidence_notes: list[str] = Field(default_factory=list)
+
+
 class DashboardSummary(BaseModel):
     total_failures: int
     total_npt_hours: float

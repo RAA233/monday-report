@@ -63,6 +63,9 @@ try {
     await expectText(page, view.title, `${view.label} visible`);
 
     if (view.label === "Report Studio") {
+      await page.getByRole("button", { name: /Source draft/i }).click();
+      await expectText(page, /Source-backed draft ready/i, "Report Studio source draft");
+      await expectText(page, /Source-backed draft evidence/i, "Report Studio evidence panel");
       await page.getByRole("button", { name: /FORGE style/i }).click();
       await page.getByRole("button", { name: /AI draft/i }).click();
       await expectText(page, /FORGE 16A\(78\)-32/i, "Report Studio FORGE template");

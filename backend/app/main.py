@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from statistics import mean
 from typing import Literal
 from uuid import UUID
@@ -28,6 +30,7 @@ from .schemas import (
     ParsedDocument,
     ProcessingJob,
     ProcessingStatus,
+    ReportDraftResponse,
     ReportExport,
     RetentionRunResult,
     RuntimeBackendStatus,
@@ -55,7 +58,15 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_origins=[
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+        *[
+            origin.strip()
+            for origin in os.getenv("MONDAY_REPORT_CORS_ORIGINS", "").split(",")
+            if origin.strip()
+        ],
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -501,6 +512,170 @@ def chat_tool_actions() -> list[dict[str, str]]:
             "kind": "audit",
         },
     ]
+
+
+def report_draft_depth_hint(source_text: str, label: str) -> str:
+    patterns = [
+        rf"\b{label}\D{{0,24}}([0-9]{{1,3}}(?:,[0-9]{{3}})+|[0-9]{{4,6}})\s*(?:ft|feet|')?",
+        rf"\b([0-9]{{1,3}}(?:,[0-9]{{3}})+|[0-9]{{4,6}})\s*(?:ft|feet|')?\s*{label}\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, source_text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def report_draft_hole_hint(source_text: str) -> str:
+    match = re.search(r"\b(26|17\.5|16|12\.25|8\.5|6\.125)\s*(?:in|inch|\"|hole)\b", source_text, flags=re.IGNORECASE)
+    return f"{match.group(1)} in" if match else ""
+
+
+def report_draft_mud_hint(source_text: str) -> str:
+    match = re.search(r"\b([0-9]{1,2}(?:\.[0-9])?)\s*(?:ppg|lb/gal)\b", source_text, flags=re.IGNORECASE)
+    return f"{match.group(1)} ppg" if match else ""
+
+
+def report_draft_casing_program(source_text: str) -> str:
+    if re.search(r"\b(casing|shoe|liner|cement)\b", source_text, flags=re.IGNORECASE):
+        status = "Source confirm"
+    else:
+        status = "Reference"
+    return "\n".join(
+        [
+            f"Conductor | 20 in | 0 | 130 | {status}",
+            f"Surface | 13.375 in | 0 | 1629 | {status}",
+            f"Intermediate | 9.625 in | 0 | 6500 | {status}",
+            f"Production | 7 in | 0 | 10987 | {status}",
+        ]
+    )
+
+
+def report_draft_operations_log(document_titles: list[str], failure_count: int, open_task_count: int) -> str:
+    latest_sources = ", ".join(document_titles[:3]) if document_titles else "no parsed source titles yet"
+    return "\n".join(
+        [
+            f"00:00-06:00 | Review latest source package: {latest_sources}.",
+            f"06:00-12:00 | Reconcile {failure_count} extracted failure/NPT record(s) with citations.",
+            "12:00-18:00 | Confirm drilling parameters, mud/BHA/survey, casing, and safety barriers from source evidence.",
+            f"18:00-24:00 | Close {open_task_count} validation task(s) before issuing branded PDF/XLSX outputs.",
+        ]
+    )
+
+
+@app.get("/workspaces/{workspace_id}/report-draft", response_model=ReportDraftResponse)
+def report_draft(workspace_id: UUID) -> ReportDraftResponse:
+    store.refresh()
+    if workspace_id not in store.workspaces:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    require_client_data_ready("report_draft.generate", "workspace", workspace_id)
+
+    workspace = store.workspaces[workspace_id]
+    documents = sorted(
+        [document for document in store.parsed_documents.values() if document.workspace_id == workspace_id],
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+    chunks = sorted(
+        [chunk for chunk in store.document_chunks.values() if chunk.workspace_id == workspace_id and chunk.text.strip()],
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+    failures = sorted(
+        [failure for failure in store.failures.values() if failure.workspace_id == workspace_id],
+        key=lambda item: (
+            {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}.get(item.severity, 0),
+            item.npt_hours,
+            item.confidence,
+        ),
+        reverse=True,
+    )
+    open_tasks = store._open_validation_tasks_for_workspace(workspace_id)
+    source_text = " ".join(chunk.text[:1200] for chunk in chunks[:20])
+    document_titles = [document.title for document in documents[:6]]
+    citations = dedupe_citations(
+        store.parsed_citations_for_workspace(workspace_id, limit=8)
+        + [citation for failure in failures for citation in failure.citations]
+    )
+    top_failure = failures[0] if failures else None
+    total_npt = sum(failure.npt_hours for failure in failures)
+    evidence_scope = f"{len(documents)} parsed document(s), {len(chunks)} chunk(s), {len(citations)} citation(s)"
+    latest_source = ", ".join(document_titles[:3]) if document_titles else "no parsed source titles available"
+
+    if top_failure:
+        present_ops = (
+            f"Source-backed review covers {evidence_scope}. Highest-risk extracted item: "
+            f"{top_failure.event_type} - {top_failure.summary} "
+            f"({top_failure.npt_hours:.1f} hr NPT, {top_failure.severity})."
+        )
+    else:
+        present_ops = (
+            f"Source-backed review covers {evidence_scope}. No structured failure records are extracted yet; "
+            "complete source review before client issue."
+        )
+
+    risk_items = [
+        f"{failure.severity}: {failure.summary} ({failure.npt_hours:.1f} hr NPT)"
+        for failure in failures[:3]
+    ]
+    if open_tasks:
+        risk_items.append(f"{len(open_tasks)} open validation task(s) must be closed before official export.")
+    risks = " ".join(risk_items) if risk_items else "No extracted high-risk item is available; confirm source coverage and safety barriers."
+
+    response = ReportDraftResponse(
+        workspace_id=workspace_id,
+        report_no=f"MR-SRC-{len(documents):03d}",
+        well=workspace.asset or workspace.name,
+        rig=workspace.name,
+        operator=store.tenant.name or "Monday Report",
+        phase=workspace.campaign or "Source-backed morning report",
+        hole_size=report_draft_hole_hint(source_text),
+        md_ft=report_draft_depth_hint(source_text, "md"),
+        tvd_ft=report_draft_depth_hint(source_text, "tvd"),
+        mud_weight=report_draft_mud_hint(source_text),
+        present_ops=present_ops,
+        next_ops=(
+            "Normalize the latest source reports into well/job information, present operations, drilling parameters, "
+            "mud/BHA/survey, casing, timeline, NPT, risks, and approvals; then export only after validation closure."
+        ),
+        safety=(
+            "Confirm BOP, well-control, pressure-control barriers, lifting exposure, and HSE observations against "
+            "the latest daily report before client issue."
+        ),
+        risks=risks,
+        casing_program=report_draft_casing_program(source_text),
+        operations_log=report_draft_operations_log(document_titles, len(failures), len(open_tasks)),
+        evidence_summary=[
+            f"Latest sources: {latest_source}.",
+            f"Failure scope: {len(failures)} record(s), {total_npt:.1f} total NPT hour(s).",
+            "Official outputs remain validation-gated and citation-backed.",
+        ],
+        source_document_count=len(documents),
+        source_chunk_count=len(chunks),
+        failure_count=len(failures),
+        open_validation_tasks=len(open_tasks),
+        citation_count=len(citations),
+        validation_gate="review_required" if open_tasks else "clear",
+        citations=citations,
+        confidence_notes=[
+            "Draft is generated from parsed workspace evidence, structured failures, and validation tasks.",
+            "Depth, hole, mud, casing, BHA, survey, and safety values must be confirmed against source citations.",
+            "Client-mode use remains blocked until readiness checks pass.",
+        ],
+    )
+    store.audit(
+        "report_draft.generate",
+        "workspace",
+        workspace_id,
+        {
+            "documents": response.source_document_count,
+            "chunks": response.source_chunk_count,
+            "failures": response.failure_count,
+            "open_validation_tasks": response.open_validation_tasks,
+            "citations": response.citation_count,
+        },
+    )
+    return response
 
 
 @app.post("/chat/messages", response_model=ChatResponse)

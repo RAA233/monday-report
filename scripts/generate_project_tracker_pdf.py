@@ -206,7 +206,7 @@ def build_pdf(tracker: dict[str, list[dict[str, str]]], readiness: dict[str, Any
                 (
                     "Next quality focus",
                     "WATCH",
-                    "Roadmap lane pull: citation-backed drafts, normalized repositories, package dry runs, OCR and scanner hardening.",
+                    "Roadmap lane pull: normal-format variants, schematic extraction, normalized repositories, package dry runs, OCR and scanner hardening.",
                 ),
             ],
             styles,
@@ -220,7 +220,7 @@ def build_pdf(tracker: dict[str, list[dict[str, str]]], readiness: dict[str, Any
     story.append(Paragraph("Current Meaning", styles["Heading2"]))
     story.append(
         Paragraph(
-            "The local client-approval environment is approved: PostgreSQL/RLS state, Redis queue, security config, local AI, reviewed fixture attestation, and parser/OCR eval evidence all pass. Next work follows the roadmap lanes through citation-backed drafts, controlled package dry runs, and production hardening.",
+            "The local client-approval environment is approved: PostgreSQL/RLS state, Redis queue, security config, local AI, reviewed fixture attestation, and parser/OCR eval evidence all pass. Source-backed Report Studio drafts are now guarded; next work follows normal-format variants, controlled package dry runs, and production hardening.",
             styles["Body"],
         )
     )

@@ -148,8 +148,8 @@ export const projectPhases: ProjectPhase[] = [
     status: "in_progress",
     owner: "Frontend + drilling SME",
     objective: "Turn real daily drilling report patterns into a branded authoring and preview workflow.",
-    evidence: "Chat now renders command-center workflow steps, insight cards, risk register, and tool actions; Report Studio has technical telemetry, normal report controls, casing/well schematics, and AI plan/execute checks.",
-    nextAction: "Connect parsed FORGE/client evidence into citation-backed local AI draft generation.",
+    evidence: "Chat renders command-center workflow steps; Report Studio has technical telemetry, normal report controls, casing/well schematics, AI plan/execute checks, and a guarded source-backed draft endpoint wired into the editor.",
+    nextAction: "Promote normal-format variants and stronger schematic extraction from reviewed daily-report evidence.",
     icon: FileText
   },
   {
@@ -176,7 +176,7 @@ export const clearTrackerLanes: TrackerLane[] = [
       "Parser worker covers text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF text, native PDF table rows, OCR routing/extraction, typed locators, manifest-driven parser/OCR eval reports, and source citation actions.",
       "Partner preview ZIP includes the built app, API, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.",
       "Validation-gated Monday Report exports JSON, CSV, HTML, PDF, and XLSX with signed artifact downloads.",
-      "Report Studio provides a technical morning-report console with standard daily-report sections, readiness telemetry, control matrix, casing/well schematic, AI plan/execute checks, timeline, and draft export.",
+      "Report Studio provides a technical morning-report console with standard daily-report sections, readiness telemetry, control matrix, source-backed draft generation, casing/well schematic, AI plan/execute checks, timeline, and draft export.",
       "Roadmap cockpit maps current build, next corpus/eval work, hardening, package, and client pilot lanes with release gates and risk controls.",
       "Official exports include GA-style metrics, validation posture, source coverage, standard daily-report sections, casing rows, well schematic, AI execution plan, timeline, branded HTML/PDF output, and expanded XLSX sections.",
       "GA readiness guard separates software-owned checks from configuration, infrastructure, and reviewed-evidence blockers.",
@@ -215,9 +215,9 @@ export const clearTrackerLanes: TrackerLane[] = [
     summary: "The next high-value work should turn approved local readiness into repeatable client-package pilots.",
     items: [
       "Run controlled client-package dry runs with the approved client-mode environment.",
-      "Connect parsed FORGE/client evidence into citation-backed local AI draft generation.",
+      "Promote more normal daily-report format variants into reviewed extraction and drafting tests.",
       "Promote the local FORGE open-source daily-report corpus into reviewed extraction evals without committing raw ignored PDFs.",
-      "Pull roadmap lane items in order: citation-backed drafts, normal-format schema variants, normalized persistence, then controlled client pilot.",
+      "Pull roadmap lane items in order: normal-format schema variants, stronger schematic extraction, normalized persistence, then controlled client pilot.",
       "Wire local LLM extraction router, strict schemas, confidence scoring, and metrics.",
       "Expand PostgreSQL from snapshot state into normalized table repositories.",
       "Harden production OCR command management and external malware scanner integration."
@@ -302,6 +302,13 @@ export const testGates: TestGate[] = [
     status: "pass",
     command: "pnpm run audit:chat-workflow",
     lastResult: "Guard verifies structured chat answers include workflow steps, insight cards, risk register, tool actions, and report export actions."
+  },
+  {
+    id: "gate-report-draft",
+    name: "Source-backed report draft",
+    status: "pass",
+    command: "pnpm run audit:report-draft",
+    lastResult: "Guard verifies parsed documents, chunks, citations, failures, validation tasks, and audit events produce form-ready Report Studio draft fields."
   },
   {
     id: "gate-roadmap",

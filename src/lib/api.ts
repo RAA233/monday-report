@@ -75,6 +75,36 @@ export interface ApiChatResponse {
   }[];
 }
 
+export interface ApiReportDraft {
+  workspace_id: string;
+  generated_at: string;
+  report_date: string;
+  report_no: string;
+  well: string;
+  rig: string;
+  operator: string;
+  phase: string;
+  hole_size: string;
+  md_ft: string;
+  tvd_ft: string;
+  mud_weight: string;
+  present_ops: string;
+  next_ops: string;
+  safety: string;
+  risks: string;
+  casing_program: string;
+  operations_log: string;
+  evidence_summary: string[];
+  source_document_count: number;
+  source_chunk_count: number;
+  failure_count: number;
+  open_validation_tasks: number;
+  citation_count: number;
+  validation_gate: "clear" | "review_required";
+  citations: ApiCitation[];
+  confidence_notes: string[];
+}
+
 export interface ApiUpload {
   id: string;
   tenant_id: string;
@@ -282,6 +312,10 @@ export async function askChat(workspaceId: string, content: string): Promise<Api
       filters: {}
     })
   });
+}
+
+export async function getReportDraft(workspaceId: string): Promise<ApiReportDraft> {
+  return request<ApiReportDraft>(`/workspaces/${workspaceId}/report-draft`);
 }
 
 export async function createUpload(params: {
