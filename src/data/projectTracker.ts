@@ -147,8 +147,8 @@ export const projectPhases: ProjectPhase[] = [
     status: "in_progress",
     owner: "Frontend + drilling SME",
     objective: "Turn real daily drilling report patterns into a branded authoring and preview workflow.",
-    evidence: "Report Studio drafts from scratch, applies a FORGE-style structure, renders casing schematics, and exports a Markdown draft.",
-    nextAction: "Connect parsed FORGE/client evidence into AI-assisted draft generation and production HTML/PDF/XLSX exports.",
+    evidence: "Report Studio drafts from scratch, applies a normal daily-report structure, renders casing/well schematics, shows AI plan/execute checks, and exports a Markdown draft.",
+    nextAction: "Connect parsed FORGE/client evidence into citation-backed local AI draft generation.",
     icon: FileText
   }
 ];
@@ -165,8 +165,8 @@ export const clearTrackerLanes: TrackerLane[] = [
       "Parser worker covers text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF text, native PDF table rows, OCR routing/extraction, typed locators, manifest-driven parser/OCR eval reports, and source citation actions.",
       "Partner preview ZIP includes the built app, API, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.",
       "Validation-gated Monday Report exports JSON, CSV, HTML, PDF, and XLSX with signed artifact downloads.",
-      "Report Studio provides a branded morning-report authoring surface with FORGE-style sections, casing schematic, timeline, and draft export.",
-      "Official exports include GA-style metrics, validation posture, source coverage, casing rows, timeline, branded HTML/PDF output, and expanded XLSX sections.",
+      "Report Studio provides a branded morning-report authoring surface with standard daily-report sections, casing/well schematic, AI plan/execute checks, timeline, and draft export.",
+      "Official exports include GA-style metrics, validation posture, source coverage, standard daily-report sections, casing rows, well schematic, AI execution plan, timeline, branded HTML/PDF output, and expanded XLSX sections.",
       "GA readiness guard separates software-owned checks from configuration, infrastructure, and reviewed-evidence blockers.",
       "`audit:all` is the accepted local proof gate after every slice."
     ]
@@ -203,7 +203,8 @@ export const clearTrackerLanes: TrackerLane[] = [
     summary: "The next high-value work should turn approved local readiness into repeatable client-package pilots.",
     items: [
       "Run controlled client-package dry runs with the approved client-mode environment.",
-      "Promote the local FORGE open-source daily-report corpus into reviewed templates and extraction evals without committing raw ignored PDFs.",
+      "Connect parsed FORGE/client evidence into citation-backed local AI draft generation.",
+      "Promote the local FORGE open-source daily-report corpus into reviewed extraction evals without committing raw ignored PDFs.",
       "Wire local LLM extraction router, strict schemas, confidence scoring, and metrics.",
       "Expand PostgreSQL from snapshot state into normalized table repositories.",
       "Harden production OCR command management and external malware scanner integration."
@@ -357,7 +358,7 @@ export const testGates: TestGate[] = [
     name: "Report export template",
     status: "pass",
     command: "pnpm run audit:report-template",
-    lastResult: "Guard verifies JSON/HTML/PDF/XLSX exports include GA-style metrics, casing schematic, timeline, and branded operations sections."
+    lastResult: "Guard verifies JSON/HTML/PDF/XLSX exports include GA-style metrics, standard daily-report sections, casing/well schematic, AI execution plan, timeline, and branded operations sections."
   },
   {
     id: "gate-e2e",

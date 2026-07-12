@@ -2,9 +2,12 @@ import { useMemo, useState } from "react";
 import type { JSX } from "react";
 import {
   CalendarDays,
+  CheckCircle2,
   Clock3,
+  ClipboardList,
   Download,
   FileText,
+  Gauge,
   Layers3,
   Ruler,
   ShieldCheck,
@@ -45,6 +48,18 @@ interface ActivitySegment {
   description: string;
 }
 
+interface StandardReportSection {
+  title: string;
+  status: string;
+  detail: string;
+}
+
+interface AiExecutionStep {
+  step: string;
+  status: string;
+  detail: string;
+}
+
 const defaultCasingProgram = [
   "Conductor | 20 in | 0 | 130 | Set",
   "Surface | 13.375 in | 0 | 1629 | Set",
@@ -65,6 +80,12 @@ export function ReportStudio(): JSX.Element {
   const casing = useMemo(() => parseCasingProgram(form.casingProgram), [form.casingProgram]);
   const activities = useMemo(() => parseOperationsLog(form.operationsLog), [form.operationsLog]);
   const summary = useMemo(() => buildExecutiveSummary(form), [form]);
+  const standardSections = useMemo(
+    () => buildStandardReportSections(form, casing, activities),
+    [form, casing, activities]
+  );
+  const aiPlan = useMemo(() => buildAiExecutionPlan(form, casing, activities), [form, casing, activities]);
+  const clientChecks = useMemo(() => buildClientIssueChecklist(form, casing, activities), [form, casing, activities]);
 
   function updateField(field: keyof ReportForm, value: string): void {
     setForm((current) => ({ ...current, [field]: value }));
@@ -116,7 +137,7 @@ export function ReportStudio(): JSX.Element {
   }
 
   function downloadDraft(): void {
-    const blob = new Blob([renderMarkdownReport(form, summary, casing, activities)], {
+    const blob = new Blob([renderMarkdownReport(form, summary, casing, activities, standardSections, aiPlan, clientChecks)], {
       type: "text/markdown;charset=utf-8"
     });
     const url = URL.createObjectURL(blob);
@@ -233,7 +254,15 @@ export function ReportStudio(): JSX.Element {
         </form>
 
         <aside className="studio-preview" aria-label="Branded report preview">
-          <DailyReportPreview form={form} summary={summary} casing={casing} activities={activities} />
+          <DailyReportPreview
+            form={form}
+            summary={summary}
+            casing={casing}
+            activities={activities}
+            standardSections={standardSections}
+            aiPlan={aiPlan}
+            clientChecks={clientChecks}
+          />
         </aside>
       </section>
     </main>
@@ -284,9 +313,20 @@ interface DailyReportPreviewProps {
   summary: string;
   casing: CasingInterval[];
   activities: ActivitySegment[];
+  standardSections: StandardReportSection[];
+  aiPlan: AiExecutionStep[];
+  clientChecks: string[];
 }
 
-function DailyReportPreview({ form, summary, casing, activities }: DailyReportPreviewProps): JSX.Element {
+function DailyReportPreview({
+  form,
+  summary,
+  casing,
+  activities,
+  standardSections,
+  aiPlan,
+  clientChecks
+}: DailyReportPreviewProps): JSX.Element {
   return (
     <div className="daily-report-sheet">
       <header className="daily-report-header">
@@ -323,6 +363,22 @@ function DailyReportPreview({ form, summary, casing, activities }: DailyReportPr
         <p>{summary}</p>
       </section>
 
+      <section className="report-section standard-format-section">
+        <div className="report-section-title">
+          <ClipboardList size={17} aria-hidden="true" />
+          <h3>Standard daily report format</h3>
+        </div>
+        <div className="standard-format-grid">
+          {standardSections.map((section) => (
+            <article key={section.title}>
+              <span>{section.status}</span>
+              <strong>{section.title}</strong>
+              <p>{section.detail}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
       <section className="report-two-column">
         <div className="report-section">
           <div className="report-section-title">
@@ -346,9 +402,14 @@ function DailyReportPreview({ form, summary, casing, activities }: DailyReportPr
         <div className="report-section">
           <div className="report-section-title">
             <Layers3 size={17} aria-hidden="true" />
-            <h3>Casing schematic</h3>
+            <h3>Casing and well schematic</h3>
           </div>
           <CasingSchematic casing={casing} currentDepth={parseDepth(form.mdFt)} />
+          <div className="schematic-note-grid">
+            <span>Hole {form.holeSize || "not entered"}</span>
+            <span>Current MD {formatDepth(form.mdFt)}</span>
+            <span>{casing.length} casing string(s)</span>
+          </div>
         </div>
         <div className="report-section">
           <div className="report-section-title">
@@ -363,6 +424,35 @@ function DailyReportPreview({ form, summary, casing, activities }: DailyReportPr
               </div>
             ))}
           </div>
+        </div>
+      </section>
+
+      <section className="report-two-column">
+        <div className="report-section">
+          <div className="report-section-title">
+            <Gauge size={17} aria-hidden="true" />
+            <h3>AI plan and execute</h3>
+          </div>
+          <div className="ai-plan-list">
+            {aiPlan.map((item) => (
+              <article key={item.step}>
+                <span>{item.status}</span>
+                <strong>{item.step}</strong>
+                <p>{item.detail}</p>
+              </article>
+            ))}
+          </div>
+        </div>
+        <div className="report-section">
+          <div className="report-section-title">
+            <CheckCircle2 size={17} aria-hidden="true" />
+            <h3>Client issue checks</h3>
+          </div>
+          <ul className="client-check-list">
+            {clientChecks.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
         </div>
       </section>
     </div>
@@ -510,6 +600,89 @@ function buildExecutiveSummary(form: ReportForm): string {
   return `${well} is in ${phase} at ${md}. ${present} Monday Report should verify casing status, timeline accuracy, safety barriers, and source citations before client issue.`;
 }
 
+function buildStandardReportSections(
+  form: ReportForm,
+  casing: CasingInterval[],
+  activities: ActivitySegment[]
+): StandardReportSection[] {
+  return [
+    {
+      title: "Well / job information",
+      status: form.well.trim() && form.rig.trim() ? "ready" : "needs input",
+      detail: `${form.well || "Well not entered"} | ${form.rig || "Rig not entered"} | ${form.operator || "Operator not entered"}`
+    },
+    {
+      title: "Present operations",
+      status: form.presentOps.trim() ? "drafted" : "needs input",
+      detail: fallbackText(form.presentOps, "Enter the current operation or use AI draft.")
+    },
+    {
+      title: "Drilling parameters",
+      status: form.mdFt.trim() || form.mudWeight.trim() ? "drafted" : "needs input",
+      detail: `Hole ${form.holeSize || "not entered"}, MD ${formatDepth(form.mdFt)}, TVD ${formatDepth(form.tvdFt)}, mud ${form.mudWeight || "not entered"}.`
+    },
+    {
+      title: "Mud, BHA, survey, and bit",
+      status: "source-confirm",
+      detail: "Confirm mud properties, BHA, bit run, survey trend, MWD/LWD/RSS status, and surface parameters from the source report."
+    },
+    {
+      title: "Casing and well schematic",
+      status: casing.length > 0 ? "rendered" : "needs input",
+      detail: `${casing.length} string(s) plotted with current depth, shoe depths, and status labels.`
+    },
+    {
+      title: "Time breakdown and approvals",
+      status: activities.length > 0 ? "drafted" : "needs input",
+      detail: `${activities.length} activity segment(s) captured. Validation, citation, and approval checks remain required before client issue.`
+    }
+  ];
+}
+
+function buildAiExecutionPlan(
+  form: ReportForm,
+  casing: CasingInterval[],
+  activities: ActivitySegment[]
+): AiExecutionStep[] {
+  return [
+    {
+      step: "Plan",
+      status: "ready",
+      detail: "Map the source report into well/job info, operations, drilling parameters, mud/BHA/survey, casing, time, risk, and approval sections."
+    },
+    {
+      step: "Draft",
+      status: form.presentOps.trim() ? "ready" : "use AI draft",
+      detail: "Generate normal daily-report wording while preserving the original field order and making gaps visible."
+    },
+    {
+      step: "Draw",
+      status: casing.length > 0 ? "ready" : "needs casing",
+      detail: "Render casing strings, shoe depths, current MD, and risk markers for the morning handover."
+    },
+    {
+      step: "Execute",
+      status: activities.length > 0 ? "approval-gated" : "needs timeline",
+      detail: "Export the branded report package after timeline review, source citations, and client issue checks are complete."
+    }
+  ];
+}
+
+function buildClientIssueChecklist(
+  form: ReportForm,
+  casing: CasingInterval[],
+  activities: ActivitySegment[]
+): string[] {
+  return [
+    form.well.trim() ? "Well and report identifiers are present." : "Add well and report identifiers.",
+    casing.length > 0 ? "Casing schematic has at least one string." : "Add casing strings before issue.",
+    activities.length > 0 ? "24 hr activity timeline is populated." : "Add the 24 hr activity timeline.",
+    form.safety.trim() ? "Safety and well-control notes are included." : "Confirm safety and well-control notes.",
+    "Confirm mud, BHA, survey, bit, and drilling parameters against source evidence.",
+    "Attach citations and close validation items before official PDF/XLSX export."
+  ];
+}
+
 function fallbackText(value: string, fallback: string): string {
   return value.trim() || fallback;
 }
@@ -523,12 +696,20 @@ function renderMarkdownReport(
   form: ReportForm,
   summary: string,
   casing: CasingInterval[],
-  activities: ActivitySegment[]
+  activities: ActivitySegment[],
+  standardSections: StandardReportSection[],
+  aiPlan: AiExecutionStep[],
+  clientChecks: string[]
 ): string {
   const casingRows = casing
     .map((item) => `- ${item.name}: ${item.od}, ${item.topFt.toLocaleString()} to ${item.shoeFt.toLocaleString()} ft, ${item.status}`)
     .join("\n");
   const activityRows = activities.map((item) => `- ${item.time}: ${item.description}`).join("\n");
+  const standardRows = standardSections
+    .map((item) => `- ${item.title}: ${item.status} - ${item.detail}`)
+    .join("\n");
+  const aiPlanRows = aiPlan.map((item) => `- ${item.step}: ${item.status} - ${item.detail}`).join("\n");
+  const checklistRows = clientChecks.map((item) => `- ${item}`).join("\n");
   return [
     "# Monday Report Morning Drilling Report",
     "",
@@ -542,6 +723,9 @@ function renderMarkdownReport(
     "",
     "## Executive Summary",
     summary,
+    "",
+    "## Standard Daily Report Format",
+    standardRows,
     "",
     "## Present Operations",
     fallbackText(form.presentOps, "No present operations entered."),
@@ -560,6 +744,12 @@ function renderMarkdownReport(
     "",
     "## 24 Hr Activity Timeline",
     activityRows,
+    "",
+    "## AI Plan And Execution",
+    aiPlanRows,
+    "",
+    "## Client Issue Checklist",
+    checklistRows,
     ""
   ].join("\n");
 }

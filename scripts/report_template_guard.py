@@ -58,9 +58,13 @@ def main() -> int:
             assert_check(
                 "Report JSON includes GA report sections",
                 report.report_json.get("metrics", {}).get("failure_count") == 1
+                and report.report_json.get("report_format_version") == "MR-DDR-2"
                 and "morning_report" in report.report_json
                 and report.report_json.get("morning_report", {}).get("casing_schematic")
-                and report.report_json.get("morning_report", {}).get("activity_timeline"),
+                and report.report_json.get("morning_report", {}).get("activity_timeline")
+                and report.report_json.get("morning_report", {}).get("standard_daily_report")
+                and report.report_json.get("morning_report", {}).get("well_schematic")
+                and report.report_json.get("morning_report", {}).get("ai_execution_plan"),
                 report.report_json,
             )
         )
@@ -76,7 +80,9 @@ def main() -> int:
             assert_check(
                 "JSON export carries metrics and casing",
                 json_payload.get("metrics", {}).get("total_npt_hours") == 8.5
-                and len(json_payload.get("morning_report", {}).get("casing_schematic", [])) >= 4,
+                and len(json_payload.get("morning_report", {}).get("casing_schematic", [])) >= 4
+                and len(json_payload.get("morning_report", {}).get("standard_daily_report", [])) >= 6
+                and "risk_markers" in json_payload.get("morning_report", {}).get("well_schematic", {}),
                 json_payload,
             )
         )
@@ -88,6 +94,9 @@ def main() -> int:
                 "<h1>Morning Operations Report</h1>" in html_text
                 and "Casing Schematic" in html_text
                 and "24 Hr Activity Timeline" in html_text
+                and "Standard Daily Report Format" in html_text
+                and "Well Schematic" in html_text
+                and "AI Plan &amp; Execution" in html_text
                 and "MWD signal loss" in html_text,
                 "html markers present" if "Casing Schematic" in html_text else html_text[:300],
             )
@@ -98,7 +107,17 @@ def main() -> int:
                 "PDF export uses branded operations template",
                 exported_bytes["pdf"].startswith(b"%PDF-1.4")
                 and b"%%EOF" in exported_bytes["pdf"][-32:]
-                and pdf_contains(exported_bytes["pdf"], ["Morning Operations Report", "Casing Schematic", "24 Hr Activity Timeline"]),
+                and pdf_contains(
+                    exported_bytes["pdf"],
+                    [
+                        "Morning Operations Report",
+                        "Standard Daily Report Format",
+                        "Casing Schematic",
+                        "24 Hr Activity Timeline",
+                        "Well Schematic",
+                        "AI Plan & Execution",
+                    ],
+                ),
                 f"bytes={len(exported_bytes['pdf'])}",
             )
         )
@@ -110,6 +129,9 @@ def main() -> int:
                 "Metrics" in xlsx_text
                 and "Casing Schematic" in xlsx_text
                 and "24 Hr Activity Timeline" in xlsx_text
+                and "Standard Daily Report Format" in xlsx_text
+                and "Well Schematic" in xlsx_text
+                and "AI Plan &amp; Execution" in xlsx_text
                 and "MWD signal loss" in xlsx_text,
                 "xlsx markers present" if "Casing Schematic" in xlsx_text else xlsx_text[:300],
             )

@@ -399,6 +399,56 @@ def chat(payload: ChatRequest) -> ChatResponse:
         {"prompt": payload.content[:180], "mode": "local_ai_api_scaffold"},
     )
 
+    wants_report_workflow = any(
+        term in normalized
+        for term in [
+            "monday report",
+            "morning report",
+            "daily report",
+            "generate",
+            "draft",
+            "schematic",
+            "plan",
+            "execute",
+            "client package",
+            "export",
+        ]
+    )
+    if wants_report_workflow:
+        open_tasks = store._open_validation_tasks_for_workspace(payload.workspace_id)
+        validation_phrase = (
+            f"{len(open_tasks)} validation task(s) must close before official issue"
+            if open_tasks
+            else "validation gate is clear for official export"
+        )
+        return ChatResponse(
+            answer=(
+                f"Draft Monday Report workflow is ready from {len(failures)} extracted failures and "
+                f"{sum(failure.npt_hours for failure in failures):.1f} NPT hours. "
+                "Plan: normalize the source daily-report format into well/job information, present operations, drilling parameters, mud/BHA/survey, casing, timeline, NPT, risks, and approvals. "
+                "Execute: generate the branded report, render the well schematic, attach citations, then export PDF/XLSX/HTML/CSV/JSON after the approval gate. "
+                f"Current gate: {validation_phrase}."
+            ),
+            citations=citations,
+            followups=[
+                "Plan next morning report",
+                "Build casing schematic",
+                "Create draft report",
+                "Show unresolved validation tasks",
+            ],
+            confidence_notes=[
+                "Response uses local source chunks plus structured failure data.",
+                "AI may plan and draft immediately, but official exports stay blocked by validation policy.",
+            ],
+            export_actions=[
+                "monday_report_pdf",
+                "monday_report_xlsx",
+                "monday_report_html",
+                "monday_report_csv",
+                "monday_report_json",
+            ],
+        )
+
     if any(term in normalized for term in ["uploaded", "parsed", "source", "evidence", "file"]):
         return ChatResponse(
             answer=(
@@ -409,25 +459,6 @@ def chat(payload: ChatRequest) -> ChatResponse:
             citations=citations,
             followups=["Show unresolved validation tasks", "Generate Monday Report"],
             confidence_notes=["This answer uses parser-worker chunks plus seeded structured failure data."],
-        )
-
-    if "monday report" in normalized or "generate" in normalized:
-        return ChatResponse(
-            answer=(
-                f"Draft Monday Report is ready from {len(failures)} extracted failures and "
-                f"{sum(failure.npt_hours for failure in failures):.1f} NPT hours. "
-                "Resolve open validation tasks before approval."
-            ),
-            citations=citations,
-            followups=["Create draft report", "Show unresolved validation tasks"],
-            confidence_notes=["Draft uses local AI scaffold data until real extraction workers are connected."],
-            export_actions=[
-                "monday_report_pdf",
-                "monday_report_xlsx",
-                "monday_report_html",
-                "monday_report_csv",
-                "monday_report_json",
-            ],
         )
 
     if "npt" in normalized:

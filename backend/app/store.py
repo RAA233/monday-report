@@ -728,6 +728,7 @@ class LocalStateStore:
             status="review" if open_tasks else "draft",
             report_json={
                 "title": "Monday Report",
+                "report_format_version": "MR-DDR-2",
                 "period": {
                     "start": payload.period_start.isoformat(),
                     "end": payload.period_end.isoformat(),
@@ -778,12 +779,60 @@ class LocalStateStore:
                         "Review cited source files for high-severity or high-NPT events.",
                         "Update casing, BHA, mud, survey, and activity timeline sections from the latest DDR evidence.",
                     ],
+                    "standard_daily_report": [
+                        {
+                            "section": "Well / Job Information",
+                            "status": "ready",
+                            "detail": f"{workspace.name} | {workspace.asset} | {workspace.campaign}",
+                        },
+                        {
+                            "section": "Present Operations",
+                            "status": "draft",
+                            "detail": "Summarized from extracted failure evidence and source-backed daily-report notes.",
+                        },
+                        {
+                            "section": "Drilling Parameters",
+                            "status": "source-confirm",
+                            "detail": "MD/TVD, hole size, survey trend, flow rate, RPM, WOB, torque, and SPP should be confirmed from the latest DDR.",
+                        },
+                        {
+                            "section": "Mud, BHA, Survey, and Bit",
+                            "status": "source-confirm",
+                            "detail": "Mud weight/properties, active BHA, bit run, MWD/LWD/RSS status, and survey quality require source confirmation.",
+                        },
+                        {
+                            "section": "NPT / Failures",
+                            "status": "ready" if failures else "monitor",
+                            "detail": f"{len(failures)} extracted failure(s), {total_npt:.1f} NPT hour(s), {len(high_failures)} high/critical item(s).",
+                        },
+                        {
+                            "section": "Next 24 Hr Plan",
+                            "status": "approval-gated",
+                            "detail": "Actions remain gated by validation closure and source-citation review.",
+                        },
+                    ],
                     "casing_schematic": [
                         {"name": "Conductor", "od": "20 in", "top_ft": 0, "shoe_ft": 130, "status": "reference"},
                         {"name": "Surface", "od": "13.375 in", "top_ft": 0, "shoe_ft": 1629, "status": "reference"},
                         {"name": "Intermediate", "od": "9.625 in", "top_ft": 0, "shoe_ft": 6500, "status": "plan"},
                         {"name": "Production", "od": "7 in", "top_ft": 0, "shoe_ft": 10987, "status": "plan"},
                     ],
+                    "well_schematic": {
+                        "surface_equipment": [
+                            "Wellhead and BOP status must be verified from the latest morning report.",
+                            "Casing, cement, pressure-test, and shoe-integrity notes are held for source confirmation.",
+                        ],
+                        "hole_sections": [
+                            {"hole_size": "17.5 in", "interval_ft": "0-1,629", "status": "surface hole reference"},
+                            {"hole_size": "12.25 in", "interval_ft": "1,629-6,500", "status": "intermediate hole plan"},
+                            {"hole_size": "8.5 in", "interval_ft": "6,500-10,987", "status": "production hole plan"},
+                        ],
+                        "risk_markers": [
+                            "MWD/LWD/RSS signal quality",
+                            "Torque, drag, ECD, and lost-circulation indicators",
+                            "Casing-point readiness and cementing dependencies",
+                        ],
+                    },
                     "activity_timeline": [
                         {
                             "time": "00:00-06:00",
@@ -801,6 +850,38 @@ class LocalStateStore:
                             "time": "18:00-24:00",
                             "activity": "Prepare branded Monday Report export package after approval gate passes.",
                         },
+                    ],
+                    "ai_execution_plan": [
+                        {
+                            "step": "Plan",
+                            "owner": "Local AI analyst",
+                            "status": "ready",
+                            "action": "Classify source reports into well/job, operations, drilling parameters, mud/BHA, casing, timeline, NPT, and approvals.",
+                        },
+                        {
+                            "step": "Draft",
+                            "owner": "Report Studio",
+                            "status": "ready",
+                            "action": "Generate normal daily-report text while preserving the original report order and source-backed language.",
+                        },
+                        {
+                            "step": "Draw",
+                            "owner": "Schematic engine",
+                            "status": "ready",
+                            "action": "Render casing strings, hole sections, current depth, and risk markers for quick morning review.",
+                        },
+                        {
+                            "step": "Execute",
+                            "owner": "Validation gate",
+                            "status": "blocked" if open_tasks else "ready",
+                            "action": "Export client-ready PDF/XLSX/HTML/CSV/JSON only after validation tasks and citation checks are closed.",
+                        },
+                    ],
+                    "client_issue_checklist": [
+                        "Every NPT/failure item has source citation and confidence.",
+                        "Casing, BHA, mud, survey, and time breakdown match the latest DDR evidence.",
+                        "Open validation tasks are resolved or explicitly countersigned.",
+                        "Exports are hashed, signed, and retained in the audit ledger.",
                     ],
                 },
                 "data_quality_notes": [
@@ -1094,6 +1175,7 @@ class LocalStateStore:
                 f"<td>{xml_escape(str(failure.get('company', '')))}</td>"
                 f"<td>{xml_escape(str(failure.get('tool_type', '')))}</td>"
                 f"<td>{xml_escape(str(failure.get('npt_hours', 0)))}</td>"
+                f"<td>{xml_escape(str(failure.get('confidence', 0)))}</td>"
                 f"<td>{xml_escape(str(failure.get('validation_status', '')))}</td>"
                 "</tr>"
             )
@@ -1124,6 +1206,57 @@ class LocalStateStore:
             for item in timeline
             if isinstance(item, dict)
         )
+        standard_sections = (
+            morning_report.get("standard_daily_report", []) if isinstance(morning_report, dict) else []
+        )
+        standard_rows = "".join(
+            (
+                "<tr>"
+                f"<td>{xml_escape(str(item.get('section', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('status', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('detail', '')))}</td>"
+                "</tr>"
+            )
+            for item in standard_sections
+            if isinstance(item, dict)
+        )
+        well_schematic = morning_report.get("well_schematic", {}) if isinstance(morning_report, dict) else {}
+        hole_sections = well_schematic.get("hole_sections", []) if isinstance(well_schematic, dict) else []
+        hole_rows = "".join(
+            (
+                "<tr>"
+                f"<td>{xml_escape(str(item.get('hole_size', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('interval_ft', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('status', '')))}</td>"
+                "</tr>"
+            )
+            for item in hole_sections
+            if isinstance(item, dict)
+        )
+        surface_items = "".join(
+            f"<li>{xml_escape(str(item))}</li>"
+            for item in (well_schematic.get("surface_equipment", []) if isinstance(well_schematic, dict) else [])
+        )
+        risk_items = "".join(
+            f"<li>{xml_escape(str(item))}</li>"
+            for item in (well_schematic.get("risk_markers", []) if isinstance(well_schematic, dict) else [])
+        )
+        plan_rows = "".join(
+            (
+                "<tr>"
+                f"<td>{xml_escape(str(item.get('step', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('owner', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('status', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('action', '')))}</td>"
+                "</tr>"
+            )
+            for item in (morning_report.get("ai_execution_plan", []) if isinstance(morning_report, dict) else [])
+            if isinstance(item, dict)
+        )
+        checklist_items = "".join(
+            f"<li>{xml_escape(str(item))}</li>"
+            for item in (morning_report.get("client_issue_checklist", []) if isinstance(morning_report, dict) else [])
+        )
         notes_items = "".join(f"<li>{xml_escape(str(note))}</li>" for note in notes)
         period = report.report_json.get("period", {})
         start = xml_escape(str(period.get("start", "")))
@@ -1140,6 +1273,7 @@ class LocalStateStore:
             "section{padding:20px 24px;border-bottom:1px solid #d8e0e7}.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}"
             "table{border-collapse:collapse;width:100%;margin-top:10px}td,th{border:1px solid #d1d5db;padding:8px;text-align:left;vertical-align:top;font-size:13px}"
             "th{background:#101820;color:white}.pill{display:inline-block;border:1px solid #bde8d5;background:#e4f7ef;color:#047857;border-radius:999px;padding:5px 9px;font-size:12px;font-weight:700}"
+            ".schematic-drawing{display:grid;grid-template-columns:110px 1fr;gap:14px;margin-top:12px}.wellbore{position:relative;min-height:260px;border-left:10px solid #0e7490;border-right:10px solid #0e7490;border-bottom:10px solid #b45309;background:#f8fbfd}.wellbore span{position:absolute;left:22px;right:22px;border-top:2px dashed #647384;color:#334155;font-size:12px;font-weight:700}.wellbore .s1{top:16%}.wellbore .s2{top:55%}.wellbore .s3{bottom:8%}.schematic-notes{font-size:13px}.checklist{columns:2}"
             "ul{margin:10px 0 0 18px;padding:0;line-height:1.5}@media(max-width:820px){.metrics,.grid{grid-template-columns:1fr}.band,header{display:block}}"
             "</style></head><body><main class=\"sheet\">"
             "<header><div><p class=\"muted\">Monday Report</p><h1>Morning Operations Report</h1></div>"
@@ -1150,6 +1284,8 @@ class LocalStateStore:
             "<section class=\"grid\"><div><h2>Present Operations</h2>"
             f"<p>{xml_escape(str(morning_report.get('present_operations', 'No operations entered.') if isinstance(morning_report, dict) else 'No operations entered.'))}</p></div>"
             f"<div><h2>Data Quality Notes</h2><ul>{notes_items}</ul></div></section>"
+            "<section><h2>Standard Daily Report Format</h2><table><thead><tr><th>Section</th><th>Status</th><th>Detail</th></tr></thead>"
+            f"<tbody>{standard_rows}</tbody></table></section>"
             "<section><h2>Failure Summary</h2><table><thead><tr><th>Event</th><th>Severity</th><th>Company</th>"
             "<th>Tool</th><th>NPT Hours</th><th>Confidence</th><th>Validation</th></tr></thead>"
             f"<tbody>{failure_rows}</tbody></table></section>"
@@ -1157,6 +1293,11 @@ class LocalStateStore:
             f"<tbody>{casing_rows}</tbody></table></div>"
             "<div><h2>24 Hr Activity Timeline</h2><table><thead><tr><th>Time</th><th>Activity</th></tr></thead>"
             f"<tbody>{timeline_rows}</tbody></table></div></section>"
+            "<section><h2>Well Schematic</h2><div class=\"schematic-drawing\"><div class=\"wellbore\"><span class=\"s1\">Surface shoe</span><span class=\"s2\">Intermediate shoe</span><span class=\"s3\">Planned TD</span></div>"
+            f"<div class=\"schematic-notes\"><h3>Surface / Control Notes</h3><ul>{surface_items}</ul><h3>Risk Markers</h3><ul>{risk_items}</ul></div></div>"
+            f"<table><thead><tr><th>Hole Size</th><th>Interval ft</th><th>Status</th></tr></thead><tbody>{hole_rows}</tbody></table></section>"
+            "<section><h2>AI Plan &amp; Execution</h2><table><thead><tr><th>Step</th><th>Owner</th><th>Status</th><th>Action</th></tr></thead>"
+            f"<tbody>{plan_rows}</tbody></table><h3>Client Issue Checklist</h3><ul class=\"checklist\">{checklist_items}</ul></section>"
             "</main></body></html>"
         )
 
@@ -1247,6 +1388,13 @@ class LocalStateStore:
         morning_report = report.report_json.get("morning_report", {})
         source_coverage = report.report_json.get("source_coverage", {})
         notes = report.report_json.get("data_quality_notes", [])
+        standard_sections = (
+            morning_report.get("standard_daily_report", []) if isinstance(morning_report, dict) else []
+        )
+        well_schematic = morning_report.get("well_schematic", {}) if isinstance(morning_report, dict) else {}
+        hole_sections = well_schematic.get("hole_sections", []) if isinstance(well_schematic, dict) else []
+        ai_plan = morning_report.get("ai_execution_plan", []) if isinstance(morning_report, dict) else []
+        checklist = morning_report.get("client_issue_checklist", []) if isinstance(morning_report, dict) else []
         story: list[object] = [
             Paragraph("Monday Report - Morning Operations Report", styles["title"]),
             Paragraph(
@@ -1284,6 +1432,21 @@ class LocalStateStore:
                         else "No operations entered."
                     ),
                     styles["body"],
+                ),
+                Paragraph("Standard Daily Report Format", styles["h2"]),
+                LocalStateStore._pdf_table(
+                    [["Section", "Status", "Detail"]]
+                    + [
+                        [
+                            str(item.get("section", "")),
+                            str(item.get("status", "")),
+                            str(item.get("detail", "")),
+                        ]
+                        for item in standard_sections
+                        if isinstance(item, dict)
+                    ],
+                    [1.65 * inch, 1.05 * inch, 3.8 * inch],
+                    styles,
                 ),
                 Paragraph("Failure Summary", styles["h2"]),
                 LocalStateStore._pdf_table(
@@ -1332,6 +1495,53 @@ class LocalStateStore:
                     [1.15 * inch, 5.25 * inch],
                     styles,
                 ),
+                Paragraph("Well Schematic", styles["h2"]),
+                Paragraph(
+                    "Surface / control notes: "
+                    + "; ".join(str(item) for item in (well_schematic.get("surface_equipment", []) if isinstance(well_schematic, dict) else [])),
+                    styles["body"],
+                ),
+                Paragraph(
+                    "Risk markers: "
+                    + "; ".join(str(item) for item in (well_schematic.get("risk_markers", []) if isinstance(well_schematic, dict) else [])),
+                    styles["body"],
+                ),
+                LocalStateStore._pdf_table(
+                    [["Hole Size", "Interval ft", "Status"]]
+                    + [
+                        [
+                            str(item.get("hole_size", "")),
+                            str(item.get("interval_ft", "")),
+                            str(item.get("status", "")),
+                        ]
+                        for item in hole_sections
+                        if isinstance(item, dict)
+                    ],
+                    [1.3 * inch, 1.4 * inch, 3.8 * inch],
+                    styles,
+                ),
+                Paragraph("AI Plan & Execution", styles["h2"]),
+                LocalStateStore._pdf_table(
+                    [["Step", "Owner", "Status", "Action"]]
+                    + [
+                        [
+                            str(item.get("step", "")),
+                            str(item.get("owner", "")),
+                            str(item.get("status", "")),
+                            str(item.get("action", "")),
+                        ]
+                        for item in ai_plan
+                        if isinstance(item, dict)
+                    ],
+                    [0.75 * inch, 1.2 * inch, 0.8 * inch, 3.75 * inch],
+                    styles,
+                ),
+                Paragraph("Client Issue Checklist", styles["h2"]),
+            ]
+        )
+        story.extend(Paragraph(f"- {item}", styles["body"]) for item in checklist)
+        story.extend(
+            [
                 Paragraph("Data Quality Notes", styles["h2"]),
             ]
         )
@@ -1376,6 +1586,12 @@ class LocalStateStore:
         period = report.report_json.get("period", {})
         summary = report.report_json.get("executive_summary", [])
         failures = report.report_json.get("failure_summary", [])
+        morning_report = report.report_json.get("morning_report", {})
+        standard_sections = (
+            morning_report.get("standard_daily_report", []) if isinstance(morning_report, dict) else []
+        )
+        well_schematic = morning_report.get("well_schematic", {}) if isinstance(morning_report, dict) else {}
+        ai_plan = morning_report.get("ai_execution_plan", []) if isinstance(morning_report, dict) else []
         lines = [
             "Monday Report",
             f"Period: {period.get('start', '')} to {period.get('end', '')}",
@@ -1383,6 +1599,12 @@ class LocalStateStore:
             "Executive Summary",
         ]
         lines.extend(str(item.get("text", "")) for item in summary)
+        lines.extend(["", "Standard Daily Report Format"])
+        lines.extend(
+            f"{item.get('section', '')}: {item.get('status', '')} - {item.get('detail', '')}"
+            for item in standard_sections
+            if isinstance(item, dict)
+        )
         lines.extend(["", "Failure Summary"])
         if failures:
             for failure in failures:
@@ -1400,6 +1622,18 @@ class LocalStateStore:
                 )
         else:
             lines.append("No extracted failures in scope.")
+        lines.extend(["", "Well Schematic"])
+        lines.extend(
+            f"{item.get('hole_size', '')}: {item.get('interval_ft', '')} - {item.get('status', '')}"
+            for item in (well_schematic.get("hole_sections", []) if isinstance(well_schematic, dict) else [])
+            if isinstance(item, dict)
+        )
+        lines.extend(["", "AI Plan & Execution"])
+        lines.extend(
+            f"{item.get('step', '')}: {item.get('status', '')} - {item.get('action', '')}"
+            for item in ai_plan
+            if isinstance(item, dict)
+        )
 
         commands = ["BT", "/F1 12 Tf", "50 760 Td", "14 TL"]
         for line in lines[:48]:
@@ -1445,8 +1679,14 @@ class LocalStateStore:
         source_coverage = report.report_json.get("source_coverage", {})
         morning_report = report.report_json.get("morning_report", {})
         notes = report.report_json.get("data_quality_notes", [])
+        standard_sections = (
+            morning_report.get("standard_daily_report", []) if isinstance(morning_report, dict) else []
+        )
+        well_schematic = morning_report.get("well_schematic", {}) if isinstance(morning_report, dict) else {}
+        ai_plan = morning_report.get("ai_execution_plan", []) if isinstance(morning_report, dict) else []
         rows: list[list[object]] = [
             ["Monday Report"],
+            ["Format Version", report.report_json.get("report_format_version", "MR-DDR-1")],
             [
                 "Period",
                 f"{report.report_json.get('period', {}).get('start', '')} to "
@@ -1465,6 +1705,20 @@ class LocalStateStore:
             ["Executive Summary"],
             *[["Summary", item.get("text", ""), item.get("confidence", "")] for item in report.report_json.get("executive_summary", [])],
             [],
+            ["Standard Daily Report Format"],
+            ["Section", "Status", "Detail"],
+        ]
+        rows.extend(
+            [
+                [item.get("section", ""), item.get("status", ""), item.get("detail", "")]
+                for item in standard_sections
+                if isinstance(item, dict)
+            ]
+        )
+        rows.extend(
+            [
+                [],
+                ["Failure Summary"],
             [
                 "Event",
                 "Severity",
@@ -1476,7 +1730,8 @@ class LocalStateStore:
                 "Validation",
                 "Summary",
             ],
-        ]
+            ]
+        )
         for failure in failures:
             rows.append(
                 [
@@ -1523,6 +1778,71 @@ class LocalStateStore:
                 [item.get("time", ""), item.get("activity", "")]
                 for item in (morning_report.get("activity_timeline", []) if isinstance(morning_report, dict) else [])
                 if isinstance(item, dict)
+            ]
+        )
+        rows.extend(
+            [
+                [],
+                ["Well Schematic"],
+                ["Surface / Control Notes"],
+            ]
+        )
+        rows.extend(
+            [
+                ["Note", item]
+                for item in (well_schematic.get("surface_equipment", []) if isinstance(well_schematic, dict) else [])
+            ]
+        )
+        rows.extend(
+            [
+                [],
+                ["Hole Sections"],
+                ["Hole Size", "Interval ft", "Status"],
+            ]
+        )
+        rows.extend(
+            [
+                [item.get("hole_size", ""), item.get("interval_ft", ""), item.get("status", "")]
+                for item in (well_schematic.get("hole_sections", []) if isinstance(well_schematic, dict) else [])
+                if isinstance(item, dict)
+            ]
+        )
+        rows.extend(
+            [
+                [],
+                ["Risk Markers"],
+            ]
+        )
+        rows.extend(
+            [
+                ["Risk", item]
+                for item in (well_schematic.get("risk_markers", []) if isinstance(well_schematic, dict) else [])
+            ]
+        )
+        rows.extend(
+            [
+                [],
+                ["AI Plan & Execution"],
+                ["Step", "Owner", "Status", "Action"],
+            ]
+        )
+        rows.extend(
+            [
+                [item.get("step", ""), item.get("owner", ""), item.get("status", ""), item.get("action", "")]
+                for item in ai_plan
+                if isinstance(item, dict)
+            ]
+        )
+        rows.extend(
+            [
+                [],
+                ["Client Issue Checklist"],
+            ]
+        )
+        rows.extend(
+            [
+                ["Check", item]
+                for item in (morning_report.get("client_issue_checklist", []) if isinstance(morning_report, dict) else [])
             ]
         )
         rows.extend([[], ["Data Quality Notes"]])

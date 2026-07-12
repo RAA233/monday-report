@@ -55,9 +55,10 @@ interface SourceActionStatus {
 }
 
 const starterPrompts = [
-  "Generate this week's Monday Report executive summary.",
+  "Plan and execute a client-ready Monday Report with schematic.",
+  "Draft a normal morning report from source evidence.",
+  "Build the casing and well schematic for the morning report.",
   "Which failures need validation before Monday Report?",
-  "Show MWD and RSS tool risk with citations.",
   "Compare NPT by service company and well."
 ];
 
@@ -73,7 +74,7 @@ export function ChatAnalyst({ events, filters, workspaceId }: ChatAnalystProps):
       id: "assistant-ready",
       role: "assistant",
       text:
-        "Local AI is ready. Ask across uploaded rig reports, BHA, MWD/LWD, mud motor, RSS, bit records, NPT logs, and service-company files. Source citations stay attached."
+        "Local AI is ready to plan, draft, and execute Monday Report workflows across uploaded rig reports, BHA, MWD/LWD, mud motor, RSS, bit records, NPT logs, and service-company files. Source citations stay attached."
     }
   ]);
 
@@ -221,8 +222,8 @@ export function ChatAnalyst({ events, filters, workspaceId }: ChatAnalystProps):
             <p className="eyebrow">Local AI analyst</p>
             <h1>Ask Monday Report first</h1>
             <p>
-              Start with a question, then move to upload, validation, dashboards, and exports when
-              the answer needs support.
+              Start with a plan or source-backed question, then move to validation, schematics, and
+              exports when the answer is ready for client review.
             </p>
           </div>
           <Badge tone={chatMode === "api" ? "good" : "warning"}>

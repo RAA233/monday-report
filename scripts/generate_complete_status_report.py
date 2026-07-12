@@ -185,10 +185,10 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "## Latest Delivered Slice",
         "",
-        "- Added Report Studio for writing morning reports from scratch.",
-        "- Added AI-assisted draft fill, FORGE-style template, branded preview, casing schematic, activity timeline, and Markdown draft export.",
-        "- Added FORGE corpus guard and wired it into `audit:all`.",
-        "- Updated tracker and README with the corpus/report-studio workflow.",
+        "- Upgraded Report Studio for normal daily-report authoring from scratch.",
+        "- Added standard daily-report sections, AI plan/execute checks, client issue checklist, richer casing/well schematic, activity timeline, and Markdown draft export.",
+        "- Upgraded official JSON/HTML/PDF/XLSX exports to carry `MR-DDR-2`, standard sections, well schematic, AI execution plan, and client checklist while preserving the original casing/timeline format.",
+        "- Updated tracker evidence and report-template guard for the upgraded format.",
         "",
         "## Audit Evidence",
         "",
@@ -223,9 +223,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## Next Execution Tracker",
             "",
-            "1. Promote FORGE corpus patterns into reviewed report templates and extraction evals.",
-            "2. Connect Report Studio to parsed evidence and local Gemma-assisted draft generation with citations.",
-            "3. Upgrade production PDF/XLSX exports to match the new branded morning-report layout.",
+            "1. Connect parsed FORGE/client evidence into citation-backed local AI draft generation.",
+            "2. Promote FORGE corpus patterns into reviewed extraction evals without committing raw ignored PDFs.",
+            "3. Add stricter normal-report schema checks for mud, BHA, survey, bit, parameters, approvals, and visuals.",
             "4. Maintain reviewed anonymized fixture attestation and parser/OCR eval reports as fixtures evolve.",
             "5. Run a controlled client-package dry run with the approved client-mode environment before broad distribution.",
             "",
@@ -310,9 +310,9 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
     story.extend(
         bullets(
             [
-                "Report Studio for writing morning drilling reports from scratch.",
-                "FORGE-style template, AI draft fill, branded preview, casing schematic, activity timeline, and Markdown draft export.",
-                "FORGE corpus guard wired into audit:all and tracker.",
+                "Report Studio for normal daily-report authoring from scratch.",
+                "Standard daily-report sections, AI plan/execute checks, client issue checklist, richer casing/well schematic, activity timeline, and Markdown draft export.",
+                "Official JSON/HTML/PDF/XLSX exports upgraded to MR-DDR-2 while preserving original casing/timeline compatibility.",
                 "Private GitHub main branch pushed at the latest audited commit.",
             ],
             styles,
@@ -413,9 +413,9 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
     story.extend(
         numbered(
             [
-                "Promote FORGE corpus patterns into reviewed report templates and extraction evals.",
-                "Connect Report Studio to parsed evidence and local Gemma-assisted draft generation with citations.",
-                "Upgrade production PDF/XLSX exports to match the new branded morning-report layout.",
+                "Connect parsed FORGE/client evidence into citation-backed local AI draft generation.",
+                "Promote FORGE corpus patterns into reviewed extraction evals without committing raw ignored PDFs.",
+                "Add stricter normal-report schema checks for mud, BHA, survey, bit, parameters, approvals, and visuals.",
                 "Maintain reviewed anonymized fixture attestation and parser/OCR eval reports as fixtures evolve.",
                 "Run a controlled client-package dry run with the approved client-mode environment before broad distribution.",
             ],
