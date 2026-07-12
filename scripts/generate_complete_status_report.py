@@ -226,6 +226,7 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
     forge = report["forge"]
     partner = report["partner"]
     client = report["client"]
+    ga = report["ga"]
     phases = tracker["phases"]
     gates = tracker["gates"]
     readiness_checks = client.get("readiness", {}).get("checks", [])
