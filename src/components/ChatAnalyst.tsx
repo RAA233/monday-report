@@ -1,13 +1,22 @@
 import { useState } from "react";
 import type { JSX } from "react";
 import {
+  Activity,
+  AlertTriangle,
   Bot,
+  Braces,
+  CheckCircle2,
+  Command,
   Cpu,
   Database,
   Download,
+  FileCog,
   FileSearch,
-  LockKeyhole,
+  Gauge,
+  ListChecks,
+  Radar,
   Send,
+  ShieldAlert,
   Sparkles,
   UserRound,
   Workflow
@@ -62,6 +71,34 @@ const starterPrompts = [
   "Compare NPT by service company and well."
 ];
 
+const commandPrompts = [
+  {
+    label: "Plan",
+    prompt: "Plan next morning report with source-backed sections and approval gates.",
+    detail: "Map evidence into DDR sections."
+  },
+  {
+    label: "Extract",
+    prompt: "Extract failures, NPT, tool attribution, and source gaps for this workspace.",
+    detail: "Focus the data model."
+  },
+  {
+    label: "Draft",
+    prompt: "Create draft report with executive summary, normal daily format, and next 24 hr plan.",
+    detail: "Generate report language."
+  },
+  {
+    label: "Draw",
+    prompt: "Build casing schematic with hole sections, shoe depths, current MD, and risk markers.",
+    detail: "Prepare visuals."
+  },
+  {
+    label: "Audit",
+    prompt: "Audit blockers, validation tasks, citations, export gate, and client issue checklist.",
+    detail: "Harden the package."
+  }
+];
+
 export function ChatAnalyst({ events, filters, workspaceId }: ChatAnalystProps): JSX.Element {
   const [question, setQuestion] = useState("");
   const [isAsking, setIsAsking] = useState(false);
@@ -69,6 +106,7 @@ export function ChatAnalyst({ events, filters, workspaceId }: ChatAnalystProps):
   const [reportId, setReportId] = useState<string | null>(null);
   const [exportStatuses, setExportStatuses] = useState<Record<string, ExportActionStatus>>({});
   const [sourceStatuses, setSourceStatuses] = useState<Record<string, SourceActionStatus>>({});
+  const completedExports = Object.values(exportStatuses).filter((status) => status.state === "done").length;
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "assistant-ready",
@@ -225,10 +263,26 @@ export function ChatAnalyst({ events, filters, workspaceId }: ChatAnalystProps):
               Start with a plan or source-backed question, then move to validation, schematics, and
               exports when the answer is ready for client review.
             </p>
+            <div className="chat-telemetry-strip" aria-label="Chat telemetry">
+              <TelemetryCell label="Mode" value={chatMode === "api" ? "API" : "fallback"} />
+              <TelemetryCell label="Events" value={String(events.length)} />
+              <TelemetryCell label="Exports" value={String(completedExports)} />
+              <TelemetryCell label="Policy" value="local first" />
+            </div>
           </div>
           <Badge tone={chatMode === "api" ? "good" : "warning"}>
             {chatMode === "api" ? "API connected" : "local fallback"}
           </Badge>
+        </div>
+
+        <div className="command-dock" aria-label="AI command dock">
+          {commandPrompts.map((command) => (
+            <button type="button" key={command.label} onClick={() => void submitQuestion(command.prompt)}>
+              <Command size={16} aria-hidden="true" />
+              <span>{command.label}</span>
+              <small>{command.detail}</small>
+            </button>
+          ))}
         </div>
 
         <div className="messages" aria-live="polite">
@@ -307,13 +361,37 @@ export function ChatAnalyst({ events, filters, workspaceId }: ChatAnalystProps):
             title="Validation loop"
             body="Low-confidence failures route to human review."
           />
+          <LocalAiCard
+            icon={Activity}
+            title="Operational memory"
+            body="Failure, NPT, citations, and exports stay connected across the workflow."
+          />
+          <LocalAiCard
+            icon={Gauge}
+            title="Readiness telemetry"
+            body="The answer returns gate status, risk, and next executable commands."
+          />
+          <LocalAiCard
+            icon={CheckCircle2}
+            title="Client issue guard"
+            body="Official exports remain blocked until validation and citation checks pass."
+          />
         </div>
         <div className="citation-policy">
-          <LockKeyhole size={19} aria-hidden="true" />
+          <AlertTriangle size={19} aria-hidden="true" />
           <p>Private report data stays tenant-scoped with citations, confidence, and audit trails.</p>
         </div>
       </aside>
     </main>
+  );
+}
+
+function TelemetryCell({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <span>
+      <strong>{value}</strong>
+      {label}
+    </span>
   );
 }
 
@@ -334,6 +412,11 @@ function ApiAnswerBlock({
   onFollowup,
   onOpenSource
 }: ApiAnswerBlockProps): JSX.Element {
+  const insightCards = answer.insight_cards ?? [];
+  const workflowSteps = answer.workflow_steps ?? [];
+  const riskRegister = answer.risk_register ?? [];
+  const toolActions = answer.tool_actions ?? [];
+
   return (
     <div className="answer-block">
       <div className="answer-title">
@@ -341,6 +424,63 @@ function ApiAnswerBlock({
         <strong>Source-backed response</strong>
       </div>
       <p>{answer.answer}</p>
+      {insightCards.length > 0 && (
+        <div className="chat-insight-grid">
+          {insightCards.map((card) => (
+            <article className={`chat-insight-card chat-insight-${card.tone}`} key={`${card.label}-${card.value}`}>
+              <span>{card.label}</span>
+              <strong>{card.value}</strong>
+              <p>{card.detail}</p>
+            </article>
+          ))}
+        </div>
+      )}
+      {workflowSteps.length > 0 && (
+        <div className="workflow-runway" aria-label="AI workflow steps">
+          {workflowSteps.map((step) => (
+            <button
+              className={`workflow-step workflow-step-${step.status}`}
+              type="button"
+              key={step.step}
+              onClick={() => step.command && onFollowup(step.command)}
+              disabled={!step.command}
+            >
+              <span>{step.status}</span>
+              <strong>{step.step}</strong>
+              <small>{step.detail}</small>
+            </button>
+          ))}
+        </div>
+      )}
+      {riskRegister.length > 0 && (
+        <div className="risk-register" aria-label="AI risk register">
+          <div className="mini-section-title">
+            <ShieldAlert size={16} aria-hidden="true" />
+            <strong>Risk register</strong>
+          </div>
+          {riskRegister.map((risk) => (
+            <article className={`risk-register-item risk-${risk.severity}`} key={risk.title}>
+              <div>
+                <span>{risk.severity}</span>
+                <strong>{risk.title}</strong>
+              </div>
+              <p>{risk.detail}</p>
+              <small>{risk.mitigation}</small>
+            </article>
+          ))}
+        </div>
+      )}
+      {toolActions.length > 0 && (
+        <div className="tool-action-grid" aria-label="AI tool actions">
+          {toolActions.map((action) => (
+            <button type="button" key={`${action.kind}-${action.label}`} onClick={() => onFollowup(action.prompt)}>
+              {toolActionIcon(action.kind)}
+              <span>{action.label}</span>
+              <small>{action.detail}</small>
+            </button>
+          ))}
+        </div>
+      )}
       {answer.confidence_notes.length > 0 && (
         <div className="confidence-notes">
           {answer.confidence_notes.map((note) => (
@@ -439,6 +579,25 @@ function LocalAiCard({ icon: Icon, title, body }: LocalAiCardProps): JSX.Element
       </div>
     </div>
   );
+}
+
+function toolActionIcon(kind: ApiChatResponse["tool_actions"][number]["kind"]): JSX.Element {
+  if (kind === "draft") {
+    return <FileCog size={17} aria-hidden="true" />;
+  }
+  if (kind === "schematic") {
+    return <Braces size={17} aria-hidden="true" />;
+  }
+  if (kind === "audit") {
+    return <ListChecks size={17} aria-hidden="true" />;
+  }
+  if (kind === "export") {
+    return <Download size={17} aria-hidden="true" />;
+  }
+  if (kind === "source") {
+    return <FileSearch size={17} aria-hidden="true" />;
+  }
+  return <Radar size={17} aria-hidden="true" />;
 }
 
 interface AnswerBlockProps {

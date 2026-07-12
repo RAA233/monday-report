@@ -206,12 +206,44 @@ class ChatRequest(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatWorkflowStep(BaseModel):
+    step: str
+    status: Literal["ready", "active", "blocked", "complete", "watch"]
+    detail: str
+    command: str | None = None
+
+
+class ChatInsightCard(BaseModel):
+    label: str
+    value: str
+    detail: str
+    tone: Literal["good", "warning", "danger", "info"] = "info"
+
+
+class ChatRiskItem(BaseModel):
+    title: str
+    severity: Literal["low", "medium", "high", "critical"]
+    detail: str
+    mitigation: str
+
+
+class ChatToolAction(BaseModel):
+    label: str
+    prompt: str
+    detail: str
+    kind: Literal["plan", "draft", "schematic", "audit", "export", "source"] = "plan"
+
+
 class ChatResponse(BaseModel):
     answer: str
     citations: list[Citation] = Field(default_factory=list)
     followups: list[str] = Field(default_factory=list)
     confidence_notes: list[str] = Field(default_factory=list)
     export_actions: list[str] = Field(default_factory=list)
+    workflow_steps: list[ChatWorkflowStep] = Field(default_factory=list)
+    insight_cards: list[ChatInsightCard] = Field(default_factory=list)
+    risk_register: list[ChatRiskItem] = Field(default_factory=list)
+    tool_actions: list[ChatToolAction] = Field(default_factory=list)
 
 
 class DashboardSummary(BaseModel):

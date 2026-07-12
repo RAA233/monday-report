@@ -49,6 +49,30 @@ export interface ApiChatResponse {
   followups: string[];
   confidence_notes: string[];
   export_actions: string[];
+  workflow_steps: {
+    step: string;
+    status: "ready" | "active" | "blocked" | "complete" | "watch";
+    detail: string;
+    command?: string | null;
+  }[];
+  insight_cards: {
+    label: string;
+    value: string;
+    detail: string;
+    tone: "good" | "warning" | "danger" | "info";
+  }[];
+  risk_register: {
+    title: string;
+    severity: "low" | "medium" | "high" | "critical";
+    detail: string;
+    mitigation: string;
+  }[];
+  tool_actions: {
+    label: string;
+    prompt: string;
+    detail: string;
+    kind: "plan" | "draft" | "schematic" | "audit" | "export" | "source";
+  }[];
 }
 
 export interface ApiUpload {

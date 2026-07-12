@@ -375,6 +375,134 @@ def list_failures(workspace_id: UUID | None = None) -> list[FailureRecord]:
     return failures
 
 
+def chat_insight_cards(failures: list[FailureRecord], documents: list, chunk_count: int, open_tasks: int) -> list[dict[str, str]]:
+    high_count = len([failure for failure in failures if failure.severity in {"High", "Critical"}])
+    total_npt = sum(failure.npt_hours for failure in failures)
+    return [
+        {
+            "label": "Evidence",
+            "value": f"{len(documents)} docs / {chunk_count} chunks",
+            "detail": "Parsed source scope available to the local analyst.",
+            "tone": "good" if documents else "warning",
+        },
+        {
+            "label": "Failures",
+            "value": f"{len(failures)} records",
+            "detail": f"{high_count} high/critical item(s), {total_npt:.1f} NPT hours.",
+            "tone": "danger" if high_count else "info",
+        },
+        {
+            "label": "Validation Gate",
+            "value": "clear" if open_tasks == 0 else f"{open_tasks} open",
+            "detail": "Official exports remain validation-gated in client mode.",
+            "tone": "good" if open_tasks == 0 else "warning",
+        },
+        {
+            "label": "Export Stack",
+            "value": "PDF XLSX HTML CSV JSON",
+            "detail": "Signed exports are available after the approval gate.",
+            "tone": "info",
+        },
+    ]
+
+
+def chat_workflow_steps(open_tasks: int, documents: list, failures: list[FailureRecord]) -> list[dict[str, str]]:
+    gate_status = "ready" if open_tasks == 0 else "blocked"
+    return [
+        {
+            "step": "Ingest",
+            "status": "complete" if documents else "watch",
+            "detail": "Parse uploaded reports, tables, email notes, OCR text, and source locators.",
+            "command": "Show parsed source evidence",
+        },
+        {
+            "step": "Extract",
+            "status": "complete" if failures else "watch",
+            "detail": "Create structured failures, NPT, company/tool attribution, confidence, and citations.",
+            "command": "Show high-NPT failures",
+        },
+        {
+            "step": "Plan",
+            "status": "ready",
+            "detail": "Map evidence into normal daily-report sections, casing, risk, and next 24 hr plan.",
+            "command": "Plan next morning report",
+        },
+        {
+            "step": "Draft",
+            "status": "ready",
+            "detail": "Generate client-readable Monday Report language while preserving source-backed constraints.",
+            "command": "Create draft report",
+        },
+        {
+            "step": "Schematic",
+            "status": "ready",
+            "detail": "Render casing strings, hole sections, current depth, shoe depths, and risk markers.",
+            "command": "Build casing schematic",
+        },
+        {
+            "step": "Export",
+            "status": gate_status,
+            "detail": "Package signed PDF/XLSX/HTML/CSV/JSON artifacts after validation closure.",
+            "command": "Generate Monday Report",
+        },
+    ]
+
+
+def chat_risk_register(open_tasks: int, documents: list, failures: list[FailureRecord]) -> list[dict[str, str]]:
+    total_npt = sum(failure.npt_hours for failure in failures)
+    high_count = len([failure for failure in failures if failure.severity in {"High", "Critical"}])
+    risks = [
+        {
+            "title": "Validation backlog",
+            "severity": "high" if open_tasks else "low",
+            "detail": f"{open_tasks} validation task(s) are open.",
+            "mitigation": "Close or countersign validation tasks before official issue.",
+        },
+        {
+            "title": "Evidence coverage",
+            "severity": "medium" if not documents else "low",
+            "detail": f"{len(documents)} parsed document(s) are available for this workspace.",
+            "mitigation": "Import the latest DDR, BHA, mud, survey, and service-company files before client signoff.",
+        },
+        {
+            "title": "Operational severity",
+            "severity": "high" if high_count or total_npt >= 8 else "medium",
+            "detail": f"{high_count} high/critical item(s), {total_npt:.1f} NPT hour(s).",
+            "mitigation": "Prioritize high-NPT failures and confirm company/tool attribution with citations.",
+        },
+    ]
+    return risks
+
+
+def chat_tool_actions() -> list[dict[str, str]]:
+    return [
+        {
+            "label": "Plan DDR",
+            "prompt": "Plan next morning report",
+            "detail": "Build the normal report section map and approval path.",
+            "kind": "plan",
+        },
+        {
+            "label": "Draft Report",
+            "prompt": "Create draft report",
+            "detail": "Generate report language using current evidence and validation status.",
+            "kind": "draft",
+        },
+        {
+            "label": "Draw Schematic",
+            "prompt": "Build casing schematic",
+            "detail": "Create casing, hole-section, depth, and risk-marker instructions.",
+            "kind": "schematic",
+        },
+        {
+            "label": "Audit Gate",
+            "prompt": "Show unresolved validation tasks",
+            "detail": "Review blockers before official export.",
+            "kind": "audit",
+        },
+    ]
+
+
 @app.post("/chat/messages", response_model=ChatResponse)
 def chat(payload: ChatRequest) -> ChatResponse:
     store.refresh()
@@ -391,6 +519,11 @@ def chat(payload: ChatRequest) -> ChatResponse:
         store.parsed_citations_for_workspace(payload.workspace_id)
         + [citation for failure in failures for citation in failure.citations]
     )
+    open_tasks = store._open_validation_tasks_for_workspace(payload.workspace_id)
+    insight_cards = chat_insight_cards(failures, documents, chunk_count, len(open_tasks))
+    workflow_steps = chat_workflow_steps(len(open_tasks), documents, failures)
+    risk_register = chat_risk_register(len(open_tasks), documents, failures)
+    tool_actions = chat_tool_actions()
 
     store.audit(
         "chat.message",
@@ -415,7 +548,6 @@ def chat(payload: ChatRequest) -> ChatResponse:
         ]
     )
     if wants_report_workflow:
-        open_tasks = store._open_validation_tasks_for_workspace(payload.workspace_id)
         validation_phrase = (
             f"{len(open_tasks)} validation task(s) must close before official issue"
             if open_tasks
@@ -440,6 +572,10 @@ def chat(payload: ChatRequest) -> ChatResponse:
                 "Response uses local source chunks plus structured failure data.",
                 "AI may plan and draft immediately, but official exports stay blocked by validation policy.",
             ],
+            workflow_steps=workflow_steps,
+            insight_cards=insight_cards,
+            risk_register=risk_register,
+            tool_actions=tool_actions,
             export_actions=[
                 "monday_report_pdf",
                 "monday_report_xlsx",
@@ -459,6 +595,10 @@ def chat(payload: ChatRequest) -> ChatResponse:
             citations=citations,
             followups=["Show unresolved validation tasks", "Generate Monday Report"],
             confidence_notes=["This answer uses parser-worker chunks plus seeded structured failure data."],
+            workflow_steps=workflow_steps,
+            insight_cards=insight_cards,
+            risk_register=risk_register,
+            tool_actions=tool_actions,
         )
 
     if "npt" in normalized:
@@ -469,6 +609,10 @@ def chat(payload: ChatRequest) -> ChatResponse:
             ),
             citations=citations,
             followups=["Break NPT down by company", "Show high-NPT failures"],
+            workflow_steps=workflow_steps,
+            insight_cards=insight_cards,
+            risk_register=risk_register,
+            tool_actions=tool_actions,
         )
 
     return ChatResponse(
@@ -478,6 +622,10 @@ def chat(payload: ChatRequest) -> ChatResponse:
         ),
         citations=citations,
         followups=["What failed this week?", "Which company caused most NPT?", "Generate Monday Report"],
+        workflow_steps=workflow_steps,
+        insight_cards=insight_cards,
+        risk_register=risk_register,
+        tool_actions=tool_actions,
     )
 
 

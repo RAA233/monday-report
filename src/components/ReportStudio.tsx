@@ -1,15 +1,20 @@
 import { useMemo, useState } from "react";
 import type { JSX } from "react";
 import {
+  BarChart3,
   CalendarDays,
   CheckCircle2,
   Clock3,
   ClipboardList,
+  Cpu,
   Download,
   FileText,
   Gauge,
+  HardHat,
   Layers3,
+  Route,
   Ruler,
+  ShieldAlert,
   ShieldCheck,
   WandSparkles
 } from "lucide-react";
@@ -60,6 +65,19 @@ interface AiExecutionStep {
   detail: string;
 }
 
+interface StudioMetric {
+  label: string;
+  value: string;
+  detail: string;
+  tone: "good" | "warning" | "danger" | "info";
+}
+
+interface ControlMatrixItem {
+  label: string;
+  value: string;
+  detail: string;
+}
+
 const defaultCasingProgram = [
   "Conductor | 20 in | 0 | 130 | Set",
   "Surface | 13.375 in | 0 | 1629 | Set",
@@ -86,6 +104,10 @@ export function ReportStudio(): JSX.Element {
   );
   const aiPlan = useMemo(() => buildAiExecutionPlan(form, casing, activities), [form, casing, activities]);
   const clientChecks = useMemo(() => buildClientIssueChecklist(form, casing, activities), [form, casing, activities]);
+  const studioMetrics = useMemo(
+    () => buildStudioMetrics(form, casing, activities, clientChecks),
+    [form, casing, activities, clientChecks]
+  );
 
   function updateField(field: keyof ReportForm, value: string): void {
     setForm((current) => ({ ...current, [field]: value }));
@@ -153,13 +175,19 @@ export function ReportStudio(): JSX.Element {
       <section className="workspace-title studio-title">
         <div>
           <p className="eyebrow">Morning report studio</p>
-          <h1>Write, summarize, and package daily drilling reports</h1>
+          <h1>Technical daily-report command console</h1>
           <p>
-            Draft from scratch, follow the open-source FORGE daily-report structure, and preview a
-            Monday Report branded output with casing schematic, timeline, risks, and handover notes.
+            Build normal daily reports with source-backed sections, advanced schematic context,
+            AI execution checks, validation gates, and branded export readiness.
           </p>
         </div>
-        <Badge tone="info">FORGE corpus aware</Badge>
+        <Badge tone="info">MR-DDR-2</Badge>
+      </section>
+
+      <section className="studio-ops-strip" aria-label="Report studio technical telemetry">
+        {studioMetrics.map((metric) => (
+          <StudioMetricCard key={metric.label} metric={metric} />
+        ))}
       </section>
 
       <section className="studio-grid">
@@ -277,6 +305,33 @@ interface LabeledInputProps {
   type?: "text" | "date";
 }
 
+function StudioMetricCard({ metric }: { metric: StudioMetric }): JSX.Element {
+  return (
+    <article className={`studio-metric-card studio-metric-${metric.tone}`}>
+      {studioMetricIcon(metric.label)}
+      <span>{metric.label}</span>
+      <strong>{metric.value}</strong>
+      <p>{metric.detail}</p>
+    </article>
+  );
+}
+
+function studioMetricIcon(label: string): JSX.Element {
+  if (label === "Completeness") {
+    return <BarChart3 size={19} aria-hidden="true" />;
+  }
+  if (label === "Schematic") {
+    return <HardHat size={19} aria-hidden="true" />;
+  }
+  if (label === "AI engine") {
+    return <Cpu size={19} aria-hidden="true" />;
+  }
+  if (label === "Gate") {
+    return <ShieldAlert size={19} aria-hidden="true" />;
+  }
+  return <Route size={19} aria-hidden="true" />;
+}
+
 function LabeledInput({ label, value, onChange, icon: Icon, type = "text" }: LabeledInputProps): JSX.Element {
   return (
     <label className="studio-field">
@@ -327,6 +382,8 @@ function DailyReportPreview({
   aiPlan,
   clientChecks
 }: DailyReportPreviewProps): JSX.Element {
+  const controlMatrix = buildControlMatrix(form, casing, activities, clientChecks);
+
   return (
     <div className="daily-report-sheet">
       <header className="daily-report-header">
@@ -353,6 +410,16 @@ function DailyReportPreview({
         <ReportFact label="TVD" value={formatDepth(form.tvdFt)} />
         <ReportFact label="Mud" value={form.mudWeight} />
         <ReportFact label="Status" value="AI-assisted draft" />
+      </section>
+
+      <section className="report-control-matrix" aria-label="Technical report control matrix">
+        {controlMatrix.map((item) => (
+          <article key={item.label}>
+            <span>{item.label}</span>
+            <strong>{item.value}</strong>
+            <p>{item.detail}</p>
+          </article>
+        ))}
       </section>
 
       <section className="report-section">
@@ -680,6 +747,105 @@ function buildClientIssueChecklist(
     form.safety.trim() ? "Safety and well-control notes are included." : "Confirm safety and well-control notes.",
     "Confirm mud, BHA, survey, bit, and drilling parameters against source evidence.",
     "Attach citations and close validation items before official PDF/XLSX export."
+  ];
+}
+
+function buildStudioMetrics(
+  form: ReportForm,
+  casing: CasingInterval[],
+  activities: ActivitySegment[],
+  clientChecks: string[]
+): StudioMetric[] {
+  const requiredFields: Array<keyof ReportForm> = [
+    "reportDate",
+    "reportNo",
+    "well",
+    "rig",
+    "phase",
+    "holeSize",
+    "mdFt",
+    "mudWeight",
+    "presentOps",
+    "nextOps",
+    "safety",
+    "risks",
+  ];
+  const completeFields = requiredFields.filter((field) => form[field].trim()).length;
+  const completion = Math.round((completeFields / requiredFields.length) * 100);
+  const blockers = clientChecks.filter((item) => item.startsWith("Add") || item.startsWith("Confirm")).length;
+  return [
+    {
+      label: "Format",
+      value: "MR-DDR-2",
+      detail: "Normal daily-report structure with original casing/timeline compatibility.",
+      tone: "info",
+    },
+    {
+      label: "Completeness",
+      value: `${completion}%`,
+      detail: `${completeFields}/${requiredFields.length} primary fields populated.`,
+      tone: completion >= 85 ? "good" : completion >= 55 ? "warning" : "danger",
+    },
+    {
+      label: "Schematic",
+      value: `${casing.length} strings`,
+      detail: `${activities.length} timeline segment(s), current MD ${formatDepth(form.mdFt)}.`,
+      tone: casing.length >= 4 ? "good" : "warning",
+    },
+    {
+      label: "AI engine",
+      value: "plan + execute",
+      detail: "Drafting, schematic, audit, and export commands are exposed in chat.",
+      tone: "good",
+    },
+    {
+      label: "Gate",
+      value: blockers === 0 ? "issue-ready" : `${blockers} blocker(s)`,
+      detail: "Client issue checklist tracks missing identifiers, safety, casing, and evidence.",
+      tone: blockers === 0 ? "good" : "warning",
+    },
+  ];
+}
+
+function buildControlMatrix(
+  form: ReportForm,
+  casing: CasingInterval[],
+  activities: ActivitySegment[],
+  clientChecks: string[]
+): ControlMatrixItem[] {
+  const safetyReady = Boolean(form.safety.trim());
+  const depthReady = parseDepth(form.mdFt) > 0 && parseDepth(form.tvdFt) > 0;
+  return [
+    {
+      label: "Trajectory",
+      value: depthReady ? "tracked" : "needs depth",
+      detail: `MD ${formatDepth(form.mdFt)} / TVD ${formatDepth(form.tvdFt)}.`,
+    },
+    {
+      label: "Hydraulics",
+      value: form.mudWeight.trim() ? "drafted" : "needs mud",
+      detail: `Mud ${form.mudWeight || "not entered"}; confirm flow, SPP, ECD, and rheology from source.`,
+    },
+    {
+      label: "Well control",
+      value: safetyReady ? "noted" : "needs note",
+      detail: safetyReady ? "Safety and barrier notes are present." : "Confirm BOP, pressure-control, and handover barriers.",
+    },
+    {
+      label: "Schematic",
+      value: casing.length > 0 ? "rendered" : "needs casing",
+      detail: `${casing.length} casing string(s) with shoe-depth context.`,
+    },
+    {
+      label: "Timeline",
+      value: `${activities.length} blocks`,
+      detail: "24 hr activity blocks are ready for source review.",
+    },
+    {
+      label: "Issue gate",
+      value: clientChecks.some((item) => item.startsWith("Add") || item.startsWith("Confirm")) ? "review" : "ready",
+      detail: "Export only after citations and validation tasks are complete.",
+    },
   ];
 }
 

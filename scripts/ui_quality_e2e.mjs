@@ -11,7 +11,7 @@ const uploadFixturePath = path.join(root, "output", "qa", "ui_upload_fixture.txt
 
 const views = [
   { label: "Local AI Chat", title: /Ask Monday Report first/i, file: "01-chat-initial.png" },
-  { label: "Report Studio", title: /Write, summarize, and package daily drilling reports/i, file: "03-report-studio.png" },
+  { label: "Report Studio", title: /Technical daily-report command console/i, file: "03-report-studio.png" },
   { label: "Upload", title: /Upload rig reports/i, file: "04-upload.png" },
   { label: "Dashboard", title: /Monday Report intelligence/i, file: "05-dashboard.png" },
   { label: "Explorer", title: /Failure explorer/i, file: "06-explorer.png" },
@@ -52,6 +52,8 @@ try {
   await page.getByPlaceholder(/Ask about failures/i).fill("Generate this week's Monday Report executive summary.");
   await page.getByRole("button", { name: /Send question/i }).click();
   await expectText(page, /Draft Monday Report|extracted failure|extracted failures/i, "Chat answer");
+  await expectText(page, /Risk register/i, "Chat structured risk register");
+  await expectText(page, /Plan DDR/i, "Chat tool actions");
   await screenshot(page, "02-chat-answer.png", "Chat answer");
 
   for (const view of views.slice(1)) {
@@ -63,6 +65,8 @@ try {
       await page.getByRole("button", { name: /FORGE style/i }).click();
       await page.getByRole("button", { name: /AI draft/i }).click();
       await expectText(page, /FORGE 16A\(78\)-32/i, "Report Studio FORGE template");
+      await expectText(page, /MR-DDR-2/i, "Report Studio format telemetry");
+      await expectText(page, /Trajectory/i, "Report Studio control matrix");
     }
 
     if (view.label === "Upload") {

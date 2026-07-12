@@ -776,7 +776,7 @@ td {
 .chat-main {
   display: grid;
   min-height: calc(100vh - 146px);
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   overflow: hidden;
 }
 
@@ -788,6 +788,79 @@ td {
 .chat-header p:not(.eyebrow) {
   max-width: 780px;
   line-height: 1.5;
+}
+
+.chat-telemetry-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.chat-telemetry-strip span {
+  display: grid;
+  min-width: 110px;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.chat-telemetry-strip strong {
+  color: var(--text);
+  font-size: 0.92rem;
+  text-transform: none;
+}
+
+.command-dock {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  background: #f8fbfd;
+}
+
+.command-dock button,
+.tool-action-grid button,
+.workflow-step {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--text);
+  text-align: left;
+}
+
+.command-dock button {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 3px 8px;
+  min-height: 64px;
+  padding: 10px;
+}
+
+.command-dock svg {
+  grid-row: 1 / span 2;
+  color: #0e7490;
+}
+
+.command-dock span,
+.tool-action-grid span {
+  font-weight: 900;
+}
+
+.command-dock small,
+.tool-action-grid small,
+.workflow-step small,
+.risk-register-item small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
 }
 
 .messages {
@@ -846,6 +919,152 @@ td {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.chat-insight-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.chat-insight-card {
+  display: grid;
+  gap: 4px;
+  min-height: 98px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.chat-insight-card span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.chat-insight-card strong {
+  font-size: 1rem;
+}
+
+.chat-insight-card p {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.chat-insight-good {
+  border-color: #bde8d5;
+}
+
+.chat-insight-warning {
+  border-color: #f7d48c;
+}
+
+.chat-insight-danger {
+  border-color: #f4bbb6;
+}
+
+.workflow-runway {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.workflow-step {
+  display: grid;
+  gap: 5px;
+  min-height: 118px;
+  padding: 10px;
+}
+
+.workflow-step:disabled {
+  cursor: default;
+}
+
+.workflow-step span,
+.risk-register-item span {
+  width: max-content;
+  max-width: 100%;
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: #e8eef8;
+  color: #2563eb;
+  font-size: 0.64rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.workflow-step-complete span,
+.workflow-step-ready span,
+.risk-low span {
+  background: #e4f7ef;
+  color: #047857;
+}
+
+.workflow-step-blocked span,
+.risk-high span,
+.risk-critical span {
+  background: #fff0ed;
+  color: #b42318;
+}
+
+.workflow-step-watch span,
+.risk-medium span {
+  background: #fff7db;
+  color: #b45309;
+}
+
+.risk-register {
+  display: grid;
+  gap: 8px;
+}
+
+.mini-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.risk-register-item {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.risk-register-item div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.risk-register-item p {
+  color: #2d3946;
+  font-size: 0.82rem;
+}
+
+.tool-action-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tool-action-grid button {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 3px 8px;
+  min-height: 74px;
+  padding: 10px;
+}
+
+.tool-action-grid svg {
+  grid-row: 1 / span 2;
+  color: #0e7490;
 }
 
 .choice-row,
@@ -1273,6 +1492,63 @@ td {
   margin-bottom: 18px;
 }
 
+.studio-ops-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.studio-metric-card {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 4px 9px;
+  min-height: 110px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.studio-metric-card svg {
+  grid-row: 1 / span 3;
+  color: #0e7490;
+}
+
+.studio-metric-card span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.studio-metric-card strong {
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.studio-metric-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.studio-metric-good {
+  border-color: #bde8d5;
+  background: #f7fffb;
+}
+
+.studio-metric-warning {
+  border-color: #f7d48c;
+  background: #fffdf5;
+}
+
+.studio-metric-danger {
+  border-color: #f4bbb6;
+  background: #fff8f7;
+}
+
 .studio-grid {
   display: grid;
   grid-template-columns: minmax(360px, 0.85fr) minmax(520px, 1.15fr);
@@ -1454,6 +1730,42 @@ td {
 .report-info-grid strong {
   overflow-wrap: anywhere;
   font-size: 0.92rem;
+}
+
+.report-control-matrix {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid var(--border);
+  background: #f8fbfd;
+}
+
+.report-control-matrix article {
+  display: grid;
+  gap: 5px;
+  min-height: 96px;
+  padding: 12px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.report-control-matrix span {
+  color: #0e7490;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.report-control-matrix strong {
+  color: #111827;
+  font-size: 0.92rem;
+  text-transform: uppercase;
+}
+
+.report-control-matrix p {
+  margin: 0;
+  color: #516170;
+  font-size: 0.76rem;
+  line-height: 1.35;
 }
 
 .report-section {
@@ -1674,6 +1986,11 @@ td {
   .architecture-grid,
   .service-map,
   .pipeline-track,
+  .chat-insight-grid,
+  .workflow-runway,
+  .tool-action-grid,
+  .studio-ops-strip,
+  .report-control-matrix,
   .clear-tracker-grid,
   .readiness-grid,
   .tracker-meta-grid {
@@ -1725,9 +2042,15 @@ td {
   .architecture-grid,
   .service-map,
   .pipeline-track,
-  .task-facts,
+    .task-facts,
+    .command-dock,
+    .chat-insight-grid,
+    .workflow-runway,
+    .tool-action-grid,
+    .studio-ops-strip,
     .studio-field-grid,
     .report-info-grid,
+    .report-control-matrix,
     .report-two-column,
     .standard-format-grid,
     .ai-plan-list,
