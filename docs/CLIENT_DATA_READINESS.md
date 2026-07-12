@@ -43,7 +43,7 @@ $env:VITE_MONDAY_REPORT_API_KEY=$env:MONDAY_REPORT_API_KEY
 $env:MONDAY_REPORT_SIGNING_SECRET="<32+ random chars>"
 $env:MONDAY_REPORT_MALWARE_SCANNER="builtin"
 $env:MONDAY_REPORT_PRODUCTION_PARSERS="true"
-$env:MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST="<anonymized client fixture manifest>"
+$env:MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST="<reviewed anonymized client fixture manifest>"
 $env:MONDAY_REPORT_PARSER_EVAL_REPORT="<passing parser/OCR eval report>"
 ```
 
@@ -51,7 +51,7 @@ Startup creates only a neutral workspace. Failure records must come from uploade
 
 ## Fixture Evidence
 
-For a local client-readiness smoke, generate the 13-family anonymized engineering fixture pack and parser/OCR report:
+For a local readiness smoke, generate the 13-family anonymized engineering fixture pack and parser/OCR report:
 
 ```powershell
 pnpm run fixtures:anonymized
@@ -62,7 +62,21 @@ python scripts\generate_parser_fixture_eval_report.py --manifest $env:MONDAY_REP
 $env:MONDAY_REPORT_PARSER_EVAL_REPORT="$PWD\output\parser-evals\parser_fixture_eval_report.json"
 ```
 
-For production client intake, replace the generated fixture pack with a reviewed anonymized client fixture manifest and a passing parser/OCR eval report from that fixture set.
+Generated fixtures prove only local parser coverage. Production client intake requires a reviewed anonymized client fixture manifest with this top-level attestation:
+
+```json
+{
+  "attestation": {
+    "classification": "reviewed_anonymized_client_fixture",
+    "review_status": "approved",
+    "reviewed_by": "Client Fixture Review Board",
+    "reviewed_at": "2026-07-12T00:00:00Z",
+    "contains_client_confidential_data": false
+  }
+}
+```
+
+After replacing the generated pack, run a new parser/OCR eval report from that reviewed fixture set.
 
 ## Approval Command
 

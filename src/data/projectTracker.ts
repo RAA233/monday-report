@@ -106,8 +106,8 @@ export const projectPhases: ProjectPhase[] = [
     status: "in_progress",
     owner: "AI/data",
     objective: "Parse ZIP, PDF, Excel, Word, CSV, email, images, and scanned pages with source lineage.",
-    evidence: "Worker enforces ZIP entry and uncompressed-size limits, expands accepted ZIP packages safely, parses text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF child files, native PDF table rows, and configured OCR output into typed page/table/row/image-aware source chunks. Parser/OCR eval report readiness now blocks incomplete fixture evidence, and the generator produces readiness reports from anonymized manifests.",
-    nextAction: "Run the parser/OCR eval report generator against real anonymized fixtures and configure production OCR.",
+    evidence: "Worker enforces ZIP entry and uncompressed-size limits, expands accepted ZIP packages safely, parses text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF child files, native PDF table rows, and configured OCR output into typed page/table/row/image-aware source chunks. Parser/OCR eval readiness blocks incomplete fixture evidence, and real-client readiness requires reviewed fixture attestation.",
+    nextAction: "Run the parser/OCR eval report generator against reviewed anonymized fixtures and configure production OCR.",
     icon: FileSearch
   },
   {
@@ -173,9 +173,9 @@ export const clearTrackerLanes: TrackerLane[] = [
     id: "real-client-blockers",
     title: "Real-Client Blockers",
     status: "watch",
-    summary: "Local client-readiness can go green with active Postgres, Redis, and fixture evidence; production intake still needs reviewed client evidence.",
+    summary: "Local smoke tests can use active Postgres, Redis, and generated fixture evidence; real-client readiness still needs reviewed client evidence.",
     items: [
-      "Use reviewed anonymized client fixtures instead of generated engineering fixtures before production intake.",
+      "Use reviewed anonymized client fixtures with approved attestation instead of generated engineering fixtures before production intake.",
       "Replace the OCR shim used by local smoke tests with production Tesseract or an approved OCR command.",
       "Move upload/export roots to approved encrypted tenant storage.",
       "Set production API key, signing secret, retention policy, and external malware scanner posture.",
@@ -188,7 +188,7 @@ export const clearTrackerLanes: TrackerLane[] = [
     status: "pending",
     summary: "The next high-value work should convert the local MVP into production-grade ingestion and extraction.",
     items: [
-      "Build a manifest-backed golden fixture pack for DDR, BHA, MWD/LWD, RSS, mud motor, bit, mud, scanned PDF, Excel, email, corrupted, and duplicate files.",
+      "Build a reviewed manifest-backed golden fixture pack for DDR, BHA, MWD/LWD, RSS, mud motor, bit, mud, scanned PDF, Excel, email, corrupted, and duplicate files.",
       "Run `generate_parser_fixture_eval_report.py` and set `MONDAY_REPORT_PARSER_EVAL_REPORT` from the passing report.",
       "Harden OCR extraction on anonymized scanned-PDF fixtures and production engine configuration.",
       "Wire local LLM extraction router, strict schemas, confidence scoring, and metrics.",
@@ -350,7 +350,7 @@ export const testGates: TestGate[] = [
     name: "Production fixture expansion",
     status: "watch",
     command: "pnpm run audit:golden-fixtures",
-    lastResult: "Guard verifies missing, synthetic, and partial manifests do not certify readiness; a complete anonymized manifest with actual files passes the fixture check."
+    lastResult: "Guard verifies missing, synthetic, and partial manifests do not certify coverage; generated fixtures pass coverage only, while real-client readiness requires reviewed attestation."
   },
   {
     id: "gate-parser-fixture-evals",
@@ -371,7 +371,7 @@ export const testGates: TestGate[] = [
     name: "Anonymized fixture pack",
     status: "watch",
     command: "pnpm run fixtures:anonymized",
-    lastResult: "Generates a 13-family anonymized engineering fixture pack and manifest for local client-readiness smoke tests."
+    lastResult: "Generates a 13-family anonymized engineering fixture pack and manifest for local smoke tests only."
   },
   {
     id: "gate-client-readiness",

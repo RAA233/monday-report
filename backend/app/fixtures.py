@@ -9,6 +9,8 @@ from typing import Any
 
 GOLDEN_FIXTURE_MANIFEST_ENV = "MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST"
 ANONYMIZED_CLIENT_FIXTURE_MODE = "anonymized_client"
+REVIEWED_CLIENT_FIXTURE_CLASSIFICATION = "reviewed_anonymized_client_fixture"
+APPROVED_FIXTURE_REVIEW_STATUSES = {"approved", "reviewed"}
 
 REQUIRED_GOLDEN_FIXTURE_FAMILIES: tuple[tuple[str, str], ...] = (
     ("ddr", "DDR"),
@@ -34,6 +36,8 @@ class GoldenFixtureReadiness:
     remediation: str
     manifest_path: str | None
     fixture_mode: str | None
+    reviewed_attestation: bool
+    attestation_detail: str
     covered_families: tuple[str, ...]
     missing_families: tuple[str, ...]
     invalid_families: tuple[str, ...]
@@ -43,8 +47,8 @@ def evaluate_golden_fixture_readiness() -> GoldenFixtureReadiness:
     manifest_value = os.getenv(GOLDEN_FIXTURE_MANIFEST_ENV, "").strip()
     required_ids = tuple(fixture_id for fixture_id, _ in REQUIRED_GOLDEN_FIXTURE_FAMILIES)
     remediation = (
-        "Create an anonymized client golden fixture manifest with real files for every required "
-        "family before enabling real client package intake."
+        "Create a reviewed anonymized client golden fixture manifest with real files for every "
+        "required family before enabling real client package intake."
     )
     if not manifest_value:
         return GoldenFixtureReadiness(
@@ -56,6 +60,8 @@ def evaluate_golden_fixture_readiness() -> GoldenFixtureReadiness:
             remediation=remediation,
             manifest_path=None,
             fixture_mode=None,
+            reviewed_attestation=False,
+            attestation_detail=f"{GOLDEN_FIXTURE_MANIFEST_ENV} is not configured.",
             covered_families=(),
             missing_families=required_ids,
             invalid_families=(),
@@ -69,6 +75,8 @@ def evaluate_golden_fixture_readiness() -> GoldenFixtureReadiness:
             remediation=remediation,
             manifest_path=str(manifest_path),
             fixture_mode=None,
+            reviewed_attestation=False,
+            attestation_detail="Golden fixture manifest is not available for attestation review.",
             covered_families=(),
             missing_families=required_ids,
             invalid_families=(),
@@ -83,12 +91,15 @@ def evaluate_golden_fixture_readiness() -> GoldenFixtureReadiness:
             remediation=remediation,
             manifest_path=str(manifest_path),
             fixture_mode=None,
+            reviewed_attestation=False,
+            attestation_detail="Golden fixture manifest is not readable for attestation review.",
             covered_families=(),
             missing_families=required_ids,
             invalid_families=(),
         )
 
     fixture_mode = str(payload.get("fixture_mode", "")).strip().lower()
+    reviewed_attestation, attestation_detail = _reviewed_attestation(payload)
     families = payload.get("families", [])
     family_items = families if isinstance(families, list) else []
     covered_ids: set[str] = set()
@@ -127,6 +138,8 @@ def evaluate_golden_fixture_readiness() -> GoldenFixtureReadiness:
         remediation=remediation,
         manifest_path=str(manifest_path),
         fixture_mode=fixture_mode or None,
+        reviewed_attestation=reviewed_attestation,
+        attestation_detail=attestation_detail,
         covered_families=covered_required,
         missing_families=missing_required,
         invalid_families=invalid_sorted,
@@ -163,3 +176,41 @@ def _family_has_existing_evidence(item: Any, manifest_root: Path) -> bool:
         if not evidence_path.exists() or not evidence_path.is_file():
             return False
     return True
+
+
+def _reviewed_attestation(payload: dict[str, Any]) -> tuple[bool, str]:
+    attestation = payload.get("attestation")
+    if not isinstance(attestation, dict):
+        return False, "Golden fixture manifest is missing a top-level attestation block."
+
+    classification = str(attestation.get("classification", "")).strip().lower()
+    review_status = str(attestation.get("review_status") or attestation.get("status") or "").strip().lower()
+    reviewed_by = str(attestation.get("reviewed_by", "")).strip()
+    reviewed_at = str(attestation.get("reviewed_at", "")).strip()
+    contains_confidential = attestation.get("contains_client_confidential_data")
+
+    ready = (
+        classification == REVIEWED_CLIENT_FIXTURE_CLASSIFICATION
+        and review_status in APPROVED_FIXTURE_REVIEW_STATUSES
+        and bool(reviewed_by)
+        and bool(reviewed_at)
+        and contains_confidential is False
+    )
+    if ready:
+        return (
+            True,
+            f"Reviewed anonymized client fixture attestation approved by {reviewed_by} at {reviewed_at}.",
+        )
+
+    missing: list[str] = []
+    if classification != REVIEWED_CLIENT_FIXTURE_CLASSIFICATION:
+        missing.append(f"classification={REVIEWED_CLIENT_FIXTURE_CLASSIFICATION!r}")
+    if review_status not in APPROVED_FIXTURE_REVIEW_STATUSES:
+        missing.append("review_status='approved'")
+    if not reviewed_by:
+        missing.append("reviewed_by")
+    if not reviewed_at:
+        missing.append("reviewed_at")
+    if contains_confidential is not False:
+        missing.append("contains_client_confidential_data=false")
+    return False, "Fixture attestation is not approved for real client data; missing " + ", ".join(missing) + "."

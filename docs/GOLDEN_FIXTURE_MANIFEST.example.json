@@ -1,6 +1,13 @@
 {
   "fixture_set": "client-anonymized-v1",
   "fixture_mode": "anonymized_client",
+  "attestation": {
+    "classification": "reviewed_anonymized_client_fixture",
+    "review_status": "approved",
+    "reviewed_by": "Client Fixture Review Board",
+    "reviewed_at": "2026-07-12T00:00:00Z",
+    "contains_client_confidential_data": false
+  },
   "parser_eval_report_env": "MONDAY_REPORT_PARSER_EVAL_REPORT",
   "families": [
     { "id": "ddr", "evidence_files": ["fixtures/ddr/anonymized_ddr.pdf"], "expected": { "parser": "pdf_text_v1", "locator_type": "pdf", "failure_extracted": true }, "notes": "Daily drilling report with failures and NPT evidence." },

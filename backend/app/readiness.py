@@ -244,6 +244,13 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
         fixture_readiness.detail,
         fixture_readiness.remediation,
     )
+    add(
+        "reviewed_fixture_attestation",
+        "Reviewed fixture attestation",
+        fixture_readiness.reviewed_attestation,
+        fixture_readiness.attestation_detail,
+        "Replace generated smoke fixtures with a reviewed anonymized client fixture manifest before approving real client data.",
+    )
 
     malware_status = evaluate_malware_scanner_status()
     add(

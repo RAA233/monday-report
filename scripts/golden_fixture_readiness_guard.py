@@ -28,12 +28,21 @@ def main() -> int:
 
         no_manifest = client.get("/readiness/client-data").json()
         no_manifest_check = readiness_check(no_manifest, "golden_fixture_coverage")
+        no_attestation_check = readiness_check(no_manifest, "reviewed_fixture_attestation")
         checks.append(
             assert_check(
                 "Golden fixtures block readiness without manifest",
                 no_manifest_check.get("status") == "warn"
                 and "not configured" in no_manifest_check.get("detail", ""),
                 no_manifest_check,
+            )
+        )
+        checks.append(
+            assert_check(
+                "Reviewed fixture attestation warns without manifest",
+                no_attestation_check.get("status") == "warn"
+                and "not configured" in no_attestation_check.get("detail", ""),
+                no_attestation_check,
             )
         )
 
@@ -56,22 +65,43 @@ def main() -> int:
             )
         )
 
-        complete_manifest = write_manifest(
+        generated_complete_manifest = write_manifest(
             tmp_root,
-            "anonymized-fixtures.json",
+            "generated-anonymized-fixtures.json",
             "anonymized_client",
             [(fixture_id, [f"fixtures/{fixture_id}.txt"]) for fixture_id, _ in REQUIRED_GOLDEN_FIXTURE_FAMILIES],
         )
-        os.environ["MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST"] = str(complete_manifest)
-        complete = client.get("/readiness/client-data").json()
-        complete_check = readiness_check(complete, "golden_fixture_coverage")
+        os.environ["MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST"] = str(generated_complete_manifest)
+        generated_complete = client.get("/readiness/client-data").json()
+        complete_check = readiness_check(generated_complete, "golden_fixture_coverage")
+        generated_attestation_check = readiness_check(generated_complete, "reviewed_fixture_attestation")
         checks.append(
             assert_check(
-                "Complete anonymized fixture manifest passes fixture check",
+                "Generated complete fixture manifest passes coverage only",
                 complete_check.get("status") == "pass"
                 and f"{len(REQUIRED_GOLDEN_FIXTURE_FAMILIES)}/{len(REQUIRED_GOLDEN_FIXTURE_FAMILIES)}"
                 in complete_check.get("detail", ""),
                 complete_check,
+            )
+        )
+        checks.append(
+            assert_check(
+                "Generated fixture manifest does not pass reviewed attestation",
+                generated_attestation_check.get("status") == "warn"
+                and "not approved for real client data" in generated_attestation_check.get("detail", ""),
+                generated_attestation_check,
+            )
+        )
+
+        os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
+        os.environ["MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST"] = str(generated_complete_manifest)
+        generated_client_mode = client.get("/readiness/client-data").json()
+        generated_client_attestation = readiness_check(generated_client_mode, "reviewed_fixture_attestation")
+        checks.append(
+            assert_check(
+                "Client mode fails closed on generated fixture attestation",
+                generated_client_attestation.get("status") == "fail" and generated_client_mode.get("ready") is False,
+                {"ready": generated_client_mode.get("ready"), "check": generated_client_attestation},
             )
         )
 
@@ -90,6 +120,25 @@ def main() -> int:
                 "Client mode fails closed on incomplete fixtures",
                 client_mode_check.get("status") == "fail" and client_mode.get("ready") is False,
                 {"ready": client_mode.get("ready"), "check": client_mode_check},
+            )
+        )
+
+        reviewed_manifest = write_manifest(
+            tmp_root,
+            "reviewed-anonymized-fixtures.json",
+            "anonymized_client",
+            [(fixture_id, [f"reviewed/{fixture_id}.txt"]) for fixture_id, _ in REQUIRED_GOLDEN_FIXTURE_FAMILIES],
+            reviewed=True,
+        )
+        os.environ["MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST"] = str(reviewed_manifest)
+        reviewed = client.get("/readiness/client-data").json()
+        reviewed_check = readiness_check(reviewed, "reviewed_fixture_attestation")
+        checks.append(
+            assert_check(
+                "Reviewed anonymized fixture manifest passes attestation",
+                reviewed_check.get("status") == "pass"
+                and "approved by" in reviewed_check.get("detail", ""),
+                reviewed_check,
             )
         )
 
@@ -119,6 +168,8 @@ def write_manifest(
     name: str,
     fixture_mode: str,
     families: list[tuple[str, list[str]]],
+    *,
+    reviewed: bool = False,
 ) -> Path:
     for _, evidence_files in families:
         for relative_path in evidence_files:
@@ -128,6 +179,20 @@ def write_manifest(
     manifest = {
         "fixture_set": name.replace(".json", ""),
         "fixture_mode": fixture_mode,
+        "attestation": (
+            {
+                "classification": "reviewed_anonymized_client_fixture",
+                "review_status": "approved",
+                "reviewed_by": "Fixture Review Board",
+                "reviewed_at": "2026-07-12T00:00:00Z",
+                "contains_client_confidential_data": False,
+            }
+            if reviewed
+            else {
+                "classification": "generated_anonymized_engineering_fixture",
+                "contains_client_confidential_data": False,
+            }
+        ),
         "families": [
             {
                 "id": fixture_id,

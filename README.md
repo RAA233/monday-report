@@ -15,13 +15,13 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 - Validation API updates extracted records, Monday Report API creates report JSON, and export API blocks unresolved official exports before writing hashed JSON/CSV/HTML/PDF/XLSX artifacts with signed download URLs.
 - Client-data readiness endpoint and tracker panel flag demo/local-scaffold blockers before real client packages are accepted, enforce retention policy, require real active infrastructure adapters, and unsafe client mode requires an API key while blocking data reads, chat, report creation, and exports until ready.
 - Local AI defaults to Ollama with `gemma4:e2b`; readiness verifies both endpoint reachability and the pinned model.
-- Parser/OCR fixture eval readiness requires a passing `MONDAY_REPORT_PARSER_EVAL_REPORT` before parser coverage can be treated as real-client ready; generate it with `python scripts/generate_parser_fixture_eval_report.py --manifest path/to/golden-fixture-manifest.json --output output/parser-evals/parser_fixture_eval_report.json`.
-- `fixtures:anonymized` creates a generated 13-family fixture pack for local client-readiness smoke tests; production client intake should replace it with reviewed anonymized client fixtures.
+- Parser/OCR fixture eval readiness requires a passing `MONDAY_REPORT_PARSER_EVAL_REPORT`; real-client approval also requires the referenced fixture manifest to carry a reviewed anonymized-client attestation.
+- `fixtures:anonymized` creates a generated 13-family fixture pack for local smoke tests only; production client intake must use reviewed anonymized client fixtures, not generated evidence.
 - Partner preview packaging creates one ZIP with the built web app, backend, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.
 - Client-data approval tooling writes an explicit approved/blocked evidence report from the live readiness endpoint.
 - Runtime backend status exposes requested versus active repository and queue adapters so PostgreSQL/Redis environment variables cannot masquerade as implemented infrastructure.
 - Fresh environments start without seeded failure records; set client tenant/user identity with environment variables before the first API start.
-- Seed drilling failure/NPT dataset with companies, wells, rigs, BHA/tool context, severity, confidence, validation status, cost impact, and source citations.
+- Extract drilling failure/NPT records from uploaded evidence with companies, wells, rigs, BHA/tool context, severity, confidence, validation status, cost impact, and source citations.
 - Deterministic analyst-chat behavior for clear questions, ambiguous comparisons, unsupported prediction requests, risk questions, repeated tools, NPT, and exports.
 - Filter system shared by explorer and chat: query, date, company, tool, severity, and validation state.
 - Rule-based risk scoring for companies and tool serials.
@@ -125,11 +125,11 @@ The output is `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.j
 
 - Replace local JSON state with PostgreSQL repositories and Redis-backed workers.
 - Replace local file storage with production object storage and queued Python parser workers.
-- Harden OCR/PDF extraction on anonymized fixtures, configure a production OCR engine, and complete customer-grade golden fixture coverage using `docs/GOLDEN_FIXTURE_MANIFEST.example.json`; then run `generate_parser_fixture_eval_report.py` and set `MONDAY_REPORT_PARSER_EVAL_REPORT` to the passing report.
+- Harden OCR/PDF extraction on reviewed anonymized client fixtures, configure a production OCR engine, and complete customer-grade golden fixture coverage using `docs/GOLDEN_FIXTURE_MANIFEST.example.json`; then run `generate_parser_fixture_eval_report.py` and set `MONDAY_REPORT_PARSER_EVAL_REPORT` to the passing report.
 - Add Postgres migrations from `db/schema.sql`.
 - Add auth/SSO, tenant-aware request context, persistent audit hardening, and source preview authorization.
 - Replace deterministic extraction with local LLM provider abstraction and evaluation sets before using customer data.
 - Keep `gemma4:e2b` installed in Ollama for partner testing, or override `MONDAY_REPORT_LOCAL_LLM_MODEL` only after the replacement model is audited.
 - Polish production PDF/XLSX templates and signed export presentation.
-- Set `MONDAY_REPORT_CLIENT_DATA_MODE=client` only after `/readiness/client-data` reports ready.
+- Set `MONDAY_REPORT_CLIENT_DATA_MODE=client` only after `/readiness/client-data` reports ready with reviewed fixture attestation.
 - For clean client bootstrap, set `MONDAY_REPORT_TENANT_NAME`, `MONDAY_REPORT_TENANT_SLUG`, `MONDAY_REPORT_USER_EMAIL`, and `MONDAY_REPORT_USER_FULL_NAME` before the first API start. Default startup creates a neutral workspace only; failure records are created from uploaded evidence.
