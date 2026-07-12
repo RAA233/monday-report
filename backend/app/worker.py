@@ -4,11 +4,10 @@ from .store import store
 
 
 def run_once() -> dict[str, int]:
-    """Process queued demo jobs once.
+    """Process queued ingestion jobs once.
 
-    This placeholder marks jobs complete and gives the real worker pipeline a
-    stable entrypoint for ZIP extraction, parser, OCR, chunking, local AI
-    classification, extraction, citation mapping, and validation routing.
+    The store pipeline performs ZIP extraction, parser/OCR routing, chunking,
+    failure extraction, citation mapping, and validation routing.
     """
 
     return {"processed": store.process_queued_jobs()}

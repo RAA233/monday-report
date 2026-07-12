@@ -50,7 +50,7 @@ def main() -> int:
                 client,
                 workspace.id,
                 "lineage/npt_events.csv",
-                b"date,company,event,npt_hours\n2026-07-06,ABC Directional Services,MWD signal loss,8.5\n",
+                b"date,company,event,npt_hours\n2026-07-06,Anonymized Directional Services,MWD signal loss,8.5\n",
                 "text/csv",
             ),
             upload_file(
@@ -60,7 +60,7 @@ def main() -> int:
                 build_xlsx_fixture(
                     [
                         ["date", "company", "event", "npt_hours"],
-                        ["2026-07-06", "ABC Directional Services", "MWD signal loss", "8.5"],
+                        ["2026-07-06", "Anonymized Directional Services", "MWD signal loss", "8.5"],
                     ]
                 ),
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -70,7 +70,7 @@ def main() -> int:
                 workspace.id,
                 "lineage/daily_summary.docx",
                 build_docx_fixture(
-                    "Daily summary confirms ABC Directional Services MWD signal loss and POOH."
+                    "Daily summary confirms Anonymized Directional Services MWD signal loss and POOH."
                 ),
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             ),
@@ -84,7 +84,7 @@ def main() -> int:
                     "Subject: Monday Report lineage update\r\n"
                     "Content-Type: text/plain; charset=utf-8\r\n"
                     "\r\n"
-                    "Email note: ABC Directional Services reported MWD signal loss with 8.5 NPT hours.\r\n"
+                    "Email note: Anonymized Directional Services reported MWD signal loss with 8.5 NPT hours.\r\n"
                 ).encode("utf-8"),
                 "message/rfc822",
             ),

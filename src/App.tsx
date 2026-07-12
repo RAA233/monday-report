@@ -22,13 +22,19 @@ import { UploadPanel } from "./components/UploadPanel";
 import { ValidationQueue } from "./components/ValidationQueue";
 import {
   defaultFilters,
-  sampleFailures,
   type FailureEvent,
   type FilterState,
   type UploadInventoryItem,
   type ValidationStatus
 } from "./data/domain";
-import { getSession, getWorkspaces, type ApiSession } from "./lib/api";
+import {
+  getFailures,
+  getSession,
+  getWorkspaces,
+  type ApiCitation,
+  type ApiFailureRecord,
+  type ApiSession
+} from "./lib/api";
 import { summarizeMetrics } from "./lib/analytics";
 
 type ViewKey = "dashboard" | "upload" | "chat" | "explorer" | "validation" | "tracker" | "architecture";
@@ -49,7 +55,7 @@ const navItems: Array<{
 
 export function App(): JSX.Element {
   const [activeView, setActiveView] = useState<ViewKey>("chat");
-  const [events, setEvents] = useState<FailureEvent[]>(sampleFailures);
+  const [events, setEvents] = useState<FailureEvent[]>([]);
   const [filters, setFilters] = useState<FilterState>(defaultFilters);
   const [inventory, setInventory] = useState<UploadInventoryItem[]>([]);
   const [apiSession, setApiSession] = useState<ApiSession | null>(null);
@@ -62,12 +68,17 @@ export function App(): JSX.Element {
 
     async function loadApiContext(): Promise<void> {
       try {
-        const [session, workspaces] = await Promise.all([getSession(), getWorkspaces()]);
+        const [session, workspaces, failures] = await Promise.all([
+          getSession(),
+          getWorkspaces(),
+          getFailures()
+        ]);
         if (!isMounted) {
           return;
         }
         setApiSession(session);
         setApiWorkspaceId(workspaces[0]?.id ?? null);
+        setEvents(failures.map(mapFailureRecord));
         setApiStatus("connected");
       } catch {
         if (isMounted) {
@@ -123,7 +134,7 @@ export function App(): JSX.Element {
 
         <section className="tenant-card" aria-label="Tenant status">
           <span>Tenant</span>
-          <strong>NorthStar Drilling</strong>
+          <strong>{apiSession?.tenant.name ?? "Not connected"}</strong>
           <Badge tone="good">isolated</Badge>
         </section>
       </aside>
@@ -145,6 +156,13 @@ export function App(): JSX.Element {
         </header>
 
         <SecurityStrip />
+
+        {apiStatus === "connected" && events.length === 0 && (
+          <section className="empty-state" aria-live="polite">
+            <strong>No extracted failures yet.</strong>
+            <p>Upload and process client-approved evidence to populate the workspace.</p>
+          </section>
+        )}
 
         {activeView === "dashboard" && <Dashboard events={events} />}
         {activeView === "upload" && (
@@ -172,4 +190,60 @@ export function App(): JSX.Element {
       </div>
     </div>
   );
+}
+
+function mapFailureRecord(record: ApiFailureRecord): FailureEvent {
+  return {
+    id: record.id,
+    eventType: record.event_type,
+    eventDate: "Unspecified",
+    well: "Unspecified",
+    rig: "Unspecified",
+    section: "Unspecified",
+    holeSizeIn: 0,
+    depthMdFt: 0,
+    formation: "Unspecified",
+    company: record.company || "Unspecified",
+    toolType: record.tool_type || "Unspecified",
+    toolName: "Unspecified",
+    toolSerial: record.tool_serial || "Unspecified",
+    summary: record.summary,
+    rootCause: "Not extracted",
+    recommendation: "Review source citations before action.",
+    nptHours: record.npt_hours,
+    costImpactUsd: 0,
+    severity: record.severity,
+    confidence: record.confidence,
+    validationStatus: mapValidationStatus(record.validation_status),
+    citations: record.citations.map(mapCitation)
+  };
+}
+
+function mapValidationStatus(status: ApiFailureRecord["validation_status"]): ValidationStatus {
+  if (status === "validated" || status === "rejected" || status === "conflict") {
+    return status;
+  }
+  return "needs_review";
+}
+
+function mapCitation(citation: ApiCitation): FailureEvent["citations"][number] {
+  const locator = citation.locator ?? {};
+  const page = typeof locator.page === "number" ? locator.page : undefined;
+  const row = typeof locator.row === "number" ? locator.row : undefined;
+  const sheet = typeof locator.sheet === "string" ? locator.sheet : undefined;
+  const file =
+    typeof locator.file_path === "string"
+      ? locator.file_path
+      : citation.file_id
+        ? `file:${citation.file_id}`
+        : "Source file";
+
+  return {
+    id: citation.id,
+    file,
+    page,
+    sheet,
+    row,
+    snippet: citation.snippet
+  };
 }

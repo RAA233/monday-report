@@ -1,4 +1,5 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+const API_KEY = import.meta.env.VITE_MONDAY_REPORT_API_KEY as string | undefined;
 
 export interface ApiTenant {
   id: string;
@@ -385,6 +386,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     ...init,
     headers: {
       ...(isMultipart ? {} : { "Content-Type": "application/json" }),
+      ...(API_KEY ? { "X-Monday-Report-Key": API_KEY } : {}),
       ...init.headers
     }
   });

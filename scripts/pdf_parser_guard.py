@@ -102,7 +102,7 @@ def main() -> int:
                 len(table_chunks) == 1
                 and table_chunks[0].get("locator", {}).get("page") == 2
                 and "NPT Hours: 6.25" in table_chunks[0].get("text", "")
-                and "ABC Directional Services" in table_chunks[0].get("text", ""),
+                and "Anonymized Directional Services" in table_chunks[0].get("text", ""),
                 table_chunks,
             )
         )
@@ -117,7 +117,7 @@ def main() -> int:
                 "PDF evidence can drive cited failure extraction",
                 any(
                     failure.get("event_type") == "MWD signal loss"
-                    and failure.get("company") == "ABC Directional Services"
+                    and failure.get("company") == "Anonymized Directional Services"
                     and abs(float(failure.get("npt_hours", 0)) - 6.25) < 0.01
                     and any(citation.get("locator", {}).get("table") == 1 for citation in failure.get("citations", []))
                     for failure in failures
@@ -193,7 +193,7 @@ def draw_npt_table(page) -> None:
 
     values = [
         ["Date", "Company", "Event", "NPT Hours"],
-        ["2026-07-06", "ABC Directional Services", "MWD signal loss", "6.25"],
+        ["2026-07-06", "Anonymized Directional Services", "MWD signal loss", "6.25"],
     ]
     for row_index, row in enumerate(values):
         for column_index, value in enumerate(row):

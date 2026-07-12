@@ -25,7 +25,7 @@ def main() -> int:
         check_no_stale_branding(),
         check_http("Frontend dev server", WEB_BASE),
         check_json("API health", f"{API_BASE}/health", "status", "ok"),
-        check_json("API session", f"{API_BASE}/auth/session", "tenant.name", "NorthStar Drilling"),
+        check_json("API session", f"{API_BASE}/auth/session", "tenant.name", "Monday Report Tenant"),
         check_json("Client data readiness endpoint", f"{API_BASE}/readiness/client-data", "status", "not_ready"),
         check_json("Local AI status endpoint", f"{API_BASE}/local-ai/status", "hosted_fallback_enabled", False),
         check_json("Audit integrity endpoint", f"{API_BASE}/audit-logs/integrity", "broken_events", 0),
@@ -211,7 +211,7 @@ def check_processing_workflow() -> dict[str, object]:
         and sum(document.get("chunk_count", 0) for document in matching_documents) == len(chunks)
         and any(
             failure.get("event_type") == "MWD signal loss"
-            and failure.get("company") == "ABC Directional Services"
+            and failure.get("company") == "Anonymized Directional Services"
             and abs(float(failure.get("npt_hours", 0)) - 8.5) < 0.01
             for failure in matching_failures
         )
@@ -252,14 +252,14 @@ def build_zip_fixture() -> bytes:
         )
         archive.writestr(
             "tables/npt_events.csv",
-            "date,company,event,npt_hours\n2026-07-06,ABC Directional Services,MWD signal loss,8.5\n",
+            "date,company,event,npt_hours\n2026-07-06,Anonymized Directional Services,MWD signal loss,8.5\n",
         )
         archive.writestr(
             "tables/service_quality.xlsx",
             build_xlsx_fixture(
                 [
                     ["date", "company", "event", "npt_hours"],
-                    ["2026-07-06", "ABC Directional Services", "MWD signal loss", "8.5"],
+                    ["2026-07-06", "Anonymized Directional Services", "MWD signal loss", "8.5"],
                 ]
             ),
         )
@@ -272,7 +272,7 @@ def build_zip_fixture() -> bytes:
         archive.writestr(
             "reports/pdf_ddr_2026_07_06.pdf",
             build_pdf_fixture(
-                "PDF DDR confirms ABC Directional Services MWD signal loss with npt_hours 8.5."
+                "PDF DDR confirms Anonymized Directional Services MWD signal loss with npt_hours 8.5."
             ),
         )
         archive.writestr(
@@ -283,7 +283,7 @@ def build_zip_fixture() -> bytes:
                 "Subject: Monday Report MWD update\r\n"
                 "Content-Type: text/plain; charset=utf-8\r\n"
                 "\r\n"
-                "Email note: ABC Directional Services reported MWD signal loss with 8.5 NPT hours.\r\n"
+                "Email note: Anonymized Directional Services reported MWD signal loss with 8.5 NPT hours.\r\n"
             ).encode("utf-8"),
         )
         archive.writestr("images/scanned_ddr_page.png", build_png_fixture())

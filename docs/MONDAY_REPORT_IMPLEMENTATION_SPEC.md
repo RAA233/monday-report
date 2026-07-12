@@ -58,7 +58,7 @@ Monday Report solves this by turning a mixed rig-report package into a local-AI-
 ### Exact Happy Path
 
 1. Login as drilling engineer.
-2. Select tenant `NorthStar Drilling` and workspace `Gulf Campaign - Week 27`.
+2. Select the configured client tenant and reporting workspace.
 3. Upload `week_27_rig_reports.zip`.
 4. Upload service stores the ZIP, computes SHA-256, starts `processing_jobs`.
 5. Workers unzip, inventory files, parse text/tables, OCR scanned pages, classify DDR/BHA/MWD/LWD/RSS/mud motor/bit/mud/NPT/email records.
@@ -517,17 +517,17 @@ All tenant-owned tables include `tenant_id uuid not null references tenants(id)`
 
 | Table | Columns and Types | PK/FK | Indexes | Constraints and Tenant Strategy | Example Row |
 |---|---|---|---|---|---|
-| `tenants` | `id uuid`, `name text`, `slug text`, `region text`, `plan text`, `local_llm_policy jsonb`, `retention_days int`, `encryption_key_ref text` | PK `id` | unique `slug` | root tenant table; no RLS by tenant but admin guarded | `{name:"NorthStar Drilling", slug:"northstar", region:"ksa"}` |
+| `tenants` | `id uuid`, `name text`, `slug text`, `region text`, `plan text`, `local_llm_policy jsonb`, `retention_days int`, `encryption_key_ref text` | PK `id` | unique `slug` | root tenant table; no RLS by tenant but admin guarded | `{name:"Client Tenant", slug:"client-tenant", region:"region"}` |
 | `users` | `id uuid`, `tenant_id uuid`, `email citext`, `full_name text`, `auth_provider_id text`, `status text` | PK `id`, FK tenant | unique `(tenant_id,email)` | status in active/disabled/invited | `{email:"drilling@northstar.com", status:"active"}` |
 | `roles` | `id uuid`, `tenant_id uuid`, `name text`, `permissions jsonb` | PK `id`, FK tenant | unique `(tenant_id,name)` | allowed names admin/engineer/validator/manager/viewer | `{name:"validator"}` |
-| `workspaces` | `id uuid`, `tenant_id uuid`, `name text`, `asset text`, `campaign text`, `period_start date`, `period_end date`, `status text` | PK `id`, FK tenant | `(tenant_id,status)`, `(tenant_id,period_start)` | tenant RLS, active/archived | `{name:"Gulf Campaign W27"}` |
+| `workspaces` | `id uuid`, `tenant_id uuid`, `name text`, `asset text`, `campaign text`, `period_start date`, `period_end date`, `status text` | PK `id`, FK tenant | `(tenant_id,status)`, `(tenant_id,period_start)` | tenant RLS, active/archived | `{name:"Weekly operations workspace"}` |
 | `wells` | `id uuid`, `tenant_id uuid`, `workspace_id uuid`, `name text`, `field text`, `country text`, `aliases text[]` | PK `id`, FK tenant/workspace | `(tenant_id,name)` | unique canonical name per tenant when possible | `{name:"Well-A12", aliases:["A-12"]}` |
 | `rigs` | `id uuid`, `tenant_id uuid`, `workspace_id uuid`, `name text`, `contractor text`, `rig_type text`, `aliases text[]` | PK `id`, FK tenant/workspace | `(tenant_id,name)` | tenant RLS | `{name:"Rig-07", contractor:"Desert Drilling"}` |
 | `uploads` | `id uuid`, `tenant_id uuid`, `workspace_id uuid`, `submitted_by uuid`, `source_type text`, `status text`, `manifest jsonb` | PK `id`, FK tenant/workspace/user | `(tenant_id,workspace_id,status)` | source_type zip/folder/files | `{source_type:"zip", status:"processing"}` |
 | `files` | `id uuid`, `tenant_id uuid`, `upload_id uuid`, `original_path text`, `storage_uri text`, `sha256 text`, `mime_type text`, `byte_size bigint`, `status text`, `malware_status text` | PK `id`, FK tenant/upload | unique `(tenant_id,sha256)`, `(tenant_id,upload_id)` | immutable original path; tenant RLS | `{original_path:"DDR_2026-07-01.pdf", status:"parsed"}` |
 | `report_documents` | `id uuid`, `tenant_id uuid`, `workspace_id uuid`, `file_id uuid`, `well_id uuid`, `rig_id uuid`, `report_type text`, `report_date date`, `title text`, `classification_confidence numeric` | PK `id`, FKs | `(tenant_id,report_type)`, `(tenant_id,report_date)` | report_type enum-like text | `{report_type:"DDR", report_date:"2026-07-01"}` |
 | `report_chunks` | `id uuid`, `tenant_id uuid`, `report_document_id uuid`, `file_id uuid`, `chunk_text text`, `source_locator jsonb`, `embedding vector(1536)`, `tsv tsvector`, `parser_confidence numeric` | PK `id`, FKs | GIN `tsv`, HNSW `embedding`, `(tenant_id,report_document_id)` | source_locator required | `{source_locator:{page:3}, chunk_text:"Lost MWD signal..."}` |
-| `companies` | `id uuid`, `tenant_id uuid`, `canonical_name text`, `aliases text[]`, `role_types text[]`, `validation_status text` | PK `id`, FK tenant | unique `(tenant_id,canonical_name)`, GIN aliases | canonical edits audited | `{canonical_name:"ABC Directional Services"}` |
+| `companies` | `id uuid`, `tenant_id uuid`, `canonical_name text`, `aliases text[]`, `role_types text[]`, `validation_status text` | PK `id`, FK tenant | unique `(tenant_id,canonical_name)`, GIN aliases | canonical edits audited | `{canonical_name:"Directional Service Provider"}` |
 | `tools` | `id uuid`, `tenant_id uuid`, `tool_type text`, `manufacturer text`, `model text`, `size_label text`, `aliases text[]` | PK `id`, FK tenant | `(tenant_id,tool_type)`, GIN aliases | tool_type MWD/LWD/RSS/mud_motor/bit/BHA/etc. | `{tool_type:"MWD", model:"PulsePro X"}` |
 | `tool_instances` | `id uuid`, `tenant_id uuid`, `tool_id uuid`, `provider_company_id uuid`, `serial_number text`, `configuration jsonb` | PK `id`, FKs | unique `(tenant_id,serial_number)` | serial can be unknown but then not unique | `{serial_number:"MWD-77821"}` |
 | `extracted_entities` | `id uuid`, `tenant_id uuid`, `report_document_id uuid`, `entity_type text`, `normalized_value text`, `raw_value text`, `confidence numeric`, `citation_id uuid` | PK `id`, FKs | `(tenant_id,entity_type,normalized_value)` | raw and normalized retained | `{entity_type:"company", raw_value:"ABC Dir Svc"}` |
@@ -619,7 +619,7 @@ Validation: confidence below 0.70 requires validation_warnings.
 ```text
 System: Extract rig, well, operator, contractor, and service-company entities from drilling evidence. Return strict JSON and do not normalize beyond obvious whitespace/case.
 Fields: well_name, well_aliases, rig_name, rig_contractor, operator, service_companies[{raw_name,role_type}], confidence, citations.
-Example: "ABC Directional Services on location for MWD/RSS" -> service company role "directional/MWD/RSS provider".
+Example: "Directional service provider on location for MWD/RSS" -> service company role "directional/MWD/RSS provider".
 Validation: if multiple companies could be responsible for NPT, set responsibility:"unknown" and conflict:true.
 ```
 
@@ -853,7 +853,7 @@ Example flows:
 {
   "title": "Monday Report",
   "period": {"start": "2026-07-01", "end": "2026-07-07"},
-  "workspace": {"name": "Gulf Campaign W27", "wells": [], "rigs": []},
+  "workspace": {"name": "Weekly operations workspace", "wells": [], "rigs": []},
   "executive_summary": [{"text": "...", "citation_ids": [], "confidence": 0.91}],
   "key_operational_highlights": [],
   "failure_summary": [],
@@ -937,10 +937,10 @@ Golden fixture dataset:
 - Corrupted file.
 - Duplicate file.
 
-## 20. Demo Script
+## 20. Validation Script
 
 1. Login as drilling engineer.
-2. Select `Gulf Campaign W27`.
+2. Select the configured reporting workspace.
 3. Upload mixed rig-report ZIP.
 4. Show inventory: DDR, BHA, MWD/LWD, RSS, mud motor, bit, mud, NPT, scanned PDF, Excel, email.
 5. Show processing pipeline and OCR-routed scanned report.

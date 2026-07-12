@@ -269,6 +269,13 @@ export const testGates: TestGate[] = [
     lastResult: "Guard verifies chat citations can request signed source-file URLs and expose a visible source link/status."
   },
   {
+    id: "gate-runtime-mock-data",
+    name: "Runtime mock-data removal",
+    status: "pass",
+    command: "pnpm run audit:runtime-mock-data",
+    lastResult: "Guard verifies runtime source starts from live API failures only and blocks reintroduced seeded sample records."
+  },
+  {
     id: "gate-pdf-parser",
     name: "PDF text parser",
     status: "pass",

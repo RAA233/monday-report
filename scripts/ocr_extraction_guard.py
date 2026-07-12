@@ -26,7 +26,7 @@ def main() -> int:
                     "if '--version' in sys.argv:",
                     "    print('fake-tesseract 1.0')",
                     "    raise SystemExit(0)",
-                    "print('OCR DDR: ABC Directional Services MWD signal loss. npt_hours 6.25. POOH to replace MWD tool.')",
+                    "print('OCR DDR: Anonymized Directional Services MWD signal loss. npt_hours 6.25. POOH to replace MWD tool.')",
                     "",
                 ]
             ),
@@ -118,7 +118,7 @@ def main() -> int:
             assert_check(
                 "OCR text feeds failure extraction",
                 len(failures) == 1
-                and failures[0].company == "ABC Directional Services"
+                and failures[0].company == "Anonymized Directional Services"
                 and failures[0].npt_hours == 6.25
                 and any(citation.locator_type == "image" for citation in failures[0].citations),
                 [failure.model_dump(mode="json") for failure in failures],

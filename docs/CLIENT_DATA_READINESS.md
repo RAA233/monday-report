@@ -31,17 +31,23 @@ $env:MONDAY_REPORT_REPOSITORY_BACKEND="postgres"
 $env:DATABASE_URL="postgresql://monday_report:monday_report_local_only@127.0.0.1:55432/monday_report"
 $env:MONDAY_REPORT_QUEUE_BACKEND="redis"
 $env:REDIS_URL="redis://127.0.0.1:56379/0"
-$env:MONDAY_REPORT_DISABLE_DEMO_SEED="true"
+$env:MONDAY_REPORT_TENANT_NAME="<client tenant name>"
+$env:MONDAY_REPORT_TENANT_SLUG="<client-tenant-slug>"
+$env:MONDAY_REPORT_USER_EMAIL="<reviewer email>"
+$env:MONDAY_REPORT_USER_FULL_NAME="<reviewer name>"
 $env:MONDAY_REPORT_STATE_PATH="$env:LOCALAPPDATA\MondayReport\state\state.json"
 $env:MONDAY_REPORT_STORAGE_ROOT="$env:LOCALAPPDATA\MondayReport\storage"
 $env:MONDAY_REPORT_EXPORT_ROOT="$env:LOCALAPPDATA\MondayReport\exports"
 $env:MONDAY_REPORT_API_KEY="<24+ random chars>"
+$env:VITE_MONDAY_REPORT_API_KEY=$env:MONDAY_REPORT_API_KEY
 $env:MONDAY_REPORT_SIGNING_SECRET="<32+ random chars>"
 $env:MONDAY_REPORT_MALWARE_SCANNER="builtin"
 $env:MONDAY_REPORT_PRODUCTION_PARSERS="true"
 $env:MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST="<anonymized client fixture manifest>"
 $env:MONDAY_REPORT_PARSER_EVAL_REPORT="<passing parser/OCR eval report>"
 ```
+
+Startup creates only a neutral workspace. Failure records must come from uploaded evidence or explicit fixture/eval commands.
 
 ## Fixture Evidence
 

@@ -177,7 +177,7 @@ def write_fake_ocr(tmp_root: Path) -> Path:
                 "if '--version' in sys.argv:",
                 "    print('fake-tesseract 1.0')",
                 "    raise SystemExit(0)",
-                "print('OCR DDR: ABC Directional Services MWD signal loss. npt_hours 6.25. POOH to replace MWD tool.')",
+                "print('OCR DDR: Anonymized Directional Services MWD signal loss. npt_hours 6.25. POOH to replace MWD tool.')",
                 "",
             ]
         ),
@@ -188,7 +188,7 @@ def write_fake_ocr(tmp_root: Path) -> Path:
 
 def build_eval_fixtures() -> list[EvalFixture]:
     ddr_pdf = build_pdf_fixture(
-        "DDR: ABC Directional Services MWD signal loss with npt_hours 8.5. POOH and replace MWD tool."
+        "DDR: Anonymized Directional Services MWD signal loss with npt_hours 8.5. POOH and replace MWD tool."
     )
     return [
         EvalFixture("ddr", "fixtures/ddr/anonymized_ddr.pdf", ddr_pdf, "application/pdf", "pdf_text_v1", "pdf", True),
@@ -243,7 +243,7 @@ def build_eval_fixtures() -> list[EvalFixture]:
         EvalFixture(
             "npt_report",
             "fixtures/npt/anonymized_npt.csv",
-            b"date,company,event,npt_hours\n2026-07-06,ABC Directional Services,MWD communication issue,3.0\n",
+            b"date,company,event,npt_hours\n2026-07-06,Anonymized Directional Services,MWD communication issue,3.0\n",
             "text/csv",
             "csv_text_v1",
             "csv",
@@ -260,7 +260,7 @@ def build_eval_fixtures() -> list[EvalFixture]:
         EvalFixture(
             "excel_workbook",
             "fixtures/excel/anonymized_service_quality.xlsx",
-            build_xlsx_fixture([["date", "company", "score"], ["2026-07-06", "ABC Directional Services", "92"]]),
+            build_xlsx_fixture([["date", "company", "score"], ["2026-07-06", "Anonymized Directional Services", "92"]]),
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "xlsx_text_v1",
             "excel",

@@ -228,7 +228,7 @@ def build_unsafe_zip() -> bytes:
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("../../escape/NUL.txt", b"reserved name should stay in tenant storage")
         archive.writestr("C:\\absolute\\tool.log", b"windows absolute-ish path should be sanitized")
-        archive.writestr("safe/ddr.txt", b"MWD signal loss. npt_hours 2026-07-06,ABC Directional Services,MWD signal loss,8.5")
+        archive.writestr("safe/ddr.txt", b"MWD signal loss. npt_hours 2026-07-06,Anonymized Directional Services,MWD signal loss,8.5")
     return buffer.getvalue()
 
 

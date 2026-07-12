@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-The executable MVP path is now phase-gated end to end. It can bootstrap a clean client tenant without demo seed data, requires an API key in client mode, rejects oversized uploads at the API boundary, enforces configured ZIP entry and uncompressed-size limits, blocks unsafe client-mode data operations until readiness is green, refuses to treat placeholder PostgreSQL/Redis env vars as active infrastructure, exposes requested versus active runtime backends, persists local JSON state with atomic replace writes, stores accepted bytes under sanitized tenant-scoped paths, verifies SHA-256, applies configurable retention to expired data artifacts, requires explicit client-mode malware scanner configuration, blocks baseline malware signatures before processing, downloads uploaded source files through signed URLs, requires a real signing secret for client-mode signed URLs, defaults local AI to Ollama `gemma4:e2b` and verifies model availability, queues a worker job, safely expands ZIP packages, parses text/CSV/XLSX/DOCX/EML/PyMuPDF-backed PDF child files and native PDF table rows into typed document chunks, preserves page/table/row-aware PDF citations, routes image/scanned-PDF files to OCR review when unconfigured, extracts configured local OCR into `ocr_text_v1` chunks with image-page citations, evaluates parser/OCR fixture reports before parser coverage can certify readiness, extracts cited MWD signal-loss failures with NPT/company fields, opens and updates validation tasks, creates Monday Report JSON, blocks official exports while validation remains open, exports JSON/CSV/HTML/PDF/XLSX artifacts, downloads exports through signed URLs, answers chat with citations, records redacted hash-chain audit events, creates a single-file partner preview ZIP, and exposes explicit real-client readiness gates. Remaining work is production hardening: PostgreSQL repositories, Redis-backed jobs, production OCR configuration/evals, anonymized parser eval reports, local LLM extraction, polished report templates, and external malware scanning.
+The executable MVP path is now phase-gated end to end. It bootstraps a clean client tenant without startup failure records, requires an API key in client mode, rejects oversized uploads at the API boundary, enforces configured ZIP entry and uncompressed-size limits, blocks unsafe client-mode data operations until readiness is green, refuses to treat placeholder PostgreSQL/Redis env vars as active infrastructure, exposes requested versus active runtime backends, persists local JSON state with atomic replace writes, stores accepted bytes under sanitized tenant-scoped paths, verifies SHA-256, applies configurable retention to expired data artifacts, requires explicit client-mode malware scanner configuration, blocks baseline malware signatures before processing, downloads uploaded source files through signed URLs, requires a real signing secret for client-mode signed URLs, defaults local AI to Ollama `gemma4:e2b` and verifies model availability, queues a worker job, safely expands ZIP packages, parses text/CSV/XLSX/DOCX/EML/PyMuPDF-backed PDF child files and native PDF table rows into typed document chunks, preserves page/table/row-aware PDF citations, routes image/scanned-PDF files to OCR review when unconfigured, extracts configured local OCR into `ocr_text_v1` chunks with image-page citations, evaluates parser/OCR fixture reports before parser coverage can certify readiness, extracts cited MWD signal-loss failures with NPT/company fields, opens and updates validation tasks, creates Monday Report JSON, blocks official exports while validation remains open, exports JSON/CSV/HTML/PDF/XLSX artifacts, downloads exports through signed URLs, answers chat with citations, records redacted hash-chain audit events, creates a single-file partner preview ZIP, and exposes explicit real-client readiness gates. Remaining work is production hardening: PostgreSQL repositories, Redis-backed jobs, production OCR configuration/evals, anonymized parser eval reports, local LLM extraction, polished report templates, and external malware scanning.
 
 ## Clear Tracker Snapshot
 
@@ -41,6 +41,7 @@ Every implementation slice must pass these checks before it is considered accept
 - Source lineage guard: `pnpm run audit:source-lineage`
 - Citation format guard: `pnpm run audit:citation-format`
 - Source citation action guard: `pnpm run audit:source-citations`
+- Runtime mock-data guard: `pnpm run audit:runtime-mock-data`
 - Tracker clarity guard: `pnpm run audit:tracker-clarity`
 - Golden fixture readiness guard: `pnpm run audit:golden-fixtures`
 - Parser/OCR fixture eval guard: `pnpm run audit:parser-fixture-evals`
@@ -81,6 +82,7 @@ pnpm run audit:upload-idempotency
 pnpm run audit:source-lineage
 pnpm run audit:citation-format
 pnpm run audit:source-citations
+pnpm run audit:runtime-mock-data
 pnpm run audit:tracker-clarity
 pnpm run audit:golden-fixtures
 pnpm run audit:parser-fixture-evals
@@ -155,5 +157,5 @@ pnpm run audit:all
 - Partner preview package output: `output/package/Monday_Report_Partner_Preview.zip`; launcher defaults local AI to Ollama `gemma4:e2b`, starts API/web/worker loop, includes a sample ZIP import package, and ships an import/export smoke script.
 - Partner preview approval output: `output/package/Monday_Report_Partner_Preview_APPROVAL.md` and `.json`; scope is partner demo/testing with synthetic data only.
 - Client-data approval output: `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.json`; status remains `BLOCKED` until every `/readiness/client-data` check is passing.
-- `MONDAY_REPORT_DISABLE_DEMO_SEED=true` prevents seeded demo failures in a fresh client state path.
+- Fresh startup creates a neutral workspace only; failure records must come from uploaded evidence or explicit fixture/eval commands.
 - Every chat, upload, validation, report generation, signed URL, and admin policy action must produce an audit event.

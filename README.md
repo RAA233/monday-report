@@ -20,7 +20,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 - Partner preview packaging creates one ZIP with the built web app, backend, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.
 - Client-data approval tooling writes an explicit approved/blocked evidence report from the live readiness endpoint.
 - Runtime backend status exposes requested versus active repository and queue adapters so PostgreSQL/Redis environment variables cannot masquerade as implemented infrastructure.
-- Fresh environments can disable demo seed data and set client tenant/user identity with environment variables.
+- Fresh environments start without seeded failure records; set client tenant/user identity with environment variables before the first API start.
 - Seed drilling failure/NPT dataset with companies, wells, rigs, BHA/tool context, severity, confidence, validation status, cost impact, and source citations.
 - Deterministic analyst-chat behavior for clear questions, ambiguous comparisons, unsupported prediction requests, risk questions, repeated tools, NPT, and exports.
 - Filter system shared by explorer and chat: query, date, company, tool, severity, and validation state.
@@ -132,4 +132,4 @@ The output is `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.j
 - Keep `gemma4:e2b` installed in Ollama for partner testing, or override `MONDAY_REPORT_LOCAL_LLM_MODEL` only after the replacement model is audited.
 - Polish production PDF/XLSX templates and signed export presentation.
 - Set `MONDAY_REPORT_CLIENT_DATA_MODE=client` only after `/readiness/client-data` reports ready.
-- For clean client bootstrap, set `MONDAY_REPORT_DISABLE_DEMO_SEED=true`, `MONDAY_REPORT_TENANT_NAME`, `MONDAY_REPORT_TENANT_SLUG`, `MONDAY_REPORT_USER_EMAIL`, and `MONDAY_REPORT_USER_FULL_NAME` before the first API start.
+- For clean client bootstrap, set `MONDAY_REPORT_TENANT_NAME`, `MONDAY_REPORT_TENANT_SLUG`, `MONDAY_REPORT_USER_EMAIL`, and `MONDAY_REPORT_USER_FULL_NAME` before the first API start. Default startup creates a neutral workspace only; failure records are created from uploaded evidence.

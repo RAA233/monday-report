@@ -101,16 +101,8 @@ class LocalStateStore:
         self.state_path = Path(os.getenv("MONDAY_REPORT_STATE_PATH", default_path))
         self.storage_root = Path(os.getenv("MONDAY_REPORT_STORAGE_ROOT", default_storage_root))
         self.export_root = Path(os.getenv("MONDAY_REPORT_EXPORT_ROOT", default_export_root))
-        self.tenant = Tenant(
-            name=os.getenv("MONDAY_REPORT_TENANT_NAME", "NorthStar Drilling"),
-            slug=os.getenv("MONDAY_REPORT_TENANT_SLUG", "northstar"),
-        )
-        self.user = User(
-            tenant_id=self.tenant.id,
-            email=os.getenv("MONDAY_REPORT_USER_EMAIL", "engineer@monday-report.local"),
-            full_name=os.getenv("MONDAY_REPORT_USER_FULL_NAME", "Demo Drilling Engineer"),
-            roles=[Role.ADMIN, Role.ENGINEER, Role.VALIDATOR],
-        )
+        self.tenant = self._configured_tenant()
+        self.user = self._configured_user(self.tenant.id)
         self.workspaces: dict[UUID, Workspace] = {}
         self.uploads: dict[UUID, Upload] = {}
         self.files: dict[UUID, UploadFileRecord] = {}
@@ -125,12 +117,50 @@ class LocalStateStore:
 
         if self._state_exists():
             self.refresh()
+            if self._contains_demo_seed():
+                self._reset_clean_bootstrap()
+                self.save()
         else:
             self._seed()
             self.save()
 
     def _state_exists(self) -> bool:
         return self.state_path.exists()
+
+    def _contains_demo_seed(self) -> bool:
+        return any(log.action == "state.seed" for log in self.audit_logs)
+
+    def _reset_clean_bootstrap(self) -> None:
+        self.tenant = self._configured_tenant()
+        self.user = self._configured_user(self.tenant.id)
+        self.workspaces.clear()
+        self.uploads.clear()
+        self.files.clear()
+        self.jobs.clear()
+        self.parsed_documents.clear()
+        self.document_chunks.clear()
+        self.failures.clear()
+        self.validation_tasks.clear()
+        self.monday_reports.clear()
+        self.report_exports.clear()
+        self.audit_logs.clear()
+        self._seed()
+
+    @staticmethod
+    def _configured_tenant() -> Tenant:
+        return Tenant(
+            name=os.getenv("MONDAY_REPORT_TENANT_NAME", "Monday Report Tenant"),
+            slug=os.getenv("MONDAY_REPORT_TENANT_SLUG", "monday-report"),
+        )
+
+    @staticmethod
+    def _configured_user(tenant_id: UUID) -> User:
+        return User(
+            tenant_id=tenant_id,
+            email=os.getenv("MONDAY_REPORT_USER_EMAIL", "operator@monday-report.invalid"),
+            full_name=os.getenv("MONDAY_REPORT_USER_FULL_NAME", "Monday Report Operator"),
+            roles=[Role.ADMIN, Role.ENGINEER, Role.VALIDATOR],
+        )
 
     def refresh(self) -> None:
         payload = self._read_state_payload()
@@ -205,65 +235,28 @@ class LocalStateStore:
                 time.sleep(STATE_REPLACE_RETRY_DELAY_SECONDS)
 
     def _seed(self) -> None:
-        demo_seed_enabled = os.getenv("MONDAY_REPORT_DISABLE_DEMO_SEED", "").strip().lower() not in {
-            "1",
-            "true",
-            "yes",
-        }
         workspace = Workspace(
             tenant_id=self.tenant.id,
             name=os.getenv(
                 "MONDAY_REPORT_DEFAULT_WORKSPACE_NAME",
-                "Gulf Campaign W27" if demo_seed_enabled else "Client workspace",
+                "Client workspace",
             ),
-            asset=os.getenv("MONDAY_REPORT_DEFAULT_ASSET", "Gulf campaign" if demo_seed_enabled else "client asset"),
+            asset=os.getenv("MONDAY_REPORT_DEFAULT_ASSET", "client asset"),
             campaign=os.getenv(
                 "MONDAY_REPORT_DEFAULT_CAMPAIGN",
-                "2026 drilling reliability" if demo_seed_enabled else "client campaign",
+                "client campaign",
             ),
         )
         self.workspaces[workspace.id] = workspace
         self.audit("workspace.create", "workspace", workspace.id, {"name": workspace.name}, save=False)
 
-        if not demo_seed_enabled:
-            self.audit(
-                "state.bootstrap",
-                "tenant",
-                self.tenant.id,
-                {"store": self.repository_backend, "demo_seed": False},
-                save=False,
-            )
-            return
-
-        citation = Citation(
-            locator_type="pdf",
-            locator={"page": 3},
-            snippet="Lost MWD signal at 10,342 ft MD. POOH to replace MWD tool.",
-            confidence=0.92,
+        self.audit(
+            "state.bootstrap",
+            "tenant",
+            self.tenant.id,
+            {"store": self.repository_backend, "demo_seed": False},
+            save=False,
         )
-        failure = FailureRecord(
-            tenant_id=self.tenant.id,
-            workspace_id=workspace.id,
-            event_type="MWD failure",
-            severity="High",
-            summary="MWD telemetry was lost while drilling; BHA was pulled to replace the tool.",
-            company="ABC Directional Services",
-            tool_type="MWD",
-            tool_serial="MWD-77821",
-            npt_hours=8.5,
-            confidence=0.84,
-            validation_status=ValidationStatus.OPEN,
-            citations=[citation],
-        )
-        self.failures[failure.id] = failure
-        self.validation_tasks[uuid4()] = ValidationTask(
-            tenant_id=self.tenant.id,
-            target_type="failure",
-            target_id=failure.id,
-            reason="High-severity MWD failure requires reviewer confirmation before official Monday Report export.",
-            priority="high",
-        )
-        self.audit("state.seed", "tenant", self.tenant.id, {"store": self.repository_backend}, save=False)
 
     def create_workspace(self, payload: WorkspaceCreate) -> Workspace:
         self.refresh()
@@ -1653,11 +1646,30 @@ class LocalStateStore:
 
     @staticmethod
     def _extract_company(text: str) -> str:
-        known_company = "ABC Directional Services"
-        if known_company.lower() in text.lower():
-            return known_company
         match = re.search(r"\d{4}-\d{2}-\d{2},([^,]+),[^,]*signal loss", text, re.IGNORECASE)
-        return match.group(1).strip() if match else "unknown"
+        if match:
+            candidate = match.group(1).strip()
+            if LocalStateStore._valid_extracted_company(candidate):
+                return candidate
+        for labeled_match in re.finditer(r"\bcompany\s*[:=]\s*([^\n\r,;]+)", text, re.IGNORECASE):
+            candidate = labeled_match.group(1).strip()
+            if LocalStateStore._valid_extracted_company(candidate):
+                return candidate
+        company_before_signal_patterns = (
+            r"\d{4}-\d{2}-\d{2}\s+([A-Z][A-Za-z0-9&.\- ]{2,80}?)\s+(?:MWD|LWD|RSS|mud motor|motor|bit)?\s*signal loss",
+            r"(?:^|[:.;]\s*)([A-Z][A-Za-z0-9&.\- ]{2,80}?)\s+(?:MWD|LWD|RSS|mud motor|motor|bit)?\s*signal loss",
+        )
+        for pattern in company_before_signal_patterns:
+            for evidence_match in re.finditer(pattern, text):
+                candidate = evidence_match.group(1).strip()
+                if LocalStateStore._valid_extracted_company(candidate):
+                    return candidate
+        return "unknown"
+
+    @staticmethod
+    def _valid_extracted_company(value: str) -> bool:
+        normalized = value.strip().lower()
+        return bool(normalized) and normalized not in {"company", "unknown", "n/a", "none", "-"}
 
     @staticmethod
     def _extract_npt_hours(text: str) -> float:
@@ -2027,6 +2039,12 @@ class LocalStateStore:
         pymupdf_text, pymupdf_metadata = LocalStateStore._extract_pdf_text_with_pymupdf(content)
         if pymupdf_text.strip():
             return pymupdf_text, {
+                "engine": "pymupdf",
+                **pymupdf_metadata,
+            }
+
+        if "pymupdf_error" not in pymupdf_metadata:
+            return "", {
                 "engine": "pymupdf",
                 **pymupdf_metadata,
             }

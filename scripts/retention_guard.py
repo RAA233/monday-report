@@ -30,7 +30,7 @@ def main() -> int:
             file_name="expired/ddr.txt",
             mime_type="text/plain",
             source_type="files",
-            content=b"MWD signal loss. npt_hours 2026-07-06,ABC Directional Services,MWD signal loss,8.5",
+            content=b"MWD signal loss. npt_hours 2026-07-06,Anonymized Directional Services,MWD signal loss,8.5",
         )
         old_upload = store.complete_upload(old_upload.id, [old_file.id])
         store.process_queued_jobs()
