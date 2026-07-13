@@ -63,8 +63,8 @@ export const capabilitySignals: CapabilitySignal[] = [
   {
     id: "signal-report-intelligence",
     label: "Report intelligence",
-    value: "MR-DDR-2+",
-    detail: "Normal variants, issue readiness, casing schematic, timeline, AI plan, and branded exports are live.",
+    value: "MR-SCHEMA-1",
+    detail: "Reviewed DDR, BHA, mud, survey, and directional schema variants now drive Studio targets.",
     tone: "good"
   },
   {
@@ -94,17 +94,17 @@ export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
   {
     id: "exec-current-slice",
     label: "Current slice",
-    value: "UI/UX command surface",
-    detail: "Client landing, rig/MR list access, Report Studio variants, issue readiness, and roadmap execution visibility are the active product polish slice.",
-    command: "pnpm run test:ui",
-    tone: "info"
+    value: "schema variants",
+    detail: "MR-SCHEMA-1 promotes DDR, BHA, mud, survey, and directional formats into guarded extraction and drafting targets.",
+    command: "pnpm run audit:report-variants",
+    tone: "good"
   },
   {
     id: "exec-next-pull",
     label: "Next audited pull",
-    value: "schema variants",
-    detail: "Promote DDR, BHA, mud, survey, and directional formats into reviewed extraction and drafting evals.",
-    command: "pnpm run audit:parser-fixture-evals",
+    value: "schematic extraction",
+    detail: "Use the reviewed variants to improve casing, trajectory, hydraulics, and directional visuals from source evidence.",
+    command: "pnpm run audit:pdf-parser",
     tone: "warning"
   },
   {
@@ -154,10 +154,10 @@ export const roadmapLanes: RoadmapLane[] = [
         id: "item-report-studio",
         title: "Advanced report studio",
         owner: "Frontend + drilling SME",
-        status: "active",
-        gate: "test:ui",
-        evidence: "MR-DDR-2+ UI includes normal-format variants, issue readiness, casing rows, schematic, AI plan, timeline, and exports.",
-        next: "Promote the visible DDR/BHA/mud/survey variants into reviewed parser and drafting fixtures."
+        status: "complete",
+        gate: "audit:report-variants",
+        evidence: "MR-SCHEMA-1 defines reviewed DDR, BHA, mud, survey, and directional targets with extraction markers, drafting checks, and output sections.",
+        next: "Use the reviewed variants to harden source-driven schematic extraction and report-template diff checks."
       },
       {
         id: "item-ui-execution-board",
@@ -319,7 +319,7 @@ export const roadmapRisks: RoadmapRisk[] = [
     id: "risk-schema-drift",
     risk: "Daily-report formats drift across contractors and wells.",
     owner: "Drilling SME",
-    control: "Versioned MR-DDR schema variants and reference-format evals.",
+    control: "Versioned MR-SCHEMA-1 schema variants and reference-format evals.",
     severity: "medium"
   },
   {

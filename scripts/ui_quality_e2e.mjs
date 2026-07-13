@@ -81,10 +81,14 @@ try {
       await expectText(page, /Source-backed draft evidence/i, "Report Studio evidence panel");
       await expectText(page, /Client issue readiness/i, "Report Studio issue readiness");
       await expectText(page, /Normal formats/i, "Report Studio normal formats");
+      await expectText(page, /Reviewed schema variants/i, "Report Studio schema variants");
       await page.getByRole("button", { name: /FORGE style/i }).click();
       await page.getByRole("tab", { name: /BHA/i }).click();
       await page.getByRole("button", { name: /Apply format/i }).click();
       await expectText(page, /BHA performance report/i, "Report Studio BHA variant");
+      await page.getByRole("tab", { name: /DIR/i }).click();
+      await page.getByRole("button", { name: /Apply format/i }).click();
+      await expectText(page, /Directional steering report/i, "Report Studio Directional variant");
       await page.getByRole("button", { name: /AI draft/i }).click();
       await expectText(page, /FORGE 16A\(78\)-32/i, "Report Studio FORGE template");
       await expectText(page, /MR-DDR-2/i, "Report Studio format telemetry");

@@ -23,6 +23,13 @@ import {
 } from "lucide-react";
 import { Badge } from "./Badge";
 import type { LucideIcon } from "lucide-react";
+import {
+  defaultOperationsLog,
+  reportFormatVariants,
+  reportVariantSchemaVersion,
+  type FormatVariantId,
+  type ReportFormatVariant
+} from "../data/reportVariantSchemas";
 import { getReportDraft, type ApiReportDraft } from "../lib/api";
 import { formatSourceCitation } from "../lib/citationFormat";
 
@@ -83,22 +90,6 @@ interface ControlMatrixItem {
   detail: string;
 }
 
-type FormatVariantId = "ddr" | "bha" | "mud" | "survey";
-
-interface ReportFormatVariant {
-  id: FormatVariantId;
-  label: string;
-  shortLabel: string;
-  scope: string;
-  phase: string;
-  presentOps: string;
-  nextOps: string;
-  safety: string;
-  risks: string;
-  operationsLog: string;
-  requiredSections: string[];
-}
-
 interface IssueReadinessItem {
   label: string;
   value: string;
@@ -116,99 +107,6 @@ const defaultCasingProgram = [
   "Intermediate | 9.625 in | 0 | 6500 | Planned",
   "Production | 7 in | 0 | 10987 | Planned"
 ].join("\n");
-
-const defaultOperationsLog = [
-  "00:00-06:00 | Drill ahead and maintain hole cleaning parameters.",
-  "06:00-12:00 | Survey, circulate bottoms up, monitor torque and drag.",
-  "12:00-18:00 | Condition mud, inspect surface equipment, update BHA record.",
-  "18:00-24:00 | Continue drilling and prepare morning handover."
-].join("\n");
-
-const reportFormatVariants: ReportFormatVariant[] = [
-  {
-    id: "ddr",
-    label: "Daily drilling",
-    shortLabel: "DDR",
-    scope: "Full morning handover",
-    phase: "Drilling morning report",
-    presentOps:
-      "Summarize the active 24 hr drilling operation with well/job information, present operations, drilling parameters, casing, mud, BHA, survey, time breakdown, NPT, and approvals.",
-    nextOps:
-      "Continue planned operation, update directional plan, verify casing readiness, and prepare a clean morning handover with source-backed highlights.",
-    safety:
-      "Confirm BOP, well-control barriers, pressure-control notes, lifting exposure, and handover hazards before client issue.",
-    risks:
-      "Watch hole cleaning, torque and drag, ECD margin, lost circulation, MWD signal continuity, and casing-point readiness.",
-    operationsLog: defaultOperationsLog,
-    requiredSections: ["Well/job", "Operations", "Parameters", "Mud/BHA/survey", "Casing", "Timeline", "NPT", "Approvals"]
-  },
-  {
-    id: "bha",
-    label: "BHA and tools",
-    shortLabel: "BHA",
-    scope: "Run performance and tool risk",
-    phase: "BHA performance report",
-    presentOps:
-      "Summarize BHA run status, bit performance, RSS/MWD/LWD response, downhole tool reliability, vibration indicators, and any service-company exposure.",
-    nextOps:
-      "Confirm tool serials, run hours, failure/NPT evidence, replacement status, and recommended operating parameters before the next run.",
-    safety:
-      "Confirm handling controls, red-zone exposure, pressure isolation, and tool-change lifting plan before operational handover.",
-    risks:
-      "Watch MWD signal quality, shock and vibration, motor/RSS response, bit wear, connection failures, and repeat-tool exposure.",
-    operationsLog: [
-      "00:00-06:00 | Review BHA run status, tool response, and signal quality.",
-      "06:00-12:00 | Confirm tool serials, bit/BHA hours, and service-company notes.",
-      "12:00-18:00 | Reconcile failures, NPT, trips, replacements, and corrective actions.",
-      "18:00-24:00 | Prepare next-run guidance and validation-backed handover."
-    ].join("\n"),
-    requiredSections: ["BHA", "Bit", "MWD/LWD/RSS", "Tool serials", "Run hours", "Failures", "NPT", "Actions"]
-  },
-  {
-    id: "mud",
-    label: "Mud and hydraulics",
-    shortLabel: "Mud",
-    scope: "Fluid condition and hole cleaning",
-    phase: "Mud and hydraulics report",
-    presentOps:
-      "Summarize mud properties, active volume, treatments, losses/gains, solids control, ECD margin, hole cleaning, and any fluid-related NPT.",
-    nextOps:
-      "Confirm rheology trend, density target, chemical treatments, losses response, hole-cleaning plan, and mud engineer approvals.",
-    safety:
-      "Confirm chemical handling controls, pit management, pressure-control exposure, and spill response posture.",
-    risks:
-      "Watch ECD margin, losses, gas cut, barite sag, hole cleaning, stuck-pipe indicators, and incompatible treatments.",
-    operationsLog: [
-      "00:00-06:00 | Review mud density, rheology, volumes, and treatment plan.",
-      "06:00-12:00 | Confirm solids control, losses/gains, ECD, and hole cleaning.",
-      "12:00-18:00 | Reconcile mud-related NPT, chemicals, and approvals.",
-      "18:00-24:00 | Prepare hydraulics guidance and next-shift treatment plan."
-    ].join("\n"),
-    requiredSections: ["Mud weight", "Rheology", "Volumes", "Treatments", "Losses/gains", "ECD", "Hole cleaning", "Approvals"]
-  },
-  {
-    id: "survey",
-    label: "Survey and directional",
-    shortLabel: "Survey",
-    scope: "Trajectory and directional quality",
-    phase: "Survey and directional report",
-    presentOps:
-      "Summarize survey acceptance, inclination/azimuth trend, DLS, toolface response, target position, MWD quality, and directional plan compliance.",
-    nextOps:
-      "Confirm next survey plan, correction requirements, anti-collision review, directional objectives, and source-backed trajectory notes.",
-    safety:
-      "Confirm survey QA, anti-collision controls, directional-change communication, and well-control constraints before handover.",
-    risks:
-      "Watch survey quality flags, DLS spikes, toolface control, target drift, MWD signal continuity, and anti-collision separation.",
-    operationsLog: [
-      "00:00-06:00 | Review accepted surveys, target position, and directional trend.",
-      "06:00-12:00 | Confirm MWD quality, DLS, toolface response, and plan compliance.",
-      "12:00-18:00 | Reconcile survey flags, anti-collision review, and trajectory risks.",
-      "18:00-24:00 | Prepare directional guidance and next survey acceptance checks."
-    ].join("\n"),
-    requiredSections: ["Surveys", "Inclination", "Azimuth", "DLS", "MWD quality", "Target", "Anti-collision", "Plan"]
-  }
-];
 
 export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
   const [form, setForm] = useState<ReportForm>(() => initialReportForm());
@@ -414,6 +312,30 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
           <BookOpenCheck size={18} aria-hidden="true" />
           Apply format
         </button>
+      </section>
+
+      <section className="variant-schema-board" aria-label="Reviewed schema variants">
+        <div className="issue-board-heading">
+          <div>
+            <p className="eyebrow">Reviewed schema variants</p>
+            <h2>Extraction and drafting targets</h2>
+          </div>
+          <Badge tone="good">{reportVariantSchemaVersion}</Badge>
+        </div>
+        <div className="variant-schema-grid">
+          {reportFormatVariants.map((variant) => (
+            <article className={variant.id === activeVariant.id ? "variant-schema-card active" : "variant-schema-card"} key={variant.id}>
+              <span>{variant.shortLabel}</span>
+              <strong>{variant.label}</strong>
+              <p>{variant.schemaId}</p>
+              <div>
+                <code>{variant.extractionMarkers.length} markers</code>
+                <code>{variant.draftingChecks.length} checks</code>
+                <code>{variant.outputSections.length} outputs</code>
+              </div>
+            </article>
+          ))}
+        </div>
       </section>
 
       <section className="studio-ops-strip" aria-label="Report studio technical telemetry">

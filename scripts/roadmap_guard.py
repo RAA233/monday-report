@@ -19,8 +19,20 @@ CHECKS = [
             "gemma4:e2b",
             "Client Pilot",
             "Client landing",
+            "MR-SCHEMA-1",
             "Citation-backed AI drafts",
-            "UI/UX command surface",
+            "schematic extraction",
+        ],
+    ),
+    (
+        ROOT / "src" / "data" / "reportVariantSchemas.ts",
+        [
+            "reportVariantSchemaVersion",
+            "MR-SCHEMA-1",
+            '"directional"',
+            "extractionMarkers",
+            "draftingChecks",
+            "outputSections",
         ],
     ),
     (
@@ -64,6 +76,7 @@ CHECKS = [
         ROOT / "src" / "data" / "projectTracker.ts",
         [
             "Roadmap cockpit",
+            "gate-report-variants",
             "gate-roadmap",
             "pnpm run audit:roadmap",
         ],
@@ -83,7 +96,9 @@ CHECKS = [
         ROOT / "package.json",
         [
             '"audit:roadmap"',
+            '"audit:report-variants"',
             "scripts/roadmap_guard.py",
+            "scripts/report_variant_schema_guard.py",
         ],
     ),
 ]

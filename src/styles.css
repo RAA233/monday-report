@@ -1669,9 +1669,9 @@ td {
 
 .format-segmented-control {
   display: grid;
-  grid-template-columns: repeat(4, minmax(48px, 1fr));
+  grid-template-columns: repeat(5, minmax(48px, 1fr));
   gap: 4px;
-  min-width: 232px;
+  min-width: 292px;
   padding: 4px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1778,8 +1778,76 @@ td {
   background: #f8fbfd;
 }
 
+.variant-schema-board {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
+}
+
 .issue-board-heading {
   align-items: start;
+}
+
+.variant-schema-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.variant-schema-card {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-height: 132px;
+  padding: 12px;
+  border: 1px solid #d8e0e7;
+  border-radius: 8px;
+  background: #f8fbfd;
+}
+
+.variant-schema-card.active {
+  border-color: #bde8d5;
+  background: #f7fffb;
+}
+
+.variant-schema-card span {
+  color: var(--cyan);
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.variant-schema-card strong {
+  font-size: 0.94rem;
+  line-height: 1.25;
+}
+
+.variant-schema-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.variant-schema-card div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.variant-schema-card code {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--text);
+  font-size: 0.66rem;
+  font-weight: 800;
 }
 
 .issue-readiness-grid {
@@ -2697,6 +2765,7 @@ td {
   .studio-command-ribbon,
   .studio-ops-strip,
   .issue-readiness-grid,
+  .variant-schema-grid,
   .report-control-matrix,
   .roadmap-signal-grid,
   .roadmap-execution-grid,
@@ -2774,6 +2843,7 @@ td {
     .studio-command-ribbon,
     .studio-ops-strip,
     .issue-readiness-grid,
+    .variant-schema-grid,
     .studio-field-grid,
     .evidence-stat-grid,
     .report-info-grid,

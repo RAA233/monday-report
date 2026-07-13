@@ -8,6 +8,7 @@ import {
   FileSearch,
   Gauge,
   HardHat,
+  ListChecks,
   LockKeyhole,
   Milestone,
   ShieldCheck,
@@ -146,11 +147,11 @@ export const projectPhases: ProjectPhase[] = [
   {
     id: "phase-09",
     name: "Morning report studio",
-    status: "in_progress",
+    status: "complete",
     owner: "Frontend + drilling SME",
     objective: "Turn real daily drilling report patterns into a branded authoring and preview workflow.",
-    evidence: "Chat renders command-center workflow steps; Report Studio has DDR/BHA/mud/survey format variants, issue-readiness board, technical telemetry, casing/well schematics, AI plan/execute checks, and guarded source-backed draft generation.",
-    nextAction: "Promote visible normal-format variants and stronger schematic extraction into reviewed parser/drafting fixtures.",
+    evidence: "Chat renders command-center workflow steps; Report Studio has DDR/BHA/mud/survey/directional format variants, issue-readiness board, technical telemetry, casing/well schematics, AI plan/execute checks, guarded source-backed draft generation, and MR-SCHEMA-1 schema coverage.",
+    nextAction: "Use reviewed schema variants to harden source-driven schematic extraction and report-template diff checks.",
     icon: FileText
   },
   {
@@ -172,6 +173,16 @@ export const projectPhases: ProjectPhase[] = [
     evidence: "Client Home renders live API workspaces, MR list records, open review counts, supported import families, and JSON/CSV/HTML/PDF/XLSX export formats.",
     nextAction: "Add workspace-specific drilldowns and preserve screenshot coverage after each UI polish slice.",
     icon: HardHat
+  },
+  {
+    id: "phase-12",
+    name: "Reviewed normal report schemas",
+    status: "complete",
+    owner: "Frontend + QA + drilling SME",
+    objective: "Promote DDR, BHA, mud, survey, and directional variants into versioned extraction and drafting targets.",
+    evidence: "MR-SCHEMA-1 defines required sections, extraction markers, drafting checks, and output sections; audit:report-variants is wired into audit:all.",
+    nextAction: "Pull stronger schematic extraction from casing, trajectory, hydraulics, and directional evidence.",
+    icon: ListChecks
   }
 ];
 
@@ -188,7 +199,7 @@ export const clearTrackerLanes: TrackerLane[] = [
       "Parser worker covers text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF text, native PDF table rows, pdf_report_profile_v1 DDR fields/sections, OCR routing/extraction, typed locators, manifest-driven parser/OCR eval reports, and source citation actions.",
       "Partner preview ZIP includes the built app, API, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.",
       "Validation-gated Monday Report exports JSON, CSV, HTML, PDF, and XLSX with signed artifact downloads.",
-      "Report Studio provides a technical morning-report console with DDR/BHA/mud/survey variants, issue-readiness board, readiness telemetry, source-backed draft generation, casing/well schematic, AI plan/execute checks, timeline, and draft export.",
+      "Report Studio provides a technical morning-report console with reviewed DDR/BHA/mud/survey/directional schema variants, issue-readiness board, readiness telemetry, source-backed draft generation, casing/well schematic, AI plan/execute checks, timeline, and draft export.",
       "Roadmap cockpit maps current build, next corpus/eval work, hardening, package, client pilot lanes, release gates, risk controls, and next controlled moves.",
       "Official exports include GA-style metrics, validation posture, source coverage, standard daily-report sections, casing rows, well schematic, AI execution plan, timeline, branded HTML/PDF output, and expanded XLSX sections.",
       "GA readiness guard separates software-owned checks from configuration, infrastructure, and reviewed-evidence blockers.",
@@ -227,7 +238,7 @@ export const clearTrackerLanes: TrackerLane[] = [
     summary: "The next high-value work should turn approved local readiness into repeatable client-package pilots.",
     items: [
       "Run controlled client-package dry runs with the approved client-mode environment.",
-      "Promote the visible DDR/BHA/mud/survey report variants into reviewed extraction and drafting tests.",
+      "Use MR-SCHEMA-1 report variants to improve source-driven schematic extraction and report-template diff checks.",
       "Promote the local FORGE open-source daily-report corpus into reviewed extraction evals without committing raw ignored PDFs.",
       "Pull roadmap lane items in order: normal-format schema variants, stronger schematic extraction, normalized persistence, then controlled client pilot.",
       "Wire local LLM extraction router, strict schemas, confidence scoring, and metrics.",
@@ -328,6 +339,13 @@ export const testGates: TestGate[] = [
     status: "pass",
     command: "pnpm run audit:report-draft",
     lastResult: "Guard verifies parsed documents, chunks, citations, failures, validation tasks, PDF profile hints, and audit events produce form-ready Report Studio draft fields."
+  },
+  {
+    id: "gate-report-variants",
+    name: "Report variant schemas",
+    status: "pass",
+    command: "pnpm run audit:report-variants",
+    lastResult: "Guard verifies MR-SCHEMA-1 covers DDR, BHA, mud, survey, and directional variants with reviewed extraction markers, drafting checks, output sections, UI coverage, and audit:all wiring."
   },
   {
     id: "gate-roadmap",
@@ -616,7 +634,7 @@ export const auditEvents: AuditEvent[] = [
     id: "audit-002",
     event: "Frontend verified",
     scope: "app",
-    result: "Client Home, chat workflow, Report Studio variants, and Roadmap execution board build and pass browser E2E.",
+    result: "Client Home, chat workflow, MR-SCHEMA-1 Report Studio variants, and Roadmap execution board build and pass browser E2E.",
     timestamp: "2026-07-07"
   },
   {
