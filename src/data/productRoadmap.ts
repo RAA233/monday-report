@@ -54,6 +54,13 @@ export interface RoadmapRisk {
 
 export const capabilitySignals: CapabilitySignal[] = [
   {
+    id: "signal-client-landing",
+    label: "Client command",
+    value: "rig/MR list",
+    detail: "Client Home opens to real rig workspaces, Monday Report access, and import/export coverage.",
+    tone: "good"
+  },
+  {
     id: "signal-report-intelligence",
     label: "Report intelligence",
     value: "MR-DDR-2+",
@@ -88,7 +95,7 @@ export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
     id: "exec-current-slice",
     label: "Current slice",
     value: "UI/UX command surface",
-    detail: "Report Studio normal variants, issue readiness, and roadmap execution visibility are the active product polish slice.",
+    detail: "Client landing, rig/MR list access, Report Studio variants, issue readiness, and roadmap execution visibility are the active product polish slice.",
     command: "pnpm run test:ui",
     tone: "info"
   },
@@ -125,6 +132,15 @@ export const roadmapLanes: RoadmapLane[] = [
     intent: "Stabilize the high-end MVP around chat, report authoring, and auditable client-data readiness.",
     status: "active",
     items: [
+      {
+        id: "item-client-landing",
+        title: "Client landing command surface",
+        owner: "Frontend + product",
+        status: "complete",
+        gate: "test:ui",
+        evidence: "Client Home exposes live rig workspaces, MR list access, import coverage, export formats, and roadmap command actions.",
+        next: "Connect rig rows to workspace-specific dashboards and report creation filters."
+      },
       {
         id: "item-chat-command-center",
         title: "Chat command center",
@@ -266,7 +282,7 @@ export const releaseGates: ReleaseGate[] = [
     label: "Design",
     status: "complete",
     command: "test:ui",
-    evidence: "Screenshots cover chat, studio, upload, dashboard, explorer, validation, tracker, roadmap, and architecture."
+    evidence: "Screenshots cover Client Home, chat, studio, upload, dashboard, explorer, validation, tracker, roadmap, and architecture."
   },
   {
     id: "gate-build",

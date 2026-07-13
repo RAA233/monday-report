@@ -10,6 +10,7 @@ const manifestPath = path.join(root, "output", "qa", "ui_quality_e2e_manifest.js
 const uploadFixturePath = path.join(root, "output", "qa", "ui_upload_fixture.txt");
 
 const views = [
+  { label: "Client Home", title: /Rigs and Monday Reports/i, file: "00-client-home.png" },
   { label: "Local AI Chat", title: /Ask Monday Report first/i, file: "01-chat-initial.png" },
   { label: "Report Studio", title: /Technical daily-report command console/i, file: "03-report-studio.png" },
   { label: "Upload", title: /Upload rig reports/i, file: "04-upload.png" },
@@ -48,6 +49,18 @@ page.on("console", (message) => {
 try {
   await openFresh(page);
   await expectText(page, /API connected/i, "API connected");
+  await expectText(page, /Client landing/i, "Client landing visible");
+  await expectText(page, /Rig MR list/i, "Rig MR list visible");
+  await expectText(page, /Import coverage/i, "Import coverage visible");
+  await expectText(page, /Export coverage/i, "Export coverage visible");
+  await expectText(page, /ZIP archives/i, "ZIP import coverage");
+  await expectText(page, /PDF reports/i, "PDF import coverage");
+  await expectText(page, /JSON/i, "JSON export coverage");
+  await expectText(page, /XLSX/i, "XLSX export coverage");
+  await screenshot(page, "00-client-home.png", "Client Home");
+
+  await page.getByRole("button", { name: "Local AI Chat", exact: true }).click();
+  await expectText(page, /Ask Monday Report first/i, "Chat visible");
   await screenshot(page, "01-chat-initial.png", "Chat initial");
 
   await page.getByPlaceholder(/Ask about failures/i).fill("Generate this week's Monday Report executive summary.");
@@ -57,7 +70,7 @@ try {
   await expectText(page, /Plan DDR/i, "Chat tool actions");
   await screenshot(page, "02-chat-answer.png", "Chat answer");
 
-  for (const view of views.slice(1)) {
+  for (const view of views.slice(2)) {
     await openFresh(page);
     await page.getByRole("button", { name: view.label, exact: true }).click();
     await expectText(page, view.title, `${view.label} visible`);

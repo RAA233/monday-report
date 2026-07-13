@@ -196,7 +196,7 @@ def build_pdf(tracker: dict[str, list[dict[str, str]]], readiness: dict[str, Any
     story.append(
         summary_table(
             [
-                ("Local MVP", "PASS", "Upload, parser, validation, exports, chat, roadmap, audit, and signed downloads pass."),
+                ("Local MVP", "PASS", "Client Home, rig/MR list, upload, parser, validation, JSON/CSV/HTML/PDF/XLSX exports, chat, roadmap, audit, and signed downloads pass."),
                 (
                     "Client data",
                     str(readiness.get("status", "not_ready")).replace("_", " ").upper(),
@@ -220,7 +220,7 @@ def build_pdf(tracker: dict[str, list[dict[str, str]]], readiness: dict[str, Any
     story.append(Paragraph("Current Meaning", styles["Heading2"]))
     story.append(
         Paragraph(
-            "The local client-approval environment is approved: PostgreSQL/RLS state, Redis queue, security config, local AI, reviewed fixture attestation, and parser/OCR eval evidence all pass. Source-backed Report Studio drafts are now guarded; next work follows normal-format variants, controlled package dry runs, and production hardening.",
+            "The local client-approval environment is approved: PostgreSQL/RLS state, Redis queue, security config, local AI, reviewed fixture attestation, and parser/OCR eval evidence all pass. Client Home now opens first with live rig/MR access and all-format import/export coverage; next work follows normal-format variants, controlled package dry runs, and production hardening.",
             styles["Body"],
         )
     )

@@ -18,8 +18,21 @@ CHECKS = [
             "roadmapRisks",
             "gemma4:e2b",
             "Client Pilot",
+            "Client landing",
             "Citation-backed AI drafts",
             "UI/UX command surface",
+        ],
+    ),
+    (
+        ROOT / "src" / "components" / "ClientLanding.tsx",
+        [
+            "Client landing",
+            "Rigs and Monday Reports",
+            "Rig MR list",
+            "Import coverage",
+            "Export coverage",
+            "ZIP archives",
+            "XLSX",
         ],
     ),
     (
@@ -39,6 +52,9 @@ CHECKS = [
     (
         ROOT / "src" / "App.tsx",
         [
+            '"client"',
+            'label: "Client Home"',
+            "<ClientLanding",
             '"roadmap"',
             'label: "Roadmap"',
             "<ProductRoadmap />",
@@ -55,6 +71,9 @@ CHECKS = [
     (
         ROOT / "scripts" / "ui_quality_e2e.mjs",
         [
+            'label: "Client Home"',
+            "00-client-home.png",
+            "/Rigs and Monday Reports/i",
             'label: "Roadmap"',
             "09-roadmap.png",
             "/Product roadmap/i",

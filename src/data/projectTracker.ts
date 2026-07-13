@@ -7,6 +7,7 @@ import {
   FileText,
   FileSearch,
   Gauge,
+  HardHat,
   LockKeyhole,
   Milestone,
   ShieldCheck,
@@ -67,9 +68,9 @@ export const projectPhases: ProjectPhase[] = [
     name: "Chat-first frontend",
     status: "complete",
     owner: "Frontend",
-    objective: "Make Local AI Chat the main Monday Report surface with citations and fallback behavior.",
-    evidence: "Vite build passes and chat opens as the default view.",
-    nextAction: "Add report preview/export wiring after backend persistence lands.",
+    objective: "Keep Local AI Chat as the primary analysis surface with citations and fallback behavior.",
+    evidence: "Client Home opens first and routes directly into Local AI Chat, Report Studio, upload, validation, dashboard, and roadmap surfaces.",
+    nextAction: "Keep chat actions aligned with official report creation and export workflows.",
     icon: Bot
   },
   {
@@ -161,6 +162,16 @@ export const projectPhases: ProjectPhase[] = [
     evidence: "Product Roadmap view, execution board, typed roadmap data, UI screenshot coverage, tracker gate, and audit:roadmap guard are wired.",
     nextAction: "Use the roadmap lanes to pull the next client-pilot hardening slice.",
     icon: Milestone
+  },
+  {
+    id: "phase-11",
+    name: "Client landing and rig MR access",
+    status: "complete",
+    owner: "Frontend + product",
+    objective: "Make the first screen a client command surface for rigs, Monday Reports, import coverage, export coverage, and roadmap actions.",
+    evidence: "Client Home renders live API workspaces, MR list records, open review counts, supported import families, and JSON/CSV/HTML/PDF/XLSX export formats.",
+    nextAction: "Add workspace-specific drilldowns and preserve screenshot coverage after each UI polish slice.",
+    icon: HardHat
   }
 ];
 
@@ -171,6 +182,7 @@ export const clearTrackerLanes: TrackerLane[] = [
     status: "pass",
     summary: "Executable local MVP path is working and phase-gated for synthetic/demo data.",
     items: [
+      "Client Home opens first with real API workspaces, rig/MR list access, import coverage, export coverage, and roadmap command actions.",
       "Chat-first UI with API fallback, structured workflow steps, insight cards, risk register, command actions, citations, and source-backed answers.",
       "Direct and ZIP uploads with hashing, malware baseline checks, safe storage paths, signed downloads, and batched clean-path persistence.",
       "Parser worker covers text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF text, native PDF table rows, pdf_report_profile_v1 DDR fields/sections, OCR routing/extraction, typed locators, manifest-driven parser/OCR eval reports, and source citation actions.",
@@ -238,7 +250,7 @@ export const testGates: TestGate[] = [
     name: "UI quality E2E",
     status: "pass",
     command: "pnpm run test:ui",
-    lastResult: "Browser E2E verifies chat, Report Studio variants, issue readiness, upload, tracker, roadmap execution board, and screenshot capture."
+    lastResult: "Browser E2E verifies Client Home, rig/MR list access, import/export coverage, chat, Report Studio variants, issue readiness, upload, tracker, roadmap execution board, and screenshot capture."
   },
   {
     id: "gate-python",
@@ -604,7 +616,7 @@ export const auditEvents: AuditEvent[] = [
     id: "audit-002",
     event: "Frontend verified",
     scope: "app",
-    result: "Chat-first UI, Report Studio variants, and Roadmap execution board build and pass browser E2E.",
+    result: "Client Home, chat workflow, Report Studio variants, and Roadmap execution board build and pass browser E2E.",
     timestamp: "2026-07-07"
   },
   {

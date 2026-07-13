@@ -415,6 +415,11 @@ export async function createMondayReport(params: {
   });
 }
 
+export async function getMondayReports(workspaceId?: string): Promise<ApiMondayReport[]> {
+  const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "";
+  return request<ApiMondayReport[]>(`/monday-reports${query}`);
+}
+
 export async function exportMondayReport(
   reportId: string,
   format: ApiReportExport["format"],

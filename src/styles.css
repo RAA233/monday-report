@@ -1479,6 +1479,143 @@ td {
   font-size: 0.82rem;
 }
 
+.client-landing {
+  align-content: start;
+}
+
+.client-title {
+  background:
+    linear-gradient(90deg, rgba(14, 116, 144, 0.08), rgba(14, 116, 144, 0) 46%),
+    var(--surface);
+}
+
+.client-title-status {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+  min-width: 220px;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.client-command-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.client-command-card {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-height: 116px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--text);
+  text-align: left;
+  box-shadow: var(--shadow);
+}
+
+.client-command-primary {
+  border-color: #bde8d5;
+  background: #f7fffb;
+}
+
+.client-command-card strong,
+.client-command-card small {
+  display: block;
+}
+
+.client-command-card strong {
+  margin-bottom: 5px;
+  font-size: 0.92rem;
+}
+
+.client-command-card small {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.client-lower-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.95fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.client-mr-list,
+.client-format-grid {
+  display: grid;
+  gap: 9px;
+}
+
+.client-mr-row,
+.client-format-row {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.client-mr-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  min-height: 72px;
+  padding: 10px 12px;
+}
+
+.client-mr-row div {
+  display: grid;
+  gap: 4px;
+}
+
+.client-mr-row span,
+.client-format-row p {
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.client-format-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.client-format-row {
+  grid-template-columns: 36px minmax(0, 1fr);
+  min-height: 116px;
+  padding: 11px;
+}
+
+.client-format-row strong,
+.client-format-row code {
+  display: block;
+}
+
+.client-format-row code {
+  width: fit-content;
+  max-width: 100%;
+  margin: 5px 0 6px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--cyan);
+  font-size: 0.68rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.client-format-row p {
+  margin: 0;
+}
+
 .report-studio,
 .studio-editor,
 .studio-preview,
@@ -2555,6 +2692,8 @@ td {
   .chat-insight-grid,
   .workflow-runway,
   .tool-action-grid,
+  .client-command-grid,
+  .client-format-grid,
   .studio-command-ribbon,
   .studio-ops-strip,
   .issue-readiness-grid,
@@ -2572,6 +2711,7 @@ td {
   .insight-grid,
   .chat-layout,
   .studio-grid,
+  .client-lower-grid,
   .roadmap-bottom-grid {
     grid-template-columns: 1fr;
   }
@@ -2625,6 +2765,9 @@ td {
   .pipeline-track,
     .task-facts,
     .command-dock,
+    .client-command-grid,
+    .client-format-grid,
+    .client-lower-grid,
     .chat-insight-grid,
     .workflow-runway,
     .tool-action-grid,
@@ -2658,6 +2801,16 @@ td {
 
   .task-actions {
     flex-wrap: wrap;
+  }
+
+  .client-title-status {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .client-mr-row {
+    grid-template-columns: 1fr;
+    align-items: start;
   }
 
   .tracker-phase,

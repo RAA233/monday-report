@@ -5,6 +5,7 @@ import {
   Database,
   FilePenLine,
   Gauge,
+  Home,
   LayoutDashboard,
   Map,
   MessageSquareText,
@@ -16,6 +17,7 @@ import type { LucideIcon } from "lucide-react";
 import { ArchitectureView } from "./components/ArchitectureView";
 import { Badge } from "./components/Badge";
 import { ChatAnalyst } from "./components/ChatAnalyst";
+import { ClientLanding } from "./components/ClientLanding";
 import { Dashboard } from "./components/Dashboard";
 import { FailureExplorer } from "./components/FailureExplorer";
 import { SecurityStrip } from "./components/PipelineBoard";
@@ -33,15 +35,19 @@ import {
 } from "./data/domain";
 import {
   getFailures,
+  getMondayReports,
   getSession,
   getWorkspaces,
   type ApiCitation,
   type ApiFailureRecord,
+  type ApiMondayReport,
+  type ApiWorkspace,
   type ApiSession
 } from "./lib/api";
 import { summarizeMetrics } from "./lib/analytics";
 
 type ViewKey =
+  | "client"
   | "dashboard"
   | "upload"
   | "chat"
@@ -57,6 +63,7 @@ const navItems: Array<{
   label: string;
   icon: LucideIcon;
 }> = [
+  { key: "client", label: "Client Home", icon: Home },
   { key: "chat", label: "Local AI Chat", icon: MessageSquareText },
   { key: "studio", label: "Report Studio", icon: FilePenLine },
   { key: "upload", label: "Upload", icon: UploadCloud },
@@ -69,11 +76,14 @@ const navItems: Array<{
 ];
 
 export function App(): JSX.Element {
-  const [activeView, setActiveView] = useState<ViewKey>("chat");
+  const [activeView, setActiveView] = useState<ViewKey>("client");
   const [events, setEvents] = useState<FailureEvent[]>([]);
   const [filters, setFilters] = useState<FilterState>(defaultFilters);
   const [inventory, setInventory] = useState<UploadInventoryItem[]>([]);
   const [apiSession, setApiSession] = useState<ApiSession | null>(null);
+  const [apiWorkspaces, setApiWorkspaces] = useState<ApiWorkspace[]>([]);
+  const [apiFailures, setApiFailures] = useState<ApiFailureRecord[]>([]);
+  const [apiMondayReports, setApiMondayReports] = useState<ApiMondayReport[]>([]);
   const [apiWorkspaceId, setApiWorkspaceId] = useState<string | null>(null);
   const [apiStatus, setApiStatus] = useState<"checking" | "connected" | "offline">("checking");
   const metrics = useMemo(() => summarizeMetrics(events), [events]);
@@ -83,15 +93,19 @@ export function App(): JSX.Element {
 
     async function loadApiContext(): Promise<void> {
       try {
-        const [session, workspaces, failures] = await Promise.all([
+        const [session, workspaces, failures, mondayReports] = await Promise.all([
           getSession(),
           getWorkspaces(),
-          getFailures()
+          getFailures(),
+          getMondayReports()
         ]);
         if (!isMounted) {
           return;
         }
         setApiSession(session);
+        setApiWorkspaces(workspaces);
+        setApiFailures(failures);
+        setApiMondayReports(mondayReports);
         setApiWorkspaceId(workspaces[0]?.id ?? null);
         setEvents(failures.map(mapFailureRecord));
         setApiStatus("connected");
@@ -172,13 +186,24 @@ export function App(): JSX.Element {
 
         <SecurityStrip />
 
-        {apiStatus === "connected" && events.length === 0 && (
+        {activeView !== "client" && apiStatus === "connected" && events.length === 0 && (
           <section className="empty-state" aria-live="polite">
             <strong>No extracted failures yet.</strong>
             <p>Upload and process client-approved evidence to populate the workspace.</p>
           </section>
         )}
 
+        {activeView === "client" && (
+          <ClientLanding
+            session={apiSession}
+            workspaces={apiWorkspaces}
+            reports={apiMondayReports}
+            failures={apiFailures}
+            inventory={inventory}
+            apiStatus={apiStatus}
+            onNavigate={(view) => setActiveView(view)}
+          />
+        )}
         {activeView === "dashboard" && <Dashboard events={events} />}
         {activeView === "upload" && (
           <UploadPanel
