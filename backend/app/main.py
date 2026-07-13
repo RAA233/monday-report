@@ -212,8 +212,10 @@ async def create_direct_upload(
     source_type: Literal["zip", "folder", "files"] = Form("files"),
     file: UploadFile = File(...),
 ) -> UploadCreateResponse:
-    store.refresh()
-    require_client_data_ready("upload.direct", "workspace", workspace_id)
+    if client_data_mode() == "client":
+        require_client_data_ready("upload.direct", "workspace", workspace_id)
+    else:
+        store.refresh()
     if workspace_id not in store.workspaces:
         raise HTTPException(status_code=404, detail="Workspace not found")
 
@@ -238,11 +240,13 @@ async def create_direct_upload(
         mime_type=file.content_type or "application/octet-stream",
         source_type=source_type,
         content=content,
+        refresh=False,
+        save=False,
     )
     if file_record.malware_status == "blocked":
+        store.save()
         raise HTTPException(status_code=422, detail="Upload blocked by malware scanner")
-    upload = store.complete_upload(upload.id, [file_record.id])
-    store.refresh()
+    upload = store.complete_upload(upload.id, [file_record.id], refresh=False)
     return UploadCreateResponse(
         upload=upload,
         file=store.files[file_record.id],

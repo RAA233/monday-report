@@ -5,7 +5,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 ## What Is Implemented
 
 - React SaaS workspace with local AI chat as the main surface, plus upload, dashboard, failure explorer, validation queue, and architecture screens.
-- Report Studio lets users write morning drilling reports from scratch, apply a FORGE-style daily-report structure, preview Monday Report branding, render casing schematics and activity timelines, and export a draft Markdown report.
+- Report Studio lets users write morning drilling reports from scratch, switch between DDR/BHA/mud/survey normal formats, review client issue readiness, apply a FORGE-style daily-report structure, preview Monday Report branding, render casing schematics and activity timelines, and export a draft Markdown report.
 - Chat calls the FastAPI scaffold when available, exposes local AI runtime status, and falls back to deterministic local analysis when offline.
 - Backend scaffold uses durable local JSON state so API and worker share uploads, jobs, and redacted hash-chain audit logs before PostgreSQL/Redis lands.
 - Browser ZIP/file/folder intake with configurable byte limits, sanitized tenant-scoped storage paths, local byte storage, real SHA-256 hashes, report-family classification, duplicate candidates, configurable OCR routing/extraction, and parser gap warnings.
@@ -58,6 +58,7 @@ Useful backend checks:
 Invoke-WebRequest http://127.0.0.1:8000/health -UseBasicParsing
 pnpm run worker:once
 pnpm run audit:phase
+pnpm run test:ui
 pnpm run test:e2e
 pnpm run audit:client-data
 pnpm run audit:bootstrap

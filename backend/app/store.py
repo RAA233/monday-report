@@ -312,8 +312,12 @@ class LocalStateStore:
         mime_type: str,
         source_type: str,
         content: bytes,
+        *,
+        refresh: bool = True,
+        save: bool = True,
     ) -> tuple[Upload, UploadFileRecord, str]:
-        self.refresh()
+        if refresh:
+            self.refresh()
         upload = Upload(
             tenant_id=self.tenant.id,
             workspace_id=workspace_id,
@@ -370,11 +374,13 @@ class LocalStateStore:
                     "reason": scan_result.reason,
                 },
             },
+            save=save,
         )
         return upload, file_record, f"local-storage://{file_record.id}"
 
-    def complete_upload(self, upload_id: UUID, file_ids: list[UUID]) -> Upload:
-        self.refresh()
+    def complete_upload(self, upload_id: UUID, file_ids: list[UUID], *, refresh: bool = True) -> Upload:
+        if refresh:
+            self.refresh()
         upload = self.uploads[upload_id]
         upload.status = ProcessingStatus.PROCESSING
         created_job_ids: list[str] = []

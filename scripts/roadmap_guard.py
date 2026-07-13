@@ -12,23 +12,28 @@ CHECKS = [
         ROOT / "src" / "data" / "productRoadmap.ts",
         [
             "capabilitySignals",
+            "roadmapExecutionBoard",
             "roadmapLanes",
             "releaseGates",
             "roadmapRisks",
             "gemma4:e2b",
             "Client Pilot",
             "Citation-backed AI drafts",
+            "UI/UX command surface",
         ],
     ),
     (
         ROOT / "src" / "components" / "ProductRoadmap.tsx",
         [
             "Product roadmap",
+            "Roadmap execution board",
+            "Next controlled moves",
             "Delivery lanes",
             "Release train",
             "Roadmap risk controls",
             "Capability map",
             "roadmap-lanes",
+            "roadmap-execution-grid",
         ],
     ),
     (

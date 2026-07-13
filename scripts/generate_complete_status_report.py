@@ -156,7 +156,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
         "## Executive Status",
         "",
-        "- Local MVP: PASS - chat-first app, upload, parsing, validation, exports, signed downloads, audit chain, tracker, and roadmap are operational.",
+        "- Local MVP: PASS - chat-first app, batched upload, parsing, validation, exports, signed downloads, audit chain, tracker, and roadmap are operational.",
         f"- Partner package: {'APPROVED' if partner.get('approved') else 'NOT APPROVED'} for `{partner.get('scope', 'unknown')}`.",
         f"- Real client data: {client_status} - {client_summary}",
         "- FORGE corpus: PASS - local open-source daily-report corpus is parsed and checked without committing raw PDFs.",
@@ -186,8 +186,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## Latest Delivered Slice",
         "",
         "- Upgraded chat into a command-center workflow with structured steps, insight cards, risk register, tool actions, and export actions.",
-        "- Upgraded Report Studio into a technical daily-report console with source-backed draft generation, readiness telemetry, control matrix, normal report sections, AI plan/execute checks, client issue checklist, richer casing/well schematic, activity timeline, and Markdown draft export.",
-        "- Added a Product Roadmap cockpit with now/next/harden/package/client-pilot lanes, release gates, risk controls, and capability mapping.",
+        "- Upgraded Report Studio into a high-end technical daily-report console with DDR/BHA/mud/survey variants, source-backed draft generation, issue-readiness board, readiness telemetry, control matrix, normal report sections, AI plan/execute checks, richer casing/well schematic, activity timeline, and Markdown draft export.",
+        "- Added a Product Roadmap execution board with current slice, next audited pull, GA proof, package posture, now/next/harden/package/client-pilot lanes, release gates, risk controls, and capability mapping.",
+        "- Hardened direct-upload persistence so clean uploads batch file record creation, malware scan result, processing job creation, queue enqueue, and audit persistence into one clean-path save while blocked uploads still persist malware evidence.",
         "- Added `pdf_report_profile_v1` extraction so embedded-text PDFs can promote report number, well, rig, operator, hole size, MD, TVD, mud weight, operations, safety, casing, BHA, survey, and time breakdown into cited draft-ready fields.",
         "- Hardened NPT extraction to prefer explicit NPT-hour labels and avoid casing/depth values such as `6500 ft` when deriving failure hours.",
         "- Hardened extracted-text persistence so PDF/table control characters cannot block PostgreSQL JSONB saves during large corpus processing.",
@@ -199,6 +200,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## Audit Evidence",
         "",
         "- `pnpm run build` - PASS",
+        "- `pnpm run test:ui` - PASS",
         "- `pnpm run audit:forge-corpus` - PASS",
         "- `pnpm run audit:tracker-clarity` - PASS",
         "- `pnpm run audit:roadmap` - PASS",
@@ -292,7 +294,7 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
         Spacer(1, 0.14 * inch),
         status_table(
             [
-                ("Local MVP", "PASS", "Upload, parser, validation, exports, chat, signed downloads, audit chain, tracker, and roadmap are operational."),
+                ("Local MVP", "PASS", "Batched upload, parser, validation, exports, chat, signed downloads, audit chain, tracker, and roadmap are operational."),
                 (
                     "Partner package",
                     "APPROVED" if partner.get("approved") else "NOT APPROVED",
@@ -323,8 +325,9 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
         bullets(
             [
                 "Chat command-center workflow with structured steps, insight cards, risk register, tool actions, and export actions.",
-                "Report Studio technical console with source-backed draft generation, readiness telemetry, control matrix, normal report sections, AI plan/execute checks, client issue checklist, richer casing/well schematic, activity timeline, and Markdown draft export.",
-                "Product Roadmap cockpit with now/next/harden/package/client-pilot lanes, release train, risk controls, capability map, and screenshot/audit coverage.",
+                "Report Studio high-end command console with DDR/BHA/mud/survey variants, issue-readiness board, source-backed draft generation, readiness telemetry, control matrix, normal report sections, AI plan/execute checks, richer casing/well schematic, activity timeline, and Markdown draft export.",
+                "Product Roadmap execution board with current slice, next audited pull, GA proof, package posture, release train, risk controls, capability map, and screenshot/audit coverage.",
+                "Direct-upload persistence batching for faster client-mode imports while retaining blocked-malware evidence.",
                 "PDF report profile extraction promotes DDR fields and sections into cited chunks, draft prefill values, and safer NPT-hour extraction.",
                 "Extractor text sanitization prevents PDF/table NUL characters from blocking PostgreSQL JSONB state saves.",
                 "Official JSON/HTML/PDF/XLSX exports upgraded to MR-DDR-2 while preserving original casing/timeline compatibility.",
@@ -361,6 +364,7 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
                 [
                     ["Command", "Result"],
                     ["pnpm run build", "PASS"],
+                    ["pnpm run test:ui", "PASS"],
                     ["pnpm run audit:forge-corpus", "PASS"],
                     ["pnpm run audit:tracker-clarity", "PASS"],
                     ["pnpm run audit:roadmap", "PASS"],

@@ -7,6 +7,7 @@ import {
   GitPullRequest,
   PackageCheck,
   Radar,
+  Route,
   ShieldCheck,
   TriangleAlert
 } from "lucide-react";
@@ -14,6 +15,7 @@ import type { JSX } from "react";
 import {
   capabilitySignals,
   releaseGates,
+  roadmapExecutionBoard,
   roadmapLanes,
   roadmapRisks,
   type RoadmapStatus,
@@ -63,6 +65,26 @@ export function ProductRoadmap(): JSX.Element {
             <p>{signal.detail}</p>
           </article>
         ))}
+      </section>
+
+      <section className="panel roadmap-execution-panel" aria-labelledby="roadmap-execution-title">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Roadmap execution board</p>
+            <h2 id="roadmap-execution-title">Next controlled moves</h2>
+          </div>
+          <Route size={20} aria-hidden="true" />
+        </div>
+        <div className="roadmap-execution-grid">
+          {roadmapExecutionBoard.map((item) => (
+            <article className={`roadmap-execution-card roadmap-execution-${item.tone}`} key={item.id}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+              <p>{item.detail}</p>
+              <code>{item.command}</code>
+            </article>
+          ))}
+        </div>
       </section>
 
       <section className="panel roadmap-board" aria-labelledby="roadmap-board-title">

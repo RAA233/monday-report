@@ -78,8 +78,8 @@ export const projectPhases: ProjectPhase[] = [
     status: "complete",
     owner: "Backend",
     objective: "Provide tenant, workspace, upload, chat, dashboard, report, and audit API boundaries.",
-    evidence: "Health, session, dashboard, chat, upload, and Monday Report endpoints respond locally.",
-    nextAction: "Replace in-memory store with PostgreSQL repositories.",
+    evidence: "Health, session, dashboard, chat, batched direct upload, and Monday Report endpoints respond locally.",
+    nextAction: "Replace snapshot persistence with normalized PostgreSQL repositories.",
     icon: Workflow
   },
   {
@@ -148,8 +148,8 @@ export const projectPhases: ProjectPhase[] = [
     status: "in_progress",
     owner: "Frontend + drilling SME",
     objective: "Turn real daily drilling report patterns into a branded authoring and preview workflow.",
-    evidence: "Chat renders command-center workflow steps; Report Studio has technical telemetry, normal report controls, casing/well schematics, AI plan/execute checks, and a guarded source-backed draft endpoint wired into the editor.",
-    nextAction: "Promote normal-format variants and stronger schematic extraction from reviewed daily-report evidence.",
+    evidence: "Chat renders command-center workflow steps; Report Studio has DDR/BHA/mud/survey format variants, issue-readiness board, technical telemetry, casing/well schematics, AI plan/execute checks, and guarded source-backed draft generation.",
+    nextAction: "Promote visible normal-format variants and stronger schematic extraction into reviewed parser/drafting fixtures.",
     icon: FileText
   },
   {
@@ -158,7 +158,7 @@ export const projectPhases: ProjectPhase[] = [
     status: "complete",
     owner: "Product + QA",
     objective: "Expose the Monday Report delivery path from current MVP hardening through package, pilot, and client-data approval.",
-    evidence: "Product Roadmap view, typed roadmap data, UI screenshot coverage, tracker gate, and audit:roadmap guard are wired.",
+    evidence: "Product Roadmap view, execution board, typed roadmap data, UI screenshot coverage, tracker gate, and audit:roadmap guard are wired.",
     nextAction: "Use the roadmap lanes to pull the next client-pilot hardening slice.",
     icon: Milestone
   }
@@ -172,12 +172,12 @@ export const clearTrackerLanes: TrackerLane[] = [
     summary: "Executable local MVP path is working and phase-gated for synthetic/demo data.",
     items: [
       "Chat-first UI with API fallback, structured workflow steps, insight cards, risk register, command actions, citations, and source-backed answers.",
-      "Direct and ZIP uploads with hashing, malware baseline checks, safe storage paths, and signed downloads.",
+      "Direct and ZIP uploads with hashing, malware baseline checks, safe storage paths, signed downloads, and batched clean-path persistence.",
       "Parser worker covers text, CSV, XLSX, DOCX, EML, PyMuPDF-backed PDF text, native PDF table rows, pdf_report_profile_v1 DDR fields/sections, OCR routing/extraction, typed locators, manifest-driven parser/OCR eval reports, and source citation actions.",
       "Partner preview ZIP includes the built app, API, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.",
       "Validation-gated Monday Report exports JSON, CSV, HTML, PDF, and XLSX with signed artifact downloads.",
-      "Report Studio provides a technical morning-report console with standard daily-report sections, readiness telemetry, control matrix, source-backed draft generation, casing/well schematic, AI plan/execute checks, timeline, and draft export.",
-      "Roadmap cockpit maps current build, next corpus/eval work, hardening, package, and client pilot lanes with release gates and risk controls.",
+      "Report Studio provides a technical morning-report console with DDR/BHA/mud/survey variants, issue-readiness board, readiness telemetry, source-backed draft generation, casing/well schematic, AI plan/execute checks, timeline, and draft export.",
+      "Roadmap cockpit maps current build, next corpus/eval work, hardening, package, client pilot lanes, release gates, risk controls, and next controlled moves.",
       "Official exports include GA-style metrics, validation posture, source coverage, standard daily-report sections, casing rows, well schematic, AI execution plan, timeline, branded HTML/PDF output, and expanded XLSX sections.",
       "GA readiness guard separates software-owned checks from configuration, infrastructure, and reviewed-evidence blockers.",
       "`audit:all` is the accepted local proof gate after every slice."
@@ -215,7 +215,7 @@ export const clearTrackerLanes: TrackerLane[] = [
     summary: "The next high-value work should turn approved local readiness into repeatable client-package pilots.",
     items: [
       "Run controlled client-package dry runs with the approved client-mode environment.",
-      "Promote more normal daily-report format variants into reviewed extraction and drafting tests.",
+      "Promote the visible DDR/BHA/mud/survey report variants into reviewed extraction and drafting tests.",
       "Promote the local FORGE open-source daily-report corpus into reviewed extraction evals without committing raw ignored PDFs.",
       "Pull roadmap lane items in order: normal-format schema variants, stronger schematic extraction, normalized persistence, then controlled client pilot.",
       "Wire local LLM extraction router, strict schemas, confidence scoring, and metrics.",
@@ -232,6 +232,13 @@ export const testGates: TestGate[] = [
     status: "pass",
     command: "pnpm run build",
     lastResult: "TypeScript and Vite production build passed."
+  },
+  {
+    id: "gate-ui-quality",
+    name: "UI quality E2E",
+    status: "pass",
+    command: "pnpm run test:ui",
+    lastResult: "Browser E2E verifies chat, Report Studio variants, issue readiness, upload, tracker, roadmap execution board, and screenshot capture."
   },
   {
     id: "gate-python",
@@ -315,7 +322,7 @@ export const testGates: TestGate[] = [
     name: "Product roadmap",
     status: "pass",
     command: "pnpm run audit:roadmap",
-    lastResult: "Guard verifies typed roadmap data, app navigation, UI E2E screenshot coverage, tracker gate, and audit:all wiring."
+    lastResult: "Guard verifies typed roadmap data, execution board markers, app navigation, UI E2E screenshot coverage, tracker gate, and audit:all wiring."
   },
   {
     id: "gate-text-sanitization",
@@ -597,7 +604,7 @@ export const auditEvents: AuditEvent[] = [
     id: "audit-002",
     event: "Frontend verified",
     scope: "app",
-    result: "Chat-first UI builds and local API fallback is available.",
+    result: "Chat-first UI, Report Studio variants, and Roadmap execution board build and pass browser E2E.",
     timestamp: "2026-07-07"
   },
   {

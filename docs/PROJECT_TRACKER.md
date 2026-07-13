@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-The executable MVP path is now phase-gated end to end and the local client-data approval environment is green. It bootstraps a clean client tenant without startup failure records, requires an API key in client mode, rejects oversized uploads at the API boundary, enforces configured ZIP entry and uncompressed-size limits, blocks unsafe client-mode data operations until readiness is green, activates PostgreSQL/RLS state and Redis-backed queue processing in client mode, exposes requested versus active runtime backends, stores accepted bytes under sanitized tenant-scoped paths, verifies SHA-256, applies configurable retention to expired data artifacts, requires explicit client-mode malware scanner configuration, blocks baseline malware signatures before processing, downloads uploaded source files through signed URLs, defaults local AI to Ollama `gemma4:e2b`, parses text/CSV/XLSX/DOCX/EML/PyMuPDF-backed PDF child files and native PDF table rows into typed document chunks, builds `pdf_report_profile_v1` DDR field/section profiles from PDFs, preserves page/table/row-aware PDF citations, extracts configured local OCR into `ocr_text_v1` chunks with image-page citations, extracts cited MWD signal-loss failures with NPT/company fields, opens validation tasks, creates source-backed Report Studio drafts, creates Monday Report JSON, exports JSON/CSV/HTML/PDF/XLSX artifacts, answers chat with citations and structured workflow cards, renders the Product Roadmap cockpit, records redacted hash-chain audit events, creates a single-file partner preview ZIP, and writes approved real-client readiness evidence. Remaining work follows the roadmap lanes: reviewed normal-format variants, stronger schematic extraction, normalized PostgreSQL repositories, controlled client-package dry runs, production OCR command management, and external malware scanning.
+The executable MVP path is now phase-gated end to end and the local client-data approval environment is green. It bootstraps a clean client tenant without startup failure records, requires an API key in client mode, rejects oversized uploads at the API boundary, enforces configured ZIP entry and uncompressed-size limits, blocks unsafe client-mode data operations until readiness is green, activates PostgreSQL/RLS state and Redis-backed queue processing in client mode, exposes requested versus active runtime backends, stores accepted bytes under sanitized tenant-scoped paths, verifies SHA-256, applies configurable retention to expired data artifacts, requires explicit client-mode malware scanner configuration, blocks baseline malware signatures before processing, downloads uploaded source files through signed URLs, defaults local AI to Ollama `gemma4:e2b`, parses text/CSV/XLSX/DOCX/EML/PyMuPDF-backed PDF child files and native PDF table rows into typed document chunks, builds `pdf_report_profile_v1` DDR field/section profiles from PDFs, preserves page/table/row-aware PDF citations, extracts configured local OCR into `ocr_text_v1` chunks with image-page citations, extracts cited MWD signal-loss failures with NPT/company fields, opens validation tasks, creates source-backed Report Studio drafts, provides DDR/BHA/mud/survey Report Studio variants with client issue readiness, creates Monday Report JSON, exports JSON/CSV/HTML/PDF/XLSX artifacts, answers chat with citations and structured workflow cards, renders the Product Roadmap cockpit with an execution board, records redacted hash-chain audit events, creates a single-file partner preview ZIP, and writes approved real-client readiness evidence. Remaining work follows the roadmap lanes: reviewed normal-format variants, stronger schematic extraction, normalized PostgreSQL repositories, controlled client-package dry runs, production OCR command management, and external malware scanning.
 
 ## Clear Tracker Snapshot
 
@@ -15,8 +15,8 @@ The executable MVP path is now phase-gated end to end and the local client-data 
 
 ## Current Tracker
 
-- Working now: chat-first workflow, direct/ZIP upload, SHA-256 storage, malware baseline blocking, parser-worker queue, source chunks, failure extraction, validation tasks, Monday Report creation, JSON/CSV/HTML/PDF/XLSX exports, signed source/export downloads, redacted audit logs, and readiness reporting.
-- Recently added: typed source locators, readable citation labels, source-file actions directly from chat citation cards, command-center chat workflow, source-backed Report Studio drafts, Product Roadmap cockpit, manifest-backed fixture readiness, Gemma 4 E2B local AI default, single-file partner preview packaging, page-aware PDF chunks, native PDF table row citations, high-confidence PDF report profiles, and configurable local OCR extraction into image-page chunks.
+- Working now: chat-first workflow, batched direct/ZIP upload, SHA-256 storage, malware baseline blocking, parser-worker queue, source chunks, failure extraction, validation tasks, Monday Report creation, JSON/CSV/HTML/PDF/XLSX exports, signed source/export downloads, redacted audit logs, and readiness reporting.
+- Recently added: typed source locators, readable citation labels, source-file actions directly from chat citation cards, command-center chat workflow, source-backed Report Studio drafts, DDR/BHA/mud/survey report variants, client issue-readiness board, Product Roadmap execution board, direct-upload persistence batching, manifest-backed fixture readiness, Gemma 4 E2B local AI default, single-file partner preview packaging, page-aware PDF chunks, native PDF table row citations, high-confidence PDF report profiles, and configurable local OCR extraction into image-page chunks.
 - Real-client posture: approved in the local client environment with active PostgreSQL, active Redis, local AI, security configuration, golden fixture/eval evidence, and reviewed fixture attestation all passing.
 - Operator command: run `pnpm run audit:all` after every meaningful code change; run `pnpm run package:partner-approval` before sending the partner ZIP; run `pnpm run package:client-approval` to write the current real-client approval/blocker report.
 
@@ -25,6 +25,7 @@ The executable MVP path is now phase-gated end to end and the local client-data 
 Every implementation slice must pass these checks before it is considered accepted:
 
 - Frontend build: `pnpm run build`
+- UI quality E2E and screenshots: `pnpm run test:ui`
 - Backend compile: `python -m py_compile backend/app/*.py`
 - API health: `GET http://127.0.0.1:8000/health`
 - Frontend health: `GET http://127.0.0.1:5173`
@@ -74,6 +75,7 @@ Run the combined local gates:
 
 ```powershell
 pnpm run audit:phase
+pnpm run test:ui
 pnpm run test:e2e
 pnpm run audit:client-data
 pnpm run audit:bootstrap
@@ -127,8 +129,8 @@ pnpm run audit:all
 | 06 | Active | Local AI extraction | Deterministic scaffold extracts cited MWD failures, NPT hours, company, and validation tasks from parsed chunks; local AI defaults to Ollama `gemma4:e2b` and verifies the pinned model is available | Wire Ollama/LM Studio router, strict schemas, confidence scoring, and metrics |
 | 07 | Complete | Validated exports | E2E verifies unresolved validation blocks export, validates extracted failures, creates report, exports JSON/CSV/HTML/PDF/XLSX artifacts, inspects artifact signatures, and downloads through signed URLs | Polish report templates |
 | 08 | Complete | Real-client readiness | Live client-data approval is APPROVED with PostgreSQL/RLS, Redis, API key, signing secret, protected storage, retention, malware scanner, parser/OCR evals, reviewed fixture attestation, and local Gemma runtime | Run controlled client-package dry runs and maintain approval evidence |
-| 09 | Active | Morning report studio | Chat command center and Report Studio now show workflow steps, insight cards, risk register, tool actions, technical telemetry, source-backed draft generation, normal report controls, casing/well schematic, AI plan checks, timeline, and draft export | Promote normal-format variants and stronger schematic extraction from reviewed daily-report evidence |
-| 10 | Complete | Roadmap cockpit | Product Roadmap view, typed roadmap data, UI screenshot coverage, tracker gate, and `audit:roadmap` guard are wired | Use roadmap lanes to pull the next client-pilot hardening slice |
+| 09 | Active | Morning report studio | Chat command center and Report Studio now show workflow steps, insight cards, risk register, tool actions, technical telemetry, source-backed draft generation, DDR/BHA/mud/survey variants, issue-readiness board, casing/well schematic, AI plan checks, timeline, and draft export | Promote visible format variants and stronger schematic extraction into reviewed parser/drafting fixtures |
+| 10 | Complete | Roadmap cockpit | Product Roadmap view, execution board, typed roadmap data, UI screenshot coverage, tracker gate, and `audit:roadmap` guard are wired | Use roadmap execution board lanes to pull the next client-pilot hardening slice |
 
 ## Audit Notes
 
@@ -143,6 +145,7 @@ pnpm run audit:all
 - Sensitive audit metadata is redacted before sealing; prompts, filenames, paths, tokens, emails, and names are stored as fingerprints.
 - `/retention/run` supports dry-run and explicit apply modes for expired uploads, parsed artifacts, reports, exports, and managed local files.
 - `MONDAY_REPORT_MALWARE_SCANNER=builtin` explicitly enables the baseline scanner for client readiness; direct uploads and ZIP child files with blocked signatures are audited.
+- Direct uploads batch the initial file record, scan result, processing job, queue enqueue, and audit persistence into a single clean-path save; blocked uploads still persist malware evidence before returning HTTP 422.
 - Metadata and direct upload names plus ZIP entry names are sanitized before storage; traversal and reserved device names remain under tenant storage, and metadata-only completion fails closed until bytes exist.
 - Embedded-text PDFs parse through `pdf_text_v1`; PyMuPDF is used when available, native table rows become evidence chunks, chunks carry page/table/row-specific PDF locator metadata, and `pdf_report_profile_v1` extracts DDR report number, well, rig, operator, hole size, MD, TVD, mud weight, operations, safety, casing, BHA, survey, and time breakdown sections.
 - PDF profile fields and sections become cited chunks and prefill Report Studio drafts; NPT extraction now prefers explicit NPT-hour labels and ignores casing/depth units such as `6500 ft`.
@@ -150,7 +153,8 @@ pnpm run audit:all
 - Chat citations render typed locator labels with source filenames.
 - Chat citations can request signed source-file links from the evidence card.
 - `/workspaces/{workspace_id}/report-draft` generates editable Report Studio fields from parsed documents, chunks, failures, validation tasks, and citations, then records `report_draft.generate`.
-- Product Roadmap is a guarded app surface; `audit:roadmap` verifies data, navigation, tracker gate, UI screenshot coverage, and `audit:all` wiring.
+- Report Studio now exposes normal-format variants for DDR, BHA/tools, mud/hydraulics, and survey/directional reports; `pnpm run test:ui` verifies the variant controls, issue-readiness board, source draft evidence, and screenshots.
+- Product Roadmap is a guarded app surface; `audit:roadmap` verifies data, execution board markers, navigation, tracker gate, UI screenshot coverage, and `audit:all` wiring.
 - Extracted text is scrubbed before chunking and before PostgreSQL JSONB persistence so PDF/table control characters cannot block corpus processing.
 - Golden fixture readiness requires `MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST` to reference an `anonymized_client` manifest with all required fixture families and real files; real-client readiness also requires a reviewed anonymized-client attestation.
 - Parser/OCR eval readiness requires `MONDAY_REPORT_PARSER_EVAL_REPORT` to reference a passing report covering all required fixture families with passing checks; `scripts/generate_parser_fixture_eval_report.py` creates that report from `MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST`, and incomplete reports warn in demo mode and fail in client mode.

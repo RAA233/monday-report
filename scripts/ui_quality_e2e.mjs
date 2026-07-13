@@ -66,11 +66,21 @@ try {
       await page.getByRole("button", { name: /Source draft/i }).click();
       await expectText(page, /Source-backed draft ready/i, "Report Studio source draft");
       await expectText(page, /Source-backed draft evidence/i, "Report Studio evidence panel");
+      await expectText(page, /Client issue readiness/i, "Report Studio issue readiness");
+      await expectText(page, /Normal formats/i, "Report Studio normal formats");
       await page.getByRole("button", { name: /FORGE style/i }).click();
+      await page.getByRole("tab", { name: /BHA/i }).click();
+      await page.getByRole("button", { name: /Apply format/i }).click();
+      await expectText(page, /BHA performance report/i, "Report Studio BHA variant");
       await page.getByRole("button", { name: /AI draft/i }).click();
       await expectText(page, /FORGE 16A\(78\)-32/i, "Report Studio FORGE template");
       await expectText(page, /MR-DDR-2/i, "Report Studio format telemetry");
       await expectText(page, /Trajectory/i, "Report Studio control matrix");
+    }
+
+    if (view.label === "Roadmap") {
+      await expectText(page, /Roadmap execution board/i, "Roadmap execution board");
+      await expectText(page, /Next controlled moves/i, "Roadmap controlled moves");
     }
 
     if (view.label === "Upload") {

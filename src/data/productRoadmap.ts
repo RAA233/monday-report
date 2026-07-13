@@ -27,6 +27,15 @@ export interface RoadmapLane {
   items: RoadmapItem[];
 }
 
+export interface RoadmapExecutionCard {
+  id: string;
+  label: string;
+  value: string;
+  detail: string;
+  command: string;
+  tone: RoadmapTone;
+}
+
 export interface ReleaseGate {
   id: string;
   label: string;
@@ -47,8 +56,8 @@ export const capabilitySignals: CapabilitySignal[] = [
   {
     id: "signal-report-intelligence",
     label: "Report intelligence",
-    value: "MR-DDR-2",
-    detail: "Normal report sections, casing schematic, timeline, AI plan, and branded exports are live.",
+    value: "MR-DDR-2+",
+    detail: "Normal variants, issue readiness, casing schematic, timeline, AI plan, and branded exports are live.",
     tone: "good"
   },
   {
@@ -68,9 +77,44 @@ export const capabilitySignals: CapabilitySignal[] = [
   {
     id: "signal-roadmap",
     label: "Roadmap proof",
-    value: "guarded",
-    detail: "Navigation, UI screenshots, tracker gate, and audit wiring are checked by audit:roadmap.",
+    value: "execution board",
+    detail: "Navigation, UI screenshots, tracker gate, execution board, and audit wiring are checked by audit:roadmap.",
     tone: "info"
+  }
+];
+
+export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
+  {
+    id: "exec-current-slice",
+    label: "Current slice",
+    value: "UI/UX command surface",
+    detail: "Report Studio normal variants, issue readiness, and roadmap execution visibility are the active product polish slice.",
+    command: "pnpm run test:ui",
+    tone: "info"
+  },
+  {
+    id: "exec-next-pull",
+    label: "Next audited pull",
+    value: "schema variants",
+    detail: "Promote DDR, BHA, mud, survey, and directional formats into reviewed extraction and drafting evals.",
+    command: "pnpm run audit:parser-fixture-evals",
+    tone: "warning"
+  },
+  {
+    id: "exec-ga-proof",
+    label: "GA proof",
+    value: "GA_READY",
+    detail: "Strict readiness remains the handoff gate before client data or pilot dispatch.",
+    command: "pnpm run ga:readiness",
+    tone: "good"
+  },
+  {
+    id: "exec-package",
+    label: "Package",
+    value: "partner approved",
+    detail: "Partner ZIP and approval ledger remain separate from client-data approval evidence.",
+    command: "pnpm run package:partner-approval",
+    tone: "good"
   }
 ];
 
@@ -95,9 +139,18 @@ export const roadmapLanes: RoadmapLane[] = [
         title: "Advanced report studio",
         owner: "Frontend + drilling SME",
         status: "active",
-        gate: "audit:report-template",
-        evidence: "MR-DDR-2 templates include standard sections, casing rows, schematic, AI plan, timeline, and exports.",
-        next: "Add reviewed normal-report variants for mud, BHA, survey, bits, approvals, and morning handover."
+        gate: "test:ui",
+        evidence: "MR-DDR-2+ UI includes normal-format variants, issue readiness, casing rows, schematic, AI plan, timeline, and exports.",
+        next: "Promote the visible DDR/BHA/mud/survey variants into reviewed parser and drafting fixtures."
+      },
+      {
+        id: "item-ui-execution-board",
+        title: "High-end UX execution board",
+        owner: "Frontend + product",
+        status: "complete",
+        gate: "audit:roadmap",
+        evidence: "Roadmap execution board exposes the current slice, next audited pull, GA proof, and package posture.",
+        next: "Keep UI screenshots and tracker evidence refreshed after each visible product slice."
       }
     ]
   },

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { JSX } from "react";
 import {
   BarChart3,
+  BookOpenCheck,
   CalendarDays,
   CheckCircle2,
   Clock3,
@@ -13,6 +14,7 @@ import {
   Gauge,
   HardHat,
   Layers3,
+  ListChecks,
   Route,
   Ruler,
   ShieldAlert,
@@ -81,6 +83,29 @@ interface ControlMatrixItem {
   detail: string;
 }
 
+type FormatVariantId = "ddr" | "bha" | "mud" | "survey";
+
+interface ReportFormatVariant {
+  id: FormatVariantId;
+  label: string;
+  shortLabel: string;
+  scope: string;
+  phase: string;
+  presentOps: string;
+  nextOps: string;
+  safety: string;
+  risks: string;
+  operationsLog: string;
+  requiredSections: string[];
+}
+
+interface IssueReadinessItem {
+  label: string;
+  value: string;
+  detail: string;
+  tone: "good" | "warning" | "danger" | "info";
+}
+
 interface ReportStudioProps {
   workspaceId?: string;
 }
@@ -99,26 +124,118 @@ const defaultOperationsLog = [
   "18:00-24:00 | Continue drilling and prepare morning handover."
 ].join("\n");
 
+const reportFormatVariants: ReportFormatVariant[] = [
+  {
+    id: "ddr",
+    label: "Daily drilling",
+    shortLabel: "DDR",
+    scope: "Full morning handover",
+    phase: "Drilling morning report",
+    presentOps:
+      "Summarize the active 24 hr drilling operation with well/job information, present operations, drilling parameters, casing, mud, BHA, survey, time breakdown, NPT, and approvals.",
+    nextOps:
+      "Continue planned operation, update directional plan, verify casing readiness, and prepare a clean morning handover with source-backed highlights.",
+    safety:
+      "Confirm BOP, well-control barriers, pressure-control notes, lifting exposure, and handover hazards before client issue.",
+    risks:
+      "Watch hole cleaning, torque and drag, ECD margin, lost circulation, MWD signal continuity, and casing-point readiness.",
+    operationsLog: defaultOperationsLog,
+    requiredSections: ["Well/job", "Operations", "Parameters", "Mud/BHA/survey", "Casing", "Timeline", "NPT", "Approvals"]
+  },
+  {
+    id: "bha",
+    label: "BHA and tools",
+    shortLabel: "BHA",
+    scope: "Run performance and tool risk",
+    phase: "BHA performance report",
+    presentOps:
+      "Summarize BHA run status, bit performance, RSS/MWD/LWD response, downhole tool reliability, vibration indicators, and any service-company exposure.",
+    nextOps:
+      "Confirm tool serials, run hours, failure/NPT evidence, replacement status, and recommended operating parameters before the next run.",
+    safety:
+      "Confirm handling controls, red-zone exposure, pressure isolation, and tool-change lifting plan before operational handover.",
+    risks:
+      "Watch MWD signal quality, shock and vibration, motor/RSS response, bit wear, connection failures, and repeat-tool exposure.",
+    operationsLog: [
+      "00:00-06:00 | Review BHA run status, tool response, and signal quality.",
+      "06:00-12:00 | Confirm tool serials, bit/BHA hours, and service-company notes.",
+      "12:00-18:00 | Reconcile failures, NPT, trips, replacements, and corrective actions.",
+      "18:00-24:00 | Prepare next-run guidance and validation-backed handover."
+    ].join("\n"),
+    requiredSections: ["BHA", "Bit", "MWD/LWD/RSS", "Tool serials", "Run hours", "Failures", "NPT", "Actions"]
+  },
+  {
+    id: "mud",
+    label: "Mud and hydraulics",
+    shortLabel: "Mud",
+    scope: "Fluid condition and hole cleaning",
+    phase: "Mud and hydraulics report",
+    presentOps:
+      "Summarize mud properties, active volume, treatments, losses/gains, solids control, ECD margin, hole cleaning, and any fluid-related NPT.",
+    nextOps:
+      "Confirm rheology trend, density target, chemical treatments, losses response, hole-cleaning plan, and mud engineer approvals.",
+    safety:
+      "Confirm chemical handling controls, pit management, pressure-control exposure, and spill response posture.",
+    risks:
+      "Watch ECD margin, losses, gas cut, barite sag, hole cleaning, stuck-pipe indicators, and incompatible treatments.",
+    operationsLog: [
+      "00:00-06:00 | Review mud density, rheology, volumes, and treatment plan.",
+      "06:00-12:00 | Confirm solids control, losses/gains, ECD, and hole cleaning.",
+      "12:00-18:00 | Reconcile mud-related NPT, chemicals, and approvals.",
+      "18:00-24:00 | Prepare hydraulics guidance and next-shift treatment plan."
+    ].join("\n"),
+    requiredSections: ["Mud weight", "Rheology", "Volumes", "Treatments", "Losses/gains", "ECD", "Hole cleaning", "Approvals"]
+  },
+  {
+    id: "survey",
+    label: "Survey and directional",
+    shortLabel: "Survey",
+    scope: "Trajectory and directional quality",
+    phase: "Survey and directional report",
+    presentOps:
+      "Summarize survey acceptance, inclination/azimuth trend, DLS, toolface response, target position, MWD quality, and directional plan compliance.",
+    nextOps:
+      "Confirm next survey plan, correction requirements, anti-collision review, directional objectives, and source-backed trajectory notes.",
+    safety:
+      "Confirm survey QA, anti-collision controls, directional-change communication, and well-control constraints before handover.",
+    risks:
+      "Watch survey quality flags, DLS spikes, toolface control, target drift, MWD signal continuity, and anti-collision separation.",
+    operationsLog: [
+      "00:00-06:00 | Review accepted surveys, target position, and directional trend.",
+      "06:00-12:00 | Confirm MWD quality, DLS, toolface response, and plan compliance.",
+      "12:00-18:00 | Reconcile survey flags, anti-collision review, and trajectory risks.",
+      "18:00-24:00 | Prepare directional guidance and next survey acceptance checks."
+    ].join("\n"),
+    requiredSections: ["Surveys", "Inclination", "Azimuth", "DLS", "MWD quality", "Target", "Anti-collision", "Plan"]
+  }
+];
+
 export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
   const [form, setForm] = useState<ReportForm>(() => initialReportForm());
   const [evidenceDraft, setEvidenceDraft] = useState<ApiReportDraft | null>(null);
+  const [formatVariantId, setFormatVariantId] = useState<FormatVariantId>("ddr");
   const [draftStatus, setDraftStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [draftMessage, setDraftMessage] = useState(
     "Source draft pulls parsed workspace evidence into this editable report."
   );
 
+  const activeVariant = reportFormatVariants.find((variant) => variant.id === formatVariantId) ?? reportFormatVariants[0];
   const casing = useMemo(() => parseCasingProgram(form.casingProgram), [form.casingProgram]);
   const activities = useMemo(() => parseOperationsLog(form.operationsLog), [form.operationsLog]);
   const summary = useMemo(() => buildExecutiveSummary(form), [form]);
   const standardSections = useMemo(
-    () => buildStandardReportSections(form, casing, activities),
-    [form, casing, activities]
+    () => buildStandardReportSections(form, casing, activities, activeVariant),
+    [form, casing, activities, activeVariant]
   );
   const aiPlan = useMemo(() => buildAiExecutionPlan(form, casing, activities), [form, casing, activities]);
   const clientChecks = useMemo(() => buildClientIssueChecklist(form, casing, activities), [form, casing, activities]);
   const studioMetrics = useMemo(
-    () => buildStudioMetrics(form, casing, activities, clientChecks, evidenceDraft),
-    [form, casing, activities, clientChecks, evidenceDraft]
+    () => buildStudioMetrics(form, casing, activities, clientChecks, evidenceDraft, activeVariant),
+    [form, casing, activities, clientChecks, evidenceDraft, activeVariant]
+  );
+  const issueReadiness = useMemo(
+    () => buildIssueReadiness(form, casing, activities, clientChecks, evidenceDraft, activeVariant),
+    [form, casing, activities, clientChecks, evidenceDraft, activeVariant]
   );
 
   function updateField(field: keyof ReportForm, value: string): void {
@@ -187,6 +304,7 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
   }
 
   function applyForgeTemplate(): void {
+    setFormatVariantId("ddr");
     setForm({
       reportDate: currentDateInputValue(),
       reportNo: "DDR-001",
@@ -211,9 +329,34 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
     });
   }
 
+  function applyFormatVariant(variant: ReportFormatVariant): void {
+    setFormatVariantId(variant.id);
+    setForm((current) => ({
+      ...current,
+      phase: variant.phase,
+      presentOps: current.presentOps.trim() ? current.presentOps : variant.presentOps,
+      nextOps: current.nextOps.trim() ? current.nextOps : variant.nextOps,
+      safety: current.safety.trim() ? current.safety : variant.safety,
+      risks: current.risks.trim() ? current.risks : variant.risks,
+      operationsLog: current.operationsLog.trim() ? current.operationsLog : variant.operationsLog
+    }));
+  }
+
   function downloadDraft(): void {
     const blob = new Blob(
-      [renderMarkdownReport(form, summary, casing, activities, standardSections, aiPlan, clientChecks, evidenceDraft)],
+      [
+        renderMarkdownReport(
+          form,
+          summary,
+          casing,
+          activities,
+          standardSections,
+          aiPlan,
+          clientChecks,
+          evidenceDraft,
+          activeVariant
+        )
+      ],
       {
         type: "text/markdown;charset=utf-8"
       }
@@ -240,10 +383,64 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
         <Badge tone="info">MR-DDR-2</Badge>
       </section>
 
+      <section className="studio-command-ribbon" aria-label="Report format command ribbon">
+        <div className="format-selector">
+          <div>
+            <p className="eyebrow">Normal formats</p>
+            <h2>{activeVariant.label}</h2>
+            <span>{activeVariant.scope}</span>
+          </div>
+          <div className="format-segmented-control" role="tablist" aria-label="Report format variants">
+            {reportFormatVariants.map((variant) => (
+              <button
+                key={variant.id}
+                type="button"
+                className={variant.id === formatVariantId ? "active" : ""}
+                onClick={() => setFormatVariantId(variant.id)}
+                aria-selected={variant.id === formatVariantId}
+                role="tab"
+              >
+                {variant.shortLabel}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="format-section-strip">
+          {activeVariant.requiredSections.slice(0, 8).map((section) => (
+            <span key={section}>{section}</span>
+          ))}
+        </div>
+        <button className="secondary-action format-apply-action" type="button" onClick={() => applyFormatVariant(activeVariant)}>
+          <BookOpenCheck size={18} aria-hidden="true" />
+          Apply format
+        </button>
+      </section>
+
       <section className="studio-ops-strip" aria-label="Report studio technical telemetry">
         {studioMetrics.map((metric) => (
           <StudioMetricCard key={metric.label} metric={metric} />
         ))}
+      </section>
+
+      <section className="issue-readiness-board" aria-label="Client issue readiness board">
+        <div className="issue-board-heading">
+          <div>
+            <p className="eyebrow">Client issue readiness</p>
+            <h2>Review board</h2>
+          </div>
+          <Badge tone={issueReadiness.every((item) => item.tone === "good") ? "good" : "warning"}>
+            {issueReadiness.filter((item) => item.tone === "good").length}/{issueReadiness.length} clear
+          </Badge>
+        </div>
+        <div className="issue-readiness-grid">
+          {issueReadiness.map((item) => (
+            <article className={`issue-readiness-card issue-readiness-${item.tone}`} key={item.label}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+              <p>{item.detail}</p>
+            </article>
+          ))}
+        </div>
       </section>
 
       <section className="studio-grid">
@@ -359,6 +556,7 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
             aiPlan={aiPlan}
             clientChecks={clientChecks}
             evidenceDraft={evidenceDraft}
+            activeVariant={activeVariant}
           />
         </aside>
       </section>
@@ -391,6 +589,9 @@ function studioMetricIcon(label: string): JSX.Element {
   }
   if (label === "Completeness") {
     return <BarChart3 size={19} aria-hidden="true" />;
+  }
+  if (label === "Format") {
+    return <ListChecks size={19} aria-hidden="true" />;
   }
   if (label === "Schematic") {
     return <HardHat size={19} aria-hidden="true" />;
@@ -444,6 +645,7 @@ interface DailyReportPreviewProps {
   aiPlan: AiExecutionStep[];
   clientChecks: string[];
   evidenceDraft: ApiReportDraft | null;
+  activeVariant: ReportFormatVariant;
 }
 
 function DailyReportPreview({
@@ -454,7 +656,8 @@ function DailyReportPreview({
   standardSections,
   aiPlan,
   clientChecks,
-  evidenceDraft
+  evidenceDraft,
+  activeVariant
 }: DailyReportPreviewProps): JSX.Element {
   const controlMatrix = buildControlMatrix(form, casing, activities, clientChecks);
 
@@ -472,7 +675,7 @@ function DailyReportPreview({
       <div className="daily-report-band">
         <span>{form.reportDate || "Date not set"}</span>
         <span>{form.reportNo || "Draft"}</span>
-        <span>{form.phase || "Operation phase"}</span>
+        <span>{activeVariant.shortLabel} / {form.phase || "Operation phase"}</span>
       </div>
 
       <section className="report-info-grid">
@@ -791,9 +994,15 @@ function buildExecutiveSummary(form: ReportForm): string {
 function buildStandardReportSections(
   form: ReportForm,
   casing: CasingInterval[],
-  activities: ActivitySegment[]
+  activities: ActivitySegment[],
+  activeVariant: ReportFormatVariant
 ): StandardReportSection[] {
   return [
+    {
+      title: `${activeVariant.label} focus`,
+      status: "selected",
+      detail: `${activeVariant.scope}. Required checks: ${activeVariant.requiredSections.join(", ")}.`
+    },
     {
       title: "Well / job information",
       status: form.well.trim() && form.rig.trim() ? "ready" : "needs input",
@@ -876,7 +1085,8 @@ function buildStudioMetrics(
   casing: CasingInterval[],
   activities: ActivitySegment[],
   clientChecks: string[],
-  evidenceDraft: ApiReportDraft | null
+  evidenceDraft: ApiReportDraft | null,
+  activeVariant: ReportFormatVariant
 ): StudioMetric[] {
   const requiredFields: Array<keyof ReportForm> = [
     "reportDate",
@@ -908,8 +1118,8 @@ function buildStudioMetrics(
     },
     {
       label: "Format",
-      value: "MR-DDR-2",
-      detail: "Normal daily-report structure with original casing/timeline compatibility.",
+      value: activeVariant.shortLabel,
+      detail: `${activeVariant.label} format with ${activeVariant.requiredSections.length} required checks.`,
       tone: "info",
     },
     {
@@ -936,6 +1146,57 @@ function buildStudioMetrics(
       detail: "Client issue checklist tracks missing identifiers, safety, casing, and evidence.",
       tone: blockers === 0 ? "good" : "warning",
     },
+  ];
+}
+
+function buildIssueReadiness(
+  form: ReportForm,
+  casing: CasingInterval[],
+  activities: ActivitySegment[],
+  clientChecks: string[],
+  evidenceDraft: ApiReportDraft | null,
+  activeVariant: ReportFormatVariant
+): IssueReadinessItem[] {
+  const missingChecks = clientChecks.filter((item) => item.startsWith("Add") || item.startsWith("Confirm")).length;
+  const primaryTextReady = Boolean(form.presentOps.trim() && form.nextOps.trim() && form.safety.trim());
+  const validationClear = evidenceDraft ? evidenceDraft.validation_gate === "clear" : false;
+  return [
+    {
+      label: "Format",
+      value: activeVariant.shortLabel,
+      detail: `${activeVariant.requiredSections.length} normal-report checks selected.`,
+      tone: "good"
+    },
+    {
+      label: "Source",
+      value: evidenceDraft ? `${evidenceDraft.source_document_count} docs` : "manual",
+      detail: evidenceDraft ? `${evidenceDraft.citation_count} citation(s) attached.` : "No source draft loaded in this editor session.",
+      tone: evidenceDraft ? "good" : "info"
+    },
+    {
+      label: "Draft",
+      value: primaryTextReady ? "ready" : "gaps",
+      detail: primaryTextReady ? "Operations, plan, and safety text are populated." : "Operations, plan, or safety text needs completion.",
+      tone: primaryTextReady ? "good" : "warning"
+    },
+    {
+      label: "Visuals",
+      value: `${casing.length}/${activities.length}`,
+      detail: `${casing.length} casing string(s) and ${activities.length} activity block(s).`,
+      tone: casing.length >= 3 && activities.length >= 4 ? "good" : "warning"
+    },
+    {
+      label: "Validation",
+      value: validationClear ? "clear" : evidenceDraft ? `${evidenceDraft.open_validation_tasks} open` : "review",
+      detail: validationClear ? "Source validation gate is clear." : "Reviewer confirmation remains required before official export.",
+      tone: validationClear ? "good" : "warning"
+    },
+    {
+      label: "Issue",
+      value: missingChecks === 0 ? "ready" : `${missingChecks} gap(s)`,
+      detail: "Client issue checklist tracks identifiers, safety, casing, timeline, and source evidence.",
+      tone: missingChecks === 0 ? "good" : "warning"
+    }
   ];
 }
 
@@ -998,7 +1259,8 @@ function renderMarkdownReport(
   standardSections: StandardReportSection[],
   aiPlan: AiExecutionStep[],
   clientChecks: string[],
-  evidenceDraft: ApiReportDraft | null
+  evidenceDraft: ApiReportDraft | null,
+  activeVariant: ReportFormatVariant
 ): string {
   const casingRows = casing
     .map((item) => `- ${item.name}: ${item.od}, ${item.topFt.toLocaleString()} to ${item.shoeFt.toLocaleString()} ft, ${item.status}`)
@@ -1019,6 +1281,7 @@ function renderMarkdownReport(
     `Rig: ${form.rig}`,
     `Operator: ${form.operator}`,
     `Phase: ${form.phase}`,
+    `Format: ${activeVariant.label} (${activeVariant.shortLabel})`,
     `Depth: MD ${formatDepth(form.mdFt)}, TVD ${formatDepth(form.tvdFt)}`,
     "",
     "## Executive Summary",
