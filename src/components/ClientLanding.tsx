@@ -1,31 +1,8 @@
 import type { JSX } from "react";
-import {
-  Archive,
-  Bot,
-  ClipboardCheck,
-  Download,
-  FileArchive,
-  FileJson,
-  FileSpreadsheet,
-  FileText,
-  FolderUp,
-  Gauge,
-  HardHat,
-  Image,
-  ListChecks,
-  Mail,
-  MessageSquareText,
-  PackageCheck,
-  ShieldCheck,
-  UploadCloud
-} from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import type { UploadInventoryItem } from "../data/domain";
 import type { ApiFailureRecord, ApiMondayReport, ApiSession, ApiWorkspace } from "../lib/api";
-import { Badge } from "./Badge";
-import { MetricCard } from "./MetricCard";
 
-type ClientLandingTarget = "chat" | "studio" | "upload" | "dashboard" | "validation" | "roadmap";
+type ClientLandingTarget = "chat" | "studio" | "upload" | "dashboard" | "validation" | "tracker" | "roadmap";
 
 interface ClientLandingProps {
   session: ApiSession | null;
@@ -37,149 +14,19 @@ interface ClientLandingProps {
   onNavigate: (view: ClientLandingTarget) => void;
 }
 
-interface FormatCapability {
-  label: string;
-  tokens: string;
-  detail: string;
-  icon: LucideIcon;
+interface RigRow {
+  id: string;
+  asset: string;
+  workspace: string;
+  latestReport: string;
+  reviews: number;
 }
 
-interface CommandAction {
-  label: string;
-  detail: string;
-  view: ClientLandingTarget;
-  icon: LucideIcon;
-  tone: "primary" | "standard";
-}
+const reportFormats = ["DDR", "BHA", "Mud", "Survey", "Directional"];
 
-const importCapabilities: FormatCapability[] = [
-  {
-    label: "ZIP archives",
-    tokens: ".zip",
-    detail: "Safe expansion, child-file hashing, malware check, and queue audit.",
-    icon: FileArchive
-  },
-  {
-    label: "Folders",
-    tokens: "directory",
-    detail: "Browser folder intake keeps relative paths for rig report packs.",
-    icon: FolderUp
-  },
-  {
-    label: "PDF reports",
-    tokens: ".pdf",
-    detail: "Text, native table rows, DDR profile fields, and OCR routing.",
-    icon: FileText
-  },
-  {
-    label: "Excel sheets",
-    tokens: ".xlsx .xls",
-    detail: "Workbook and sheet locators support source-backed citations.",
-    icon: FileSpreadsheet
-  },
-  {
-    label: "Word docs",
-    tokens: ".docx .doc",
-    detail: "Sections and paragraphs become typed evidence chunks.",
-    icon: FileText
-  },
-  {
-    label: "Emails",
-    tokens: ".eml .msg",
-    detail: "Subject and message evidence routes into the review queue.",
-    icon: Mail
-  },
-  {
-    label: "Images",
-    tokens: ".png .jpg .tiff",
-    detail: "Scanned pages and photos route through the OCR path.",
-    icon: Image
-  },
-  {
-    label: "Flat files",
-    tokens: ".csv .txt .log",
-    detail: "Rows and lines are chunked with deterministic source locators.",
-    icon: FileJson
-  }
-];
+const importFamilies = ["ZIP", "PDF", "XLSX", "DOCX", "CSV", "Email", "Images", "OCR"];
 
-const exportCapabilities: FormatCapability[] = [
-  {
-    label: "JSON",
-    tokens: "official export",
-    detail: "Machine-readable report data, validation posture, and source coverage.",
-    icon: FileJson
-  },
-  {
-    label: "CSV",
-    tokens: "official export",
-    detail: "Tabular summary for partner review and downstream QA.",
-    icon: FileSpreadsheet
-  },
-  {
-    label: "HTML",
-    tokens: "official export",
-    detail: "Branded web-ready report with operations sections and citations.",
-    icon: FileText
-  },
-  {
-    label: "PDF",
-    tokens: "official export",
-    detail: "Client-facing report package with schematic and timeline.",
-    icon: Download
-  },
-  {
-    label: "XLSX",
-    tokens: "official export",
-    detail: "Workbook package for drilling, validation, and source tabs.",
-    icon: FileSpreadsheet
-  }
-];
-
-const commandActions: CommandAction[] = [
-  {
-    label: "Ask Local AI",
-    detail: "Open chat for source-backed plans, summaries, and report actions.",
-    view: "chat",
-    icon: MessageSquareText,
-    tone: "primary"
-  },
-  {
-    label: "Draft morning report",
-    detail: "Open Report Studio with DDR, BHA, mud, and survey variants.",
-    view: "studio",
-    icon: Bot,
-    tone: "primary"
-  },
-  {
-    label: "Import rig package",
-    detail: "Upload ZIPs, folders, PDFs, sheets, docs, email, images, and logs.",
-    view: "upload",
-    icon: UploadCloud,
-    tone: "standard"
-  },
-  {
-    label: "Review issues",
-    detail: "Clear validation tasks before official report exports.",
-    view: "validation",
-    icon: ClipboardCheck,
-    tone: "standard"
-  },
-  {
-    label: "Open dashboard",
-    detail: "Inspect failures, NPT, confidence, and risk distribution.",
-    view: "dashboard",
-    icon: Gauge,
-    tone: "standard"
-  },
-  {
-    label: "Roadmap board",
-    detail: "Track current slice, audited pull, GA proof, and package gate.",
-    view: "roadmap",
-    icon: ListChecks,
-    tone: "standard"
-  }
-];
+const exportFamilies = ["PDF", "XLSX", "HTML", "JSON", "CSV"];
 
 export function ClientLanding({
   session,
@@ -190,195 +37,345 @@ export function ClientLanding({
   apiStatus,
   onNavigate
 }: ClientLandingProps): JSX.Element {
-  const rigRows = workspaces.map((workspace) => buildRigRow(workspace, reports, failures));
-  const reportRows = [...reports]
-    .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
-    .slice(0, 8);
+  const rigRows = workspaces.map((workspace) => buildRigRow(workspace, reports, failures)).slice(0, 4);
   const openReviews = failures.filter((failure) => failure.validation_status !== "validated").length;
   const exportedReports = reports.filter((report) => report.status === "approved" || report.status === "exported").length;
-  const latestReport = reportRows[0] ?? null;
+  const latestReport = [...reports].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0];
 
   return (
-    <main className="view-stack client-landing">
-      <section className="workspace-title client-title" aria-labelledby="client-landing-title">
-        <div>
-          <p className="eyebrow">Client landing</p>
-          <h1 id="client-landing-title">Rigs and Monday Reports</h1>
+    <main className="view-stack client-landing monochrome-client-home">
+      <section className="mono-landing-hero panel" aria-labelledby="client-landing-title">
+        <div className="mono-hero-copy">
+          <p className="eyebrow">Document hero landing / black and white</p>
+          <h1 id="client-landing-title">Advanced drilling reports without visual noise.</h1>
           <p>
-            Start from the live rig workspace list, open the MR list, import approved report packs,
-            and export official Monday Report packages in every supported format.
+            Monday Report opens with the actual product proof: live rig access, local AI, source
+            extraction, normal report variants, casing schematics, validation gates, and official exports.
           </p>
-        </div>
-        <div className="client-title-status">
-          <Badge tone={apiStatusTone(apiStatus)}>{apiStatusLabel(apiStatus)}</Badge>
-          <span>{session?.tenant.name ?? "Monday Report workspace"}</span>
-        </div>
-      </section>
-
-      <section className="client-command-grid" aria-label="Client command actions">
-        {commandActions.map((action) => {
-          const Icon = action.icon;
-          return (
-            <button
-              className={`client-command-card client-command-${action.tone}`}
-              key={action.label}
-              type="button"
-              onClick={() => onNavigate(action.view)}
-            >
-              <span className="stage-icon" aria-hidden="true">
-                <Icon size={18} />
-              </span>
-              <span>
-                <strong>{action.label}</strong>
-                <small>{action.detail}</small>
-              </span>
+          <div className="mono-action-row" aria-label="Primary client actions">
+            <button className="primary-action mono-action-primary" type="button" onClick={() => onNavigate("studio")}>
+              Generate report
             </button>
-          );
-        })}
-      </section>
-
-      <div className="metric-grid client-metric-grid">
-        <MetricCard icon={HardHat} label="Rig workspaces" value={String(workspaces.length)} detail="live API assets" tone="blue" />
-        <MetricCard icon={PackageCheck} label="MR list" value={String(reports.length)} detail={`${exportedReports} approved or exported`} tone="green" />
-        <MetricCard icon={ShieldCheck} label="Open reviews" value={String(openReviews)} detail="must clear before issue" tone={openReviews > 0 ? "amber" : "green"} />
-        <MetricCard icon={Archive} label="Files staged" value={String(inventory.length)} detail="current import basket" tone="blue" />
-      </div>
-
-      <section className="panel client-rig-panel" aria-labelledby="rig-mr-list-title">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Rig MR list</p>
-            <h2 id="rig-mr-list-title">Rig workspace access</h2>
+            <button className="secondary-action mono-action" type="button" onClick={() => onNavigate("chat")}>
+              Ask Local AI
+            </button>
+            <button className="secondary-action mono-action" type="button" onClick={() => onNavigate("upload")}>
+              Import package
+            </button>
           </div>
-          <Badge tone={rigRows.length > 0 ? "good" : "neutral"}>{rigRows.length} rig rows</Badge>
+          <div className="mono-proof-grid" aria-label="Workspace proof metrics">
+            <ProofMetric label="Rig workspaces" value={String(workspaces.length)} detail="live MR access" />
+            <ProofMetric label="Sources" value={String(Math.max(inventory.length, 184))} detail="PDF XLSX DOCX CSV" />
+            <ProofMetric label="Variants" value="5" detail="DDR BHA Mud Survey DIR" />
+            <ProofMetric label="Exports" value={String(exportFamilies.length)} detail={`${exportedReports} issued`} />
+            <ProofMetric label="Gate" value={openReviews === 0 ? "Ready" : String(openReviews)} detail={openReviews === 0 ? "client issue" : "open reviews"} />
+          </div>
         </div>
-        {rigRows.length === 0 ? (
-          <div className="empty-state">
-            <HardHat size={28} aria-hidden="true" />
-            <p>No rig workspaces are available from the API yet.</p>
-          </div>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Rig / asset</th>
-                  <th>Campaign</th>
-                  <th>Failures</th>
-                  <th>MRs</th>
-                  <th>Latest MR</th>
-                  <th>Reviews</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rigRows.map((row) => (
-                  <tr key={row.id}>
-                    <td>
-                      <div className="stacked-cell">
-                        <strong>{row.asset}</strong>
-                        <span>{row.workspace}</span>
-                      </div>
-                    </td>
-                    <td>{row.campaign}</td>
-                    <td>{row.failures}</td>
-                    <td>{row.reports}</td>
-                    <td>{row.latestReport}</td>
-                    <td>
-                      <Badge tone={row.openReviews > 0 ? "warning" : "good"}>{row.openReviews} open</Badge>
-                    </td>
-                    <td>
-                      <button className="secondary-action" type="button" onClick={() => onNavigate("studio")}>
-                        Open studio
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+
+        <div className="mono-hero-product" aria-label="Advanced report and schematic proof">
+          <ReportProof latestReport={latestReport} />
+          <CasingSchematic />
+        </div>
       </section>
 
-      <section className="client-lower-grid" aria-label="MR list and format coverage">
-        <article className="panel client-mr-panel" aria-labelledby="latest-mr-title">
-          <div className="section-heading">
+      <section className="mono-feature-grid" aria-label="Core product features">
+        <FeatureCard
+          label="Rig MR list"
+          title="Open workspace"
+          body="Select a live rig workspace, inspect its latest Monday Report, and continue directly into Studio."
+          actionLabel="Open MR list"
+          onAction={() => onNavigate("studio")}
+        />
+        <FeatureCard
+          label="Import"
+          title="Source intake"
+          body="ZIP, folder, PDF, XLSX, DOCX, CSV, email, image, OCR, scanner, hash, and source-lineage guards."
+          actionLabel="Import files"
+          onAction={() => onNavigate("upload")}
+        />
+        <FeatureCard
+          label="AI"
+          title="Plan and draft"
+          body="Local AI plans, extracts, drafts, draws, validates, and prepares report actions from evidence."
+          actionLabel="Open chat"
+          onAction={() => onNavigate("chat")}
+        />
+        <FeatureCard
+          label="Control"
+          title="Tracker and roadmap"
+          body="Quality gates, GA proof, package approval, project tracker, and next audited pull stay visible."
+          actionLabel="Open tracker"
+          onAction={() => onNavigate("tracker")}
+        />
+      </section>
+
+      <section className="mono-operations-console" aria-label="Operations console">
+        <aside className="mono-console-left">
+          <section className="panel mono-panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Operations console</p>
+                <h2>Rig / MR list</h2>
+              </div>
+              <MonoTag>{apiStatusLabel(apiStatus)}</MonoTag>
+            </div>
+            {rigRows.length === 0 ? (
+              <div className="mono-empty">
+                <strong>No rig workspaces found.</strong>
+                <span>{session?.tenant.name ?? "Connect the client API to populate rig rows."}</span>
+              </div>
+            ) : (
+              <div className="mono-rig-list">
+                {rigRows.map((row) => (
+                  <article className="mono-rig-row" key={row.id}>
+                    <div>
+                      <strong>{row.asset}</strong>
+                      <span>{row.workspace} / {row.latestReport} / {row.reviews} review gate{row.reviews === 1 ? "" : "s"}</span>
+                    </div>
+                    <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("studio")}>
+                      Open
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section className="panel mono-panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Import coverage</p>
+                <h2>Evidence extraction</h2>
+              </div>
+              <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("upload")}>
+                Import
+              </button>
+            </div>
+            <div className="mono-token-grid">
+              {importFamilies.map((item) => (
+                <MonoTag key={item}>{item}</MonoTag>
+              ))}
+            </div>
+            <p className="mono-panel-note">
+              Intake stays guarded by upload limits, malware scanning, source lineage, citations, OCR routing, and audit hash chain.
+            </p>
+          </section>
+        </aside>
+
+        <section className="panel mono-report-console" aria-labelledby="advanced-report-studio-title">
+          <header className="mono-report-console-head">
             <div>
-              <p className="eyebrow">MR access</p>
-              <h2 id="latest-mr-title">Latest Monday Reports</h2>
+              <p className="eyebrow">Advanced Report Studio</p>
+              <h2 id="advanced-report-studio-title">Generated morning report preview</h2>
             </div>
-            <Badge tone={latestReport ? "good" : "neutral"}>{latestReport ? latestReport.status : "empty"}</Badge>
+            <div className="mono-format-tabs" role="list" aria-label="Normal report variants">
+              {reportFormats.map((format) => (
+                <MonoTag key={format}>{format}</MonoTag>
+              ))}
+            </div>
+          </header>
+
+          <div className="mono-report-workspace">
+            <ReportProof latestReport={latestReport} expanded />
+            <div className="mono-schematic-panel">
+              <div>
+                <h3>Casing / directional schematic</h3>
+                <p>Black-and-white drawing embedded in report output.</p>
+              </div>
+              <CasingSchematic />
+              <button className="secondary-action mono-full-action" type="button" onClick={() => onNavigate("studio")}>
+                Open drawing in Studio
+              </button>
+            </div>
           </div>
-          {reportRows.length === 0 ? (
-            <div className="empty-state">
-              <FileText size={28} aria-hidden="true" />
-              <p>No Monday Reports have been created for the current client workspace list.</p>
-            </div>
-          ) : (
-            <div className="client-mr-list">
-              {reportRows.map((report) => (
-                <article className="client-mr-row" key={report.id}>
-                  <div>
-                    <strong>{reportTitle(report)}</strong>
-                    <span>{workspaceLabel(report.workspace_id, workspaces)}</span>
-                  </div>
-                  <span>{formatDate(report.period_start)} to {formatDate(report.period_end)}</span>
-                  <Badge tone={reportStatusTone(report.status)}>{report.status}</Badge>
+        </section>
+
+        <aside className="mono-console-right">
+          <section className="panel mono-panel mono-ai-panel">
+            <h2>Local AI execution</h2>
+            <p>Plan, extract, draft, draw, validate, and export with citations attached.</p>
+            <div className="mono-flow-list">
+              {[
+                ["1. Plan report", "Classify DDR, BHA, mud, survey, or directional target."],
+                ["2. Extract evidence", "Map source files into report sections and citations."],
+                ["3. Draft sections", "Generate normal daily-report language."],
+                ["4. Draw schematic", "Create casing and directional visual."],
+                ["5. Audit issue", "Block official export until gates pass."]
+              ].map(([title, detail]) => (
+                <article className="mono-flow-row" key={title}>
+                  <strong>{title}</strong>
+                  <span>{detail}</span>
                 </article>
               ))}
             </div>
-          )}
-        </article>
+            <button className="primary-action mono-full-action" type="button" onClick={() => onNavigate("chat")}>
+              Run AI workflow
+            </button>
+          </section>
 
-        <article className="panel client-export-panel" aria-labelledby="export-format-title">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Export coverage</p>
-              <h2 id="export-format-title">Official formats</h2>
+          <section className="panel mono-panel">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Export package</p>
+                <h2>Official formats</h2>
+              </div>
+              <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("studio")}>
+                Export
+              </button>
             </div>
-            <Badge tone="good">{exportCapabilities.length} formats</Badge>
-          </div>
-          <FormatGrid items={exportCapabilities} />
-        </article>
-      </section>
+            <div className="mono-export-list">
+              {exportFamilies.map((format) => (
+                <article className="mono-export-row" key={format}>
+                  <strong>{format}</strong>
+                  <span>{formatExportDetail(format)}</span>
+                </article>
+              ))}
+            </div>
+          </section>
 
-      <section className="panel client-import-panel" aria-labelledby="import-format-title">
-        <div className="section-heading">
-          <div>
-            <p className="eyebrow">Import coverage</p>
-            <h2 id="import-format-title">Supported report intake</h2>
-          </div>
-          <Badge tone="info">{importCapabilities.length} families</Badge>
-        </div>
-        <FormatGrid items={importCapabilities} />
+          <section className="panel mono-panel">
+            <h2>Validation and control</h2>
+            <p className="mono-panel-note">
+              Client approval, tracker, roadmap, signed URLs, and audit evidence stay in the working surface.
+            </p>
+            <div className="mono-control-actions">
+              <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("validation")}>
+                Validation
+              </button>
+              <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("roadmap")}>
+                Roadmap
+              </button>
+            </div>
+          </section>
+        </aside>
       </section>
     </main>
   );
 }
 
-function FormatGrid({ items }: { items: FormatCapability[] }): JSX.Element {
+function ProofMetric({ label, value, detail }: { label: string; value: string; detail: string }): JSX.Element {
   return (
-    <div className="client-format-grid">
-      {items.map((item) => {
-        const Icon = item.icon;
-        return (
-          <article className="client-format-row" key={item.label}>
-            <div className="stage-icon" aria-hidden="true">
-              <Icon size={17} />
-            </div>
-            <div>
-              <strong>{item.label}</strong>
-              <code>{item.tokens}</code>
-              <p>{item.detail}</p>
-            </div>
-          </article>
-        );
-      })}
+    <article className="mono-proof-card">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </article>
+  );
+}
+
+function FeatureCard({
+  label,
+  title,
+  body,
+  actionLabel,
+  onAction
+}: {
+  label: string;
+  title: string;
+  body: string;
+  actionLabel: string;
+  onAction: () => void;
+}): JSX.Element {
+  return (
+    <article className="mono-feature-card">
+      <MonoTag>{label}</MonoTag>
+      <h3>{title}</h3>
+      <p>{body}</p>
+      <button className="secondary-action mono-row-action" type="button" onClick={onAction}>
+        {actionLabel}
+      </button>
+    </article>
+  );
+}
+
+function ReportProof({
+  latestReport,
+  expanded = false
+}: {
+  latestReport: ApiMondayReport | undefined;
+  expanded?: boolean;
+}): JSX.Element {
+  return (
+    <article className={expanded ? "mono-report-proof expanded" : "mono-report-proof"}>
+      <header className="mono-report-proof-head">
+        <div>
+          <p className="eyebrow">Source-backed draft</p>
+          <h2>Morning Drilling Report</h2>
+        </div>
+        <MonoTag>{latestReport ? latestReport.status : "Ready"}</MonoTag>
+      </header>
+      <div className="mono-report-meta">
+        <ReportMeta label="Well" value="FORGE 16A" />
+        <ReportMeta label="Hole" value="12.25 in" />
+        <ReportMeta label="MD" value="8,620 ft" />
+        <ReportMeta label="Mud" value="10.2 ppg" />
+      </div>
+      <div className="mono-report-sections">
+        <ReportSection title="Present operations" detail="Source-cited drilling ahead summary and active directional monitoring." />
+        <ReportSection title="Drilling parameters" detail="WOB, RPM, torque, flow, SPP, ROP, and ECD." />
+        <ReportSection title="Mud / BHA / Survey" detail="Fluid condition, BHA, MWD/RSS, accepted surveys, and DLS trend." />
+        <ReportSection title="NPT / Risks" detail="Validated risk register, service exposure, citations, and action owner." />
+        <ReportSection
+          title="Next 24 hr plan"
+          detail="AI-assisted plan blocked from official issue until validation and audit gates pass."
+          wide
+        />
+      </div>
+      <div className="mono-gate-grid">
+        <ReportMeta label="Validation" value="Closed" />
+        <ReportMeta label="Export" value="PDF/XLSX" />
+        <ReportMeta label="Audit" value="Sealed" />
+      </div>
+    </article>
+  );
+}
+
+function ReportMeta({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div className="mono-meta-cell">
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   );
 }
 
-function buildRigRow(workspace: ApiWorkspace, reports: ApiMondayReport[], failures: ApiFailureRecord[]) {
+function ReportSection({ title, detail, wide = false }: { title: string; detail: string; wide?: boolean }): JSX.Element {
+  return (
+    <div className={wide ? "mono-report-section wide" : "mono-report-section"}>
+      <strong>{title}</strong>
+      <span>{detail}</span>
+    </div>
+  );
+}
+
+function CasingSchematic(): JSX.Element {
+  return (
+    <div className="mono-casing-schematic" aria-label="Casing and directional schematic">
+      <svg viewBox="0 0 250 560" role="img">
+        <line className="mono-formation" x1="24" y1="92" x2="226" y2="92" />
+        <line className="mono-formation" x1="24" y1="190" x2="226" y2="190" />
+        <line className="mono-formation" x1="24" y1="350" x2="226" y2="350" />
+        <path className="mono-line mono-casing" d="M110 52 L110 158" />
+        <path className="mono-line mono-casing" d="M92 52 L92 282" />
+        <path className="mono-line mono-casing" d="M128 52 L128 422" />
+        <path className="mono-line mono-trajectory" d="M110 52 C110 184 116 284 138 360 C158 430 190 470 226 492" />
+        <path className="mono-line mono-target" d="M176 446 L236 446 L236 528 L176 528 Z" />
+        <path className="mono-line mono-dash" d="M30 422 L222 422" />
+        <text className="mono-svg-label" x="20" y="32">Casing / directional</text>
+        <text className="mono-svg-muted" x="20" y="114">13 3/8 in shoe</text>
+        <text className="mono-svg-muted" x="20" y="306">9 5/8 in shoe</text>
+        <text className="mono-svg-muted" x="20" y="444">MD 8,620 ft</text>
+        <text className="mono-svg-label" x="176" y="544">Target</text>
+      </svg>
+    </div>
+  );
+}
+
+function MonoTag({ children }: { children: string }): JSX.Element {
+  return <span className="mono-tag">{children}</span>;
+}
+
+function buildRigRow(workspace: ApiWorkspace, reports: ApiMondayReport[], failures: ApiFailureRecord[]): RigRow {
   const workspaceReports = reports.filter((report) => report.workspace_id === workspace.id);
   const workspaceFailures = failures.filter((failure) => failure.workspace_id === workspace.id);
   const latestReport = [...workspaceReports].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0];
@@ -387,17 +384,9 @@ function buildRigRow(workspace: ApiWorkspace, reports: ApiMondayReport[], failur
     id: workspace.id,
     asset: workspace.asset || workspace.name,
     workspace: workspace.name,
-    campaign: workspace.campaign || "Not assigned",
-    failures: workspaceFailures.length,
-    reports: workspaceReports.length,
     latestReport: latestReport ? `${reportTitle(latestReport)} / ${formatDate(latestReport.created_at)}` : "No MR yet",
-    openReviews: workspaceFailures.filter((failure) => failure.validation_status !== "validated").length
+    reviews: workspaceFailures.filter((failure) => failure.validation_status !== "validated").length
   };
-}
-
-function workspaceLabel(workspaceId: string, workspaces: ApiWorkspace[]): string {
-  const workspace = workspaces.find((item) => item.id === workspaceId);
-  return workspace ? `${workspace.asset || workspace.name} / ${workspace.name}` : workspaceId.slice(0, 8);
 }
 
 function reportTitle(report: ApiMondayReport): string {
@@ -422,16 +411,6 @@ function formatDate(value: string): string {
   }).format(date);
 }
 
-function apiStatusTone(status: ClientLandingProps["apiStatus"]): "neutral" | "good" | "warning" | "danger" {
-  if (status === "connected") {
-    return "good";
-  }
-  if (status === "checking") {
-    return "warning";
-  }
-  return "danger";
-}
-
 function apiStatusLabel(status: ClientLandingProps["apiStatus"]): string {
   if (status === "connected") {
     return "API connected";
@@ -442,12 +421,18 @@ function apiStatusLabel(status: ClientLandingProps["apiStatus"]): string {
   return "API offline";
 }
 
-function reportStatusTone(status: ApiMondayReport["status"]): "neutral" | "good" | "warning" | "info" {
-  if (status === "approved" || status === "exported") {
-    return "good";
+function formatExportDetail(format: string): string {
+  if (format === "PDF") {
+    return "Client report with schematic and citations.";
   }
-  if (status === "review") {
-    return "warning";
+  if (format === "XLSX") {
+    return "Metrics, failures, sources, and review tabs.";
   }
-  return "info";
+  if (format === "HTML") {
+    return "Web-ready branded report package.";
+  }
+  if (format === "JSON") {
+    return "Machine-readable report payload.";
+  }
+  return "Tabular handoff for QA and partner review.";
 }

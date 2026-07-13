@@ -38,12 +38,13 @@ CHECKS = [
     (
         ROOT / "src" / "components" / "ClientLanding.tsx",
         [
-            "Client landing",
-            "Rigs and Monday Reports",
+            "Advanced drilling reports without visual noise",
+            "Document hero landing / black and white",
             "Rig MR list",
             "Import coverage",
-            "Export coverage",
-            "ZIP archives",
+            "Export package",
+            "Casing / directional schematic",
+            "ZIP",
             "XLSX",
         ],
     ),
@@ -86,7 +87,7 @@ CHECKS = [
         [
             'label: "Client Home"',
             "00-client-home.png",
-            "/Rigs and Monday Reports/i",
+            "/Advanced drilling reports without visual noise/i",
             'label: "Roadmap"',
             "09-roadmap.png",
             "/Product roadmap/i",

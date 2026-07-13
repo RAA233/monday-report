@@ -10,7 +10,7 @@ const manifestPath = path.join(root, "output", "qa", "ui_quality_e2e_manifest.js
 const uploadFixturePath = path.join(root, "output", "qa", "ui_upload_fixture.txt");
 
 const views = [
-  { label: "Client Home", title: /Rigs and Monday Reports/i, file: "00-client-home.png" },
+  { label: "Client Home", title: /Advanced drilling reports without visual noise/i, file: "00-client-home.png" },
   { label: "Local AI Chat", title: /Ask Monday Report first/i, file: "01-chat-initial.png" },
   { label: "Report Studio", title: /Technical daily-report command console/i, file: "03-report-studio.png" },
   { label: "Upload", title: /Upload rig reports/i, file: "04-upload.png" },
@@ -49,30 +49,52 @@ page.on("console", (message) => {
 try {
   await openFresh(page);
   await expectText(page, /API connected/i, "API connected");
-  await expectText(page, /Client landing/i, "Client landing visible");
+  await expectText(page, /Advanced drilling reports without visual noise/i, "Client landing visible");
+  await expectText(page, /Document hero landing/i, "Document hero visible");
+  await expectText(page, /Operations console/i, "Operations console visible");
   await expectText(page, /Rig MR list/i, "Rig MR list visible");
   await expectText(page, /Import coverage/i, "Import coverage visible");
-  await expectText(page, /Export coverage/i, "Export coverage visible");
-  await expectText(page, /ZIP archives/i, "ZIP import coverage");
-  await expectText(page, /PDF reports/i, "PDF import coverage");
+  await expectText(page, /Export package/i, "Export package visible");
+  await expectText(page, /ZIP/i, "ZIP import coverage");
+  await expectText(page, /PDF/i, "PDF coverage");
   await expectText(page, /JSON/i, "JSON export coverage");
   await expectText(page, /XLSX/i, "XLSX export coverage");
+  await expectText(page, /Casing \/ directional schematic/i, "Casing schematic visible");
   await screenshot(page, "00-client-home.png", "Client Home");
 
-  await page.getByRole("button", { name: "Local AI Chat", exact: true }).click();
+  await clickClientAction(page, /Generate report/i, /Technical daily-report command console/i, "Generate report button");
+  await clickClientAction(page, /Ask Local AI/i, /Ask Monday Report first/i, "Ask Local AI button");
+  await clickClientAction(page, /Import package/i, /Upload rig reports/i, "Import package button");
+  await clickClientAction(page, /^Open$/i, /Technical daily-report command console/i, "Rig row open button");
+  await clickClientAction(page, /^Import$/i, /Upload rig reports/i, "Evidence import button");
+  await clickClientAction(page, /Open MR list/i, /Technical daily-report command console/i, "Open MR list button");
+  await clickClientAction(page, /Import files/i, /Upload rig reports/i, "Import files button");
+  await clickClientAction(page, /Open chat/i, /Ask Monday Report first/i, "Open chat button");
+  await clickClientAction(page, /Open tracker/i, /Project tracker/i, "Open tracker button");
+  await clickClientAction(page, /Run AI workflow/i, /Ask Monday Report first/i, "Run AI workflow button");
+  await clickClientAction(page, /Open drawing in Studio/i, /Technical daily-report command console/i, "Open drawing button");
+  await clickClientAction(page, /^Export$/i, /Technical daily-report command console/i, "Export button");
+  await clickClientAction(page, /Validation/i, /Validation queue/i, "Validation button");
+  await clickClientAction(page, /Roadmap/i, /Product roadmap/i, "Roadmap button");
+
+  await openFresh(page);
+  await expectText(page, /API connected/i, "Chat API context ready");
+  await page.getByLabel("Primary", { exact: true }).getByRole("button", { name: "Local AI Chat", exact: true }).click();
   await expectText(page, /Ask Monday Report first/i, "Chat visible");
   await screenshot(page, "01-chat-initial.png", "Chat initial");
 
-  await page.getByPlaceholder(/Ask about failures/i).fill("Generate this week's Monday Report executive summary.");
+  await page.getByPlaceholder(/Ask about failures/i).fill("Plan and execute a client-ready Monday Report with schematic.");
   await page.getByRole("button", { name: /Send question/i }).click();
   await expectText(page, /Draft Monday Report|extracted failure|extracted failures/i, "Chat answer");
+  await expectText(page, /Source-backed response/i, "Chat API structured answer");
   await expectText(page, /Risk register/i, "Chat structured risk register");
   await expectText(page, /Plan DDR/i, "Chat tool actions");
   await screenshot(page, "02-chat-answer.png", "Chat answer");
 
   for (const view of views.slice(2)) {
     await openFresh(page);
-    await page.getByRole("button", { name: view.label, exact: true }).click();
+    await expectText(page, /API connected/i, `${view.label} API context ready`);
+    await page.getByLabel("Primary", { exact: true }).getByRole("button", { name: view.label, exact: true }).click();
     await expectText(page, view.title, `${view.label} visible`);
 
     if (view.label === "Report Studio") {
@@ -136,16 +158,23 @@ if (failed.length > 0) {
   process.exit(1);
 }
 console.log("UI quality E2E passed.");
+process.exit(0);
 
 async function openFresh(activePage) {
-  await activePage.goto(webBase, { waitUntil: "networkidle" });
-  await activePage.reload({ waitUntil: "networkidle" });
+  await activePage.goto(webBase, { waitUntil: "domcontentloaded", timeout: 30000 });
   await activePage.locator(".app-shell").waitFor({ state: "visible", timeout: 15000 });
+  await activePage.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
 }
 
 async function expectText(activePage, pattern, name) {
   await activePage.getByText(pattern).first().waitFor({ state: "visible", timeout: 20000 });
   record(name, true, "visible");
+}
+
+async function clickClientAction(activePage, buttonName, expected, name) {
+  await openFresh(activePage);
+  await activePage.getByRole("button", { name: buttonName }).first().click();
+  await expectText(activePage, expected, name);
 }
 
 async function screenshot(activePage, fileName, name) {
