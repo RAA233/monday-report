@@ -23,10 +23,16 @@ interface RigRow {
 }
 
 const reportFormats = ["DDR", "BHA", "Mud", "Survey", "Directional"];
-
 const importFamilies = ["ZIP", "PDF", "XLSX", "DOCX", "CSV", "Email", "Images", "OCR"];
-
 const exportFamilies = ["PDF", "XLSX", "HTML", "JSON", "CSV"];
+
+const workflowSteps = [
+  ["1. Plan report", "Classify DDR, BHA, mud, survey, or directional target."],
+  ["2. Extract evidence", "Map source files into report sections and citations."],
+  ["3. Draft sections", "Generate normal daily-report language."],
+  ["4. Draw schematic", "Create casing and directional visual."],
+  ["5. Audit issue", "Block official export until gates pass."]
+] as const;
 
 export function ClientLanding({
   session,
@@ -41,18 +47,24 @@ export function ClientLanding({
   const openReviews = failures.filter((failure) => failure.validation_status !== "validated").length;
   const exportedReports = reports.filter((report) => report.status === "approved" || report.status === "exported").length;
   const latestReport = [...reports].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0];
+  const readinessLabel = openReviews === 0 ? "Ready" : `${openReviews} open`;
 
   return (
-    <main className="view-stack client-landing monochrome-client-home">
-      <section className="mono-landing-hero panel" aria-labelledby="client-landing-title">
-        <div className="mono-hero-copy">
-          <p className="eyebrow">Document hero landing / black and white</p>
-          <h1 id="client-landing-title">Advanced drilling reports without visual noise.</h1>
+    <main className="view-stack client-landing monochrome-client-home industrial-client-home">
+      <section className="industrial-hero-panel panel" aria-labelledby="client-landing-title">
+        <div className="industrial-hero-copy">
+          <div className="industrial-overline-row">
+            <MonoTag>Monday Report</MonoTag>
+            <span>Document hero landing / black and white</span>
+          </div>
+          <h1 id="client-landing-title">Monday Report</h1>
+          <p className="industrial-offer">Advanced drilling reports without visual noise.</p>
           <p>
-            Monday Report opens with the actual product proof: live rig access, local AI, source
-            extraction, normal report variants, casing schematics, validation gates, and official exports.
+            Local AI command center for rig MR access, normal daily-report drafting, evidence
+            extraction, casing schematics, validation gates, and official export packages.
           </p>
-          <div className="mono-action-row" aria-label="Primary client actions">
+
+          <div className="industrial-command-actions" aria-label="Primary client actions">
             <button className="primary-action mono-action-primary" type="button" onClick={() => onNavigate("studio")}>
               Generate report
             </button>
@@ -63,22 +75,46 @@ export function ClientLanding({
               Import package
             </button>
           </div>
-          <div className="mono-proof-grid" aria-label="Workspace proof metrics">
-            <ProofMetric label="Rig workspaces" value={String(workspaces.length)} detail="live MR access" />
+
+          <div className="industrial-stat-grid" aria-label="Workspace proof metrics">
+            <ProofMetric label="Rigs" value={String(workspaces.length)} detail="live MR access" />
             <ProofMetric label="Sources" value={String(Math.max(inventory.length, 184))} detail="PDF XLSX DOCX CSV" />
             <ProofMetric label="Variants" value="5" detail="DDR BHA Mud Survey DIR" />
             <ProofMetric label="Exports" value={String(exportFamilies.length)} detail={`${exportedReports} issued`} />
-            <ProofMetric label="Gate" value={openReviews === 0 ? "Ready" : String(openReviews)} detail={openReviews === 0 ? "client issue" : "open reviews"} />
+            <ProofMetric label="Gate" value={readinessLabel} detail={openReviews === 0 ? "client issue" : "open reviews"} />
+          </div>
+
+          <div className="industrial-system-list" aria-label="System coverage">
+            <SystemRow label="Local AI" detail="gemma4:e2b first, hosted fallback held" />
+            <SystemRow label="Import" detail="ZIP, PDF, Office, CSV, email, image, OCR" />
+            <SystemRow label="Export" detail="PDF, XLSX, HTML, JSON, CSV with audit chain" />
           </div>
         </div>
 
-        <div className="mono-hero-product" aria-label="Advanced report and schematic proof">
-          <ReportProof latestReport={latestReport} />
-          <CasingSchematic />
+        <div className="industrial-product-board" aria-label="Advanced report and schematic proof">
+          <header className="industrial-board-header">
+            <div>
+              <span>Live report system</span>
+              <strong>{latestReport ? reportTitle(latestReport) : "Morning report workspace"}</strong>
+            </div>
+            <MonoTag>{apiStatusLabel(apiStatus)}</MonoTag>
+          </header>
+          <div className="industrial-product-layout">
+            <ReportProof latestReport={latestReport} />
+            <div className="industrial-schematic-column">
+              <h2>Casing / directional schematic</h2>
+              <CasingSchematic />
+              <div className="industrial-depth-ledger" aria-label="Directional ledger">
+                <span>MD 8,620 ft</span>
+                <span>12.25 in hole</span>
+                <span>9 5/8 in shoe</span>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
-      <section className="mono-feature-grid" aria-label="Core product features">
+      <section className="industrial-capability-grid" aria-label="Core product features">
         <FeatureCard
           label="Rig MR list"
           title="Open workspace"
@@ -109,145 +145,148 @@ export function ClientLanding({
         />
       </section>
 
-      <section className="mono-operations-console" aria-label="Operations console">
-        <aside className="mono-console-left">
-          <section className="panel mono-panel">
-            <div className="section-heading">
+      <section className="industrial-operations-shell" aria-label="Operations console">
+        <header className="industrial-section-header">
+          <div>
+            <p className="eyebrow">Operations console</p>
+            <h2>Report production cockpit</h2>
+          </div>
+          <div className="mono-format-tabs" role="list" aria-label="Normal report variants">
+            {reportFormats.map((format) => (
+              <MonoTag key={format}>{format}</MonoTag>
+            ))}
+          </div>
+        </header>
+
+        <div className="industrial-operations-grid">
+          <aside className="industrial-rail-stack">
+            <section className="panel mono-panel">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Rig MR list</p>
+                  <h2>Rig / MR list</h2>
+                </div>
+                <MonoTag>{apiStatusLabel(apiStatus)}</MonoTag>
+              </div>
+              {rigRows.length === 0 ? (
+                <div className="mono-empty">
+                  <strong>No rig workspaces found.</strong>
+                  <span>{session?.tenant.name ?? "Connect the client API to populate rig rows."}</span>
+                </div>
+              ) : (
+                <div className="mono-rig-list">
+                  {rigRows.map((row) => (
+                    <article className="mono-rig-row" key={row.id}>
+                      <div>
+                        <strong>{row.asset}</strong>
+                        <span>{row.workspace} / {row.latestReport} / {row.reviews} review gate{row.reviews === 1 ? "" : "s"}</span>
+                      </div>
+                      <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("studio")}>
+                        Open
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <section className="panel mono-panel">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Import coverage</p>
+                  <h2>Evidence extraction</h2>
+                </div>
+                <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("upload")}>
+                  Import
+                </button>
+              </div>
+              <div className="mono-token-grid">
+                {importFamilies.map((item) => (
+                  <MonoTag key={item}>{item}</MonoTag>
+                ))}
+              </div>
+              <p className="mono-panel-note">
+                Intake stays guarded by upload limits, malware scanning, source lineage, citations, OCR routing, and audit hash chain.
+              </p>
+            </section>
+          </aside>
+
+          <section className="panel industrial-report-station" aria-labelledby="advanced-report-studio-title">
+            <header className="mono-report-console-head">
               <div>
-                <p className="eyebrow">Operations console</p>
-                <h2>Rig / MR list</h2>
+                <p className="eyebrow">Advanced Report Studio</p>
+                <h2 id="advanced-report-studio-title">Generated morning report preview</h2>
               </div>
-              <MonoTag>{apiStatusLabel(apiStatus)}</MonoTag>
+              <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("studio")}>
+                Open drawing in Studio
+              </button>
+            </header>
+
+            <div className="industrial-report-layout">
+              <ReportProof latestReport={latestReport} expanded />
+              <div className="mono-schematic-panel">
+                <div>
+                  <h3>Casing / directional schematic</h3>
+                  <p>Black-and-white drawing embedded in report output.</p>
+                </div>
+                <CasingSchematic />
+              </div>
             </div>
-            {rigRows.length === 0 ? (
-              <div className="mono-empty">
-                <strong>No rig workspaces found.</strong>
-                <span>{session?.tenant.name ?? "Connect the client API to populate rig rows."}</span>
-              </div>
-            ) : (
-              <div className="mono-rig-list">
-                {rigRows.map((row) => (
-                  <article className="mono-rig-row" key={row.id}>
-                    <div>
-                      <strong>{row.asset}</strong>
-                      <span>{row.workspace} / {row.latestReport} / {row.reviews} review gate{row.reviews === 1 ? "" : "s"}</span>
-                    </div>
-                    <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("studio")}>
-                      Open
-                    </button>
+          </section>
+
+          <aside className="industrial-rail-stack">
+            <section className="panel mono-panel mono-ai-panel">
+              <h2>Local AI execution</h2>
+              <p>Plan, extract, draft, draw, validate, and export with citations attached.</p>
+              <div className="mono-flow-list">
+                {workflowSteps.map(([title, detail]) => (
+                  <article className="mono-flow-row" key={title}>
+                    <strong>{title}</strong>
+                    <span>{detail}</span>
                   </article>
                 ))}
               </div>
-            )}
-          </section>
+              <button className="primary-action mono-full-action" type="button" onClick={() => onNavigate("chat")}>
+                Run AI workflow
+              </button>
+            </section>
 
-          <section className="panel mono-panel">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Import coverage</p>
-                <h2>Evidence extraction</h2>
+            <section className="panel mono-panel">
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Export package</p>
+                  <h2>Official formats</h2>
+                </div>
+                <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("studio")}>
+                  Export
+                </button>
               </div>
-              <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("upload")}>
-                Import
-              </button>
-            </div>
-            <div className="mono-token-grid">
-              {importFamilies.map((item) => (
-                <MonoTag key={item}>{item}</MonoTag>
-              ))}
-            </div>
-            <p className="mono-panel-note">
-              Intake stays guarded by upload limits, malware scanning, source lineage, citations, OCR routing, and audit hash chain.
-            </p>
-          </section>
-        </aside>
-
-        <section className="panel mono-report-console" aria-labelledby="advanced-report-studio-title">
-          <header className="mono-report-console-head">
-            <div>
-              <p className="eyebrow">Advanced Report Studio</p>
-              <h2 id="advanced-report-studio-title">Generated morning report preview</h2>
-            </div>
-            <div className="mono-format-tabs" role="list" aria-label="Normal report variants">
-              {reportFormats.map((format) => (
-                <MonoTag key={format}>{format}</MonoTag>
-              ))}
-            </div>
-          </header>
-
-          <div className="mono-report-workspace">
-            <ReportProof latestReport={latestReport} expanded />
-            <div className="mono-schematic-panel">
-              <div>
-                <h3>Casing / directional schematic</h3>
-                <p>Black-and-white drawing embedded in report output.</p>
+              <div className="mono-export-list">
+                {exportFamilies.map((format) => (
+                  <article className="mono-export-row" key={format}>
+                    <strong>{format}</strong>
+                    <span>{formatExportDetail(format)}</span>
+                  </article>
+                ))}
               </div>
-              <CasingSchematic />
-              <button className="secondary-action mono-full-action" type="button" onClick={() => onNavigate("studio")}>
-                Open drawing in Studio
-              </button>
-            </div>
-          </div>
-        </section>
+            </section>
 
-        <aside className="mono-console-right">
-          <section className="panel mono-panel mono-ai-panel">
-            <h2>Local AI execution</h2>
-            <p>Plan, extract, draft, draw, validate, and export with citations attached.</p>
-            <div className="mono-flow-list">
-              {[
-                ["1. Plan report", "Classify DDR, BHA, mud, survey, or directional target."],
-                ["2. Extract evidence", "Map source files into report sections and citations."],
-                ["3. Draft sections", "Generate normal daily-report language."],
-                ["4. Draw schematic", "Create casing and directional visual."],
-                ["5. Audit issue", "Block official export until gates pass."]
-              ].map(([title, detail]) => (
-                <article className="mono-flow-row" key={title}>
-                  <strong>{title}</strong>
-                  <span>{detail}</span>
-                </article>
-              ))}
-            </div>
-            <button className="primary-action mono-full-action" type="button" onClick={() => onNavigate("chat")}>
-              Run AI workflow
-            </button>
-          </section>
-
-          <section className="panel mono-panel">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Export package</p>
-                <h2>Official formats</h2>
+            <section className="panel mono-panel">
+              <h2>Validation and control</h2>
+              <p className="mono-panel-note">
+                Client approval, tracker, roadmap, signed URLs, and audit evidence stay in the working surface.
+              </p>
+              <div className="mono-control-actions">
+                <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("validation")}>
+                  Validation
+                </button>
+                <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("roadmap")}>
+                  Roadmap
+                </button>
               </div>
-              <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("studio")}>
-                Export
-              </button>
-            </div>
-            <div className="mono-export-list">
-              {exportFamilies.map((format) => (
-                <article className="mono-export-row" key={format}>
-                  <strong>{format}</strong>
-                  <span>{formatExportDetail(format)}</span>
-                </article>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel mono-panel">
-            <h2>Validation and control</h2>
-            <p className="mono-panel-note">
-              Client approval, tracker, roadmap, signed URLs, and audit evidence stay in the working surface.
-            </p>
-            <div className="mono-control-actions">
-              <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("validation")}>
-                Validation
-              </button>
-              <button className="secondary-action mono-row-action" type="button" onClick={() => onNavigate("roadmap")}>
-                Roadmap
-              </button>
-            </div>
-          </section>
-        </aside>
+            </section>
+          </aside>
+        </div>
       </section>
     </main>
   );
@@ -260,6 +299,15 @@ function ProofMetric({ label, value, detail }: { label: string; value: string; d
       <strong>{value}</strong>
       <small>{detail}</small>
     </article>
+  );
+}
+
+function SystemRow({ label, detail }: { label: string; detail: string }): JSX.Element {
+  return (
+    <div className="industrial-system-row">
+      <strong>{label}</strong>
+      <span>{detail}</span>
+    </div>
   );
 }
 

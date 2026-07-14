@@ -130,7 +130,7 @@ export function App(): JSX.Element {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell industrial-shell">
       <aside className="sidebar" aria-label="Primary">
         <div className="brand">
           <div className="brand-mark" aria-hidden="true">
