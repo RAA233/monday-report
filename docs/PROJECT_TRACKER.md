@@ -60,7 +60,7 @@ Evidence paths:
 
 Security review: `git diff --check` passed; the GA environment file remains ignored; no credential, private-key, local-state, cache, log, browser-profile, or machine-path artifact was found in the release ZIP. Archive CRC validation passed and all required Benchmarking files were present. The ZIP intentionally contains only a placeholder `partner.env.example`, never a populated environment file.
 
-Git state at evidence capture: branch `main`, remote `origin` at `https://github.com/RAA233/monday-report.git`; commit and push remain gated on the final post-tracker checks. Remaining release constraint: the partner ZIP is approved only for synthetic demo/testing and is not a real-client-data dispatch package.
+Git result: release commit `f7b66353704d0d99f36698298e73c6164c85ccf0` (`Add benchmarking module and evidence workflow`) was pushed successfully from branch `main` to the private `origin` repository `RAA233/monday-report`; local, remote-tracking, and GitHub branch heads matched after dispatch. Remaining release constraint: the partner ZIP is approved only for synthetic demo/testing and is not a real-client-data dispatch package.
 
 ## Phase Gate Rule
 
