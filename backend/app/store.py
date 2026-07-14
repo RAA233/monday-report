@@ -10,7 +10,7 @@ import zipfile
 import zlib
 import xml.etree.ElementTree as ET
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from hashlib import sha256
@@ -36,11 +36,22 @@ from .runtime_backends import (
     requested_repository_backend,
 )
 from .schemas import (
+    AiReportStatement,
     AuditIntegrityStatus,
     AuditLog,
+    AnomalyEvent,
+    AnomalyRule,
+    BenchmarkComparison,
+    BenchmarkMeasurement,
+    BenchmarkMeasurementCreate,
+    BenchmarkValue,
+    BenchmarkValueUpdate,
+    BenchmarkingStatus,
     Citation,
+    DiagnosticAction,
     DocumentChunk,
     FailureRecord,
+    KeyDecision,
     MondayReport,
     ParsedDocument,
     ProcessingJob,
@@ -83,6 +94,66 @@ STATE_READ_RETRIES = 5
 STATE_READ_RETRY_DELAY_SECONDS = 0.03
 STATE_REPLACE_RETRIES = 5
 STATE_REPLACE_RETRY_DELAY_SECONDS = 0.03
+FEET_DRILLED_PER_DAY = "feet_drilled_per_day"
+BENCHMARK_METRICS = [
+    FEET_DRILLED_PER_DAY,
+    "dogleg_severity",
+    "lateral_percentage",
+    "slide_rotate_performance",
+    "drilling_hours",
+    "trip_time",
+    "nonproductive_time",
+    "directional_plan_adherence",
+]
+BENCHMARK_SEED_VALUES = [
+    {
+        "benchmark_name": "Gordon average",
+        "metric": FEET_DRILLED_PER_DAY,
+        "value": 528.0,
+        "unit": "ft/day",
+        "performance_category": "average",
+        "data_source": "Approved operator benchmark seed",
+        "dataset_version": "seed-2026-07",
+    },
+    {
+        "benchmark_name": "Noble top-quartile",
+        "metric": FEET_DRILLED_PER_DAY,
+        "value": 588.0,
+        "unit": "ft/day",
+        "performance_category": "top-quartile",
+        "data_source": "Approved market benchmark seed",
+        "dataset_version": "seed-2026-07",
+    },
+]
+BENCHMARK_RULE_SEEDS = [
+    {
+        "name": "Top-quartile performance gap",
+        "metric": FEET_DRILLED_PER_DAY,
+        "severity": "Advisory",
+        "benchmark_name": "Noble top-quartile",
+        "threshold_mode": "below_benchmark",
+        "threshold_percent": None,
+        "diagnostic_modules": [],
+    },
+    {
+        "name": "Below approved average drilling rate",
+        "metric": FEET_DRILLED_PER_DAY,
+        "severity": "Warning",
+        "benchmark_name": "Gordon average",
+        "threshold_mode": "below_benchmark",
+        "threshold_percent": None,
+        "diagnostic_modules": [],
+    },
+    {
+        "name": "Critical drilling-rate deviation",
+        "metric": FEET_DRILLED_PER_DAY,
+        "severity": "Critical",
+        "benchmark_name": "Gordon average",
+        "threshold_mode": "below_percent_of_benchmark",
+        "threshold_percent": 85.0,
+        "diagnostic_modules": ["Hydraulics", "Torque & Drag"],
+    },
+]
 
 
 def utc_iso() -> str:
@@ -129,6 +200,11 @@ class LocalStateStore:
         self.validation_tasks: dict[UUID, ValidationTask] = {}
         self.monday_reports: dict[UUID, MondayReport] = {}
         self.report_exports: dict[UUID, ReportExport] = {}
+        self.benchmark_values: dict[UUID, BenchmarkValue] = {}
+        self.anomaly_rules: dict[UUID, AnomalyRule] = {}
+        self.benchmark_measurements: dict[UUID, BenchmarkMeasurement] = {}
+        self.anomaly_events: dict[UUID, AnomalyEvent] = {}
+        self.key_decisions: dict[UUID, KeyDecision] = {}
         self.audit_logs: list[AuditLog] = []
 
         if self._state_exists():
@@ -138,6 +214,8 @@ class LocalStateStore:
                 self.save()
         else:
             self._seed()
+            self.save()
+        if self._ensure_benchmarking_defaults():
             self.save()
 
     def _state_exists(self) -> bool:
@@ -195,6 +273,14 @@ class LocalStateStore:
         self.validation_tasks = self._load_map(ValidationTask, payload.get("validation_tasks", []))
         self.monday_reports = self._load_map(MondayReport, payload.get("monday_reports", []))
         self.report_exports = self._load_map(ReportExport, payload.get("report_exports", []))
+        self.benchmark_values = self._load_map(BenchmarkValue, payload.get("benchmark_values", []))
+        self.anomaly_rules = self._load_map(AnomalyRule, payload.get("anomaly_rules", []))
+        self.benchmark_measurements = self._load_map(
+            BenchmarkMeasurement,
+            payload.get("benchmark_measurements", []),
+        )
+        self.anomaly_events = self._load_map(AnomalyEvent, payload.get("anomaly_events", []))
+        self.key_decisions = self._load_map(KeyDecision, payload.get("key_decisions", []))
         self.audit_logs = [AuditLog.model_validate(item) for item in payload.get("audit_logs", [])]
 
     def save(self) -> None:
@@ -224,6 +310,11 @@ class LocalStateStore:
             "validation_tasks": self._dump_map(self.validation_tasks),
             "monday_reports": self._dump_map(self.monday_reports),
             "report_exports": self._dump_map(self.report_exports),
+            "benchmark_values": self._dump_map(self.benchmark_values),
+            "anomaly_rules": self._dump_map(self.anomaly_rules),
+            "benchmark_measurements": self._dump_map(self.benchmark_measurements),
+            "anomaly_events": self._dump_map(self.anomaly_events),
+            "key_decisions": self._dump_map(self.key_decisions),
             "audit_logs": [item.model_dump(mode="json") for item in self.audit_logs],
         }
         return payload
@@ -273,6 +364,73 @@ class LocalStateStore:
             {"store": self.repository_backend, "demo_seed": False},
             save=False,
         )
+
+    def _ensure_benchmarking_defaults(self, audit_seed: bool = True) -> bool:
+        changed = False
+        today = date(2026, 7, 14)
+        for seed in BENCHMARK_SEED_VALUES:
+            exists = any(
+                item.benchmark_name == seed["benchmark_name"]
+                and item.metric == seed["metric"]
+                for item in self.benchmark_values.values()
+            )
+            if exists:
+                continue
+            benchmark = BenchmarkValue(
+                tenant_id=self.tenant.id,
+                benchmark_name=str(seed["benchmark_name"]),
+                metric=str(seed["metric"]),
+                value=float(seed["value"]),
+                unit=str(seed["unit"]),
+                performance_category=str(seed["performance_category"]),
+                data_source=str(seed["data_source"]),
+                effective_date=today,
+                dataset_version=str(seed["dataset_version"]),
+            )
+            self.benchmark_values[benchmark.id] = benchmark
+            changed = True
+
+        for seed in BENCHMARK_RULE_SEEDS:
+            exists = any(
+                item.name == seed["name"] and item.metric == seed["metric"]
+                for item in self.anomaly_rules.values()
+            )
+            if exists:
+                continue
+            rule = AnomalyRule(
+                tenant_id=self.tenant.id,
+                name=str(seed["name"]),
+                metric=str(seed["metric"]),
+                severity=seed["severity"],  # type: ignore[arg-type]
+                benchmark_name=str(seed["benchmark_name"]),
+                threshold_mode=seed["threshold_mode"],  # type: ignore[arg-type]
+                threshold_percent=seed["threshold_percent"],  # type: ignore[arg-type]
+                diagnostic_modules=list(seed["diagnostic_modules"]),  # type: ignore[arg-type]
+            )
+            self.anomaly_rules[rule.id] = rule
+            changed = True
+
+        if changed and audit_seed:
+            self.audit(
+                "benchmark_config.seed",
+                "benchmark_config",
+                self.tenant.id,
+                {
+                    "benchmarks": [
+                        {
+                            "name": item.benchmark_name,
+                            "metric": item.metric,
+                            "value": item.value,
+                            "unit": item.unit,
+                            "dataset_version": item.dataset_version,
+                        }
+                        for item in self.benchmark_values.values()
+                    ],
+                    "rules": [item.name for item in self.anomaly_rules.values()],
+                },
+                save=False,
+            )
+        return changed
 
     def create_workspace(self, payload: WorkspaceCreate) -> Workspace:
         self.refresh()
@@ -710,6 +868,571 @@ class LocalStateStore:
         )
         return task
 
+    def benchmark_permissions(self) -> dict[str, bool]:
+        roles = set(self.user.roles)
+        is_admin = Role.ADMIN in roles
+        is_engineer = Role.ENGINEER in roles
+        is_validator = Role.VALIDATOR in roles
+        is_manager = Role.MANAGER in roles
+        return {
+            "view_benchmarks": True,
+            "manage_benchmark_config": is_admin or is_manager,
+            "review_anomalies": is_admin or is_engineer or is_validator or is_manager,
+            "dismiss_anomalies": is_admin or is_validator or is_manager,
+            "run_diagnostics": is_admin or is_engineer or is_manager,
+            "approve_ai_content": is_admin or is_validator or is_manager,
+            "issue_client_reports": is_admin or is_manager,
+            "export_evidence": is_admin or is_engineer or is_manager,
+            "edit_decision_records": is_admin or is_engineer or is_manager,
+            "view_audit_history": is_admin or is_validator or is_manager,
+        }
+
+    def update_benchmark_value(self, benchmark_id: UUID, payload: BenchmarkValueUpdate) -> BenchmarkValue:
+        self.refresh()
+        benchmark = self.benchmark_values[benchmark_id]
+        previous = benchmark.model_dump(mode="json")
+        for field in [
+            "value",
+            "unit",
+            "performance_category",
+            "data_source",
+            "effective_date",
+            "dataset_version",
+            "approval_status",
+        ]:
+            value = getattr(payload, field)
+            if value is not None:
+                setattr(benchmark, field, value)
+        benchmark.last_updated = datetime.now(timezone.utc)
+        self.audit(
+            "benchmark_config.update",
+            "benchmark_value",
+            benchmark.id,
+            {
+                "previous_value": previous,
+                "new_value": benchmark.model_dump(mode="json"),
+                "reason": payload.reason,
+            },
+        )
+        return benchmark
+
+    def record_benchmark_measurement(
+        self,
+        workspace_id: UUID,
+        payload: BenchmarkMeasurementCreate,
+    ) -> BenchmarkingStatus:
+        self.refresh()
+        if workspace_id not in self.workspaces:
+            raise KeyError("workspace_not_found")
+        citation = Citation(
+            locator_type="benchmark_measurement",
+            locator={
+                "source_type": payload.source_type,
+                "source_identifier": payload.source_identifier,
+                "dataset_version": payload.dataset_version,
+            },
+            snippet=(
+                f"{payload.metric} measured at {payload.value:g} {payload.unit} "
+                f"from {payload.data_source}."
+            ),
+            confidence=0.9 if payload.confidence_status in {"high", "manual"} else 0.65,
+        )
+        measurement = BenchmarkMeasurement(
+            tenant_id=self.tenant.id,
+            workspace_id=workspace_id,
+            metric=payload.metric,
+            value=payload.value,
+            unit=payload.unit,
+            data_source=payload.data_source,
+            data_timestamp=payload.data_timestamp or datetime.now(timezone.utc),
+            confidence_status=payload.confidence_status,
+            source_type=payload.source_type,
+            source_identifier=payload.source_identifier,
+            dataset_version=payload.dataset_version,
+            citations=[citation],
+        )
+        self.benchmark_measurements[measurement.id] = measurement
+        self.audit(
+            "benchmark_measurement.create",
+            "benchmark_measurement",
+            measurement.id,
+            {
+                "workspace_id": str(workspace_id),
+                "metric": measurement.metric,
+                "value": measurement.value,
+                "unit": measurement.unit,
+                "data_source": measurement.data_source,
+                "data_timestamp": measurement.data_timestamp.isoformat(),
+            },
+            save=False,
+        )
+        self._evaluate_anomaly_rules(measurement, moc_reference=payload.moc_reference)
+        self.save()
+        return self._build_benchmarking_status(workspace_id)
+
+    def benchmarking_status(self, workspace_id: UUID) -> BenchmarkingStatus:
+        self.refresh()
+        if workspace_id not in self.workspaces:
+            raise KeyError("workspace_not_found")
+        return self._build_benchmarking_status(workspace_id)
+
+    def dismiss_diagnostic_action(
+        self,
+        anomaly_id: UUID,
+        action_id: UUID,
+        reason: str,
+    ) -> AnomalyEvent:
+        self.refresh()
+        if anomaly_id not in self.anomaly_events:
+            raise KeyError("anomaly_not_found")
+        anomaly = self.anomaly_events[anomaly_id]
+        matching = next((item for item in anomaly.diagnostic_actions if item.id == action_id), None)
+        if matching is None:
+            raise KeyError("diagnostic_action_not_found")
+        previous = matching.status
+        matching.status = "Dismissed"
+        matching.authorized_user = self.user.email
+        matching.timestamp = datetime.now(timezone.utc)
+        matching.dismissal_reason = reason
+        self.audit(
+            "diagnostic_action.dismiss",
+            "anomaly_event",
+            anomaly.id,
+            {
+                "action_id": str(action_id),
+                "module": matching.module,
+                "from": previous,
+                "to": matching.status,
+                "authorized_user": self.user.email,
+                "reason": reason,
+            },
+        )
+        return anomaly
+
+    def _build_benchmarking_status(self, workspace_id: UUID) -> BenchmarkingStatus:
+        measurements = [
+            item
+            for item in self.benchmark_measurements.values()
+            if item.workspace_id == workspace_id
+        ]
+        current = self._latest_measurement(workspace_id, FEET_DRILLED_PER_DAY)
+        trend_measurements = sorted(
+            [item for item in measurements if item.metric == FEET_DRILLED_PER_DAY],
+            key=lambda item: item.data_timestamp,
+        )[-7:]
+        normalized_trend = [
+            {
+                "timestamp": item.data_timestamp.isoformat(),
+                "value": round(self._normalize_value(item.value, item.unit, "ft/day"), 2),
+                "unit": "ft/day",
+                "confidence_status": item.confidence_status,
+            }
+            for item in trend_measurements
+        ]
+        seven_day_average = (
+            round(sum(item["value"] for item in normalized_trend) / len(normalized_trend), 2)
+            if normalized_trend
+            else None
+        )
+        benchmark_values = [
+            item
+            for item in self.benchmark_values.values()
+            if item.approval_status == "approved"
+        ]
+        comparisons = self._benchmark_comparisons(workspace_id)
+        active_anomalies = [
+            item
+            for item in self.anomaly_events.values()
+            if item.workspace_id == workspace_id and item.status == "active"
+        ]
+        historical_anomalies = [
+            item
+            for item in self.anomaly_events.values()
+            if item.workspace_id == workspace_id and item.status != "active"
+        ]
+        diagnostic_actions = [
+            action
+            for anomaly in active_anomalies
+            for action in anomaly.diagnostic_actions
+        ]
+        gordon = self._benchmark_by_name("Gordon average", FEET_DRILLED_PER_DAY)
+        noble = self._benchmark_by_name("Noble top-quartile", FEET_DRILLED_PER_DAY)
+        return BenchmarkingStatus(
+            workspace_id=workspace_id,
+            current_ft_per_day=(
+                round(self._normalize_value(current.value, current.unit, "ft/day"), 2)
+                if current
+                else None
+            ),
+            seven_day_average_ft_per_day=seven_day_average,
+            gordon_average_benchmark=gordon.value if gordon else None,
+            noble_top_quartile_benchmark=noble.value if noble else None,
+            comparisons=comparisons,
+            active_anomalies=active_anomalies,
+            historical_anomalies=historical_anomalies,
+            benchmark_values=benchmark_values,
+            anomaly_rules=[
+                item for item in self.anomaly_rules.values() if item.approval_status == "approved"
+            ],
+            seven_day_trend=normalized_trend,
+            likely_operational_contributors=self._likely_operational_contributors(active_anomalies, comparisons),
+            recommended_diagnostic_actions=diagnostic_actions,
+            supporting_evidence_references=self._benchmark_source_references(workspace_id),
+            ai_interpretation=self._benchmark_ai_interpretation(comparisons, active_anomalies),
+            permissions=self.benchmark_permissions(),
+        )
+
+    def _benchmark_comparisons(self, workspace_id: UUID) -> list[BenchmarkComparison]:
+        rows: list[BenchmarkComparison] = []
+        for metric in BENCHMARK_METRICS:
+            measurement = self._latest_measurement(workspace_id, metric)
+            metric_benchmarks = [
+                item
+                for item in self.benchmark_values.values()
+                if item.metric == metric and item.approval_status == "approved"
+            ]
+            if not metric_benchmarks:
+                rows.append(
+                    BenchmarkComparison(
+                        metric=metric,
+                        benchmark_name="No approved benchmark",
+                        current_value=measurement.value if measurement else None,
+                        current_unit=measurement.unit if measurement else "not available",
+                        benchmark_value=None,
+                        benchmark_unit="not configured",
+                        performance_status="Insufficient data",
+                        supporting_source=measurement.data_source if measurement else "No measurement or approved benchmark configured",
+                        data_timestamp=measurement.data_timestamp if measurement else None,
+                        confidence_status=measurement.confidence_status if measurement else "missing",
+                    )
+                )
+                continue
+            for benchmark in metric_benchmarks:
+                rows.append(self._comparison_for_benchmark(measurement, benchmark))
+        return rows
+
+    def _comparison_for_benchmark(
+        self,
+        measurement: BenchmarkMeasurement | None,
+        benchmark: BenchmarkValue,
+    ) -> BenchmarkComparison:
+        if measurement is None:
+            return BenchmarkComparison(
+                metric=benchmark.metric,
+                benchmark_name=benchmark.benchmark_name,
+                current_value=None,
+                current_unit=benchmark.unit,
+                benchmark_value=benchmark.value,
+                benchmark_unit=benchmark.unit,
+                performance_status="Insufficient data",
+                supporting_source=benchmark.data_source,
+                confidence_status="missing",
+            )
+        normalized_current = self._normalize_value(measurement.value, measurement.unit, benchmark.unit)
+        absolute_variance = normalized_current - benchmark.value
+        percentage_variance = (absolute_variance / benchmark.value * 100) if benchmark.value else 0
+        status = self._comparison_status(measurement, benchmark, normalized_current, percentage_variance)
+        return BenchmarkComparison(
+            metric=benchmark.metric,
+            benchmark_name=benchmark.benchmark_name,
+            current_value=round(normalized_current, 2),
+            current_unit=benchmark.unit,
+            benchmark_value=benchmark.value,
+            benchmark_unit=benchmark.unit,
+            absolute_variance=round(absolute_variance, 2),
+            percentage_variance=round(percentage_variance, 2),
+            performance_status=status,
+            supporting_source=f"{measurement.data_source}; benchmark {benchmark.data_source} {benchmark.dataset_version}",
+            data_timestamp=measurement.data_timestamp,
+            confidence_status=measurement.confidence_status,
+        )
+
+    def _comparison_status(
+        self,
+        measurement: BenchmarkMeasurement,
+        benchmark: BenchmarkValue,
+        normalized_current: float,
+        percentage_variance: float,
+    ) -> str:
+        age = datetime.now(timezone.utc) - measurement.data_timestamp
+        if measurement.confidence_status == "missing":
+            return "Insufficient data"
+        if measurement.confidence_status == "stale" or age > timedelta(days=2):
+            return "Stale data"
+        critical_rule = next(
+            (
+                rule
+                for rule in self.anomaly_rules.values()
+                if rule.metric == benchmark.metric
+                and rule.severity == "Critical"
+                and rule.approval_status == "approved"
+            ),
+            None,
+        )
+        critical_threshold = (
+            self._threshold_for_rule(critical_rule)
+            if critical_rule is not None
+            else None
+        )
+        if critical_threshold is not None and normalized_current < critical_threshold:
+            return "Critical deviation"
+        if percentage_variance < -5:
+            return "Below benchmark"
+        if abs(percentage_variance) <= 5:
+            return "Within expected range"
+        return "Above benchmark"
+
+    def _evaluate_anomaly_rules(
+        self,
+        measurement: BenchmarkMeasurement,
+        *,
+        moc_reference: str | None = None,
+    ) -> None:
+        for rule in self.anomaly_rules.values():
+            if rule.metric != measurement.metric or rule.approval_status != "approved":
+                continue
+            threshold = self._threshold_for_rule(rule)
+            benchmark = self._benchmark_by_name(rule.benchmark_name, rule.metric)
+            if threshold is None or benchmark is None:
+                continue
+            current = self._normalize_value(measurement.value, measurement.unit, benchmark.unit)
+            if current >= threshold:
+                continue
+            existing = self._matching_anomaly_event(measurement.id, rule.id)
+            if existing is not None:
+                continue
+            actions = [
+                DiagnosticAction(
+                    module=module,  # type: ignore[arg-type]
+                    reason=(
+                        f"{rule.name}: current {current:.1f} {benchmark.unit} "
+                        f"is below {threshold:.1f} {benchmark.unit}."
+                    ),
+                )
+                for module in rule.diagnostic_modules
+            ]
+            anomaly = AnomalyEvent(
+                tenant_id=self.tenant.id,
+                workspace_id=measurement.workspace_id,
+                measurement_id=measurement.id,
+                metric=measurement.metric,
+                severity=rule.severity,
+                performance_status=(
+                    "Critical deviation" if rule.severity == "Critical" else "Below benchmark"
+                ),
+                current_value=round(current, 2),
+                unit=benchmark.unit,
+                threshold_value=round(threshold, 2),
+                threshold_unit=benchmark.unit,
+                rule_id=rule.id,
+                rule_name=rule.name,
+                summary=(
+                    f"{rule.severity}: {measurement.metric.replace('_', ' ')} "
+                    f"{current:.1f} {benchmark.unit} is below {rule.benchmark_name} threshold "
+                    f"{threshold:.1f} {benchmark.unit}."
+                ),
+                benchmark_evidence={
+                    "benchmark_name": benchmark.benchmark_name,
+                    "benchmark_value": benchmark.value,
+                    "benchmark_unit": benchmark.unit,
+                    "data_source": benchmark.data_source,
+                    "dataset_version": benchmark.dataset_version,
+                    "approval_status": benchmark.approval_status,
+                    "effective_date": benchmark.effective_date.isoformat(),
+                },
+                supporting_citations=measurement.citations,
+                diagnostic_actions=actions,
+                moc_reference=moc_reference,
+            )
+            self.anomaly_events[anomaly.id] = anomaly
+            self.audit(
+                "benchmark_anomaly.create",
+                "anomaly_event",
+                anomaly.id,
+                {
+                    "workspace_id": str(measurement.workspace_id),
+                    "metric": anomaly.metric,
+                    "severity": anomaly.severity,
+                    "current_value": anomaly.current_value,
+                    "threshold_value": anomaly.threshold_value,
+                    "rule": anomaly.rule_name,
+                    "diagnostic_modules": [item.module for item in actions],
+                    "moc_reference": moc_reference,
+                },
+                save=False,
+            )
+            if rule.severity == "Critical":
+                task = ValidationTask(
+                    tenant_id=self.tenant.id,
+                    target_type="anomaly_event",
+                    target_id=anomaly.id,
+                    reason=(
+                        "Critical benchmark deviation requires review before client issue "
+                        "and Management of Change export."
+                    ),
+                    priority="critical",
+                )
+                self.validation_tasks[task.id] = task
+                self.audit(
+                    "risk_watchlist.add",
+                    "anomaly_event",
+                    anomaly.id,
+                    {
+                        "validation_task_id": str(task.id),
+                        "severity": anomaly.severity,
+                        "status": anomaly.performance_status,
+                    },
+                    save=False,
+                )
+
+    def _threshold_for_rule(self, rule: AnomalyRule | None) -> float | None:
+        if rule is None:
+            return None
+        benchmark = self._benchmark_by_name(rule.benchmark_name, rule.metric)
+        if benchmark is None:
+            return None
+        if rule.threshold_mode == "below_benchmark":
+            return benchmark.value
+        if rule.threshold_percent is None:
+            return None
+        return benchmark.value * (rule.threshold_percent / 100)
+
+    def _benchmark_by_name(self, benchmark_name: str, metric: str) -> BenchmarkValue | None:
+        return next(
+            (
+                item
+                for item in self.benchmark_values.values()
+                if item.benchmark_name == benchmark_name
+                and item.metric == metric
+                and item.approval_status == "approved"
+            ),
+            None,
+        )
+
+    def _latest_measurement(self, workspace_id: UUID, metric: str) -> BenchmarkMeasurement | None:
+        measurements = [
+            item
+            for item in self.benchmark_measurements.values()
+            if item.workspace_id == workspace_id and item.metric == metric
+        ]
+        if not measurements:
+            return None
+        return max(measurements, key=lambda item: (item.data_timestamp, item.created_at))
+
+    def _matching_anomaly_event(self, measurement_id: UUID, rule_id: UUID) -> AnomalyEvent | None:
+        return next(
+            (
+                item
+                for item in self.anomaly_events.values()
+                if item.measurement_id == measurement_id and item.rule_id == rule_id
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _normalize_value(value: float, source_unit: str, target_unit: str) -> float:
+        source = source_unit.strip().lower()
+        target = target_unit.strip().lower()
+        if source == target:
+            return value
+        if source in {"m/day", "meter/day", "meters/day"} and target == "ft/day":
+            return value * 3.28084
+        if source == "ft/day" and target in {"m/day", "meter/day", "meters/day"}:
+            return value / 3.28084
+        if source in {"hr", "hrs", "hour", "hours"} and target in {"hr", "hrs", "hour", "hours"}:
+            return value
+        if source in {"%", "percent"} and target in {"%", "percent"}:
+            return value
+        raise ValueError(f"Unsupported unit conversion: {source_unit} to {target_unit}")
+
+    @staticmethod
+    def _likely_operational_contributors(
+        anomalies: list[AnomalyEvent],
+        comparisons: list[BenchmarkComparison],
+    ) -> list[str]:
+        if any(item.severity == "Critical" for item in anomalies):
+            return [
+                "Hydraulics efficiency, hole cleaning, bit/BHA response, or drilling parameter limits may be contributing; treat as risk assessment.",
+                "Torque and drag trend should be reviewed before changing operating parameters.",
+            ]
+        if any(item.performance_status == "Below benchmark" for item in comparisons):
+            return [
+                "Performance is below at least one approved benchmark; verify data freshness before assigning operational cause.",
+            ]
+        return ["No benchmark-driven contributor is inferred from the current approved measurements."]
+
+    def _benchmark_source_references(self, workspace_id: UUID) -> list[str]:
+        measurements = [
+            item
+            for item in self.benchmark_measurements.values()
+            if item.workspace_id == workspace_id
+        ]
+        references = [
+            f"{item.source_type}:{item.source_identifier} ({item.metric}, {item.data_timestamp.isoformat()})"
+            for item in sorted(measurements, key=lambda value: value.data_timestamp, reverse=True)[:8]
+        ]
+        references.extend(
+            f"{item.benchmark_name} {item.dataset_version} ({item.data_source})"
+            for item in self.benchmark_values.values()
+            if item.approval_status == "approved"
+        )
+        return references
+
+    @staticmethod
+    def _benchmark_ai_interpretation(
+        comparisons: list[BenchmarkComparison],
+        anomalies: list[AnomalyEvent],
+    ) -> list[AiReportStatement]:
+        current_rows = [item for item in comparisons if item.current_value is not None]
+        statements: list[AiReportStatement] = []
+        if current_rows:
+            first = current_rows[0]
+            statements.append(
+                AiReportStatement(
+                    category="Measured fact",
+                    text=f"Current {first.metric.replace('_', ' ')} is {first.current_value:g} {first.current_unit}.",
+                    source_reference=first.supporting_source,
+                )
+            )
+        if comparisons:
+            row = comparisons[0]
+            if row.absolute_variance is not None:
+                statements.append(
+                    AiReportStatement(
+                        category="Calculated result",
+                        text=(
+                            f"Variance against {row.benchmark_name} is {row.absolute_variance:g} "
+                            f"{row.benchmark_unit} ({row.percentage_variance:g}%)."
+                        ),
+                        source_reference=row.supporting_source,
+                    )
+                )
+        if anomalies:
+            critical = next((item for item in anomalies if item.severity == "Critical"), anomalies[0])
+            statements.extend(
+                [
+                    AiReportStatement(
+                        category="Risk assessment",
+                        text=f"{critical.summary} This is a benchmark-driven risk flag, not a confirmed root cause.",
+                        source_reference=critical.rule_name,
+                    ),
+                    AiReportStatement(
+                        category="Recommended action",
+                        text="Review Hydraulics and Torque & Drag diagnostics before changing drilling parameters.",
+                        source_reference=critical.rule_name,
+                    ),
+                ]
+            )
+        else:
+            statements.append(
+                AiReportStatement(
+                    category="Inferred explanation",
+                    text="No active benchmark anomaly is inferred from approved current measurements.",
+                    source_reference="benchmarking_status",
+                )
+            )
+        return statements
+
     def create_monday_report(self, payload) -> MondayReport:
         self.refresh()
         failures = [
@@ -731,6 +1454,10 @@ class LocalStateStore:
             if failures
             else 0
         )
+        benchmark_status = self._build_benchmarking_status(payload.workspace_id)
+        active_benchmark_anomalies = [
+            anomaly for anomaly in benchmark_status.active_anomalies if anomaly.status == "active"
+        ]
         report = MondayReport(
             tenant_id=self.tenant.id,
             workspace_id=payload.workspace_id,
@@ -759,6 +1486,8 @@ class LocalStateStore:
                     "citation_count": citation_count,
                     "parsed_documents": len(parsed_documents),
                     "average_confidence": round(average_confidence, 3),
+                    "benchmark_comparisons": len(benchmark_status.comparisons),
+                    "active_benchmark_anomalies": len(active_benchmark_anomalies),
                 },
                 "executive_summary": [
                     {
@@ -767,9 +1496,19 @@ class LocalStateStore:
                             f"and {total_npt:.1f} NPT hour(s) are currently in scope."
                         ),
                         "confidence": 0.82,
+                    },
+                    {
+                        "text": (
+                            "Market benchmark review: "
+                            f"current ft/day is {benchmark_status.current_ft_per_day if benchmark_status.current_ft_per_day is not None else 'missing'}, "
+                            f"seven-day average is {benchmark_status.seven_day_average_ft_per_day if benchmark_status.seven_day_average_ft_per_day is not None else 'missing'}, "
+                            f"and {len(active_benchmark_anomalies)} active benchmark anomaly/anomalies require review."
+                        ),
+                        "confidence": 0.78,
                     }
                 ],
                 "failure_summary": [failure.model_dump(mode="json") for failure in failures],
+                "benchmarking": benchmark_status.model_dump(mode="json"),
                 "validation": {
                     "open_tasks": len(open_tasks),
                     "status": "requires_review" if open_tasks else "ready_for_approval",
@@ -847,7 +1586,7 @@ class LocalStateStore:
                     "activity_timeline": [
                         {
                             "time": "00:00-06:00",
-                            "activity": "Review overnight source evidence and validate extracted NPT/failure records.",
+                            "activity": "Review overnight source evidence, benchmark performance, and validate extracted NPT/failure records.",
                         },
                         {
                             "time": "06:00-12:00",
@@ -862,6 +1601,117 @@ class LocalStateStore:
                             "activity": "Prepare branded Monday Report export package after approval gate passes.",
                         },
                     ],
+                    "market_benchmark": {
+                        "current_ft_per_day": benchmark_status.current_ft_per_day,
+                        "seven_day_average_ft_per_day": benchmark_status.seven_day_average_ft_per_day,
+                        "gordon_average_benchmark": benchmark_status.gordon_average_benchmark,
+                        "noble_top_quartile_benchmark": benchmark_status.noble_top_quartile_benchmark,
+                        "current_dls": self._latest_measurement(payload.workspace_id, "dogleg_severity").value
+                        if self._latest_measurement(payload.workspace_id, "dogleg_severity")
+                        else None,
+                        "comparisons": [item.model_dump(mode="json") for item in benchmark_status.comparisons],
+                        "seven_day_trend": benchmark_status.seven_day_trend,
+                        "active_anomalies": [item.model_dump(mode="json") for item in active_benchmark_anomalies],
+                        "likely_operational_contributors": benchmark_status.likely_operational_contributors,
+                        "recommended_diagnostic_actions": [
+                            item.model_dump(mode="json") for item in benchmark_status.recommended_diagnostic_actions
+                        ],
+                        "supporting_evidence_references": benchmark_status.supporting_evidence_references,
+                        "ai_interpretation": [
+                            item.model_dump(mode="json") for item in benchmark_status.ai_interpretation
+                        ],
+                    },
+                    "safety_and_ai_watchlist": {
+                        "safety_concerns": [
+                            "Confirm well-control, BOP, and pressure-control notes against the latest DDR."
+                        ],
+                        "operational_anomalies": [item.summary for item in active_benchmark_anomalies],
+                        "data_quality_issues": [
+                            item.metric
+                            for item in benchmark_status.comparisons
+                            if item.performance_status in {"Insufficient data", "Stale data"}
+                        ],
+                        "benchmark_deviations": [
+                            item.model_dump(mode="json")
+                            for item in benchmark_status.comparisons
+                            if item.performance_status in {"Below benchmark", "Critical deviation"}
+                        ],
+                        "ai_generated_observations": [
+                            item.model_dump(mode="json") for item in benchmark_status.ai_interpretation
+                        ],
+                        "unresolved_decisions": [
+                            "No approved decision record is linked yet."
+                            if not self.key_decisions
+                            else f"{len(self.key_decisions)} decision record(s) available for review."
+                        ],
+                        "forward_looking_risks": benchmark_status.likely_operational_contributors,
+                        "recommended_follow_up_actions": [
+                            action.reason for action in benchmark_status.recommended_diagnostic_actions
+                        ],
+                    },
+                    "current_operations": {
+                        "current_hole_section": "Confirm from latest DDR or directional plan.",
+                        "current_depth": "Confirm MD/TVD from source records.",
+                        "directional_plan": "Compare approved plan to as-drilled trajectory before client issue.",
+                        "active_anomalies": [item.summary for item in active_benchmark_anomalies],
+                        "required_decisions": [
+                            "Review critical benchmark deviations before issuing client report."
+                        ]
+                        if active_benchmark_anomalies
+                        else [],
+                    },
+                    "next_operations": {
+                        "planned_target": "Source-confirm next target/depth interval.",
+                        "bha_status": "Confirm active BHA status and tool limits.",
+                        "operational_limits": "Confirm WOB, RPM, flow, torque, drag, and ECD limits.",
+                        "benchmark_deviations": [
+                            item.performance_status
+                            for item in benchmark_status.comparisons
+                            if item.performance_status in {"Below benchmark", "Critical deviation"}
+                        ],
+                        "identified_risks": benchmark_status.likely_operational_contributors,
+                    },
+                    "handover_notes": {
+                        "current_well_status": "Source-backed report draft requires reviewer confirmation.",
+                        "work_completed": "Summarize from timeline and parsed source records.",
+                        "open_risks": benchmark_status.likely_operational_contributors,
+                        "pending_decisions": ["Close AI observations and benchmark anomaly review states."],
+                        "next_critical_operation": "Confirm from approved drilling program.",
+                        "changed_information": [
+                            "Benchmark measurements, anomaly rules, and diagnostic recommendations are audited when updated."
+                        ],
+                    },
+                    "key_decisions_and_impact": [
+                        item.model_dump(mode="json")
+                        for item in self.key_decisions.values()
+                        if item.workspace_id == payload.workspace_id
+                    ],
+                    "source_citations": {
+                        "benchmark_evidence": benchmark_status.supporting_evidence_references,
+                        "material_claim_warning": (
+                            "Material claims without citations must remain in review before client issue."
+                        ),
+                    },
+                    "management_of_change_evidence": {
+                        "benchmark_values_used": [
+                            item.model_dump(mode="json") for item in benchmark_status.benchmark_values
+                        ],
+                        "variance_calculations": [
+                            item.model_dump(mode="json") for item in benchmark_status.comparisons
+                        ],
+                        "triggered_anomaly_rules": [
+                            item.model_dump(mode="json") for item in active_benchmark_anomalies
+                        ],
+                        "diagnostic_recommendations": [
+                            item.model_dump(mode="json") for item in benchmark_status.recommended_diagnostic_actions
+                        ],
+                        "audit_actions": [
+                            "benchmark_measurement.create",
+                            "benchmark_anomaly.create",
+                            "risk_watchlist.add",
+                            "diagnostic_action.dismiss",
+                        ],
+                    },
                     "ai_execution_plan": [
                         {
                             "step": "Plan",
@@ -898,6 +1748,7 @@ class LocalStateStore:
                 "data_quality_notes": [
                     "Official exports are blocked until validation tasks are closed.",
                     "Casing and timeline sections use the FORGE-style daily-report structure and should be source-confirmed before client issue.",
+                    "AI benchmark interpretation is review-required and must not be presented as confirmed root cause.",
                 ],
             },
         )
@@ -1104,11 +1955,18 @@ class LocalStateStore:
             for failure in self.failures.values()
             if failure.workspace_id == workspace_id
         }
+        anomaly_ids = {
+            anomaly.id
+            for anomaly in self.anomaly_events.values()
+            if anomaly.workspace_id == workspace_id
+        }
         return [
             task
             for task in self.validation_tasks.values()
-            if task.target_type == "failure"
-            and task.target_id in failure_ids
+            if (
+                (task.target_type == "failure" and task.target_id in failure_ids)
+                or (task.target_type == "anomaly_event" and task.target_id in anomaly_ids)
+            )
             and task.status == ValidationStatus.OPEN
         ]
 
@@ -1148,6 +2006,24 @@ class LocalStateStore:
                 failure.get("summary", ""),
             ]
             lines.append(",".join(f'"{str(field).replace(chr(34), chr(34) + chr(34))}"' for field in fields))
+        lines.append("")
+        lines.append("benchmark_metric,benchmark_name,current_value,benchmark_value,absolute_variance,percentage_variance,status,source")
+        benchmarking = report.report_json.get("benchmarking", {})
+        comparisons = benchmarking.get("comparisons", []) if isinstance(benchmarking, dict) else []
+        for comparison in comparisons:
+            if not isinstance(comparison, dict):
+                continue
+            fields = [
+                comparison.get("metric", ""),
+                comparison.get("benchmark_name", ""),
+                comparison.get("current_value", ""),
+                comparison.get("benchmark_value", ""),
+                comparison.get("absolute_variance", ""),
+                comparison.get("percentage_variance", ""),
+                comparison.get("performance_status", ""),
+                comparison.get("supporting_source", ""),
+            ]
+            lines.append(",".join(f'"{str(field).replace(chr(34), chr(34) + chr(34))}"' for field in fields))
         return "\n".join(lines) + "\n"
 
     @staticmethod
@@ -1158,8 +2034,12 @@ class LocalStateStore:
         validation = report.report_json.get("validation", {})
         source_coverage = report.report_json.get("source_coverage", {})
         morning_report = report.report_json.get("morning_report", {})
+        benchmarking = report.report_json.get("benchmarking", {})
         casing = morning_report.get("casing_schematic", []) if isinstance(morning_report, dict) else []
         timeline = morning_report.get("activity_timeline", []) if isinstance(morning_report, dict) else []
+        benchmark_comparisons = benchmarking.get("comparisons", []) if isinstance(benchmarking, dict) else []
+        benchmark_anomalies = benchmarking.get("active_anomalies", []) if isinstance(benchmarking, dict) else []
+        benchmark_ai = benchmarking.get("ai_interpretation", []) if isinstance(benchmarking, dict) else []
         notes = report.report_json.get("data_quality_notes", [])
         summary_items = "".join(f"<li>{xml_escape(str(item.get('text', '')))}</li>" for item in summary)
         metric_cards = "".join(
@@ -1194,6 +2074,33 @@ class LocalStateStore:
         )
         if not failure_rows:
             failure_rows = "<tr><td colspan=\"7\">No extracted failures in scope.</td></tr>"
+        benchmark_rows = "".join(
+            (
+                "<tr>"
+                f"<td>{xml_escape(str(item.get('metric', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('benchmark_name', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('current_value', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('benchmark_value', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('absolute_variance', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('percentage_variance', '')))}</td>"
+                f"<td>{xml_escape(str(item.get('performance_status', '')))}</td>"
+                "</tr>"
+            )
+            for item in benchmark_comparisons
+            if isinstance(item, dict)
+        )
+        if not benchmark_rows:
+            benchmark_rows = "<tr><td colspan=\"7\">No approved benchmark comparison is available.</td></tr>"
+        anomaly_items = "".join(
+            f"<li>{xml_escape(str(item.get('summary', '')))}</li>"
+            for item in benchmark_anomalies
+            if isinstance(item, dict)
+        )
+        ai_items = "".join(
+            f"<li><strong>{xml_escape(str(item.get('category', '')))}:</strong> {xml_escape(str(item.get('text', '')))}</li>"
+            for item in benchmark_ai
+            if isinstance(item, dict)
+        )
         casing_rows = "".join(
             (
                 "<tr>"
@@ -1297,6 +2204,9 @@ class LocalStateStore:
             f"<div><h2>Data Quality Notes</h2><ul>{notes_items}</ul></div></section>"
             "<section><h2>Standard Daily Report Format</h2><table><thead><tr><th>Section</th><th>Status</th><th>Detail</th></tr></thead>"
             f"<tbody>{standard_rows}</tbody></table></section>"
+            "<section><h2>Market Benchmark</h2><table><thead><tr><th>Metric</th><th>Benchmark</th><th>Current</th><th>Benchmark Value</th><th>Variance</th><th>Variance %</th><th>Status</th></tr></thead>"
+            f"<tbody>{benchmark_rows}</tbody></table><h3>Active Anomalies</h3><ul>{anomaly_items or '<li>No active benchmark anomalies.</li>'}</ul>"
+            f"<h3>AI Interpretation Review</h3><ul>{ai_items}</ul></section>"
             "<section><h2>Failure Summary</h2><table><thead><tr><th>Event</th><th>Severity</th><th>Company</th>"
             "<th>Tool</th><th>NPT Hours</th><th>Confidence</th><th>Validation</th></tr></thead>"
             f"<tbody>{failure_rows}</tbody></table></section>"
@@ -1397,11 +2307,15 @@ class LocalStateStore:
         failures = report.report_json.get("failure_summary", [])
         validation = report.report_json.get("validation", {})
         morning_report = report.report_json.get("morning_report", {})
+        benchmarking = report.report_json.get("benchmarking", {})
         source_coverage = report.report_json.get("source_coverage", {})
         notes = report.report_json.get("data_quality_notes", [])
         standard_sections = (
             morning_report.get("standard_daily_report", []) if isinstance(morning_report, dict) else []
         )
+        benchmark_comparisons = benchmarking.get("comparisons", []) if isinstance(benchmarking, dict) else []
+        benchmark_anomalies = benchmarking.get("active_anomalies", []) if isinstance(benchmarking, dict) else []
+        benchmark_ai = benchmarking.get("ai_interpretation", []) if isinstance(benchmarking, dict) else []
         well_schematic = morning_report.get("well_schematic", {}) if isinstance(morning_report, dict) else {}
         hole_sections = well_schematic.get("hole_sections", []) if isinstance(well_schematic, dict) else []
         ai_plan = morning_report.get("ai_execution_plan", []) if isinstance(morning_report, dict) else []
@@ -1459,6 +2373,51 @@ class LocalStateStore:
                     [1.65 * inch, 1.05 * inch, 3.8 * inch],
                     styles,
                 ),
+                Paragraph("Market Benchmark", styles["h2"]),
+                LocalStateStore._pdf_table(
+                    [["Metric", "Benchmark", "Current", "Bench", "Variance", "%", "Status"]]
+                    + [
+                        [
+                            str(item.get("metric", "")),
+                            str(item.get("benchmark_name", "")),
+                            str(item.get("current_value", "")),
+                            str(item.get("benchmark_value", "")),
+                            str(item.get("absolute_variance", "")),
+                            str(item.get("percentage_variance", "")),
+                            str(item.get("performance_status", "")),
+                        ]
+                        for item in benchmark_comparisons
+                        if isinstance(item, dict)
+                    ],
+                    [1.1 * inch, 1.2 * inch, 0.7 * inch, 0.7 * inch, 0.75 * inch, 0.5 * inch, 1.2 * inch],
+                    styles,
+                ),
+                Paragraph("Benchmark Anomalies", styles["h2"]),
+            ]
+        )
+        if benchmark_anomalies:
+            story.extend(
+                Paragraph(str(item.get("summary", "")), styles["body"])
+                for item in benchmark_anomalies
+                if isinstance(item, dict)
+            )
+        else:
+            story.append(Paragraph("No active benchmark anomalies.", styles["body"]))
+        story.extend(
+            [
+                Paragraph("AI Interpretation Review", styles["h2"]),
+            ]
+        )
+        story.extend(
+            Paragraph(
+                f"{item.get('category', '')}: {item.get('text', '')}",
+                styles["body"],
+            )
+            for item in benchmark_ai
+            if isinstance(item, dict)
+        )
+        story.extend(
+            [
                 Paragraph("Failure Summary", styles["h2"]),
                 LocalStateStore._pdf_table(
                     [["Event", "Severity", "Company", "Tool", "NPT", "Confidence", "Validation"]]
@@ -1598,11 +2557,13 @@ class LocalStateStore:
         summary = report.report_json.get("executive_summary", [])
         failures = report.report_json.get("failure_summary", [])
         morning_report = report.report_json.get("morning_report", {})
+        benchmarking = report.report_json.get("benchmarking", {})
         standard_sections = (
             morning_report.get("standard_daily_report", []) if isinstance(morning_report, dict) else []
         )
         well_schematic = morning_report.get("well_schematic", {}) if isinstance(morning_report, dict) else {}
         ai_plan = morning_report.get("ai_execution_plan", []) if isinstance(morning_report, dict) else []
+        benchmark_comparisons = benchmarking.get("comparisons", []) if isinstance(benchmarking, dict) else []
         lines = [
             "Monday Report",
             f"Period: {period.get('start', '')} to {period.get('end', '')}",
@@ -1614,6 +2575,12 @@ class LocalStateStore:
         lines.extend(
             f"{item.get('section', '')}: {item.get('status', '')} - {item.get('detail', '')}"
             for item in standard_sections
+            if isinstance(item, dict)
+        )
+        lines.extend(["", "Market Benchmark"])
+        lines.extend(
+            f"{item.get('metric', '')}: {item.get('current_value', '')} vs {item.get('benchmark_name', '')} {item.get('benchmark_value', '')} - {item.get('performance_status', '')}"
+            for item in benchmark_comparisons
             if isinstance(item, dict)
         )
         lines.extend(["", "Failure Summary"])
@@ -1689,10 +2656,14 @@ class LocalStateStore:
         validation = report.report_json.get("validation", {})
         source_coverage = report.report_json.get("source_coverage", {})
         morning_report = report.report_json.get("morning_report", {})
+        benchmarking = report.report_json.get("benchmarking", {})
         notes = report.report_json.get("data_quality_notes", [])
         standard_sections = (
             morning_report.get("standard_daily_report", []) if isinstance(morning_report, dict) else []
         )
+        benchmark_comparisons = benchmarking.get("comparisons", []) if isinstance(benchmarking, dict) else []
+        benchmark_anomalies = benchmarking.get("active_anomalies", []) if isinstance(benchmarking, dict) else []
+        benchmark_ai = benchmarking.get("ai_interpretation", []) if isinstance(benchmarking, dict) else []
         well_schematic = morning_report.get("well_schematic", {}) if isinstance(morning_report, dict) else {}
         ai_plan = morning_report.get("ai_execution_plan", []) if isinstance(morning_report, dict) else []
         rows: list[list[object]] = [
@@ -1723,6 +2694,55 @@ class LocalStateStore:
             [
                 [item.get("section", ""), item.get("status", ""), item.get("detail", "")]
                 for item in standard_sections
+                if isinstance(item, dict)
+            ]
+        )
+        rows.extend(
+            [
+                [],
+                ["Market Benchmark"],
+                ["Metric", "Benchmark", "Current", "Benchmark Value", "Variance", "Variance %", "Status", "Source"],
+            ]
+        )
+        rows.extend(
+            [
+                [
+                    item.get("metric", ""),
+                    item.get("benchmark_name", ""),
+                    item.get("current_value", ""),
+                    item.get("benchmark_value", ""),
+                    item.get("absolute_variance", ""),
+                    item.get("percentage_variance", ""),
+                    item.get("performance_status", ""),
+                    item.get("supporting_source", ""),
+                ]
+                for item in benchmark_comparisons
+                if isinstance(item, dict)
+            ]
+        )
+        rows.extend([[], ["Benchmark Anomalies"], ["Severity", "Summary", "Rule", "MOC Reference"]])
+        rows.extend(
+            [
+                [
+                    item.get("severity", ""),
+                    item.get("summary", ""),
+                    item.get("rule_name", ""),
+                    item.get("moc_reference", ""),
+                ]
+                for item in benchmark_anomalies
+                if isinstance(item, dict)
+            ]
+        )
+        rows.extend([[], ["AI Interpretation Review"], ["Category", "Review Status", "Text", "Source"]])
+        rows.extend(
+            [
+                [
+                    item.get("category", ""),
+                    item.get("review_status", ""),
+                    item.get("text", ""),
+                    item.get("source_reference", ""),
+                ]
+                for item in benchmark_ai
                 if isinstance(item, dict)
             ]
         )

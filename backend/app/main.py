@@ -18,9 +18,16 @@ from .retention import retention_days
 from .schemas import (
     AuditIntegrityStatus,
     AuditLog,
+    AnomalyEvent,
+    BenchmarkConfigResponse,
+    BenchmarkMeasurementCreate,
+    BenchmarkValue,
+    BenchmarkValueUpdate,
+    BenchmarkingStatus,
     ChatRequest,
     ChatResponse,
     ClientDataReadiness,
+    DiagnosticDismissRequest,
     DashboardSummary,
     DocumentChunk,
     FailureRecord,
@@ -169,6 +176,20 @@ def require_client_data_ready(operation: str, resource_type: str, resource_id: U
         },
     )
     raise HTTPException(status_code=423, detail="Client data readiness checks are failing")
+
+
+def require_benchmark_permission(permission: str) -> None:
+    store.refresh()
+    permissions = store.benchmark_permissions()
+    if permissions.get(permission):
+        return
+    store.audit(
+        "benchmark.permission_denied",
+        "tenant",
+        store.tenant.id,
+        {"permission": permission, "user": store.user.email},
+    )
+    raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
 
 
 @app.get("/workspaces", response_model=list[Workspace])
@@ -388,6 +409,78 @@ def list_failures(workspace_id: UUID | None = None) -> list[FailureRecord]:
     if workspace_id:
         failures = [failure for failure in failures if failure.workspace_id == workspace_id]
     return failures
+
+
+@app.get("/benchmarking/config", response_model=BenchmarkConfigResponse)
+def benchmarking_config() -> BenchmarkConfigResponse:
+    store.refresh()
+    require_benchmark_permission("view_benchmarks")
+    return BenchmarkConfigResponse(
+        benchmark_values=list(store.benchmark_values.values()),
+        anomaly_rules=list(store.anomaly_rules.values()),
+        permissions=store.benchmark_permissions(),
+    )
+
+
+@app.patch("/benchmarking/values/{benchmark_id}", response_model=BenchmarkValue)
+def update_benchmark_value(benchmark_id: UUID, payload: BenchmarkValueUpdate) -> BenchmarkValue:
+    store.refresh()
+    require_benchmark_permission("manage_benchmark_config")
+    if benchmark_id not in store.benchmark_values:
+        raise HTTPException(status_code=404, detail="Benchmark value not found")
+    return store.update_benchmark_value(benchmark_id, payload)
+
+
+@app.get("/workspaces/{workspace_id}/benchmarking", response_model=BenchmarkingStatus)
+def workspace_benchmarking(workspace_id: UUID) -> BenchmarkingStatus:
+    store.refresh()
+    if workspace_id not in store.workspaces:
+        require_client_data_ready("benchmarking.status", "workspace", workspace_id)
+        require_benchmark_permission("view_benchmarks")
+        store.audit(
+            "benchmarking.workspace_missing_status",
+            "workspace",
+            workspace_id,
+            {"detail": "Returning configuration-only benchmark status for missing workspace."},
+        )
+        return store._build_benchmarking_status(workspace_id)
+    require_client_data_ready("benchmarking.status", "workspace", workspace_id)
+    require_benchmark_permission("view_benchmarks")
+    try:
+        return store.benchmarking_status(workspace_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/workspaces/{workspace_id}/benchmarking/measurements", response_model=BenchmarkingStatus)
+def create_benchmark_measurement(
+    workspace_id: UUID,
+    payload: BenchmarkMeasurementCreate,
+) -> BenchmarkingStatus:
+    store.refresh()
+    if workspace_id not in store.workspaces:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    require_client_data_ready("benchmarking.measurement.create", "workspace", workspace_id)
+    require_benchmark_permission("review_anomalies")
+    try:
+        return store.record_benchmark_measurement(workspace_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.patch("/benchmarking/anomalies/{anomaly_id}/diagnostics/{action_id}/dismiss", response_model=AnomalyEvent)
+def dismiss_benchmark_diagnostic(
+    anomaly_id: UUID,
+    action_id: UUID,
+    payload: DiagnosticDismissRequest,
+) -> AnomalyEvent:
+    require_benchmark_permission("dismiss_anomalies")
+    if not payload.reason.strip():
+        raise HTTPException(status_code=422, detail="Dismissal reason is required")
+    try:
+        return store.dismiss_diagnostic_action(anomaly_id, action_id, payload.reason)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 def chat_insight_cards(failures: list[FailureRecord], documents: list, chunk_count: int, open_tasks: int) -> list[dict[str, str]]:
@@ -784,6 +877,10 @@ def chat(payload: ChatRequest) -> ChatResponse:
     workflow_steps = chat_workflow_steps(len(open_tasks), documents, failures)
     risk_register = chat_risk_register(len(open_tasks), documents, failures)
     tool_actions = chat_tool_actions()
+    try:
+        benchmark_status = store.benchmarking_status(payload.workspace_id)
+    except (KeyError, ValueError):
+        benchmark_status = None
 
     store.audit(
         "chat.message",
@@ -843,6 +940,63 @@ def chat(payload: ChatRequest) -> ChatResponse:
                 "monday_report_csv",
                 "monday_report_json",
             ],
+        )
+
+    if any(term in normalized for term in ["benchmark", "market", "ft/day", "drilling rate", "dls"]):
+        if benchmark_status is None:
+            answer = "Benchmarking is not available for this workspace yet."
+            benchmark_citations = citations
+            benchmark_followups = ["Import daily drilling data", "Create draft report"]
+        else:
+            active = benchmark_status.active_anomalies
+            comparison_text = "; ".join(
+                f"{item.metric} vs {item.benchmark_name}: {item.performance_status}"
+                for item in benchmark_status.comparisons[:4]
+            )
+            answer = (
+                f"Market benchmark status: current ft/day is "
+                f"{benchmark_status.current_ft_per_day if benchmark_status.current_ft_per_day is not None else 'missing'}, "
+                f"seven-day average is "
+                f"{benchmark_status.seven_day_average_ft_per_day if benchmark_status.seven_day_average_ft_per_day is not None else 'missing'}. "
+                f"{comparison_text or 'No approved comparison is available yet.'} "
+                f"{len(active)} active benchmark anomaly/anomalies are in review."
+            )
+            benchmark_citations = citations + [
+                citation
+                for anomaly in active
+                for citation in anomaly.supporting_citations
+            ]
+            benchmark_followups = [
+                "Show Market Benchmark",
+                "Explain active anomalies",
+                "Prepare Management of Change evidence",
+            ]
+            insight_cards = [
+                *insight_cards,
+                {
+                    "label": "Benchmark",
+                    "value": (
+                        f"{benchmark_status.current_ft_per_day:g} ft/day"
+                        if benchmark_status.current_ft_per_day is not None
+                        else "missing"
+                    ),
+                    "detail": f"{len(active)} active anomaly/anomalies, {len(benchmark_status.comparisons)} comparison row(s).",
+                    "tone": "danger" if any(item.severity == "Critical" for item in active) else "info",
+                },
+            ]
+        return ChatResponse(
+            answer=answer,
+            citations=dedupe_citations(benchmark_citations),
+            followups=benchmark_followups,
+            confidence_notes=[
+                "Benchmark statements are categorized in the Benchmarking module and require review before client issue.",
+                "Top-quartile gaps are performance gaps and are not presented as confirmed operational failures.",
+            ],
+            workflow_steps=workflow_steps,
+            insight_cards=insight_cards,
+            risk_register=risk_register,
+            tool_actions=tool_actions,
+            export_actions=["benchmark_evidence_json", "moc_evidence_pdf"],
         )
 
     if any(term in normalized for term in ["uploaded", "parsed", "source", "evidence", "file"]):

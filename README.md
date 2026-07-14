@@ -6,6 +6,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 
 - React SaaS workspace with local AI chat as the main surface, plus upload, dashboard, failure explorer, validation queue, and architecture screens.
 - Report Studio lets users write morning drilling reports from scratch, switch between DDR/BHA/mud/survey normal formats, review client issue readiness, apply a FORGE-style daily-report structure, preview Monday Report branding, render casing schematics and activity timelines, and export a draft Markdown report.
+- Benchmarking adds approved market/operator comparison for drilling rate, configurable Gordon average and Noble top-quartile seed values, variance tables, seven-day trend visuals, anomaly creation, Hydraulics and Torque & Drag recommendations, review-required AI interpretations, and Management of Change evidence export content.
 - Chat calls the FastAPI scaffold when available, exposes local AI runtime status, and falls back to deterministic local analysis when offline.
 - Backend scaffold uses durable local JSON state so API and worker share uploads, jobs, and redacted hash-chain audit logs before PostgreSQL/Redis lands.
 - Browser ZIP/file/folder intake with configurable byte limits, sanitized tenant-scoped storage paths, local byte storage, real SHA-256 hashes, report-family classification, duplicate candidates, configurable OCR routing/extraction, and parser gap warnings.
@@ -15,6 +16,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 - Extraction scaffold creates cited MWD signal-loss failure records, NPT hours, company attribution, and validation tasks from parsed chunks; NPT hour parsing prefers explicit NPT labels so casing/depth values are not treated as time.
 - Validation API updates extracted records, Monday Report API creates report JSON, and export API blocks unresolved official exports before writing hashed JSON/CSV/HTML/PDF/XLSX artifacts with signed download URLs.
 - Official report exports now include metrics, validation posture, source coverage, FORGE-style casing schematic rows, 24 hr activity timeline, branded HTML/PDF output, and expanded XLSX sections.
+- Official report exports now include Market Benchmark evidence, benchmark source/version, current measurements, variance calculations, triggered anomaly rules, diagnostic recommendations, AI review state, and audit/MOC evidence fields in JSON/CSV/HTML/PDF/XLSX outputs.
 - Client-data readiness endpoint and tracker panel flag demo/local-scaffold blockers before real client packages are accepted, enforce retention policy, require real active infrastructure adapters, and unsafe client mode requires an API key while blocking data reads, chat, report creation, and exports until ready.
 - Local AI defaults to Ollama with `gemma4:e2b`; readiness verifies both endpoint reachability and the pinned model.
 - Parser/OCR fixture eval readiness requires a passing `MONDAY_REPORT_PARSER_EVAL_REPORT`; real-client approval also requires the referenced fixture manifest to carry a reviewed anonymized-client attestation.
@@ -85,6 +87,7 @@ pnpm run audit:client-approval
 pnpm run audit:client-ops
 pnpm run audit:report-export-idempotency
 pnpm run audit:report-template
+pnpm run audit:benchmarking
 pnpm run audit:runtime-backends
 pnpm run audit:infra-readiness
 pnpm run audit:ga-readiness

@@ -8,23 +8,66 @@ The executable MVP path is now phase-gated end to end and the local client-data 
 
 | Lane | Status | Meaning | Next Action |
 |---|---|---|---|
-| Accepted now | Pass | Executable MVP is working with Client Home, rig/MR list access, chat, report studio, roadmap, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
+| Accepted now | Pass | Executable MVP is working with Client Home, rig/MR list access, chat, report studio, Benchmarking, roadmap, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
 | Safe operating mode | Pass | Demo mode remains local; approved client mode uses PostgreSQL/RLS state, Redis queue, protected storage, API key, signing secret, and reviewed fixture/eval evidence. | Keep secrets out of Git and regenerate approval after environment changes. |
 | Real-client approval | Pass | Live client approval reports `APPROVED`; GA readiness reports `GA_READY`; readiness has zero blockers. | Run controlled client-package dry runs before broad distribution. |
 | Next execution order | Pending | Pull roadmap lanes in order: schematic extraction, FORGE eval promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Start with source-driven schematic extraction and controlled client-package trials. |
 
 ## Current Tracker
 
-- Working now: Client Home, rig/MR list access, chat-first workflow, batched direct/ZIP upload, SHA-256 storage, malware baseline blocking, parser-worker queue, source chunks, failure extraction, validation tasks, Monday Report creation, JSON/CSV/HTML/PDF/XLSX exports, signed source/export downloads, redacted audit logs, and readiness reporting.
-- Recently added: typed source locators, readable citation labels, source-file actions directly from chat citation cards, command-center chat workflow, source-backed Report Studio drafts, MR-SCHEMA-1 DDR/BHA/mud/survey/directional report variants, client issue-readiness board, Product Roadmap execution board, direct-upload persistence batching, manifest-backed fixture readiness, Gemma 4 E2B local AI default, single-file partner preview packaging, page-aware PDF chunks, native PDF table row citations, high-confidence PDF report profiles, and configurable local OCR extraction into image-page chunks.
+- Working now: Client Home, rig/MR list access, chat-first workflow, Benchmarking module, batched direct/ZIP upload, SHA-256 storage, malware baseline blocking, parser-worker queue, source chunks, failure extraction, validation tasks, Monday Report creation, JSON/CSV/HTML/PDF/XLSX exports, signed source/export downloads, redacted audit logs, and readiness reporting.
+- Recently added: typed source locators, readable citation labels, source-file actions directly from chat citation cards, command-center chat workflow, source-backed Report Studio drafts, MR-SCHEMA-1 DDR/BHA/mud/survey/directional report variants, client issue-readiness board, Benchmarking with Gordon/Noble seed config, critical anomaly workflow, diagnostic recommendations, MOC evidence exports, Product Roadmap execution board, direct-upload persistence batching, manifest-backed fixture readiness, Gemma 4 E2B local AI default, single-file partner preview packaging, page-aware PDF chunks, native PDF table row citations, high-confidence PDF report profiles, and configurable local OCR extraction into image-page chunks.
 - Real-client posture: approved in the local client environment with active PostgreSQL, active Redis, local AI, security configuration, golden fixture/eval evidence, and reviewed fixture attestation all passing.
 - Operator command: run `pnpm run audit:all` after every meaningful code change; run `pnpm run package:partner-approval` before sending the partner ZIP; run `pnpm run package:client-approval` to write the current real-client approval/blocker report.
+
+## 2026-07-14 Benchmarking Release Evidence
+
+Verification completed on `2026-07-14` in `Asia/Riyadh` (`UTC+03:00`) from starting revision `78a67ef37537b1e0d440accc8dbe003886f3b8f4` on branch `main`. No manual state, storage, export, API, web, or GA environment overrides were used.
+
+Root causes closed:
+
+- `scripts/phase_audit.py` loaded `output/ga-readiness/monday_report_ga.env` during import, which contaminated ordinary audit and E2E callers. GA environment loading is now explicit, non-destructive, path-safe, and followed by runtime URL refresh.
+- `scripts/roadmap_guard.py` required obsolete `09-roadmap.png`. It now enforces Benchmarking at `04-benchmarking.png`, Roadmap at `10-roadmap.png`, the exact view order/count, unique labels/files/indices, valid filenames, and existing navigation markers.
+
+Release files reviewed: `README.md`, `backend/app/main.py`, `backend/app/schemas.py`, `backend/app/store.py`, `db/migrations/0003_benchmarking.sql`, `package.json`, `scripts/audit_harness_guard.py`, `scripts/benchmarking_guard.py`, `scripts/phase_audit.py`, `scripts/roadmap_guard.py`, `scripts/ui_quality_e2e.mjs`, `src/App.tsx`, `src/components/BenchmarkingModule.tsx`, `src/components/ReportStudio.tsx`, `src/lib/api.ts`, `src/styles.css`, and this tracker.
+
+| Final command | Exit | Completed (UTC+03:00) | Evidence |
+|---|---:|---|---|
+| `pnpm run build` | 0 | `2026-07-14 13:06:18` | TypeScript and Vite production build passed; 1,600 modules transformed. |
+| `pnpm run audit:benchmarking` | 0 | `2026-07-14 13:06:29` | Seeds, thresholds, anomaly workflow, permissions, review gates, audit events, and JSON/CSV/HTML/PDF/XLSX evidence passed. |
+| `pnpm run audit:roadmap` | 0 | `2026-07-14 13:06:38` | Current module labels, order, screenshot filenames, routes, and audit wiring passed. |
+| `pnpm run test:e2e` | 0 | `2026-07-14 13:06:53` | Nine ZIP files, seven parsed documents, six chunks, validation gate, five exports, signed downloads, chat, and audit coverage passed. |
+| `pnpm run test:ui` | 0 | `2026-07-14 13:07:45` | All navigation/actions and 12 screenshots passed with zero browser errors. |
+| `pnpm run audit:all` | 0 | `2026-07-14 13:08:52` | Full software, parser, report, security, readiness, Benchmarking, and package-approval chain passed. |
+| `pnpm run ga:readiness` | 0 | `2026-07-14 13:09:14` | `GA_READY`; zero software, configuration, infrastructure, evidence/approval, or uncategorized blockers. |
+| `pnpm run report:ui-screenshots` | 0 | `2026-07-14 13:09:30` | 15-page UI evidence PDF regenerated and visually inspected. |
+| `pnpm run package:partner-preview` | 0 | `2026-07-14 13:57:04` | Partner ZIP rebuilt from the production bundle. |
+| `pnpm run audit:harness` (post-tracker) | 0 | `2026-07-14 14:00:19` | Import isolation, explicit loading, precedence, path handling, URL refresh, and roadmap markers passed. |
+| `pnpm run audit:roadmap` (post-tracker) | 0 | `2026-07-14 14:00:39` | Final tracker state retained the exact Benchmarking/Roadmap sequence. |
+| `pnpm run audit:benchmarking` (post-tracker) | 0 | `2026-07-14 14:00:58` | Final source state retained all Benchmarking and export evidence behavior. |
+| `pnpm run audit:all` (post-tracker) | 0 | `2026-07-14 14:02` | Full chain passed again and rebuilt the archive with current tracked documentation. |
+| `pnpm run package:partner-approval` | 0 | `2026-07-14 14:03:24` | Final rebuilt archive `APPROVED` for partner demo/testing with synthetic data only. |
+
+Evidence paths:
+
+- UI manifest: `output/qa/ui_quality_e2e_manifest.json`
+- Benchmarking screenshot: `output/screenshots/ui-quality/04-benchmarking.png`
+- Roadmap screenshot: `output/screenshots/ui-quality/10-roadmap.png`
+- Render-reviewed UI PDF: `output/pdf/monday_report_ui_quality_screenshots.pdf`
+- GA evidence: `output/ga-readiness/Monday_Report_GA_READINESS.json` and `.md`
+- Partner package: `output/package/Monday_Report_Partner_Preview.zip` (`388611` bytes; SHA-256 `9571a5f04cc849721e1ba370de3b1effb89919384e80f6b7ff5f800574a4787b`)
+- Partner approval: `output/package/Monday_Report_Partner_Preview_APPROVAL.json` and `.md`
+
+Security review: `git diff --check` passed; the GA environment file remains ignored; no credential, private-key, local-state, cache, log, browser-profile, or machine-path artifact was found in the release ZIP. Archive CRC validation passed and all required Benchmarking files were present. The ZIP intentionally contains only a placeholder `partner.env.example`, never a populated environment file.
+
+Git state at evidence capture: branch `main`, remote `origin` at `https://github.com/RAA233/monday-report.git`; commit and push remain gated on the final post-tracker checks. Remaining release constraint: the partner ZIP is approved only for synthetic demo/testing and is not a real-client-data dispatch package.
 
 ## Phase Gate Rule
 
 Every implementation slice must pass these checks before it is considered accepted:
 
 - Frontend build: `pnpm run build`
+- Audit harness environment-isolation guard: `pnpm run audit:harness`
 - UI quality E2E and screenshots: `pnpm run test:ui`
 - Backend compile: `python -m py_compile backend/app/*.py`
 - API health: `GET http://127.0.0.1:8000/health`
@@ -60,6 +103,7 @@ Every implementation slice must pass these checks before it is considered accept
 - Source-backed report draft guard: `pnpm run audit:report-draft`
 - Report variant schema guard: `pnpm run audit:report-variants`
 - Report export idempotency guard: `pnpm run audit:report-export-idempotency`
+- Benchmarking guard: `pnpm run audit:benchmarking`
 - Runtime backend guard: `pnpm run audit:runtime-backends`
 - Infrastructure readiness guard: `pnpm run audit:infra-readiness`
 - Audit integrity guard: `pnpm run audit:integrity`
@@ -76,6 +120,7 @@ Run the combined local gates:
 
 ```powershell
 pnpm run audit:phase
+pnpm run audit:harness
 pnpm run test:ui
 pnpm run test:e2e
 pnpm run audit:client-data
@@ -106,6 +151,7 @@ pnpm run audit:client-ops
 pnpm run audit:report-draft
 pnpm run audit:report-variants
 pnpm run audit:report-export-idempotency
+pnpm run audit:benchmarking
 pnpm run audit:runtime-backends
 pnpm run audit:infra-readiness
 pnpm run audit:integrity

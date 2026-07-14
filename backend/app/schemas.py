@@ -167,6 +167,193 @@ class Citation(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 
+class BenchmarkValue(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    tenant_id: UUID
+    benchmark_name: str
+    metric: str
+    value: float
+    unit: str
+    performance_category: str
+    data_source: str
+    effective_date: date
+    dataset_version: str
+    last_updated: datetime = Field(default_factory=utc_now)
+    approval_status: Literal["draft", "approved", "retired"] = "approved"
+
+
+class BenchmarkValueUpdate(BaseModel):
+    value: float | None = None
+    unit: str | None = None
+    performance_category: str | None = None
+    data_source: str | None = None
+    effective_date: date | None = None
+    dataset_version: str | None = None
+    approval_status: Literal["draft", "approved", "retired"] | None = None
+    reason: str
+
+
+class AnomalyRule(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    tenant_id: UUID
+    name: str
+    metric: str
+    severity: Literal["Advisory", "Warning", "Critical"]
+    benchmark_name: str
+    threshold_mode: Literal["below_benchmark", "below_percent_of_benchmark"]
+    threshold_percent: float | None = None
+    diagnostic_modules: list[str] = Field(default_factory=list)
+    approval_status: Literal["draft", "approved", "retired"] = "approved"
+    last_updated: datetime = Field(default_factory=utc_now)
+
+
+class BenchmarkMeasurement(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    tenant_id: UUID
+    workspace_id: UUID
+    metric: str
+    value: float
+    unit: str
+    data_source: str
+    data_timestamp: datetime
+    confidence_status: Literal["high", "medium", "low", "manual", "stale", "conflicting", "missing"] = "high"
+    source_type: str = "manual"
+    source_identifier: str = "manual-entry"
+    dataset_version: str = "manual-v1"
+    citations: list[Citation] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class BenchmarkMeasurementCreate(BaseModel):
+    metric: str
+    value: float
+    unit: str
+    data_source: str
+    data_timestamp: datetime | None = None
+    confidence_status: Literal["high", "medium", "low", "manual", "stale", "conflicting", "missing"] = "high"
+    source_type: str = "manual"
+    source_identifier: str = "manual-entry"
+    dataset_version: str = "manual-v1"
+    moc_reference: str | None = None
+
+
+class BenchmarkComparison(BaseModel):
+    metric: str
+    benchmark_name: str
+    current_value: float | None = None
+    current_unit: str
+    benchmark_value: float | None = None
+    benchmark_unit: str
+    absolute_variance: float | None = None
+    percentage_variance: float | None = None
+    performance_status: Literal[
+        "Above benchmark",
+        "Within expected range",
+        "Below benchmark",
+        "Critical deviation",
+        "Insufficient data",
+        "Stale data",
+    ]
+    supporting_source: str
+    data_timestamp: datetime | None = None
+    confidence_status: str
+
+
+class DiagnosticAction(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    module: Literal["Hydraulics", "Torque & Drag"]
+    status: Literal["Recommended", "Queued", "Running", "Completed", "Failed", "Dismissed"] = "Recommended"
+    reason: str
+    authorized_user: str | None = None
+    timestamp: datetime = Field(default_factory=utc_now)
+    dismissal_reason: str | None = None
+
+
+class DiagnosticDismissRequest(BaseModel):
+    reason: str
+
+
+class AnomalyEvent(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    tenant_id: UUID
+    workspace_id: UUID
+    measurement_id: UUID | None = None
+    metric: str
+    severity: Literal["Advisory", "Warning", "Critical"]
+    performance_status: str
+    current_value: float
+    unit: str
+    threshold_value: float
+    threshold_unit: str
+    rule_id: UUID
+    rule_name: str
+    summary: str
+    benchmark_evidence: dict[str, Any] = Field(default_factory=dict)
+    supporting_citations: list[Citation] = Field(default_factory=list)
+    diagnostic_actions: list[DiagnosticAction] = Field(default_factory=list)
+    moc_reference: str | None = None
+    status: Literal["active", "dismissed", "resolved"] = "active"
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class AiReportStatement(BaseModel):
+    category: Literal[
+        "Measured fact",
+        "Calculated result",
+        "Inferred explanation",
+        "Risk assessment",
+        "Recommended action",
+    ]
+    text: str
+    review_status: Literal["review_required", "accepted", "rejected"] = "review_required"
+    source_reference: str | None = None
+
+
+class KeyDecision(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    tenant_id: UUID
+    workspace_id: UUID
+    decision_timestamp: datetime
+    decision_type: str
+    title: str
+    operational_context: str
+    decision_made: str
+    decision_owner: str
+    supporting_evidence: list[Citation] = Field(default_factory=list)
+    expected_impact: str
+    actual_impact: str | None = None
+    affected_depth_or_interval: str | None = None
+    related_risks: list[str] = Field(default_factory=list)
+    moc_reference: str | None = None
+    approval_status: Literal["draft", "review", "approved", "rejected"] = "review"
+
+
+class BenchmarkingStatus(BaseModel):
+    workspace_id: UUID
+    generated_at: datetime = Field(default_factory=utc_now)
+    current_ft_per_day: float | None = None
+    seven_day_average_ft_per_day: float | None = None
+    gordon_average_benchmark: float | None = None
+    noble_top_quartile_benchmark: float | None = None
+    comparisons: list[BenchmarkComparison] = Field(default_factory=list)
+    active_anomalies: list[AnomalyEvent] = Field(default_factory=list)
+    historical_anomalies: list[AnomalyEvent] = Field(default_factory=list)
+    benchmark_values: list[BenchmarkValue] = Field(default_factory=list)
+    anomaly_rules: list[AnomalyRule] = Field(default_factory=list)
+    seven_day_trend: list[dict[str, Any]] = Field(default_factory=list)
+    likely_operational_contributors: list[str] = Field(default_factory=list)
+    recommended_diagnostic_actions: list[DiagnosticAction] = Field(default_factory=list)
+    supporting_evidence_references: list[str] = Field(default_factory=list)
+    ai_interpretation: list[AiReportStatement] = Field(default_factory=list)
+    permissions: dict[str, bool] = Field(default_factory=dict)
+
+
+class BenchmarkConfigResponse(BaseModel):
+    benchmark_values: list[BenchmarkValue] = Field(default_factory=list)
+    anomaly_rules: list[AnomalyRule] = Field(default_factory=list)
+    permissions: dict[str, bool] = Field(default_factory=dict)
+
+
 class FailureRecord(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     tenant_id: UUID
@@ -186,7 +373,7 @@ class FailureRecord(BaseModel):
 class ValidationTask(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     tenant_id: UUID
-    target_type: Literal["failure", "npt_event", "company", "tool", "citation", "file"]
+    target_type: Literal["failure", "npt_event", "company", "tool", "citation", "file", "anomaly_event", "ai_statement"]
     target_id: UUID
     reason: str
     priority: Literal["low", "medium", "high", "critical"] = "medium"

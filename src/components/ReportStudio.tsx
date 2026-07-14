@@ -43,11 +43,13 @@ interface ReportForm {
   holeSize: string;
   mdFt: string;
   tvdFt: string;
+  asDrilledDls: string;
   mudWeight: string;
   presentOps: string;
   nextOps: string;
   safety: string;
   risks: string;
+  keyDecisions: string;
   casingProgram: string;
   operationsLog: string;
 }
@@ -155,6 +157,9 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
       risks:
         current.risks.trim() ||
         "Watch torque and drag trend, ECD margin, lost-circulation indicators, MWD signal quality, and casing shoe integrity.",
+      keyDecisions:
+        current.keyDecisions.trim() ||
+        "06:00 | Morning parameter review | Keep drilling parameters within approved envelope | Owner: Drilling Supervisor | Expected impact: maintain hole quality and reduce avoidable NPT | Actual impact: review pending.",
       operationsLog: current.operationsLog.trim() ? current.operationsLog : defaultOperationsLog,
       casingProgram: current.casingProgram.trim() ? current.casingProgram : defaultCasingProgram
     }));
@@ -214,6 +219,7 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
       mdFt: "8,620",
       tvdFt: "7,980",
       mudWeight: "10.2 ppg",
+      asDrilledDls: "2.1 deg/100 ft",
       presentOps:
         "Summarize 24 hr activity using the open-source FORGE daily-report structure: well/job information, present operations, casing, mud, BHA, survey, consumables, and time breakdown.",
       nextOps:
@@ -222,6 +228,8 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
         "BOP and well-control notes must be confirmed by the drilling supervisor before client issue.",
       risks:
         "Track hole cleaning, torque and drag, MWD signal continuity, casing-point readiness, and any non-productive time.",
+      keyDecisions:
+        "06:00 | Morning report basis | Use source-backed FORGE-style DDR structure for the handover | Owner: Company Representative | Expected impact: cleaner review and traceable client issue | Actual impact: pending approval.",
       casingProgram: defaultCasingProgram,
       operationsLog: defaultOperationsLog
     });
@@ -405,6 +413,11 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
             <LabeledInput label="MD ft" value={form.mdFt} onChange={(value) => updateField("mdFt", value)} />
             <LabeledInput label="TVD ft" value={form.tvdFt} onChange={(value) => updateField("tvdFt", value)} />
             <LabeledInput
+              label="As-drilled DLS"
+              value={form.asDrilledDls}
+              onChange={(value) => updateField("asDrilledDls", value)}
+            />
+            <LabeledInput
               label="Mud weight"
               value={form.mudWeight}
               onChange={(value) => updateField("mudWeight", value)}
@@ -427,6 +440,12 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
             onChange={(value) => updateField("safety", value)}
           />
           <LabeledTextarea label="Risks and AI watchlist" value={form.risks} onChange={(value) => updateField("risks", value)} />
+          <LabeledTextarea
+            label="Key Decisions and Impact of Decision"
+            hint="HH:MM | Title | Decision | Owner | Expected impact | Actual impact"
+            value={form.keyDecisions}
+            onChange={(value) => updateField("keyDecisions", value)}
+          />
           <LabeledTextarea
             label="Casing program"
             hint="Name | OD | Top ft | Shoe ft | Status"
@@ -607,6 +626,7 @@ function DailyReportPreview({
         <ReportFact label="Hole" value={form.holeSize} />
         <ReportFact label="MD" value={formatDepth(form.mdFt)} />
         <ReportFact label="TVD" value={formatDepth(form.tvdFt)} />
+        <ReportFact label="DLS" value={form.asDrilledDls} />
         <ReportFact label="Mud" value={form.mudWeight} />
         <ReportFact label="Status" value="AI-assisted draft" />
       </section>
@@ -676,6 +696,7 @@ function DailyReportPreview({
           <div className="schematic-note-grid">
             <span>Hole {form.holeSize || "not entered"}</span>
             <span>Current MD {formatDepth(form.mdFt)}</span>
+            <span>As-drilled DLS {form.asDrilledDls || "not entered"}</span>
             <span>{casing.length} casing string(s)</span>
           </div>
         </div>
@@ -692,6 +713,21 @@ function DailyReportPreview({
               </div>
             ))}
           </div>
+        </div>
+      </section>
+
+      <section className="report-section">
+        <div className="report-section-title">
+          <ClipboardList size={17} aria-hidden="true" />
+          <h3>Key Decisions and Impact of Decision</h3>
+        </div>
+        <div className="activity-timeline">
+          {parseDecisionRows(form.keyDecisions).map((decision, index) => (
+            <div className="timeline-row" key={`${decision.time}-${index}`}>
+              <strong>{decision.time}</strong>
+              <span>{decision.description}</span>
+            </div>
+          ))}
         </div>
       </section>
 
@@ -843,10 +879,12 @@ function initialReportForm(): ReportForm {
     mdFt: "",
     tvdFt: "",
     mudWeight: "",
+    asDrilledDls: "",
     presentOps: "",
     nextOps: "",
     safety: "",
     risks: "",
+    keyDecisions: "",
     casingProgram: defaultCasingProgram,
     operationsLog: defaultOperationsLog
   };
@@ -890,6 +928,21 @@ function parseOperationsLog(value: string): ActivitySegment[] {
     });
 
   return parsed.length > 0 ? parsed : parseOperationsLog(defaultOperationsLog);
+}
+
+function parseDecisionRows(value: string): ActivitySegment[] {
+  const parsed = value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [time, ...rest] = line.split("|");
+      return {
+        time: time.trim() || "Decision",
+        description: rest.join("|").trim() || line
+      };
+    });
+  return parsed.length > 0 ? parsed : [{ time: "Decision log", description: "No timestamped decision record entered." }];
 }
 
 function parseDepth(value: string | undefined): number {
@@ -938,7 +991,7 @@ function buildStandardReportSections(
     {
       title: "Drilling parameters",
       status: form.mdFt.trim() || form.mudWeight.trim() ? "drafted" : "needs input",
-      detail: `Hole ${form.holeSize || "not entered"}, MD ${formatDepth(form.mdFt)}, TVD ${formatDepth(form.tvdFt)}, mud ${form.mudWeight || "not entered"}.`
+      detail: `Hole ${form.holeSize || "not entered"}, MD ${formatDepth(form.mdFt)}, TVD ${formatDepth(form.tvdFt)}, DLS ${form.asDrilledDls || "not entered"}, mud ${form.mudWeight || "not entered"}.`
     },
     {
       title: "Mud, BHA, survey, and bit",
@@ -998,6 +1051,7 @@ function buildClientIssueChecklist(
     activities.length > 0 ? "24 hr activity timeline is populated." : "Add the 24 hr activity timeline.",
     form.safety.trim() ? "Safety and well-control notes are included." : "Confirm safety and well-control notes.",
     "Confirm mud, BHA, survey, bit, and drilling parameters against source evidence.",
+    form.keyDecisions.trim() ? "Timestamped key decisions and impacts are listed." : "Add Key Decisions and Impact of Decision.",
     "Attach citations and close validation items before official PDF/XLSX export."
   ];
 }
@@ -1019,10 +1073,12 @@ function buildStudioMetrics(
     "holeSize",
     "mdFt",
     "mudWeight",
+    "asDrilledDls",
     "presentOps",
     "nextOps",
     "safety",
     "risks",
+    "keyDecisions",
   ];
   const completeFields = requiredFields.filter((field) => form[field].trim()).length;
   const completion = Math.round((completeFields / requiredFields.length) * 100);
@@ -1134,7 +1190,7 @@ function buildControlMatrix(
     {
       label: "Trajectory",
       value: depthReady ? "tracked" : "needs depth",
-      detail: `MD ${formatDepth(form.mdFt)} / TVD ${formatDepth(form.tvdFt)}.`,
+      detail: `MD ${formatDepth(form.mdFt)} / TVD ${formatDepth(form.tvdFt)} / DLS ${form.asDrilledDls || "not entered"}.`,
     },
     {
       label: "Hydraulics",
@@ -1188,6 +1244,7 @@ function renderMarkdownReport(
     .map((item) => `- ${item.name}: ${item.od}, ${item.topFt.toLocaleString()} to ${item.shoeFt.toLocaleString()} ft, ${item.status}`)
     .join("\n");
   const activityRows = activities.map((item) => `- ${item.time}: ${item.description}`).join("\n");
+  const decisionRows = parseDecisionRows(form.keyDecisions).map((item) => `- ${item.time}: ${item.description}`).join("\n");
   const standardRows = standardSections
     .map((item) => `- ${item.title}: ${item.status} - ${item.detail}`)
     .join("\n");
@@ -1204,7 +1261,7 @@ function renderMarkdownReport(
     `Operator: ${form.operator}`,
     `Phase: ${form.phase}`,
     `Format: ${activeVariant.label} (${activeVariant.shortLabel})`,
-    `Depth: MD ${formatDepth(form.mdFt)}, TVD ${formatDepth(form.tvdFt)}`,
+    `Depth: MD ${formatDepth(form.mdFt)}, TVD ${formatDepth(form.tvdFt)}, DLS ${form.asDrilledDls || "not entered"}`,
     "",
     "## Executive Summary",
     summary,
@@ -1224,6 +1281,9 @@ function renderMarkdownReport(
     "",
     "## Risks And AI Watchlist",
     fallbackText(form.risks, "No risk watchlist entered."),
+    "",
+    "## Key Decisions And Impact Of Decision",
+    decisionRows,
     "",
     "## Casing Program",
     casingRows,

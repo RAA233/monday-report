@@ -203,7 +203,7 @@ export interface ApiFailureRecord {
 export interface ApiValidationTask {
   id: string;
   tenant_id: string;
-  target_type: "failure" | "npt_event" | "company" | "tool" | "citation" | "file";
+  target_type: "failure" | "npt_event" | "company" | "tool" | "citation" | "file" | "anomaly_event" | "ai_statement";
   target_id: string;
   reason: string;
   priority: "low" | "medium" | "high" | "critical";
@@ -221,6 +221,132 @@ export interface ApiMondayReport {
   status: "draft" | "review" | "approved" | "exported";
   report_json: Record<string, unknown>;
   created_at: string;
+}
+
+export interface ApiBenchmarkValue {
+  id: string;
+  tenant_id: string;
+  benchmark_name: string;
+  metric: string;
+  value: number;
+  unit: string;
+  performance_category: string;
+  data_source: string;
+  effective_date: string;
+  dataset_version: string;
+  last_updated: string;
+  approval_status: "draft" | "approved" | "retired";
+}
+
+export interface ApiAnomalyRule {
+  id: string;
+  tenant_id: string;
+  name: string;
+  metric: string;
+  severity: "Advisory" | "Warning" | "Critical";
+  benchmark_name: string;
+  threshold_mode: "below_benchmark" | "below_percent_of_benchmark";
+  threshold_percent?: number | null;
+  diagnostic_modules: string[];
+  approval_status: "draft" | "approved" | "retired";
+  last_updated: string;
+}
+
+export interface ApiBenchmarkComparison {
+  metric: string;
+  benchmark_name: string;
+  current_value?: number | null;
+  current_unit: string;
+  benchmark_value?: number | null;
+  benchmark_unit: string;
+  absolute_variance?: number | null;
+  percentage_variance?: number | null;
+  performance_status:
+    | "Above benchmark"
+    | "Within expected range"
+    | "Below benchmark"
+    | "Critical deviation"
+    | "Insufficient data"
+    | "Stale data";
+  supporting_source: string;
+  data_timestamp?: string | null;
+  confidence_status: string;
+}
+
+export interface ApiDiagnosticAction {
+  id: string;
+  module: "Hydraulics" | "Torque & Drag";
+  status: "Recommended" | "Queued" | "Running" | "Completed" | "Failed" | "Dismissed";
+  reason: string;
+  authorized_user?: string | null;
+  timestamp: string;
+  dismissal_reason?: string | null;
+}
+
+export interface ApiAnomalyEvent {
+  id: string;
+  tenant_id: string;
+  workspace_id: string;
+  measurement_id?: string | null;
+  metric: string;
+  severity: "Advisory" | "Warning" | "Critical";
+  performance_status: string;
+  current_value: number;
+  unit: string;
+  threshold_value: number;
+  threshold_unit: string;
+  rule_id: string;
+  rule_name: string;
+  summary: string;
+  benchmark_evidence: Record<string, unknown>;
+  supporting_citations: ApiCitation[];
+  diagnostic_actions: ApiDiagnosticAction[];
+  moc_reference?: string | null;
+  status: "active" | "dismissed" | "resolved";
+  created_at: string;
+}
+
+export interface ApiAiReportStatement {
+  category:
+    | "Measured fact"
+    | "Calculated result"
+    | "Inferred explanation"
+    | "Risk assessment"
+    | "Recommended action";
+  text: string;
+  review_status: "review_required" | "accepted" | "rejected";
+  source_reference?: string | null;
+}
+
+export interface ApiBenchmarkingStatus {
+  workspace_id: string;
+  generated_at: string;
+  current_ft_per_day?: number | null;
+  seven_day_average_ft_per_day?: number | null;
+  gordon_average_benchmark?: number | null;
+  noble_top_quartile_benchmark?: number | null;
+  comparisons: ApiBenchmarkComparison[];
+  active_anomalies: ApiAnomalyEvent[];
+  historical_anomalies: ApiAnomalyEvent[];
+  benchmark_values: ApiBenchmarkValue[];
+  anomaly_rules: ApiAnomalyRule[];
+  seven_day_trend: {
+    timestamp: string;
+    value: number;
+    unit: string;
+    confidence_status: string;
+  }[];
+  likely_operational_contributors: string[];
+  recommended_diagnostic_actions: ApiDiagnosticAction[];
+  supporting_evidence_references: string[];
+  ai_interpretation: ApiAiReportStatement[];
+  permissions: Record<string, boolean>;
+}
+
+export interface ApiBenchmarkConfig {
+  benchmark_values: ApiBenchmarkValue[];
+  anomaly_rules: ApiAnomalyRule[];
+  permissions: Record<string, boolean>;
 }
 
 export interface ApiReportExport {
@@ -380,6 +506,80 @@ export async function getDocuments(): Promise<ApiParsedDocument[]> {
 
 export async function getFailures(): Promise<ApiFailureRecord[]> {
   return request<ApiFailureRecord[]>("/failures");
+}
+
+export async function getBenchmarkConfig(): Promise<ApiBenchmarkConfig> {
+  return request<ApiBenchmarkConfig>("/benchmarking/config");
+}
+
+export async function getWorkspaceBenchmarking(workspaceId: string): Promise<ApiBenchmarkingStatus> {
+  return request<ApiBenchmarkingStatus>(`/workspaces/${workspaceId}/benchmarking`);
+}
+
+export async function createBenchmarkMeasurement(params: {
+  workspaceId: string;
+  metric: string;
+  value: number;
+  unit: string;
+  dataSource: string;
+  confidenceStatus?: "high" | "medium" | "low" | "manual" | "stale" | "conflicting" | "missing";
+  sourceType?: string;
+  sourceIdentifier?: string;
+  datasetVersion?: string;
+  mocReference?: string;
+}): Promise<ApiBenchmarkingStatus> {
+  return request<ApiBenchmarkingStatus>(`/workspaces/${params.workspaceId}/benchmarking/measurements`, {
+    method: "POST",
+    body: JSON.stringify({
+      metric: params.metric,
+      value: params.value,
+      unit: params.unit,
+      data_source: params.dataSource,
+      confidence_status: params.confidenceStatus ?? "manual",
+      source_type: params.sourceType ?? "manual",
+      source_identifier: params.sourceIdentifier ?? "manual-entry",
+      dataset_version: params.datasetVersion ?? "manual-v1",
+      moc_reference: params.mocReference ?? null
+    })
+  });
+}
+
+export async function updateBenchmarkValue(params: {
+  benchmarkId: string;
+  value?: number;
+  unit?: string;
+  performanceCategory?: string;
+  dataSource?: string;
+  datasetVersion?: string;
+  approvalStatus?: "draft" | "approved" | "retired";
+  reason: string;
+}): Promise<ApiBenchmarkValue> {
+  return request<ApiBenchmarkValue>(`/benchmarking/values/${params.benchmarkId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      value: params.value ?? null,
+      unit: params.unit ?? null,
+      performance_category: params.performanceCategory ?? null,
+      data_source: params.dataSource ?? null,
+      dataset_version: params.datasetVersion ?? null,
+      approval_status: params.approvalStatus ?? null,
+      reason: params.reason
+    })
+  });
+}
+
+export async function dismissBenchmarkDiagnostic(params: {
+  anomalyId: string;
+  actionId: string;
+  reason: string;
+}): Promise<ApiAnomalyEvent> {
+  return request<ApiAnomalyEvent>(
+    `/benchmarking/anomalies/${params.anomalyId}/diagnostics/${params.actionId}/dismiss`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ reason: params.reason })
+    }
+  );
 }
 
 export async function getValidationTasks(): Promise<ApiValidationTask[]> {

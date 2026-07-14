@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import subprocess
@@ -15,25 +16,77 @@ from uuid import uuid4
 from xml.sax.saxutils import escape as xml_escape
 
 
-def load_env_file(path: Path) -> None:
+def load_env_file(path: Path, *, required: bool = False) -> int:
     if not path.exists():
-        return
+        if required:
+            raise FileNotFoundError(f"requested GA environment file not found: {path}")
+        return 0
+    loaded = 0
     for line in path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip())
+        key = key.strip()
+        if not key:
+            continue
+        os.environ.setdefault(key, value.strip())
+        loaded += 1
+    return loaded
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ENV_FILE = ROOT / "output" / "ga-readiness" / "monday_report_ga.env"
-load_env_file(DEFAULT_ENV_FILE)
-API_BASE = os.getenv("MONDAY_REPORT_API_BASE", "http://127.0.0.1:8000")
-WEB_BASE = os.getenv("MONDAY_REPORT_WEB_BASE", "http://127.0.0.1:5173")
+DEFAULT_API_BASE = "http://127.0.0.1:8000"
+DEFAULT_WEB_BASE = "http://127.0.0.1:5173"
+API_BASE = os.getenv("MONDAY_REPORT_API_BASE", DEFAULT_API_BASE)
+WEB_BASE = os.getenv("MONDAY_REPORT_WEB_BASE", DEFAULT_WEB_BASE)
 
 
-def main() -> int:
+def refresh_runtime_configuration() -> None:
+    global API_BASE, WEB_BASE
+    API_BASE = os.getenv("MONDAY_REPORT_API_BASE", DEFAULT_API_BASE)
+    WEB_BASE = os.getenv("MONDAY_REPORT_WEB_BASE", DEFAULT_WEB_BASE)
+
+
+def resolve_ga_env_file(path: str | Path | None = None) -> Path:
+    candidate = Path(path).expanduser() if path is not None else DEFAULT_ENV_FILE
+    if not candidate.is_absolute():
+        candidate = ROOT / candidate
+    return candidate.resolve()
+
+
+def configure_ga_environment(path: str | Path | None = None) -> Path:
+    env_file = resolve_ga_env_file(path)
+    load_env_file(env_file, required=True)
+    refresh_runtime_configuration()
+    return env_file
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Monday Report phase audit.")
+    parser.add_argument(
+        "--load-ga-env",
+        action="store_true",
+        help="Explicitly load the default output/ga-readiness/monday_report_ga.env file.",
+    )
+    parser.add_argument(
+        "--ga-env-file",
+        help="Explicitly load a GA environment file; relative paths resolve from the repository root.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.load_ga_env or args.ga_env_file:
+        try:
+            env_file = configure_ga_environment(args.ga_env_file)
+        except OSError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        print(f"Loaded GA environment file: {env_file}")
+
     checks = [
         check_required_files(),
         check_no_stale_branding(),

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { JSX } from "react";
 import {
+  BarChart3,
   ClipboardCheck,
   Database,
   FilePenLine,
@@ -16,6 +17,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { ArchitectureView } from "./components/ArchitectureView";
 import { Badge } from "./components/Badge";
+import { BenchmarkingModule } from "./components/BenchmarkingModule";
 import { ChatAnalyst } from "./components/ChatAnalyst";
 import { ClientLanding } from "./components/ClientLanding";
 import { Dashboard } from "./components/Dashboard";
@@ -52,6 +54,7 @@ type ViewKey =
   | "upload"
   | "chat"
   | "studio"
+  | "benchmarking"
   | "explorer"
   | "validation"
   | "tracker"
@@ -66,6 +69,7 @@ const navItems: Array<{
   { key: "client", label: "Client Home", icon: Home },
   { key: "chat", label: "Local AI Chat", icon: MessageSquareText },
   { key: "studio", label: "Report Studio", icon: FilePenLine },
+  { key: "benchmarking", label: "Benchmarking", icon: BarChart3 },
   { key: "upload", label: "Upload", icon: UploadCloud },
   { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { key: "explorer", label: "Explorer", icon: SearchCheck },
@@ -220,6 +224,7 @@ export function App(): JSX.Element {
           />
         )}
         {activeView === "studio" && <ReportStudio workspaceId={apiWorkspaceId ?? undefined} />}
+        {activeView === "benchmarking" && <BenchmarkingModule workspaceId={apiWorkspaceId ?? undefined} />}
         {activeView === "explorer" && (
           <FailureExplorer events={events} filters={filters} onFiltersChange={setFilters} />
         )}

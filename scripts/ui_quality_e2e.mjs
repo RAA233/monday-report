@@ -13,13 +13,14 @@ const views = [
   { label: "Client Home", title: /Advanced drilling reports without visual noise/i, file: "00-client-home.png" },
   { label: "Local AI Chat", title: /Ask Monday Report first/i, file: "01-chat-initial.png" },
   { label: "Report Studio", title: /Technical daily-report command console/i, file: "03-report-studio.png" },
-  { label: "Upload", title: /Upload rig reports/i, file: "04-upload.png" },
-  { label: "Dashboard", title: /Monday Report intelligence/i, file: "05-dashboard.png" },
-  { label: "Explorer", title: /Failure explorer/i, file: "06-explorer.png" },
-  { label: "Validation", title: /Validation queue/i, file: "07-validation.png" },
-  { label: "Tracker", title: /Project tracker/i, file: "08-tracker.png" },
-  { label: "Roadmap", title: /Product roadmap/i, file: "09-roadmap.png" },
-  { label: "Architecture", title: /Local AI-first architecture/i, file: "10-architecture.png" }
+  { label: "Benchmarking", title: /Market Benchmark/i, file: "04-benchmarking.png" },
+  { label: "Upload", title: /Upload rig reports/i, file: "05-upload.png" },
+  { label: "Dashboard", title: /Monday Report intelligence/i, file: "06-dashboard.png" },
+  { label: "Explorer", title: /Failure explorer/i, file: "07-explorer.png" },
+  { label: "Validation", title: /Validation queue/i, file: "08-validation.png" },
+  { label: "Tracker", title: /Project tracker/i, file: "09-tracker.png" },
+  { label: "Roadmap", title: /Product roadmap/i, file: "10-roadmap.png" },
+  { label: "Architecture", title: /Local AI-first architecture/i, file: "11-architecture.png" }
 ];
 
 const checks = [];
@@ -42,7 +43,15 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, de
 page.on("pageerror", (error) => browserErrors.push(error.message));
 page.on("console", (message) => {
   if (["error", "warning"].includes(message.type())) {
+    if (/Failed to load resource/i.test(message.text())) {
+      return;
+    }
     browserErrors.push(`${message.type()}: ${message.text()}`);
+  }
+});
+page.on("response", (response) => {
+  if (response.status() >= 400) {
+    browserErrors.push(`HTTP ${response.status()}: ${response.url()}`);
   }
 });
 
@@ -115,6 +124,14 @@ try {
       await expectText(page, /FORGE 16A\(78\)-32/i, "Report Studio FORGE template");
       await expectText(page, /MR-DDR-2/i, "Report Studio format telemetry");
       await expectText(page, /Trajectory/i, "Report Studio control matrix");
+    }
+
+    if (view.label === "Benchmarking") {
+      await expectText(page, /Gordon average/i, "Benchmarking Gordon benchmark");
+      await expectText(page, /Noble top quartile/i, "Benchmarking Noble benchmark");
+      await expectText(page, /Critical threshold/i, "Benchmarking critical threshold");
+      await expectText(page, /Variance table/i, "Benchmarking variance table");
+      await expectText(page, /Management of Change package inputs/i, "Benchmarking MOC evidence");
     }
 
     if (view.label === "Roadmap") {
