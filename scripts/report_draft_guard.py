@@ -26,6 +26,7 @@ def main() -> int:
             ProcessingStatus,
             ValidationStatus,
             ValidationTask,
+            Workspace,
         )
         from backend.app.store import store
 
@@ -33,6 +34,27 @@ def main() -> int:
         upload_id = uuid4()
         file_id = uuid4()
         document_id = uuid4()
+        # Source profile with two casing strings, a conflicting third Surface depth,
+        # and two timed activity rows. Scalar fields are left empty so the existing
+        # scalar-hint assertions continue to exercise the chunk-hint path.
+        report_profile = {
+            "profile_version": "pdf_report_profile_v1",
+            "document_type": "daily_drilling_report",
+            "confidence": 0.9,
+            "field_count": 0,
+            "section_count": 0,
+            "fields": {},
+            "sections": {},
+            "casing_strings": [
+                {"name": "Surface", "od": "13.375 in", "top_ft": None, "shoe_ft": 1629.0, "status": "set", "page": 1, "confidence": 0.95},
+                {"name": "Intermediate", "od": "9.625 in", "top_ft": None, "shoe_ft": 6500.0, "status": "planned", "page": 1, "confidence": 0.9},
+                {"name": "Surface", "od": "13.375 in", "top_ft": None, "shoe_ft": 1705.0, "status": "reported", "page": 2, "confidence": 0.7},
+            ],
+            "activity_timeline": [
+                {"time": "00:00-06:00", "activity": "Drill ahead 12.25 in section.", "page": 1, "confidence": 0.82},
+                {"time": "06:00-12:00", "activity": "Circulate bottoms up and survey.", "page": 1, "confidence": 0.82},
+            ],
+        }
         document = ParsedDocument(
             id=document_id,
             tenant_id=store.tenant.id,
@@ -44,7 +66,7 @@ def main() -> int:
             status=ProcessingStatus.COMPLETE,
             text_preview="12.25 in hole section drilling ahead. MD 8620 ft. TVD 7980 ft. Mud weight 10.2 ppg.",
             chunk_count=3,
-            metadata={"guard": "report_draft"},
+            metadata={"guard": "report_draft", "parser": {"report_profile": report_profile}},
         )
         store.parsed_documents[document.id] = document
         chunks = [
@@ -98,6 +120,13 @@ def main() -> int:
         )
         store.failures[failure.id] = failure
         store.validation_tasks[task.id] = task
+        reference_workspace = Workspace(
+            tenant_id=store.tenant.id,
+            name="Reference-only guard workspace",
+            asset="No-evidence asset",
+            campaign="Reference fallback",
+        )
+        store.workspaces[reference_workspace.id] = reference_workspace
         store.save()
 
         draft = report_draft(workspace.id)
@@ -110,9 +139,7 @@ def main() -> int:
                 and draft.well
                 and draft.rig
                 and "Source-backed review" in draft.present_ops
-                and "Normalize the latest source reports" in draft.next_ops
-                and "Surface | 13.375 in" in draft.casing_program
-                and "00:00-06:00" in draft.operations_log,
+                and "Normalize the latest source reports" in draft.next_ops,
                 payload,
             )
         )
@@ -140,12 +167,112 @@ def main() -> int:
                 payload,
             )
         )
-        store.refresh()
         checks.append(
             assert_check(
-                "Audit event",
-                any(log.action == "report_draft.generate" and log.resource_id == workspace.id for log in store.audit_logs),
-                [log.action for log in store.audit_logs[-5:]],
+                "Source-backed casing rows carry page/confidence provenance",
+                draft.schematic_source == "source"
+                and len(draft.casing_strings) >= 2
+                and all(row.source == "source" for row in draft.casing_strings)
+                and any(
+                    row.name == "Surface"
+                    and row.od == "13.375 in"
+                    and row.shoe_ft == 1629.0
+                    and row.page == 1
+                    and row.confidence is not None
+                    for row in draft.casing_strings
+                )
+                # Legacy flat string is derived from the same source rows.
+                and "Surface | 13.375 in" in draft.casing_program,
+                payload,
+            )
+        )
+        checks.append(
+            assert_check(
+                "Source-backed timeline rows carry provenance",
+                len(draft.activity_timeline) >= 2
+                and all(seg.source == "source" and seg.page for seg in draft.activity_timeline)
+                and "00:00-06:00" in draft.operations_log,
+                payload,
+            )
+        )
+        surface_rows = [row for row in draft.casing_strings if row.name == "Surface"]
+        checks.append(
+            assert_check(
+                "Conflicting casing depths are surfaced, not silently merged",
+                len(surface_rows) == 2 and {row.shoe_ft for row in surface_rows} == {1629.0, 1705.0},
+                [row.model_dump(mode="json") for row in surface_rows],
+            )
+        )
+
+        reference_draft = report_draft(reference_workspace.id)
+        reference_payload = reference_draft.model_dump(mode="json")
+        checks.append(
+            assert_check(
+                "Reference fallback casing rows are labelled and unsourced",
+                reference_draft.schematic_source == "reference"
+                and len(reference_draft.casing_strings) == 4
+                and all(
+                    row.source == "reference" and row.page is None and row.confidence is None
+                    for row in reference_draft.casing_strings
+                )
+                and "Surface | 13.375 in" in reference_draft.casing_program,
+                reference_payload,
+            )
+        )
+        checks.append(
+            assert_check(
+                "Reference fallback timeline requires DDR confirmation",
+                len(reference_draft.activity_timeline) >= 2
+                and all(seg.source == "reference" and seg.page is None for seg in reference_draft.activity_timeline)
+                and any("confirm" in note.lower() for note in reference_draft.confidence_notes),
+                reference_payload,
+            )
+        )
+        checks.append(
+            assert_check(
+                "Cross-workspace source rows do not leak into an empty workspace",
+                reference_draft.source_document_count == 0
+                and not any(row.source == "source" for row in reference_draft.casing_strings)
+                and not any(seg.source == "source" for seg in reference_draft.activity_timeline),
+                reference_payload,
+            )
+        )
+
+        store.refresh()
+        source_audit = next(
+            (
+                log
+                for log in reversed(store.audit_logs)
+                if log.action == "report_draft.generate" and log.resource_id == workspace.id
+            ),
+            None,
+        )
+        checks.append(
+            assert_check(
+                "Audit event records source provenance",
+                source_audit is not None
+                and source_audit.metadata.get("schematic_source") == "source"
+                and int(source_audit.metadata.get("casing_source_rows", 0)) >= 2
+                and int(source_audit.metadata.get("timeline_source_rows", 0)) >= 2
+                and source_audit.metadata.get("parser_version") == "pdf_report_profile_v1",
+                source_audit.metadata if source_audit else None,
+            )
+        )
+        reference_audit = next(
+            (
+                log
+                for log in reversed(store.audit_logs)
+                if log.action == "report_draft.generate" and log.resource_id == reference_workspace.id
+            ),
+            None,
+        )
+        checks.append(
+            assert_check(
+                "Audit event records reference provenance",
+                reference_audit is not None
+                and reference_audit.metadata.get("schematic_source") == "reference"
+                and int(reference_audit.metadata.get("casing_reference_rows", 0)) == 4,
+                reference_audit.metadata if reference_audit else None,
             )
         )
 

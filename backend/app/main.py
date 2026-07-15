@@ -16,6 +16,7 @@ from .limits import max_upload_bytes, upload_too_large
 from .local_ai import evaluate_local_ai_status
 from .retention import retention_days
 from .schemas import (
+    ActivitySegment,
     AuditIntegrityStatus,
     AuditLog,
     AnomalyEvent,
@@ -24,6 +25,7 @@ from .schemas import (
     BenchmarkValue,
     BenchmarkValueUpdate,
     BenchmarkingStatus,
+    CasingString,
     ChatRequest,
     ChatResponse,
     ClientDataReadiness,
@@ -633,54 +635,8 @@ def report_draft_mud_hint(source_text: str) -> str:
     return f"{match.group(1)} ppg" if match else ""
 
 
-def report_draft_casing_program(source_text: str) -> str:
-    if re.search(r"\b(casing|shoe|liner|cement)\b", source_text, flags=re.IGNORECASE):
-        status = "Source confirm"
-    else:
-        status = "Reference"
-    return "\n".join(
-        [
-            f"Conductor | 20 in | 0 | 130 | {status}",
-            f"Surface | 13.375 in | 0 | 1629 | {status}",
-            f"Intermediate | 9.625 in | 0 | 6500 | {status}",
-            f"Production | 7 in | 0 | 10987 | {status}",
-        ]
-    )
-
-
-def report_draft_operations_log(document_titles: list[str], failure_count: int, open_task_count: int) -> str:
-    latest_sources = ", ".join(document_titles[:3]) if document_titles else "no parsed source titles yet"
-    return "\n".join(
-        [
-            f"00:00-06:00 | Review latest source package: {latest_sources}.",
-            f"06:00-12:00 | Reconcile {failure_count} extracted failure/NPT record(s) with citations.",
-            "12:00-18:00 | Confirm drilling parameters, mud/BHA/survey, casing, and safety barriers from source evidence.",
-            f"18:00-24:00 | Close {open_task_count} validation task(s) before issuing branded PDF/XLSX outputs.",
-        ]
-    )
-
-
 def report_draft_pdf_profiles(documents: list) -> list[dict[str, object]]:
-    profiles: list[dict[str, object]] = []
-    for document in documents:
-        metadata = getattr(document, "metadata", {})
-        if not isinstance(metadata, dict):
-            continue
-        parser_metadata = metadata.get("parser", {})
-        if not isinstance(parser_metadata, dict):
-            continue
-        profile = parser_metadata.get("report_profile")
-        if isinstance(profile, dict):
-            profiles.append(profile)
-    return sorted(
-        profiles,
-        key=lambda item: (
-            float(item.get("confidence", 0)) if isinstance(item.get("confidence"), (int, float)) else 0,
-            int(item.get("field_count", 0)) if isinstance(item.get("field_count"), int) else 0,
-            int(item.get("section_count", 0)) if isinstance(item.get("section_count"), int) else 0,
-        ),
-        reverse=True,
-    )
+    return store.collect_report_profiles_from_documents(documents)
 
 
 def report_draft_profile_field(profiles: list[dict[str, object]], field: str) -> str:
@@ -761,7 +717,6 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     casing_from_pdf = report_draft_profile_section(pdf_profiles, "casing")
     bha_from_pdf = report_draft_profile_section(pdf_profiles, "bha")
     survey_from_pdf = report_draft_profile_section(pdf_profiles, "survey")
-    time_from_pdf = report_draft_profile_section(pdf_profiles, "time_breakdown")
 
     if top_failure:
         present_prefix = f"{present_from_pdf} " if present_from_pdf else ""
@@ -795,9 +750,15 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     profile_note = report_draft_profile_note(pdf_profiles)
     if profile_note:
         evidence_summary.insert(1, profile_note)
-    operations_log = report_draft_operations_log(document_titles, len(failures), len(open_tasks))
-    if time_from_pdf:
-        operations_log = f"00:00-06:00 | {time_from_pdf}\n" + "\n".join(operations_log.splitlines()[1:])
+    casing_source_rows = store.casing_rows_from_profiles(pdf_profiles)
+    casing_rows = casing_source_rows if casing_source_rows else store.reference_casing_rows()
+    activity_source_rows = store.activity_rows_from_profiles(pdf_profiles)
+    activity_rows = activity_source_rows if activity_source_rows else store.reference_activity_rows()
+    casing_program = store.casing_program_from_rows(casing_rows)
+    operations_log = store.operations_log_from_rows(activity_rows)
+    casing_strings = [CasingString(**row) for row in casing_rows]
+    activity_timeline = [ActivitySegment(**row) for row in activity_rows]
+    schematic_source = "source" if (casing_source_rows or activity_source_rows) else "reference"
 
     response = ReportDraftResponse(
         workspace_id=workspace_id,
@@ -825,8 +786,11 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
             "the latest daily report before client issue."
         ),
         risks=risks,
-        casing_program=report_draft_casing_program(source_text),
+        casing_program=casing_program,
         operations_log=operations_log,
+        casing_strings=casing_strings,
+        activity_timeline=activity_timeline,
+        schematic_source=schematic_source,
         evidence_summary=evidence_summary,
         source_document_count=len(documents),
         source_chunk_count=len(chunks),
@@ -851,6 +815,13 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
             "failures": response.failure_count,
             "open_validation_tasks": response.open_validation_tasks,
             "citations": response.citation_count,
+            "schematic_source": schematic_source,
+            "casing_source_rows": len(casing_source_rows),
+            "casing_reference_rows": 0 if casing_source_rows else len(casing_rows),
+            "timeline_source_rows": len(activity_source_rows),
+            "timeline_reference_rows": 0 if activity_source_rows else len(activity_rows),
+            "report_profiles": len(pdf_profiles),
+            "parser_version": "pdf_report_profile_v1",
         },
     )
     return response

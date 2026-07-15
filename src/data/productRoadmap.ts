@@ -103,7 +103,7 @@ export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
     id: "exec-next-pull",
     label: "Next audited pull",
     value: "schematic extraction",
-    detail: "Use the reviewed variants to improve casing, trajectory, hydraulics, and directional visuals from source evidence.",
+    detail: "Casing schematic and 24 hr activity timeline now derive from source evidence with page provenance; trajectory, hydraulics, and directional visuals remain the next pull.",
     command: "pnpm run audit:pdf-parser",
     tone: "warning"
   },
@@ -156,8 +156,8 @@ export const roadmapLanes: RoadmapLane[] = [
         owner: "Frontend + drilling SME",
         status: "complete",
         gate: "audit:report-variants",
-        evidence: "MR-SCHEMA-1 defines reviewed DDR, BHA, mud, survey, and directional targets with extraction markers, drafting checks, and output sections.",
-        next: "Use the reviewed variants to harden source-driven schematic extraction and report-template diff checks."
+        evidence: "MR-SCHEMA-1 targets drive drafting, and the casing schematic plus 24 hr activity timeline now extract from source evidence with page-level provenance and explicit reference fallback.",
+        next: "Extend source-driven schematic extraction to trajectory, hydraulics, and directional visuals."
       },
       {
         id: "item-ui-execution-board",

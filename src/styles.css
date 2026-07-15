@@ -3721,6 +3721,73 @@ td {
   line-height: 1.45;
 }
 
+.schematic-provenance-note {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid #d8e0e7;
+  background: #f8fbfd;
+  color: #334155;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.schematic-provenance-note.is-source {
+  border-color: #0e7490;
+  color: #0b4f5f;
+}
+
+.schematic-provenance-note.is-reference {
+  border-color: #b45309;
+  color: #7c3d06;
+}
+
+.schematic-provenance-list {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.schematic-provenance-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.74rem;
+  color: #334155;
+}
+
+.provenance-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid #d8e0e7;
+  font-size: 0.68rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.provenance-badge.is-source {
+  border-color: #0e7490;
+  background: #e8f4f8;
+  color: #0b4f5f;
+}
+
+.provenance-badge.is-reference {
+  border-color: #b45309;
+  background: #fdf3e7;
+  color: #7c3d06;
+}
+
+.timeline-row .provenance-badge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 0.68rem;
+}
+
 .client-check-list {
   display: grid;
   gap: 9px;
