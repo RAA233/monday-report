@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -43,7 +44,10 @@ def main() -> int:
                         "Casing: Surface 13.375 in shoe at 1629 ft; intermediate 9.625 in planned at 6500 ft.",
                         "BHA: PDC bit with RSS, MWD, and LWD assembly.",
                         "Survey: Survey data accepted with no quality flags.",
-                        "Time Breakdown: Drill ahead, circulate, survey, and condition mud.",
+                        "Time Breakdown: 24 hr activity timeline captured below.",
+                        "00:00-06:00 Drill ahead 12.25 in section and monitor hole cleaning.",
+                        "06:00-12:00 Circulate bottoms up, survey, and condition mud.",
+                        "12:00-24:00 Ream and prepare casing point.",
                     ]
                 ),
                 "PDF DDR summary. Review the NPT table for failure evidence.",
@@ -124,6 +128,39 @@ def main() -> int:
             )
         )
 
+        casing_strings = report_profile.get("casing_strings", []) if isinstance(report_profile, dict) else []
+        surface_row = next((row for row in casing_strings if str(row.get("name")).lower() == "surface"), None)
+        checks.append(
+            assert_check(
+                "PDF profile extracts structured casing strings from source",
+                len(casing_strings) >= 2
+                and surface_row is not None
+                and surface_row.get("od") == "13.375 in"
+                and abs(float(surface_row.get("shoe_ft") or 0) - 1629.0) < 0.01
+                and surface_row.get("page") == 1
+                and 0.0 < float(surface_row.get("confidence") or 0) <= 1.0
+                # Unsupported field stays null; nothing is back-filled.
+                and surface_row.get("top_ft") is None
+                # Rows come from source, not the 4-row hardcoded reference geometry.
+                and not any(str(row.get("name")).lower() == "conductor" for row in casing_strings),
+                casing_strings,
+            )
+        )
+
+        activity_rows = report_profile.get("activity_timeline", []) if isinstance(report_profile, dict) else []
+        checks.append(
+            assert_check(
+                "PDF profile extracts structured activity timeline from source",
+                len(activity_rows) >= 2
+                and all(re.match(r"^\d{2}:\d{2}-\d{2}:\d{2}$", str(row.get("time"))) for row in activity_rows)
+                and all(str(row.get("activity", "")).strip() for row in activity_rows)
+                and all(row.get("page") == 1 for row in activity_rows)
+                and all(0.0 < float(row.get("confidence") or 0) <= 1.0 for row in activity_rows)
+                and any("drill ahead" in str(row.get("activity")).lower() for row in activity_rows),
+                activity_rows,
+            )
+        )
+
         chunks = client.get(f"/documents/{pdf_document.get('id')}/chunks").json() if pdf_document.get("id") else []
         pdf_chunks = [chunk for chunk in chunks if chunk.get("locator_type") == "pdf"]
         located_pages = {chunk.get("locator", {}).get("page") for chunk in pdf_chunks}
@@ -168,6 +205,22 @@ def main() -> int:
             )
         )
 
+        schematic_chunks = [
+            chunk
+            for chunk in pdf_chunks
+            if chunk.get("locator", {}).get("field") in {"casing_string", "activity_timeline"}
+        ]
+        checks.append(
+            assert_check(
+                "PDF casing and activity rows become cited source chunks",
+                any(chunk.get("locator", {}).get("field") == "casing_string" for chunk in schematic_chunks)
+                and any(chunk.get("locator", {}).get("field") == "activity_timeline" for chunk in schematic_chunks)
+                and all(isinstance(chunk.get("locator", {}).get("page"), int) for chunk in schematic_chunks)
+                and any("Surface" in chunk.get("text", "") for chunk in schematic_chunks),
+                schematic_chunks,
+            )
+        )
+
         failures = [
             item
             for item in client.get(f"/failures?workspace_id={workspace.id}").json()
@@ -204,6 +257,38 @@ def main() -> int:
                 and "Continue drilling" in draft.get("next_ops", "")
                 and any("PDF report profile" in item for item in draft.get("evidence_summary", [])),
                 draft,
+            )
+        )
+
+        draft_casing = draft.get("casing_strings", [])
+        draft_timeline = draft.get("activity_timeline", [])
+        checks.append(
+            assert_check(
+                "Report draft carries source-derived schematic rows and legacy strings",
+                draft.get("schematic_source") == "source"
+                and len(draft_casing) >= 2
+                and all(row.get("source") == "source" for row in draft_casing)
+                and any(
+                    row.get("od") == "13.375 in" and abs(float(row.get("shoe_ft") or 0) - 1629.0) < 0.01
+                    for row in draft_casing
+                )
+                and all(row.get("page") for row in draft_casing)
+                and len(draft_timeline) >= 2
+                and all(row.get("source") == "source" for row in draft_timeline)
+                # Legacy flat string is derived from the same source rows.
+                and "Surface | 13.375 in" in draft.get("casing_program", ""),
+                {"casing": draft_casing, "timeline": draft_timeline, "schematic_source": draft.get("schematic_source")},
+            )
+        )
+
+        from backend.app.store import LocalStateStore
+
+        checks.append(
+            assert_check(
+                "Parser does not fabricate schematic rows without source evidence",
+                LocalStateStore._extract_casing_strings([(1, "Drilling ahead with hole cleaning and mud checks.")]) == []
+                and LocalStateStore._extract_activity_timeline([(1, "No timed activity is present in this note.")], []) == [],
+                "no fabricated rows",
             )
         )
 

@@ -75,6 +75,25 @@ export interface ApiChatResponse {
   }[];
 }
 
+export interface ApiCasingString {
+  name: string;
+  od?: string | null;
+  top_ft?: number | null;
+  shoe_ft?: number | null;
+  status?: string | null;
+  source: "source" | "reference";
+  page?: number | null;
+  confidence?: number | null;
+}
+
+export interface ApiActivitySegment {
+  time: string;
+  activity: string;
+  source: "source" | "reference";
+  page?: number | null;
+  confidence?: number | null;
+}
+
 export interface ApiReportDraft {
   workspace_id: string;
   generated_at: string;
@@ -94,6 +113,9 @@ export interface ApiReportDraft {
   risks: string;
   casing_program: string;
   operations_log: string;
+  casing_strings?: ApiCasingString[];
+  activity_timeline?: ApiActivitySegment[];
+  schematic_source?: "source" | "reference";
   evidence_summary: string[];
   source_document_count: number;
   source_chunk_count: number;

@@ -433,6 +433,40 @@ class ChatResponse(BaseModel):
     tool_actions: list[ChatToolAction] = Field(default_factory=list)
 
 
+class CasingString(BaseModel):
+    """A single reviewed casing string for the well schematic.
+
+    Rows either come from parsed source evidence (``source="source"`` with a
+    ``page`` and ``confidence``) or are explicit reference geometry that a
+    reviewer must confirm against the daily drilling report (``source="reference"``).
+    Missing values stay missing; nothing is invented.
+    """
+
+    name: str = Field(min_length=1)
+    od: str | None = None
+    top_ft: float | None = Field(default=None, ge=0)
+    shoe_ft: float | None = Field(default=None, ge=0)
+    status: str | None = None
+    source: Literal["source", "reference"]
+    page: int | None = Field(default=None, ge=1)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class ActivitySegment(BaseModel):
+    """A single reviewed 24-hour activity segment for the morning report.
+
+    ``source="source"`` rows are parsed from timed source evidence with a
+    ``page``/``confidence``; ``source="reference"`` rows are generic fallback
+    guidance that must be confirmed against the DDR.
+    """
+
+    time: str = Field(min_length=1)
+    activity: str = Field(min_length=1)
+    source: Literal["source", "reference"]
+    page: int | None = Field(default=None, ge=1)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class ReportDraftResponse(BaseModel):
     workspace_id: UUID
     generated_at: datetime = Field(default_factory=utc_now)
@@ -452,6 +486,9 @@ class ReportDraftResponse(BaseModel):
     risks: str
     casing_program: str
     operations_log: str
+    casing_strings: list[CasingString] = Field(default_factory=list)
+    activity_timeline: list[ActivitySegment] = Field(default_factory=list)
+    schematic_source: Literal["source", "reference"] = "reference"
     evidence_summary: list[str] = Field(default_factory=list)
     source_document_count: int
     source_chunk_count: int

@@ -11,7 +11,7 @@ The executable MVP path is now phase-gated end to end and the local client-data 
 | Accepted now | Pass | Executable MVP is working with Client Home, rig/MR list access, chat, report studio, Benchmarking, roadmap, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
 | Safe operating mode | Pass | Demo mode remains local; approved client mode uses PostgreSQL/RLS state, Redis queue, protected storage, API key, signing secret, and reviewed fixture/eval evidence. | Keep secrets out of Git and regenerate approval after environment changes. |
 | Real-client approval | Pass | Live client approval reports `APPROVED`; GA readiness reports `GA_READY`; readiness has zero blockers. | Run controlled client-package dry runs before broad distribution. |
-| Next execution order | Pending | Pull roadmap lanes in order: schematic extraction, FORGE eval promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Start with source-driven schematic extraction and controlled client-package trials. |
+| Next execution order | Pending | Source-driven casing schematic and 24 hr activity timeline extraction are complete; remaining lanes: trajectory/hydraulics/directional schematic extraction, FORGE eval promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull trajectory/hydraulics/directional schematic extraction, then controlled client-package trials. |
 
 ## Current Tracker
 
@@ -61,6 +61,42 @@ Evidence paths:
 Security review: `git diff --check` passed; the GA environment file remains ignored; no credential, private-key, local-state, cache, log, browser-profile, or machine-path artifact was found in the release ZIP. Archive CRC validation passed and all required Benchmarking files were present. The ZIP intentionally contains only a placeholder `partner.env.example`, never a populated environment file.
 
 Git result: release commit `f7b66353704d0d99f36698298e73c6164c85ccf0` (`Add benchmarking module and evidence workflow`) was pushed successfully from branch `main` to the private `origin` repository `RAA233/monday-report`; local, remote-tracking, and GitHub branch heads matched after dispatch. Remaining release constraint: the partner ZIP is approved only for synthetic demo/testing and is not a real-client-data dispatch package.
+
+## 2026-07-15 Source-Driven Schematic Extraction Evidence
+
+Increment completed on `2026-07-15` from starting revision `29be738b467b597158ac2f21867c269dd64c051d` on branch `claude/init-11040f`. Scope: the casing schematic and 24 hr activity timeline now derive from parsed DDR/PDF source evidence with page-level citations and confidence, carry explicit `source`/`reference` provenance through the report draft, Report Studio, and Monday Report JSON, and fall back to labelled reference geometry (never presented as client-confirmed) when no source is found.
+
+Files changed:
+
+- `backend/app/schemas.py` — new `CasingString` and `ActivitySegment` models; additive `casing_strings`, `activity_timeline`, `schematic_source` fields on `ReportDraftResponse` (legacy `casing_program`/`operations_log` strings preserved).
+- `backend/app/store.py` — deterministic structured extraction (`_extract_casing_strings`, `_extract_activity_timeline` with unit normalization, time-range validation, and overlap conflict flagging), casing/timeline evidence chunks, shared profile-selection and row builders, and source-driven `create_monday_report` schematic blocks with reference fallback.
+- `backend/app/main.py` — report-draft casing/timeline builders now derive from the best PDF profile; new structured response fields and provenance audit metadata on `report_draft.generate`.
+- `src/lib/api.ts` — `ApiCasingString`/`ApiActivitySegment` interfaces mirroring the Pydantic models plus additive draft fields.
+- `src/components/ReportStudio.tsx`, `src/styles.css` — per-row `Source-derived · p.N · NN% confidence` vs `Reference · confirm from DDR` provenance badges and banners (text + `aria-label`, not colour alone); reference defaults demoted to fallback-only.
+- `scripts/pdf_parser_guard.py`, `scripts/report_draft_guard.py`, `scripts/ui_quality_e2e.mjs` — behavioural assertions for structured extraction, cited chunks, source/reference provenance, conflicting-depth surfacing, cross-workspace isolation, audit provenance, no-fabrication, and a Report Studio provenance UI check.
+
+| Final command | Exit | Evidence |
+|---|---:|---|
+| `python -m py_compile backend/app/*.py` | 0 | Backend modules compile. |
+| `pnpm run build` | 0 | `tsc` typecheck and Vite production build passed; 1,600 modules transformed. |
+| `pnpm run audit:pdf-parser` | 0 | 16/16 checks: structured casing/timeline extraction, cited chunks, source-derived draft, and no-fabrication passed. |
+| `pnpm run audit:report-draft` | 0 | 11/11 checks: source/reference provenance, conflicting-depth surfacing, cross-workspace isolation, and provenance audit metadata passed. |
+| `pnpm run audit:report-variants` | 0 | Reviewed variant schema consistency retained. |
+| `pnpm run audit:source-lineage` | 0 | Chunk-to-citation source lineage intact. |
+| `pnpm run test:e2e` | 0 | 22/22 checks: audited upload/parse/validate/report/export workflow passed. |
+| `pnpm run test:ui` | 0 | 83/83 checks incl. Report Studio schematic provenance visible; zero browser errors. |
+| `pnpm run audit:all` | 0 | Full chain: 313 PASS, 0 FAIL. |
+| `pnpm run ga:readiness` | 1 | `GA_BLOCKED` with **0 software blockers**; remaining blockers are configuration/infrastructure/evidence only (demo environment without the provisioned client env), unchanged by this increment. |
+| `pnpm run report:ui-screenshots` | 0 | 15-page UI evidence PDF regenerated and visually reviewed. |
+
+Evidence paths: `output/screenshots/ui-quality/03-report-studio.png` (provenance badges/banners visible), `output/pdf/monday_report_ui_quality_screenshots.pdf`, `output/qa/ui_quality_e2e_manifest.json`.
+
+Notes:
+
+- `well_schematic.hole_sections` is a **direct deterministic projection** of the reviewed casing rows (interval top→shoe per casing name) only when casing rows are source-derived, so the well schematic cannot contradict the source-driven casing schematic; no bit size or new engineering value is inferred. It stays reference geometry when only reference casing rows exist. Independent hole-section/trajectory/directional/hydraulics extraction remains deferred follow-up work.
+- Benchmarking behaviour is unchanged: Gordon `528` / Noble `588` configurable benchmarks, Hydraulics and Torque & Drag recommended-only, and review-required AI interpretations all retained (`audit:benchmarking` 23/23).
+- Synthetic partner-demo approval remains separate from real-client production approval; reference schematic rows are always labelled and never described as extracted from client evidence.
+- Follow-up: trajectory/hydraulics/directional schematic extraction, formatted HTML/PDF/XLSX provenance columns, deeper field-level correction workflow, local-LLM extraction router (Phase 06), and normalized PostgreSQL repositories (Phase 04).
 
 ## Phase Gate Rule
 
@@ -177,10 +213,10 @@ pnpm run audit:all
 | 06 | Active | Local AI extraction | Deterministic scaffold extracts cited MWD failures, NPT hours, company, and validation tasks from parsed chunks; local AI defaults to Ollama `gemma4:e2b` and verifies the pinned model is available | Wire Ollama/LM Studio router, strict schemas, confidence scoring, and metrics |
 | 07 | Complete | Validated exports | E2E verifies unresolved validation blocks export, validates extracted failures, creates report, exports JSON/CSV/HTML/PDF/XLSX artifacts, inspects artifact signatures, and downloads through signed URLs | Polish report templates |
 | 08 | Complete | Real-client readiness | Live client-data approval is APPROVED with PostgreSQL/RLS, Redis, API key, signing secret, protected storage, retention, malware scanner, parser/OCR evals, reviewed fixture attestation, and local Gemma runtime | Run controlled client-package dry runs and maintain approval evidence |
-| 09 | Complete | Morning report studio | Chat command center and Report Studio now show workflow steps, insight cards, risk register, tool actions, technical telemetry, source-backed draft generation, DDR/BHA/mud/survey/directional variants, issue-readiness board, casing/well schematic, AI plan checks, timeline, and draft export | Use reviewed variants to harden source-driven schematic extraction |
+| 09 | Complete | Morning report studio | Chat command center and Report Studio now show workflow steps, insight cards, risk register, tool actions, technical telemetry, source-backed draft generation, DDR/BHA/mud/survey/directional variants, issue-readiness board, source-driven casing/well schematic with provenance, AI plan checks, source-driven activity timeline, and draft export | Extend source-driven schematic extraction (casing + timeline complete) to trajectory, hydraulics, and directional visuals |
 | 10 | Complete | Roadmap cockpit | Product Roadmap view, execution board, typed roadmap data, UI screenshot coverage, tracker gate, and `audit:roadmap` guard are wired | Use roadmap execution board lanes to pull the next client-pilot hardening slice |
 | 11 | Complete | Client landing and rig MR access | Client Home renders live workspaces, rig/MR list rows, import coverage, and JSON/CSV/HTML/PDF/XLSX export coverage | Add workspace-specific drilldowns and keep screenshot evidence refreshed |
-| 12 | Complete | Reviewed normal report schemas | MR-SCHEMA-1 defines DDR, BHA, mud, survey, and directional extraction markers, drafting checks, and output sections | Pull stronger casing, trajectory, hydraulics, and directional schematic extraction |
+| 12 | Complete | Reviewed normal report schemas | MR-SCHEMA-1 defines DDR, BHA, mud, survey, and directional extraction markers, drafting checks, and output sections; casing schematic and 24 hr activity timeline now extract from source evidence with page provenance | Pull trajectory, hydraulics, and directional schematic extraction next |
 
 ## Audit Notes
 

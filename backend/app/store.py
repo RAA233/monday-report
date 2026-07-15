@@ -95,6 +95,28 @@ STATE_READ_RETRY_DELAY_SECONDS = 0.03
 STATE_REPLACE_RETRIES = 5
 STATE_REPLACE_RETRY_DELAY_SECONDS = 0.03
 FEET_DRILLED_PER_DAY = "feet_drilled_per_day"
+
+# Reference (non-extracted) schematic geometry. These rows are shown only when no
+# source evidence is available and are always labelled source="reference" so they
+# can never be mistaken for values extracted from an uploaded daily drilling report.
+REFERENCE_CASING_STRINGS = [
+    {"name": "Conductor", "od": "20 in", "top_ft": 0.0, "shoe_ft": 130.0},
+    {"name": "Surface", "od": "13.375 in", "top_ft": 0.0, "shoe_ft": 1629.0},
+    {"name": "Intermediate", "od": "9.625 in", "top_ft": 0.0, "shoe_ft": 6500.0},
+    {"name": "Production", "od": "7 in", "top_ft": 0.0, "shoe_ft": 10987.0},
+]
+REFERENCE_HOLE_SECTIONS = [
+    {"hole_size": "17.5 in", "interval_ft": "0-1,629", "status": "surface hole reference"},
+    {"hole_size": "12.25 in", "interval_ft": "1,629-6,500", "status": "intermediate hole plan"},
+    {"hole_size": "8.5 in", "interval_ft": "6,500-10,987", "status": "production hole plan"},
+]
+REFERENCE_ACTIVITY_TIMELINE = [
+    {"time": "00:00-06:00", "activity": "Review overnight source evidence, benchmark performance, and validate extracted NPT/failure records."},
+    {"time": "06:00-12:00", "activity": "Confirm safety, well-control, casing, and BHA status for morning handover."},
+    {"time": "12:00-18:00", "activity": "Close validation gaps, attach source citations, and update recommended actions."},
+    {"time": "18:00-24:00", "activity": "Prepare branded Monday Report export package after approval gate passes."},
+]
+
 BENCHMARK_METRICS = [
     FEET_DRILLED_PER_DAY,
     "dogleg_severity",
@@ -1458,6 +1480,41 @@ class LocalStateStore:
         active_benchmark_anomalies = [
             anomaly for anomaly in benchmark_status.active_anomalies if anomaly.status == "active"
         ]
+        report_profiles = LocalStateStore.collect_report_profiles_from_documents(parsed_documents)
+        casing_rows = self.casing_rows_from_profiles(report_profiles)
+        casing_source = "source" if casing_rows else "reference"
+        if not casing_rows:
+            casing_rows = self.reference_casing_rows()
+        activity_rows = self.activity_rows_from_profiles(report_profiles)
+        if not activity_rows:
+            activity_rows = self.reference_activity_rows()
+        if casing_source == "source":
+            hole_sections = self.hole_sections_from_casing_rows(casing_rows) or [dict(section) for section in REFERENCE_HOLE_SECTIONS]
+        else:
+            hole_sections = [dict(section) for section in REFERENCE_HOLE_SECTIONS]
+        casing_schematic_rows = [
+            {
+                "name": row.get("name"),
+                "od": row.get("od"),
+                "top_ft": row.get("top_ft"),
+                "shoe_ft": row.get("shoe_ft"),
+                "status": row.get("status"),
+                "source": row.get("source"),
+                "page": row.get("page"),
+                "confidence": row.get("confidence"),
+            }
+            for row in casing_rows
+        ]
+        activity_timeline_rows = [
+            {
+                "time": row.get("time"),
+                "activity": row.get("activity"),
+                "source": row.get("source"),
+                "page": row.get("page"),
+                "confidence": row.get("confidence"),
+            }
+            for row in activity_rows
+        ]
         report = MondayReport(
             tenant_id=self.tenant.id,
             workspace_id=payload.workspace_id,
@@ -1561,46 +1618,21 @@ class LocalStateStore:
                             "detail": "Actions remain gated by validation closure and source-citation review.",
                         },
                     ],
-                    "casing_schematic": [
-                        {"name": "Conductor", "od": "20 in", "top_ft": 0, "shoe_ft": 130, "status": "reference"},
-                        {"name": "Surface", "od": "13.375 in", "top_ft": 0, "shoe_ft": 1629, "status": "reference"},
-                        {"name": "Intermediate", "od": "9.625 in", "top_ft": 0, "shoe_ft": 6500, "status": "plan"},
-                        {"name": "Production", "od": "7 in", "top_ft": 0, "shoe_ft": 10987, "status": "plan"},
-                    ],
+                    "casing_schematic": casing_schematic_rows,
+                    "casing_schematic_source": casing_source,
                     "well_schematic": {
                         "surface_equipment": [
                             "Wellhead and BOP status must be verified from the latest morning report.",
                             "Casing, cement, pressure-test, and shoe-integrity notes are held for source confirmation.",
                         ],
-                        "hole_sections": [
-                            {"hole_size": "17.5 in", "interval_ft": "0-1,629", "status": "surface hole reference"},
-                            {"hole_size": "12.25 in", "interval_ft": "1,629-6,500", "status": "intermediate hole plan"},
-                            {"hole_size": "8.5 in", "interval_ft": "6,500-10,987", "status": "production hole plan"},
-                        ],
+                        "hole_sections": hole_sections,
                         "risk_markers": [
                             "MWD/LWD/RSS signal quality",
                             "Torque, drag, ECD, and lost-circulation indicators",
                             "Casing-point readiness and cementing dependencies",
                         ],
                     },
-                    "activity_timeline": [
-                        {
-                            "time": "00:00-06:00",
-                            "activity": "Review overnight source evidence, benchmark performance, and validate extracted NPT/failure records.",
-                        },
-                        {
-                            "time": "06:00-12:00",
-                            "activity": "Confirm safety, well-control, casing, and BHA status for morning handover.",
-                        },
-                        {
-                            "time": "12:00-18:00",
-                            "activity": "Close validation gaps, attach source citations, and update recommended actions.",
-                        },
-                        {
-                            "time": "18:00-24:00",
-                            "activity": "Prepare branded Monday Report export package after approval gate passes.",
-                        },
-                    ],
+                    "activity_timeline": activity_timeline_rows,
                     "market_benchmark": {
                         "current_ft_per_day": benchmark_status.current_ft_per_day,
                         "seven_day_average_ft_per_day": benchmark_status.seven_day_average_ft_per_day,
@@ -3814,11 +3846,17 @@ class LocalStateStore:
             "time_breakdown": "time breakdown" in lower_text or "24 hr" in lower_text or "activity timeline" in lower_text,
             "npt": "npt" in lower_text or any(LocalStateStore._pdf_table_mentions(table, ["npt", "non-productive"]) for table in tables),
         }
+        casing_strings = LocalStateStore._extract_casing_strings(page_lines)
+        activity_timeline = LocalStateStore._extract_activity_timeline(page_lines, tables)
+        structured_score = len(casing_strings) + len(activity_timeline)
         marker_score = sum(1 for value in section_presence.values() if value)
         field_score = len(fields) + len(sections)
-        if field_score < 2 and marker_score < 2:
+        if field_score < 2 and marker_score < 2 and structured_score < 2:
             return None
-        confidence = min(0.97, 0.35 + field_score * 0.045 + marker_score * 0.035)
+        confidence = min(
+            0.97,
+            0.35 + field_score * 0.045 + marker_score * 0.035 + structured_score * 0.02,
+        )
         document_type = "daily_drilling_report" if section_presence["daily_drilling_report"] or marker_score >= 4 else "pdf_report"
         return {
             "profile_version": "pdf_report_profile_v1",
@@ -3831,7 +3869,215 @@ class LocalStateStore:
             "sections": sections,
             "section_sources": section_sources,
             "section_presence": section_presence,
+            "casing_strings": casing_strings,
+            "activity_timeline": activity_timeline,
         }
+
+    @staticmethod
+    def _extract_casing_strings(page_lines: list[tuple[int, str]]) -> list[dict[str, object]]:
+        """Deterministically parse casing-string rows from source lines.
+
+        Emits one row per casing string that states an outside diameter and/or a
+        setting/shoe depth. Nothing is inferred: rows without an OD or a depth are
+        dropped rather than back-filled with assumed values.
+        """
+        casing_terms = ("conductor", "surface", "intermediate", "production", "liner", "casing")
+        rows: list[dict[str, object]] = []
+        seen: set[tuple[str, str, object]] = set()
+        for page_number, line in page_lines:
+            lower_line = line.lower()
+            if not any(term in lower_line for term in casing_terms):
+                continue
+            segments = re.split(
+                r";|(?:,\s*(?=(?:conductor|surface|intermediate|production|liner)))",
+                line,
+                flags=re.IGNORECASE,
+            )
+            for segment in segments:
+                parsed = LocalStateStore._parse_casing_segment(segment.strip(" ."), page_number)
+                if not parsed:
+                    continue
+                key = (str(parsed["name"]).lower(), str(parsed.get("od") or ""), parsed.get("shoe_ft"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(parsed)
+                if len(rows) >= 12:
+                    return rows
+        return rows
+
+    @staticmethod
+    def _parse_casing_segment(segment: str, page_number: int) -> dict[str, object] | None:
+        if not segment:
+            return None
+        lower = segment.lower()
+        name_match = re.search(r"\b(conductor|surface|intermediate|production|liner)\b", lower)
+        if name_match:
+            name = name_match.group(1).title()
+        elif "casing" in lower:
+            name = "Casing"
+        else:
+            return None
+        od_match = re.search(r"([0-9]{1,2}(?:\.[0-9]{1,3})?)\s*(?:in\b|inch|\")", segment, flags=re.IGNORECASE)
+        od = f"{od_match.group(1)} in" if od_match else None
+        shoe_ft = LocalStateStore._parse_depth_to_ft(segment)
+        if od is None and shoe_ft is None:
+            return None
+        if re.search(r"\b(set|shoe|run|cemented|cement)\b", lower):
+            status = "set"
+        elif re.search(r"\b(planned|plan|proposed|forecast|future)\b", lower):
+            status = "planned"
+        else:
+            status = "reported"
+        confidence = round(0.6 + (0.2 if od else 0.0) + (0.15 if shoe_ft is not None else 0.0), 3)
+        return {
+            "name": name,
+            "od": od,
+            "top_ft": None,
+            "shoe_ft": shoe_ft,
+            "status": status,
+            "page": page_number,
+            "confidence": confidence,
+        }
+
+    @staticmethod
+    def _parse_depth_to_ft(text: str) -> float | None:
+        feet = re.search(
+            r"([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{3,6}(?:\.[0-9]+)?)\s*(?:ft\b|feet\b|')",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if feet:
+            try:
+                return float(feet.group(1).replace(",", ""))
+            except ValueError:
+                return None
+        metres = re.search(
+            r"([0-9]{2,4}(?:\.[0-9]+)?)\s*(?:m\b|metre|meter|metres|meters)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if metres:
+            try:
+                return round(float(metres.group(1)) * 3.28084, 1)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _extract_activity_timeline(
+        page_lines: list[tuple[int, str]],
+        tables: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        """Deterministically parse timed 24-hour activity rows from source lines/tables.
+
+        Only explicit time ranges (e.g. ``00:00-06:00``) are extracted; narrative
+        without times is never converted into fabricated timed rows.
+        """
+        rows: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        range_pattern = re.compile(r"([0-9]{1,2}:[0-5][0-9])\s*[-–—]\s*([0-9]{1,2}:[0-5][0-9])\s*[|:\-]?\s*(.+)")
+        for page_number, line in page_lines:
+            match = range_pattern.search(line)
+            if not match:
+                continue
+            start, end = match.group(1), match.group(2)
+            if not LocalStateStore._valid_time_range(start, end):
+                continue
+            activity = match.group(3).strip(" .|-")[:160].strip()
+            if not activity:
+                continue
+            time_label = f"{LocalStateStore._normalize_clock(start)}-{LocalStateStore._normalize_clock(end)}"
+            key = (time_label, activity.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({"time": time_label, "activity": activity, "page": page_number, "confidence": 0.82})
+            if len(rows) >= 12:
+                break
+        if not rows:
+            rows = LocalStateStore._activity_rows_from_tables(tables)
+        LocalStateStore._flag_overlapping_activities(rows)
+        return rows
+
+    @staticmethod
+    def _activity_rows_from_tables(tables: list[dict[str, object]]) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        seen: set[tuple[str, str]] = set()
+        for table in tables:
+            table_rows = table.get("rows") if isinstance(table, dict) else None
+            page = table.get("page") if isinstance(table, dict) else None
+            if not isinstance(table_rows, list):
+                continue
+            for table_row in table_rows:
+                if not isinstance(table_row, list) or len(table_row) < 2:
+                    continue
+                time_cell = str(table_row[0]).strip()
+                time_match = re.match(r"^([0-9]{1,2}:[0-5][0-9])\s*[-–—]\s*([0-9]{1,2}:[0-5][0-9])$", time_cell)
+                if not time_match or not LocalStateStore._valid_time_range(time_match.group(1), time_match.group(2)):
+                    continue
+                activity = " ".join(str(cell).strip() for cell in table_row[1:] if str(cell).strip())[:160].strip()
+                if not activity:
+                    continue
+                time_label = f"{LocalStateStore._normalize_clock(time_match.group(1))}-{LocalStateStore._normalize_clock(time_match.group(2))}"
+                key = (time_label, activity.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({
+                    "time": time_label,
+                    "activity": activity,
+                    "page": page if isinstance(page, int) and page > 0 else 1,
+                    "confidence": 0.8,
+                })
+        return rows
+
+    @staticmethod
+    def _flag_overlapping_activities(rows: list[dict[str, object]]) -> None:
+        ordered: list[tuple[int, int, dict[str, object]]] = []
+        for row in rows:
+            parts = str(row.get("time", "")).split("-")
+            if len(parts) != 2:
+                continue
+            start = LocalStateStore._clock_minutes(parts[0])
+            end = LocalStateStore._clock_minutes(parts[1])
+            if start is None or end is None:
+                continue
+            ordered.append((start, end, row))
+        ordered.sort(key=lambda item: item[0])
+        for index in range(1, len(ordered)):
+            previous = ordered[index - 1]
+            current = ordered[index]
+            if current[0] < previous[1]:
+                for _, _, row in (previous, current):
+                    row["confidence"] = min(float(row.get("confidence", 0.8)), 0.5)
+                    row["conflict"] = True
+
+    @staticmethod
+    def _clock_minutes(value: str) -> int | None:
+        match = re.match(r"^\s*([0-9]{1,2}):([0-5][0-9])\s*$", str(value))
+        if not match:
+            return None
+        hours = int(match.group(1))
+        minutes = int(match.group(2))
+        if hours > 24 or (hours == 24 and minutes > 0):
+            return None
+        return hours * 60 + minutes
+
+    @staticmethod
+    def _normalize_clock(value: str) -> str:
+        match = re.match(r"^\s*([0-9]{1,2}):([0-5][0-9])\s*$", str(value))
+        if not match:
+            return str(value).strip()
+        return f"{int(match.group(1)):02d}:{match.group(2)}"
+
+    @staticmethod
+    def _valid_time_range(start: str, end: str) -> bool:
+        start_minutes = LocalStateStore._clock_minutes(start)
+        end_minutes = LocalStateStore._clock_minutes(end)
+        if start_minutes is None or end_minutes is None:
+            return False
+        return 0 <= start_minutes < end_minutes <= 24 * 60
 
     @staticmethod
     def _pdf_page_lines(pages: list[dict[str, object]]) -> list[tuple[int, str]]:
@@ -3925,11 +4171,232 @@ class LocalStateStore:
                         "section": section,
                     }
                 )
+        casing_strings = profile.get("casing_strings")
+        if isinstance(casing_strings, list):
+            for row in casing_strings:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("name") or "").strip()
+                if not name:
+                    continue
+                shoe = row.get("shoe_ft")
+                detail = [
+                    part
+                    for part in [
+                        str(row.get("od") or "").strip(),
+                        f"shoe {shoe:g} ft" if isinstance(shoe, (int, float)) else "",
+                        str(row.get("status") or "").strip(),
+                    ]
+                    if part
+                ]
+                page = row.get("page")
+                records.append(
+                    {
+                        "text": f"PDF casing string {name}: {', '.join(detail)}" if detail else f"PDF casing string {name}",
+                        "page": page if isinstance(page, int) and page > 0 else 1,
+                        "field": "casing_string",
+                        "label": name,
+                        "section": "casing_schematic",
+                    }
+                )
+        activity_timeline = profile.get("activity_timeline")
+        if isinstance(activity_timeline, list):
+            for row in activity_timeline:
+                if not isinstance(row, dict):
+                    continue
+                time_label = str(row.get("time") or "").strip()
+                activity = str(row.get("activity") or "").strip()
+                if not time_label or not activity:
+                    continue
+                page = row.get("page")
+                records.append(
+                    {
+                        "text": f"PDF activity {time_label}: {activity}",
+                        "page": page if isinstance(page, int) and page > 0 else 1,
+                        "field": "activity_timeline",
+                        "label": time_label,
+                        "section": "activity_timeline",
+                    }
+                )
         return records
 
     @staticmethod
     def _humanize_report_key(value: str) -> str:
         return value.replace("_", " ").strip().title()
+
+    @staticmethod
+    def _as_float(value: object) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    @staticmethod
+    def collect_report_profiles_from_documents(documents: list) -> list[dict[str, object]]:
+        """Select and rank the PDF report profiles for a set of parsed documents.
+
+        Single source of profile-selection logic shared by the report-draft
+        endpoint and Monday Report assembly so they can never disagree.
+        """
+        profiles: list[dict[str, object]] = []
+        for document in documents:
+            metadata = getattr(document, "metadata", {})
+            if not isinstance(metadata, dict):
+                continue
+            parser_metadata = metadata.get("parser", {})
+            if not isinstance(parser_metadata, dict):
+                continue
+            profile = parser_metadata.get("report_profile")
+            if isinstance(profile, dict):
+                profiles.append(profile)
+        return sorted(
+            profiles,
+            key=lambda item: (
+                float(item.get("confidence", 0)) if isinstance(item.get("confidence"), (int, float)) else 0.0,
+                int(item.get("field_count", 0)) if isinstance(item.get("field_count"), int) else 0,
+                int(item.get("section_count", 0)) if isinstance(item.get("section_count"), int) else 0,
+            ),
+            reverse=True,
+        )
+
+    @staticmethod
+    def _casing_rows_from_profile(profile: dict[str, object]) -> list[dict[str, object]]:
+        rows = profile.get("casing_strings") if isinstance(profile, dict) else None
+        result: list[dict[str, object]] = []
+        if not isinstance(rows, list):
+            return result
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if not name:
+                continue
+            result.append(
+                {
+                    "name": name,
+                    "od": str(row["od"]).strip() if row.get("od") else None,
+                    "top_ft": LocalStateStore._as_float(row.get("top_ft")),
+                    "shoe_ft": LocalStateStore._as_float(row.get("shoe_ft")),
+                    "status": str(row["status"]).strip() if row.get("status") else "reported",
+                    "source": "source",
+                    "page": row.get("page") if isinstance(row.get("page"), int) else None,
+                    "confidence": LocalStateStore._as_float(row.get("confidence")),
+                }
+            )
+        return result
+
+    @staticmethod
+    def casing_rows_from_profiles(profiles: list[dict[str, object]]) -> list[dict[str, object]]:
+        for profile in profiles:
+            rows = LocalStateStore._casing_rows_from_profile(profile)
+            if rows:
+                return rows
+        return []
+
+    @staticmethod
+    def _activity_rows_from_profile(profile: dict[str, object]) -> list[dict[str, object]]:
+        rows = profile.get("activity_timeline") if isinstance(profile, dict) else None
+        result: list[dict[str, object]] = []
+        if not isinstance(rows, list):
+            return result
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            time_label = str(row.get("time") or "").strip()
+            activity = str(row.get("activity") or "").strip()
+            if not time_label or not activity:
+                continue
+            result.append(
+                {
+                    "time": time_label,
+                    "activity": activity,
+                    "source": "source",
+                    "page": row.get("page") if isinstance(row.get("page"), int) else None,
+                    "confidence": LocalStateStore._as_float(row.get("confidence")),
+                }
+            )
+        return result
+
+    @staticmethod
+    def activity_rows_from_profiles(profiles: list[dict[str, object]]) -> list[dict[str, object]]:
+        for profile in profiles:
+            rows = LocalStateStore._activity_rows_from_profile(profile)
+            if rows:
+                return rows
+        return []
+
+    @staticmethod
+    def reference_casing_rows() -> list[dict[str, object]]:
+        return [
+            {
+                "name": row["name"],
+                "od": row["od"],
+                "top_ft": float(row["top_ft"]),
+                "shoe_ft": float(row["shoe_ft"]),
+                "status": "reference",
+                "source": "reference",
+                "page": None,
+                "confidence": None,
+            }
+            for row in REFERENCE_CASING_STRINGS
+        ]
+
+    @staticmethod
+    def reference_activity_rows() -> list[dict[str, object]]:
+        return [
+            {
+                "time": row["time"],
+                "activity": row["activity"],
+                "source": "reference",
+                "page": None,
+                "confidence": None,
+            }
+            for row in REFERENCE_ACTIVITY_TIMELINE
+        ]
+
+    @staticmethod
+    def casing_program_from_rows(rows: list[dict[str, object]]) -> str:
+        lines: list[str] = []
+        for row in rows:
+            top = row.get("top_ft")
+            shoe = row.get("shoe_ft")
+            top_str = f"{top:g}" if isinstance(top, (int, float)) else "0"
+            shoe_str = f"{shoe:g}" if isinstance(shoe, (int, float)) else "0"
+            lines.append(
+                f"{row.get('name', 'Casing')} | {row.get('od') or 'OD not set'} | {top_str} | {shoe_str} | {row.get('status') or 'reported'}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def operations_log_from_rows(rows: list[dict[str, object]]) -> str:
+        return "\n".join(f"{row.get('time', '24 hr')} | {row.get('activity', '')}" for row in rows)
+
+    @staticmethod
+    def hole_sections_from_casing_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Direct, deterministic projection of reviewed casing rows into hole sections.
+
+        Uses only the casing name and its top/shoe depths (already reviewed by this
+        increment) so the well schematic cannot contradict the casing schematic. No
+        bit size or new engineering value is inferred.
+        """
+        sections: list[dict[str, object]] = []
+        previous_shoe = 0.0
+        for row in rows:
+            shoe = row.get("shoe_ft")
+            if not isinstance(shoe, (int, float)):
+                continue
+            top = row.get("top_ft")
+            interval_top = top if isinstance(top, (int, float)) else previous_shoe
+            sections.append(
+                {
+                    "hole_size": f"{row.get('name', 'Casing')} casing section",
+                    "interval_ft": f"{interval_top:,.0f}-{shoe:,.0f}",
+                    "status": f"derived from {row.get('name', 'casing')} casing evidence",
+                }
+            )
+            previous_shoe = shoe
+        return sections
 
     @staticmethod
     def _clean_extracted_text(text: str) -> str:

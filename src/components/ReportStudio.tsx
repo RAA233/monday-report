@@ -30,7 +30,12 @@ import {
   type FormatVariantId,
   type ReportFormatVariant
 } from "../data/reportVariantSchemas";
-import { getReportDraft, type ApiReportDraft } from "../lib/api";
+import {
+  getReportDraft,
+  type ApiActivitySegment,
+  type ApiCasingString,
+  type ApiReportDraft
+} from "../lib/api";
 import { formatSourceCitation } from "../lib/citationFormat";
 
 interface ReportForm {
@@ -54,7 +59,15 @@ interface ReportForm {
   operationsLog: string;
 }
 
-interface CasingInterval {
+type SchematicSource = "source" | "reference";
+
+interface RowProvenance {
+  source?: SchematicSource;
+  page?: number | null;
+  confidence?: number | null;
+}
+
+interface CasingInterval extends RowProvenance {
   name: string;
   od: string;
   topFt: number;
@@ -62,7 +75,7 @@ interface CasingInterval {
   status: string;
 }
 
-interface ActivitySegment {
+interface ActivitySegment extends RowProvenance {
   time: string;
   description: string;
 }
@@ -120,8 +133,14 @@ export function ReportStudio({ workspaceId }: ReportStudioProps): JSX.Element {
   );
 
   const activeVariant = reportFormatVariants.find((variant) => variant.id === formatVariantId) ?? reportFormatVariants[0];
-  const casing = useMemo(() => parseCasingProgram(form.casingProgram), [form.casingProgram]);
-  const activities = useMemo(() => parseOperationsLog(form.operationsLog), [form.operationsLog]);
+  const casing = useMemo(
+    () => parseCasingProgram(form.casingProgram, evidenceDraft?.casing_strings),
+    [form.casingProgram, evidenceDraft]
+  );
+  const activities = useMemo(
+    () => parseOperationsLog(form.operationsLog, evidenceDraft?.activity_timeline),
+    [form.operationsLog, evidenceDraft]
+  );
   const summary = useMemo(() => buildExecutiveSummary(form), [form]);
   const standardSections = useMemo(
     () => buildStandardReportSections(form, casing, activities, activeVariant),
@@ -601,6 +620,8 @@ function DailyReportPreview({
   activeVariant
 }: DailyReportPreviewProps): JSX.Element {
   const controlMatrix = buildControlMatrix(form, casing, activities, clientChecks);
+  const casingHasSource = casing.some((item) => item.source === "source");
+  const timelineHasSource = activities.some((item) => item.source === "source");
 
   return (
     <div className="daily-report-sheet">
@@ -692,6 +713,11 @@ function DailyReportPreview({
             <Layers3 size={17} aria-hidden="true" />
             <h3>Casing and well schematic</h3>
           </div>
+          <p className={`schematic-provenance-note ${casingHasSource ? "is-source" : "is-reference"}`}>
+            {casingHasSource
+              ? "Casing strings derived from source evidence — badges show page and confidence."
+              : "Reference casing geometry · confirm from DDR before client issue."}
+          </p>
           <CasingSchematic casing={casing} currentDepth={parseDepth(form.mdFt)} />
           <div className="schematic-note-grid">
             <span>Hole {form.holeSize || "not entered"}</span>
@@ -699,17 +725,41 @@ function DailyReportPreview({
             <span>As-drilled DLS {form.asDrilledDls || "not entered"}</span>
             <span>{casing.length} casing string(s)</span>
           </div>
+          <ul className="schematic-provenance-list" aria-label="Casing evidence provenance">
+            {casing.map((item, index) => (
+              <li key={`${item.name}-prov-${index}`}>
+                <span>{item.name}</span>
+                <span
+                  className={`provenance-badge ${item.source === "source" ? "is-source" : "is-reference"}`}
+                  aria-label={`${item.name} casing: ${schematicProvenanceLabel(item)}`}
+                >
+                  {schematicProvenanceLabel(item)}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
         <div className="report-section">
           <div className="report-section-title">
             <Clock3 size={17} aria-hidden="true" />
             <h3>24 hr activity timeline</h3>
           </div>
+          <p className={`schematic-provenance-note ${timelineHasSource ? "is-source" : "is-reference"}`}>
+            {timelineHasSource
+              ? "Timeline segments derived from source evidence."
+              : "Reference timeline · confirm from DDR before client issue."}
+          </p>
           <div className="activity-timeline">
             {activities.map((activity, index) => (
               <div className="timeline-row" key={`${activity.time}-${index}`}>
                 <strong>{activity.time}</strong>
                 <span>{activity.description}</span>
+                <span
+                  className={`provenance-badge ${activity.source === "source" ? "is-source" : "is-reference"}`}
+                  aria-label={`${activity.time} activity: ${schematicProvenanceLabel(activity)}`}
+                >
+                  {schematicProvenanceLabel(activity)}
+                </span>
               </div>
             ))}
           </div>
@@ -894,19 +944,23 @@ function currentDateInputValue(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function parseCasingProgram(value: string): CasingInterval[] {
+function parseCasingProgram(value: string, provenance?: ApiCasingString[] | null): CasingInterval[] {
   const parsed = value
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => {
+    .map((line, index) => {
       const [name, od, top, shoe, status] = line.split("|").map((part) => part.trim());
+      const meta = provenance ? provenance[index] : undefined;
       return {
         name: name || "Casing",
         od: od || "OD not set",
         topFt: parseDepth(top),
         shoeFt: parseDepth(shoe),
-        status: status || "Planned"
+        status: status || "Planned",
+        source: meta?.source,
+        page: meta?.page,
+        confidence: meta?.confidence
       };
     })
     .filter((item) => item.shoeFt > 0);
@@ -914,20 +968,34 @@ function parseCasingProgram(value: string): CasingInterval[] {
   return parsed.length > 0 ? parsed : parseCasingProgram(defaultCasingProgram);
 }
 
-function parseOperationsLog(value: string): ActivitySegment[] {
+function parseOperationsLog(value: string, provenance?: ApiActivitySegment[] | null): ActivitySegment[] {
   const parsed = value
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => {
+    .map((line, index) => {
       const [time, ...rest] = line.split("|");
+      const meta = provenance ? provenance[index] : undefined;
       return {
         time: time.trim() || "24 hr",
-        description: rest.join("|").trim() || line
+        description: rest.join("|").trim() || line,
+        source: meta?.source,
+        page: meta?.page,
+        confidence: meta?.confidence
       };
     });
 
   return parsed.length > 0 ? parsed : parseOperationsLog(defaultOperationsLog);
+}
+
+function schematicProvenanceLabel(row: RowProvenance): string {
+  if (row.source === "source") {
+    const page = typeof row.page === "number" ? ` · p. ${row.page}` : "";
+    const confidence =
+      typeof row.confidence === "number" ? ` · ${Math.round(row.confidence * 100)}% confidence` : "";
+    return `Source-derived${page}${confidence}`;
+  }
+  return "Reference · confirm from DDR";
 }
 
 function parseDecisionRows(value: string): ActivitySegment[] {
