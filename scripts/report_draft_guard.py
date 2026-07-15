@@ -54,6 +54,52 @@ def main() -> int:
                 {"time": "00:00-06:00", "activity": "Drill ahead 12.25 in section.", "page": 1, "confidence": 0.82},
                 {"time": "06:00-12:00", "activity": "Circulate bottoms up and survey.", "page": 1, "confidence": 0.82},
             ],
+            # Survey stations: one clean row plus a same-MD conflict pair.
+            "survey_stations": [
+                {
+                    "measured_depth_ft": 8000.0,
+                    "inclination_deg": 20.5,
+                    "azimuth_deg": 115.0,
+                    "true_vertical_depth_ft": 7600.0,
+                    "dogleg_severity_dp100ft": 1.2,
+                    "north_south_ft": None,
+                    "east_west_ft": None,
+                    "station_id": "S-1",
+                    "survey_type": None,
+                    "page": 1,
+                    "confidence": 0.8,
+                    "conflict": False,
+                },
+                {
+                    "measured_depth_ft": 8500.0,
+                    "inclination_deg": 24.5,
+                    "azimuth_deg": 118.2,
+                    "true_vertical_depth_ft": 7900.0,
+                    "dogleg_severity_dp100ft": 1.8,
+                    "north_south_ft": None,
+                    "east_west_ft": None,
+                    "station_id": "S-2",
+                    "survey_type": None,
+                    "page": 1,
+                    "confidence": 0.5,
+                    "conflict": True,
+                },
+                {
+                    "measured_depth_ft": 8500.0,
+                    "inclination_deg": 25.1,
+                    "azimuth_deg": 119.0,
+                    "true_vertical_depth_ft": None,
+                    "dogleg_severity_dp100ft": None,
+                    "north_south_ft": None,
+                    "east_west_ft": None,
+                    "station_id": "S-3",
+                    "survey_type": None,
+                    "page": 2,
+                    "confidence": 0.5,
+                    "conflict": True,
+                },
+            ],
+            "survey_truncated": False,
         }
         document = ParsedDocument(
             id=document_id,
@@ -203,6 +249,62 @@ def main() -> int:
                 [row.model_dump(mode="json") for row in surface_rows],
             )
         )
+        checks.append(
+            assert_check(
+                "Source-backed survey stations carry page/confidence provenance",
+                draft.survey_source == "source"
+                and len(draft.survey_stations) == 3
+                and all(row.source == "source" for row in draft.survey_stations)
+                and all(row.page is not None for row in draft.survey_stations)
+                and all(row.confidence is not None for row in draft.survey_stations)
+                and any(
+                    row.measured_depth_ft == 8000.0
+                    and row.inclination_deg == 20.5
+                    and row.true_vertical_depth_ft == 7600.0
+                    and row.conflict is False
+                    for row in draft.survey_stations
+                ),
+                payload,
+            )
+        )
+        conflict_stations = [row for row in draft.survey_stations if row.conflict]
+        checks.append(
+            assert_check(
+                "Conflicting same-MD survey rows stay visible with reduced confidence",
+                len(conflict_stations) == 2
+                and {row.inclination_deg for row in conflict_stations} == {24.5, 25.1}
+                and all(row.confidence is not None and row.confidence <= 0.5 for row in conflict_stations)
+                # Missing engineering values are never back-filled.
+                and any(row.true_vertical_depth_ft is None for row in conflict_stations),
+                [row.model_dump(mode="json") for row in conflict_stations],
+            )
+        )
+
+        from datetime import date
+
+        from backend.app.schemas import MondayReportCreate
+
+        report = store.create_monday_report(
+            MondayReportCreate(
+                workspace_id=workspace.id,
+                period_start=date(2026, 7, 13),
+                period_end=date(2026, 7, 19),
+            )
+        )
+        report_survey = report.report_json.get("morning_report", {}).get("survey_stations", [])
+        checks.append(
+            assert_check(
+                "Monday Report JSON survey rows match the report draft exactly",
+                report.report_json.get("morning_report", {}).get("survey_source") == "source"
+                and [row.get("measured_depth_ft") for row in report_survey]
+                == [row.measured_depth_ft for row in draft.survey_stations]
+                and [row.get("inclination_deg") for row in report_survey]
+                == [row.inclination_deg for row in draft.survey_stations]
+                and [bool(row.get("conflict")) for row in report_survey]
+                == [row.conflict for row in draft.survey_stations],
+                report_survey,
+            )
+        )
 
         reference_draft = report_draft(reference_workspace.id)
         reference_payload = reference_draft.model_dump(mode="json")
@@ -233,7 +335,15 @@ def main() -> int:
                 "Cross-workspace source rows do not leak into an empty workspace",
                 reference_draft.source_document_count == 0
                 and not any(row.source == "source" for row in reference_draft.casing_strings)
-                and not any(seg.source == "source" for seg in reference_draft.activity_timeline),
+                and not any(seg.source == "source" for seg in reference_draft.activity_timeline)
+                and reference_draft.survey_stations == [],
+                reference_payload,
+            )
+        )
+        checks.append(
+            assert_check(
+                "No survey evidence yields an empty list, never fabricated stations",
+                reference_draft.survey_source == "none" and reference_draft.survey_stations == [],
                 reference_payload,
             )
         )
@@ -254,6 +364,10 @@ def main() -> int:
                 and source_audit.metadata.get("schematic_source") == "source"
                 and int(source_audit.metadata.get("casing_source_rows", 0)) >= 2
                 and int(source_audit.metadata.get("timeline_source_rows", 0)) >= 2
+                and source_audit.metadata.get("survey_source") == "source"
+                and int(source_audit.metadata.get("survey_source_rows", 0)) == 3
+                and int(source_audit.metadata.get("survey_conflict_rows", 0)) == 2
+                and source_audit.metadata.get("survey_truncated") is False
                 and source_audit.metadata.get("parser_version") == "pdf_report_profile_v1",
                 source_audit.metadata if source_audit else None,
             )
@@ -271,7 +385,9 @@ def main() -> int:
                 "Audit event records reference provenance",
                 reference_audit is not None
                 and reference_audit.metadata.get("schematic_source") == "reference"
-                and int(reference_audit.metadata.get("casing_reference_rows", 0)) == 4,
+                and int(reference_audit.metadata.get("casing_reference_rows", 0)) == 4
+                and reference_audit.metadata.get("survey_source") == "none"
+                and int(reference_audit.metadata.get("survey_source_rows", 0)) == 0,
                 reference_audit.metadata if reference_audit else None,
             )
         )

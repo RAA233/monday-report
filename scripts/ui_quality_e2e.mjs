@@ -114,6 +114,8 @@ try {
       await expectText(page, /Normal formats/i, "Report Studio normal formats");
       await expectText(page, /Reviewed schema variants/i, "Report Studio schema variants");
       await expectText(page, /confirm from DDR/i, "Report Studio schematic provenance");
+      await expectText(page, /Directional survey stations/i, "Report Studio survey section");
+      await expectText(page, /No source survey stations/i, "Report Studio survey empty state");
       await page.getByRole("button", { name: /FORGE style/i }).click();
       await page.getByRole("tab", { name: /BHA/i }).click();
       await page.getByRole("button", { name: /Apply format/i }).click();

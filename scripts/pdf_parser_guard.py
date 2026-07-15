@@ -48,9 +48,21 @@ def main() -> int:
                         "00:00-06:00 Drill ahead 12.25 in section and monitor hole cleaning.",
                         "06:00-12:00 Circulate bottoms up, survey, and condition mud.",
                         "12:00-24:00 Ream and prepare casing point.",
+                        "Survey Table",
+                        "MD (ft) | Inc (deg) | Azi (deg) | TVD (ft) | DLS (deg/100ft)",
+                        "8000 | 20.5 | 115.0 | 7600 | 1.2",
+                        "8500 | 24.5 | 118.2 | 7900 | 1.8",
+                        "8500 | 24.5 | 118.2 | 7900 | 1.8",
+                        "8500 | 25.1 | 119.0 |  | ",
+                        "8750 | 195.0 | 118.0 |  | ",
                     ]
                 ),
-                "PDF DDR summary. Review the NPT table for failure evidence.",
+                "\n".join(
+                    [
+                        "PDF DDR summary. Review the NPT table for failure evidence.",
+                        "Check survey: MD 2600 m, Inc 31.0 deg, Azi 122.5 deg.",
+                    ]
+                ),
             ],
         )
         upload_response = client.post(
@@ -161,6 +173,52 @@ def main() -> int:
             )
         )
 
+        survey_rows = report_profile.get("survey_stations", []) if isinstance(report_profile, dict) else []
+        md_values = [float(row.get("measured_depth_ft") or 0) for row in survey_rows]
+        first_station = next((row for row in survey_rows if abs(float(row.get("measured_depth_ft") or 0) - 8000.0) < 0.01), None)
+        metre_station = next((row for row in survey_rows if abs(float(row.get("measured_depth_ft") or 0) - 8530.2) < 0.5), None)
+        checks.append(
+            assert_check(
+                "PDF profile extracts structured survey stations from source",
+                len(survey_rows) == 4
+                # Exact duplicate row was removed; both conflicting 8500 rows remain.
+                and md_values.count(8500.0) == 2
+                # Invalid inclination (195 deg) was rejected, never repaired.
+                and not any(abs(md - 8750.0) < 0.01 for md in md_values)
+                and first_station is not None
+                and first_station.get("inclination_deg") == 20.5
+                and first_station.get("azimuth_deg") == 115.0
+                and first_station.get("true_vertical_depth_ft") == 7600.0
+                and first_station.get("dogleg_severity_dp100ft") == 1.2
+                and first_station.get("page") == 1
+                and first_station.get("conflict") is False
+                # Unsupported fields stay missing; nothing is derived.
+                and first_station.get("north_south_ft") is None
+                and first_station.get("east_west_ft") is None
+                # Explicit metre narrative row converts to canonical feet on page 2.
+                and metre_station is not None
+                and metre_station.get("page") == 2
+                and metre_station.get("inclination_deg") == 31.0
+                and metre_station.get("true_vertical_depth_ft") is None
+                and all(0.0 < float(row.get("confidence") or 0) <= 1.0 for row in survey_rows)
+                and md_values == sorted(md_values)
+                and report_profile.get("survey_truncated") is False,
+                survey_rows,
+            )
+        )
+
+        conflict_rows = [row for row in survey_rows if abs(float(row.get("measured_depth_ft") or 0) - 8500.0) < 0.01]
+        checks.append(
+            assert_check(
+                "Conflicting same-MD survey rows are flagged, not merged",
+                len(conflict_rows) == 2
+                and all(row.get("conflict") is True for row in conflict_rows)
+                and all(float(row.get("confidence") or 1) <= 0.5 for row in conflict_rows)
+                and {row.get("inclination_deg") for row in conflict_rows} == {24.5, 25.1},
+                conflict_rows,
+            )
+        )
+
         chunks = client.get(f"/documents/{pdf_document.get('id')}/chunks").json() if pdf_document.get("id") else []
         pdf_chunks = [chunk for chunk in chunks if chunk.get("locator_type") == "pdf"]
         located_pages = {chunk.get("locator", {}).get("page") for chunk in pdf_chunks}
@@ -218,6 +276,21 @@ def main() -> int:
                 and all(isinstance(chunk.get("locator", {}).get("page"), int) for chunk in schematic_chunks)
                 and any("Surface" in chunk.get("text", "") for chunk in schematic_chunks),
                 schematic_chunks,
+            )
+        )
+
+        survey_chunks = [
+            chunk for chunk in pdf_chunks if chunk.get("locator", {}).get("field") == "survey_station"
+        ]
+        checks.append(
+            assert_check(
+                "PDF survey stations become cited source chunks",
+                len(survey_chunks) == 4
+                and all(isinstance(chunk.get("locator", {}).get("page"), int) for chunk in survey_chunks)
+                and any("MD 8000 ft" in chunk.get("text", "") for chunk in survey_chunks)
+                and any(chunk.get("locator", {}).get("page") == 2 for chunk in survey_chunks)
+                and any("conflict" in chunk.get("text", "") for chunk in survey_chunks),
+                survey_chunks,
             )
         )
 
@@ -281,14 +354,47 @@ def main() -> int:
             )
         )
 
+        draft_survey = draft.get("survey_stations", [])
+        checks.append(
+            assert_check(
+                "Report draft carries source-derived survey stations with provenance",
+                draft.get("survey_source") == "source"
+                and len(draft_survey) == 4
+                and all(row.get("source") == "source" for row in draft_survey)
+                and all(isinstance(row.get("page"), int) for row in draft_survey)
+                and sum(1 for row in draft_survey if row.get("conflict")) == 2,
+                {"survey": draft_survey, "survey_source": draft.get("survey_source")},
+            )
+        )
+
         from backend.app.store import LocalStateStore
 
         checks.append(
             assert_check(
                 "Parser does not fabricate schematic rows without source evidence",
                 LocalStateStore._extract_casing_strings([(1, "Drilling ahead with hole cleaning and mud checks.")]) == []
-                and LocalStateStore._extract_activity_timeline([(1, "No timed activity is present in this note.")], []) == [],
+                and LocalStateStore._extract_activity_timeline([(1, "No timed activity is present in this note.")], []) == []
+                and LocalStateStore._extract_survey_stations(
+                    [(1, "General drilling note near 8500 ft casing point with no survey labels.")], []
+                )
+                == ([], False),
                 "no fabricated rows",
+            )
+        )
+
+        survey_fixture_lines = [
+            (1, "MD (ft) | Inc (deg) | Azi (deg) | TVD (ft) | DLS (deg/100ft)"),
+            (1, "8000 | 20.5 | 115.0 | 7600 | 1.2"),
+            (1, "8500 | 24.5 | 118.2 | 7900 | 1.8"),
+            (2, "Check survey: MD 2600 m, Inc 31.0 deg, Azi 122.5 deg."),
+        ]
+        first_pass = LocalStateStore._extract_survey_stations(survey_fixture_lines, [])
+        second_pass = LocalStateStore._extract_survey_stations(survey_fixture_lines, [])
+        checks.append(
+            assert_check(
+                "Repeated survey extraction is deterministic",
+                first_pass == second_pass and len(first_pass[0]) == 3 and first_pass[1] is False,
+                first_pass,
             )
         )
 

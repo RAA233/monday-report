@@ -45,6 +45,7 @@ from .schemas import (
     RuntimeBackendStatus,
     SessionResponse,
     SignedUrlResponse,
+    SurveyStation,
     UploadCompleteRequest,
     UploadCreate,
     UploadCreateResponse,
@@ -759,6 +760,12 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     casing_strings = [CasingString(**row) for row in casing_rows]
     activity_timeline = [ActivitySegment(**row) for row in activity_rows]
     schematic_source = "source" if (casing_source_rows or activity_source_rows) else "reference"
+    # Survey stations are source-only: no reference fallback rows exist, so an
+    # empty list plus survey_source="none" is the honest no-evidence state.
+    survey_source_rows = store.survey_rows_from_profiles(pdf_profiles)
+    survey_stations = [SurveyStation(**row) for row in survey_source_rows]
+    survey_source = "source" if survey_source_rows else "none"
+    survey_truncated = store.survey_truncation_from_profiles(pdf_profiles)
 
     response = ReportDraftResponse(
         workspace_id=workspace_id,
@@ -791,6 +798,8 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
         casing_strings=casing_strings,
         activity_timeline=activity_timeline,
         schematic_source=schematic_source,
+        survey_stations=survey_stations,
+        survey_source=survey_source,
         evidence_summary=evidence_summary,
         source_document_count=len(documents),
         source_chunk_count=len(chunks),
@@ -820,6 +829,10 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
             "casing_reference_rows": 0 if casing_source_rows else len(casing_rows),
             "timeline_source_rows": len(activity_source_rows),
             "timeline_reference_rows": 0 if activity_source_rows else len(activity_rows),
+            "survey_source": survey_source,
+            "survey_source_rows": len(survey_source_rows),
+            "survey_conflict_rows": sum(1 for row in survey_source_rows if row.get("conflict")),
+            "survey_truncated": survey_truncated,
             "report_profiles": len(pdf_profiles),
             "parser_version": "pdf_report_profile_v1",
         },
