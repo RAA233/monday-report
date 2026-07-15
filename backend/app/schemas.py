@@ -467,6 +467,33 @@ class ActivitySegment(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class SurveyStation(BaseModel):
+    """A single directional survey station extracted from source evidence.
+
+    Survey stations are **source extraction only**: every row comes from an
+    uploaded document (``source="source"`` with a ``page`` and ``confidence``).
+    There is deliberately no reference fallback — fabricating generic survey
+    geometry would be unsafe, so "no evidence" is represented by an empty list
+    with ``survey_source="none"``. Optional engineering values (TVD, DLS,
+    displacements) are populated only when explicitly present in the source;
+    nothing is calculated or inferred.
+    """
+
+    measured_depth_ft: float = Field(ge=0)
+    inclination_deg: float | None = Field(default=None, ge=0, le=180)
+    azimuth_deg: float | None = Field(default=None, ge=0, le=360)
+    true_vertical_depth_ft: float | None = Field(default=None, ge=0)
+    dogleg_severity_dp100ft: float | None = Field(default=None, ge=0)
+    north_south_ft: float | None = None
+    east_west_ft: float | None = None
+    station_id: str | None = None
+    survey_type: str | None = None
+    source: Literal["source"]
+    page: int | None = Field(default=None, ge=1)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    conflict: bool = False
+
+
 class ReportDraftResponse(BaseModel):
     workspace_id: UUID
     generated_at: datetime = Field(default_factory=utc_now)
@@ -489,6 +516,8 @@ class ReportDraftResponse(BaseModel):
     casing_strings: list[CasingString] = Field(default_factory=list)
     activity_timeline: list[ActivitySegment] = Field(default_factory=list)
     schematic_source: Literal["source", "reference"] = "reference"
+    survey_stations: list[SurveyStation] = Field(default_factory=list)
+    survey_source: Literal["source", "none"] = "none"
     evidence_summary: list[str] = Field(default_factory=list)
     source_document_count: int
     source_chunk_count: int

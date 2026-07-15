@@ -34,7 +34,8 @@ import {
   getReportDraft,
   type ApiActivitySegment,
   type ApiCasingString,
-  type ApiReportDraft
+  type ApiReportDraft,
+  type ApiSurveyStation
 } from "../lib/api";
 import { formatSourceCitation } from "../lib/citationFormat";
 
@@ -619,7 +620,8 @@ function DailyReportPreview({
   evidenceDraft,
   activeVariant
 }: DailyReportPreviewProps): JSX.Element {
-  const controlMatrix = buildControlMatrix(form, casing, activities, clientChecks);
+  const surveyStations = evidenceDraft?.survey_stations ?? [];
+  const controlMatrix = buildControlMatrix(form, casing, activities, clientChecks, surveyStations.length);
   const casingHasSource = casing.some((item) => item.source === "source");
   const timelineHasSource = activities.some((item) => item.source === "source");
 
@@ -764,6 +766,73 @@ function DailyReportPreview({
             ))}
           </div>
         </div>
+      </section>
+
+      <section className="report-section" aria-label="Directional survey stations">
+        <div className="report-section-title">
+          <Route size={17} aria-hidden="true" />
+          <h3>Directional survey stations</h3>
+        </div>
+        {surveyStations.length > 0 ? (
+          <>
+            <p className="schematic-provenance-note is-source">
+              Survey stations extracted from source evidence — values are source-only, never calculated.
+            </p>
+            <div className="survey-table-wrap">
+              <table className="survey-station-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Station</th>
+                    <th scope="col">MD (ft)</th>
+                    <th scope="col">Inc (deg)</th>
+                    <th scope="col">Azi (deg)</th>
+                    <th scope="col">TVD (ft)</th>
+                    <th scope="col">DLS</th>
+                    <th scope="col">N/S (ft)</th>
+                    <th scope="col">E/W (ft)</th>
+                    <th scope="col">Type</th>
+                    <th scope="col">Evidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {surveyStations.map((station, index) => (
+                    <tr key={`survey-${station.measured_depth_ft}-${index}`}>
+                      <td>{station.station_id || `#${index + 1}`}</td>
+                      <td>{surveyNumber(station.measured_depth_ft)}</td>
+                      <td>{surveyNumber(station.inclination_deg)}</td>
+                      <td>{surveyNumber(station.azimuth_deg)}</td>
+                      <td>{surveyNumber(station.true_vertical_depth_ft)}</td>
+                      <td>{surveyNumber(station.dogleg_severity_dp100ft)}</td>
+                      <td>{surveyNumber(station.north_south_ft)}</td>
+                      <td>{surveyNumber(station.east_west_ft)}</td>
+                      <td>{station.survey_type || "—"}</td>
+                      <td>
+                        <span
+                          className="provenance-badge is-source"
+                          aria-label={`Survey station MD ${station.measured_depth_ft}: ${schematicProvenanceLabel(station)}`}
+                        >
+                          {schematicProvenanceLabel(station)}
+                        </span>
+                        {station.conflict && (
+                          <span
+                            className="provenance-badge is-conflict"
+                            aria-label={`Survey station MD ${station.measured_depth_ft}: conflicting source evidence requires review`}
+                          >
+                            Conflict — review
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          <p className="schematic-provenance-note is-reference">
+            No source survey stations — confirm or enter from DDR
+          </p>
+        )}
       </section>
 
       <section className="report-section">
@@ -996,6 +1065,13 @@ function schematicProvenanceLabel(row: RowProvenance): string {
     return `Source-derived${page}${confidence}`;
   }
   return "Reference · confirm from DDR";
+}
+
+function surveyNumber(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "—";
+  }
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
 function parseDecisionRows(value: string): ActivitySegment[] {
@@ -1250,7 +1326,8 @@ function buildControlMatrix(
   form: ReportForm,
   casing: CasingInterval[],
   activities: ActivitySegment[],
-  clientChecks: string[]
+  clientChecks: string[],
+  surveyStationCount = 0
 ): ControlMatrixItem[] {
   const safetyReady = Boolean(form.safety.trim());
   const depthReady = parseDepth(form.mdFt) > 0 && parseDepth(form.tvdFt) > 0;
@@ -1258,7 +1335,9 @@ function buildControlMatrix(
     {
       label: "Trajectory",
       value: depthReady ? "tracked" : "needs depth",
-      detail: `MD ${formatDepth(form.mdFt)} / TVD ${formatDepth(form.tvdFt)} / DLS ${form.asDrilledDls || "not entered"}.`,
+      detail: `MD ${formatDepth(form.mdFt)} / TVD ${formatDepth(form.tvdFt)} / DLS ${form.asDrilledDls || "not entered"} / ${
+        surveyStationCount > 0 ? `${surveyStationCount} source survey station(s)` : "no source survey stations"
+      }.`,
     },
     {
       label: "Hydraulics",

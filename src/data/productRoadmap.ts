@@ -103,7 +103,7 @@ export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
     id: "exec-next-pull",
     label: "Next audited pull",
     value: "schematic extraction",
-    detail: "Casing schematic and 24 hr activity timeline now derive from source evidence with page provenance; trajectory, hydraulics, and directional visuals remain the next pull.",
+    detail: "Casing schematic, 24 hr activity timeline, and directional survey stations now derive from source evidence with page provenance; trajectory geometry, hydraulics visuals, and directional visualization remain the next pull.",
     command: "pnpm run audit:pdf-parser",
     tone: "warning"
   },
@@ -156,8 +156,8 @@ export const roadmapLanes: RoadmapLane[] = [
         owner: "Frontend + drilling SME",
         status: "complete",
         gate: "audit:report-variants",
-        evidence: "MR-SCHEMA-1 targets drive drafting, and the casing schematic plus 24 hr activity timeline now extract from source evidence with page-level provenance and explicit reference fallback.",
-        next: "Extend source-driven schematic extraction to trajectory, hydraulics, and directional visuals."
+        evidence: "MR-SCHEMA-1 targets drive drafting; casing schematic, 24 hr activity timeline, and directional survey stations now extract from source evidence with page-level provenance, conflict flags, and honest no-source states.",
+        next: "Extend source-driven extraction to trajectory geometry, hydraulics visuals, and directional visualization."
       },
       {
         id: "item-ui-execution-board",

@@ -94,6 +94,22 @@ export interface ApiActivitySegment {
   confidence?: number | null;
 }
 
+export interface ApiSurveyStation {
+  measured_depth_ft: number;
+  inclination_deg?: number | null;
+  azimuth_deg?: number | null;
+  true_vertical_depth_ft?: number | null;
+  dogleg_severity_dp100ft?: number | null;
+  north_south_ft?: number | null;
+  east_west_ft?: number | null;
+  station_id?: string | null;
+  survey_type?: string | null;
+  source: "source";
+  page?: number | null;
+  confidence?: number | null;
+  conflict?: boolean;
+}
+
 export interface ApiReportDraft {
   workspace_id: string;
   generated_at: string;
@@ -116,6 +132,8 @@ export interface ApiReportDraft {
   casing_strings?: ApiCasingString[];
   activity_timeline?: ApiActivitySegment[];
   schematic_source?: "source" | "reference";
+  survey_stations?: ApiSurveyStation[];
+  survey_source?: "source" | "none";
   evidence_summary: string[];
   source_document_count: number;
   source_chunk_count: number;

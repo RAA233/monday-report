@@ -1515,6 +1515,29 @@ class LocalStateStore:
             }
             for row in activity_rows
         ]
+        # Survey stations are source-only: shared rows with the report draft,
+        # an empty list when no evidence exists, and never a fabricated
+        # reference fallback.
+        survey_rows = self.survey_rows_from_profiles(report_profiles)
+        survey_source = "source" if survey_rows else "none"
+        survey_station_rows = [
+            {
+                "measured_depth_ft": row.get("measured_depth_ft"),
+                "inclination_deg": row.get("inclination_deg"),
+                "azimuth_deg": row.get("azimuth_deg"),
+                "true_vertical_depth_ft": row.get("true_vertical_depth_ft"),
+                "dogleg_severity_dp100ft": row.get("dogleg_severity_dp100ft"),
+                "north_south_ft": row.get("north_south_ft"),
+                "east_west_ft": row.get("east_west_ft"),
+                "station_id": row.get("station_id"),
+                "survey_type": row.get("survey_type"),
+                "source": row.get("source"),
+                "page": row.get("page"),
+                "confidence": row.get("confidence"),
+                "conflict": row.get("conflict"),
+            }
+            for row in survey_rows
+        ]
         report = MondayReport(
             tenant_id=self.tenant.id,
             workspace_id=payload.workspace_id,
@@ -1633,6 +1656,8 @@ class LocalStateStore:
                         ],
                     },
                     "activity_timeline": activity_timeline_rows,
+                    "survey_stations": survey_station_rows,
+                    "survey_source": survey_source,
                     "market_benchmark": {
                         "current_ft_per_day": benchmark_status.current_ft_per_day,
                         "seven_day_average_ft_per_day": benchmark_status.seven_day_average_ft_per_day,
@@ -3848,7 +3873,8 @@ class LocalStateStore:
         }
         casing_strings = LocalStateStore._extract_casing_strings(page_lines)
         activity_timeline = LocalStateStore._extract_activity_timeline(page_lines, tables)
-        structured_score = len(casing_strings) + len(activity_timeline)
+        survey_stations, survey_truncated = LocalStateStore._extract_survey_stations(page_lines, tables)
+        structured_score = len(casing_strings) + len(activity_timeline) + len(survey_stations)
         marker_score = sum(1 for value in section_presence.values() if value)
         field_score = len(fields) + len(sections)
         if field_score < 2 and marker_score < 2 and structured_score < 2:
@@ -3871,6 +3897,9 @@ class LocalStateStore:
             "section_presence": section_presence,
             "casing_strings": casing_strings,
             "activity_timeline": activity_timeline,
+            # Additive pdf_report_profile_v1 extension: structured survey stations.
+            "survey_stations": survey_stations,
+            "survey_truncated": survey_truncated,
         }
 
     @staticmethod
@@ -4079,6 +4108,376 @@ class LocalStateStore:
             return False
         return 0 <= start_minutes < end_minutes <= 24 * 60
 
+    # ------------------------------------------------------------------
+    # Directional survey-station extraction (source-only; no derivation).
+    # ------------------------------------------------------------------
+
+    _SURVEY_HEADER_FIELDS: tuple[tuple[str, str], ...] = (
+        ("md", r"^(?:md|measured\s*depth)\b"),
+        ("inclination", r"^(?:inc|incl|inclination)\b"),
+        ("azimuth", r"^(?:azi|az|azimuth)\b"),
+        ("tvd", r"^(?:tvd|true\s*vertical\s*depth)\b"),
+        ("dls", r"^(?:dls|dogleg)\b"),
+        ("ns", r"^(?:n/?s|north(?:ing)?|north\s*/?\s*south)\b"),
+        ("ew", r"^(?:e/?w|east(?:ing)?|east\s*/?\s*west)\b"),
+        ("station", r"^(?:station|survey\s*(?:no|#|id)?|no\.?|#)$"),
+        ("survey_type", r"^(?:type|survey\s*type|plan(?:ned)?/?actual)\b"),
+    )
+
+    @staticmethod
+    def _extract_survey_stations(
+        page_lines: list[tuple[int, str]],
+        tables: list[dict[str, object]],
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Deterministically parse directional survey stations from source evidence.
+
+        Source extraction only: rows are read from recognized survey tables
+        (native PDF tables or delimited text lines under a survey header) and
+        from explicitly labelled inline narrative (``MD .. Inc .. Azi ..``).
+        A row is emitted only when it has a valid measured depth plus a valid
+        inclination or azimuth. Nothing is calculated, interpolated, or
+        back-filled; unsupported input yields no rows. Returns the rows plus a
+        truncation flag when the deterministic 200-row cap was applied.
+        """
+        row_cap = 200
+        collected: list[dict[str, object]] = []
+        for table in tables:
+            collected.extend(LocalStateStore._survey_rows_from_table(table))
+        collected.extend(LocalStateStore._survey_rows_from_lines(page_lines))
+        rows = LocalStateStore._finalize_survey_rows(collected)
+        truncated = len(rows) > row_cap
+        if truncated:
+            rows = rows[:row_cap]
+        return rows, truncated
+
+    @staticmethod
+    def _map_survey_columns(cells: list[str]) -> tuple[dict[str, int], dict[str, str]]:
+        """Map header cells to survey fields and per-column depth units.
+
+        Depth columns default to canonical feet; an explicit metre marker in
+        the header (``(m)``/``metre``) switches that column to metres. A header
+        is accepted only when it names MD plus inclination or azimuth.
+        """
+        columns: dict[str, int] = {}
+        units: dict[str, str] = {}
+        for index, raw_cell in enumerate(cells):
+            cell = str(raw_cell).strip().lower()
+            if not cell:
+                continue
+            for field, pattern in LocalStateStore._SURVEY_HEADER_FIELDS:
+                if field in columns:
+                    continue
+                if re.search(pattern, cell):
+                    columns[field] = index
+                    if field in {"md", "tvd", "ns", "ew"}:
+                        if re.search(r"\(m\)|\bmetres?\b|\bmeters?\b", cell):
+                            units[field] = "m"
+                        else:
+                            units[field] = "ft"
+                    break
+        if "md" not in columns or ("inclination" not in columns and "azimuth" not in columns):
+            return {}, {}
+        return columns, units
+
+    @staticmethod
+    def _survey_cell_float(cell: object) -> float | None:
+        text = str(cell).strip()
+        if not text or text in {"-", "--", "—", "n/a", "na"}:
+            return None
+        match = re.search(r"-?[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|-?[0-9]+(?:\.[0-9]+)?", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(0).replace(",", ""))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _survey_depth_from_cell(cell: object, unit: str) -> float | None:
+        value = LocalStateStore._survey_cell_float(cell)
+        if value is None:
+            return None
+        text = str(cell).lower()
+        # An explicit unit inside the cell overrides the header/column unit.
+        if re.search(r"[0-9]\s*m\b|\bmetres?\b|\bmeters?\b", text):
+            unit = "m"
+        elif re.search(r"\bft\b|\bfeet\b|'", text):
+            unit = "ft"
+        if unit == "m":
+            return round(value * 3.28084, 1)
+        return value
+
+    @staticmethod
+    def _parse_survey_cells(
+        cells: list[str],
+        columns: dict[str, int],
+        units: dict[str, str],
+        page: int,
+        base_confidence: float,
+    ) -> dict[str, object] | None:
+        def cell_at(field: str) -> str | None:
+            index = columns.get(field)
+            if index is None or index >= len(cells):
+                return None
+            return str(cells[index]).strip()
+
+        md = LocalStateStore._survey_depth_from_cell(cell_at("md") or "", units.get("md", "ft"))
+        inclination = LocalStateStore._survey_cell_float(cell_at("inclination"))
+        azimuth = LocalStateStore._survey_cell_float(cell_at("azimuth"))
+        tvd = LocalStateStore._survey_depth_from_cell(cell_at("tvd") or "", units.get("tvd", "ft"))
+        dls = LocalStateStore._survey_cell_float(cell_at("dls"))
+        ns = LocalStateStore._survey_depth_from_cell(cell_at("ns") or "", units.get("ns", "ft"))
+        ew = LocalStateStore._survey_depth_from_cell(cell_at("ew") or "", units.get("ew", "ft"))
+        station_cell = cell_at("station")
+        type_cell = cell_at("survey_type")
+        return LocalStateStore._validated_survey_row(
+            md=md,
+            inclination=inclination,
+            azimuth=azimuth,
+            tvd=tvd,
+            dls=dls,
+            ns=ns,
+            ew=ew,
+            station_id=station_cell or None,
+            survey_type=(type_cell or "").strip().lower() or None,
+            page=page,
+            base_confidence=base_confidence,
+        )
+
+    @staticmethod
+    def _validated_survey_row(
+        *,
+        md: float | None,
+        inclination: float | None,
+        azimuth: float | None,
+        tvd: float | None,
+        dls: float | None,
+        ns: float | None,
+        ew: float | None,
+        station_id: str | None,
+        survey_type: str | None,
+        page: int,
+        base_confidence: float,
+    ) -> dict[str, object] | None:
+        """Validate ranges and units; invalid rows are dropped, never repaired."""
+        if md is None or md < 0:
+            return None
+        if inclination is not None and not (0.0 <= inclination <= 180.0):
+            return None
+        if azimuth is not None and not (0.0 <= azimuth <= 360.0):
+            return None
+        if inclination is None and azimuth is None:
+            return None
+        if tvd is not None and tvd < 0:
+            tvd = None
+        if dls is not None and dls < 0:
+            dls = None
+        # Deterministic confidence: table/narrative base plus increments for
+        # each explicitly present field; clamped below 1.0 and reduced to
+        # <= 0.5 later when the row participates in a conflict.
+        confidence = base_confidence
+        if inclination is not None and azimuth is not None:
+            confidence += 0.1
+        if tvd is not None:
+            confidence += 0.05
+        if dls is not None:
+            confidence += 0.05
+        if ns is not None:
+            confidence += 0.02
+        if ew is not None:
+            confidence += 0.02
+        return {
+            "measured_depth_ft": round(md, 1),
+            "inclination_deg": inclination,
+            "azimuth_deg": azimuth,
+            "true_vertical_depth_ft": tvd,
+            "dogleg_severity_dp100ft": dls,
+            "north_south_ft": ns,
+            "east_west_ft": ew,
+            "station_id": station_id,
+            "survey_type": survey_type,
+            "page": page if isinstance(page, int) and page > 0 else 1,
+            "confidence": round(min(confidence, 0.95), 3),
+            "conflict": False,
+        }
+
+    @staticmethod
+    def _survey_rows_from_table(table: dict[str, object]) -> list[dict[str, object]]:
+        table_rows = table.get("rows") if isinstance(table, dict) else None
+        page = table.get("page") if isinstance(table, dict) else None
+        if not isinstance(table_rows, list):
+            return []
+        rows: list[dict[str, object]] = []
+        columns: dict[str, int] = {}
+        units: dict[str, str] = {}
+        for table_row in table_rows:
+            if not isinstance(table_row, list):
+                continue
+            cells = [str(cell) for cell in table_row]
+            if not columns:
+                columns, units = LocalStateStore._map_survey_columns(cells)
+                continue
+            parsed = LocalStateStore._parse_survey_cells(
+                cells,
+                columns,
+                units,
+                page if isinstance(page, int) and page > 0 else 1,
+                base_confidence=0.6,
+            )
+            if parsed:
+                rows.append(parsed)
+        return rows
+
+    @staticmethod
+    def _survey_rows_from_lines(page_lines: list[tuple[int, str]]) -> list[dict[str, object]]:
+        """Parse survey rows from delimited text lines and labelled narrative.
+
+        Text tables must start with a recognizable header line (MD plus
+        inclination or azimuth); data lines reuse that header's column map
+        until a line no longer parses. Narrative rows require explicit
+        ``MD``/``Inc``/``Azi`` labels so arbitrary numbers are never lifted
+        from general prose.
+        """
+        rows: list[dict[str, object]] = []
+        columns: dict[str, int] = {}
+        units: dict[str, str] = {}
+        for page_number, line in page_lines:
+            # Labelled narrative first: a header line never attaches numbers to
+            # its labels, so this cannot swallow real header rows, while a
+            # narrative row would otherwise be misread as a header.
+            inline = LocalStateStore._parse_inline_survey_line(line, page_number)
+            if inline:
+                rows.append(inline)
+                continue
+            cells = LocalStateStore._split_survey_line(line)
+            if len(cells) >= 2:
+                header_columns, header_units = LocalStateStore._map_survey_columns(cells)
+                if header_columns:
+                    columns, units = header_columns, header_units
+                    continue
+            if columns:
+                parsed = LocalStateStore._parse_survey_cells(
+                    cells,
+                    columns,
+                    units,
+                    page_number,
+                    base_confidence=0.6,
+                )
+                if parsed:
+                    rows.append(parsed)
+                    continue
+                md_index = columns.get("md")
+                md_cell = cells[md_index] if md_index is not None and md_index < len(cells) else ""
+                if LocalStateStore._survey_cell_float(md_cell) is not None:
+                    # Data-shaped row that failed validation: drop the row but
+                    # keep the table window open for the remaining rows.
+                    continue
+                columns, units = {}, {}
+        return rows
+
+    @staticmethod
+    def _split_survey_line(line: str) -> list[str]:
+        if "|" in line:
+            return [cell.strip() for cell in line.split("|")]
+        return [cell for cell in re.split(r"\s{1,}", line.strip()) if cell]
+
+    @staticmethod
+    def _parse_inline_survey_line(line: str, page_number: int) -> dict[str, object] | None:
+        md_match = re.search(
+            r"\bmd\s*[:=]?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(m\b|ft\b|feet\b|')?",
+            line,
+            flags=re.IGNORECASE,
+        )
+        inc_match = re.search(
+            r"\b(?:inc|inclination)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        azi_match = re.search(
+            r"\b(?:azi|azimuth)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if not md_match or (not inc_match and not azi_match):
+            return None
+        md = float(md_match.group(1).replace(",", ""))
+        unit = (md_match.group(2) or "ft").lower()
+        if unit == "m":
+            md = round(md * 3.28084, 1)
+        tvd_match = re.search(
+            r"\btvd\s*[:=]?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        dls_match = re.search(r"\bdls\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)", line, flags=re.IGNORECASE)
+        return LocalStateStore._validated_survey_row(
+            md=md,
+            inclination=float(inc_match.group(1)) if inc_match else None,
+            azimuth=float(azi_match.group(1)) if azi_match else None,
+            tvd=float(tvd_match.group(1).replace(",", "")) if tvd_match else None,
+            dls=float(dls_match.group(1)) if dls_match else None,
+            ns=None,
+            ew=None,
+            station_id=None,
+            survey_type=None,
+            page=page_number,
+            base_confidence=0.55,
+        )
+
+    @staticmethod
+    def _finalize_survey_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Deduplicate, order, and flag conflicts deterministically.
+
+        Exact repeats (same MD/inc/azi/type) collapse to one row. Distinct
+        rows sharing an MD are retained but flagged as conflicts with reduced
+        confidence, and decreasing MD within one survey type in source order
+        is flagged the same way. Conflicting evidence is surfaced, never
+        silently merged or discarded.
+        """
+        deduped: list[dict[str, object]] = []
+        seen: set[tuple[object, object, object, object]] = set()
+        for row in rows:
+            key = (
+                row.get("measured_depth_ft"),
+                row.get("inclination_deg"),
+                row.get("azimuth_deg"),
+                row.get("survey_type"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+
+        last_md_by_type: dict[object, float] = {}
+        for row in deduped:
+            md = float(row["measured_depth_ft"])
+            survey_type = row.get("survey_type")
+            previous = last_md_by_type.get(survey_type)
+            if previous is not None and md < previous:
+                row["conflict"] = True
+            last_md_by_type[survey_type] = max(previous or 0.0, md)
+
+        by_md: dict[tuple[object, object], list[dict[str, object]]] = {}
+        for row in deduped:
+            by_md.setdefault((row.get("measured_depth_ft"), row.get("survey_type")), []).append(row)
+        for group in by_md.values():
+            if len(group) > 1:
+                for row in group:
+                    row["conflict"] = True
+        for row in deduped:
+            if row.get("conflict"):
+                confidence = row.get("confidence")
+                row["confidence"] = round(min(float(confidence), 0.5), 3) if isinstance(confidence, (int, float)) else 0.5
+
+        deduped.sort(
+            key=lambda row: (
+                float(row.get("measured_depth_ft", 0.0)),
+                str(row.get("survey_type") or ""),
+                int(row.get("page") or 0),
+            )
+        )
+        return deduped
+
     @staticmethod
     def _pdf_page_lines(pages: list[dict[str, object]]) -> list[tuple[int, str]]:
         lines: list[tuple[int, str]] = []
@@ -4218,6 +4617,40 @@ class LocalStateStore:
                         "section": "activity_timeline",
                     }
                 )
+        survey_stations = profile.get("survey_stations")
+        if isinstance(survey_stations, list):
+            for row in survey_stations:
+                if not isinstance(row, dict):
+                    continue
+                md = row.get("measured_depth_ft")
+                if not isinstance(md, (int, float)):
+                    continue
+                detail = [
+                    part
+                    for part in [
+                        f"inc {row['inclination_deg']:g} deg" if isinstance(row.get("inclination_deg"), (int, float)) else "",
+                        f"azi {row['azimuth_deg']:g} deg" if isinstance(row.get("azimuth_deg"), (int, float)) else "",
+                        f"tvd {row['true_vertical_depth_ft']:g} ft"
+                        if isinstance(row.get("true_vertical_depth_ft"), (int, float))
+                        else "",
+                        f"dls {row['dogleg_severity_dp100ft']:g} deg/100ft"
+                        if isinstance(row.get("dogleg_severity_dp100ft"), (int, float))
+                        else "",
+                        "conflict" if row.get("conflict") else "",
+                    ]
+                    if part
+                ]
+                page = row.get("page")
+                label = f"MD {md:g} ft"
+                records.append(
+                    {
+                        "text": f"PDF survey station {label}: {', '.join(detail)}" if detail else f"PDF survey station {label}",
+                        "page": page if isinstance(page, int) and page > 0 else 1,
+                        "field": "survey_station",
+                        "label": label,
+                        "section": "survey_stations",
+                    }
+                )
         return records
 
     @staticmethod
@@ -4325,6 +4758,59 @@ class LocalStateStore:
             if rows:
                 return rows
         return []
+
+    @staticmethod
+    def _survey_rows_from_profile(profile: dict[str, object]) -> list[dict[str, object]]:
+        rows = profile.get("survey_stations") if isinstance(profile, dict) else None
+        result: list[dict[str, object]] = []
+        if not isinstance(rows, list):
+            return result
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            md = LocalStateStore._as_float(row.get("measured_depth_ft"))
+            if md is None or md < 0:
+                continue
+            result.append(
+                {
+                    "measured_depth_ft": md,
+                    "inclination_deg": LocalStateStore._as_float(row.get("inclination_deg")),
+                    "azimuth_deg": LocalStateStore._as_float(row.get("azimuth_deg")),
+                    "true_vertical_depth_ft": LocalStateStore._as_float(row.get("true_vertical_depth_ft")),
+                    "dogleg_severity_dp100ft": LocalStateStore._as_float(row.get("dogleg_severity_dp100ft")),
+                    "north_south_ft": LocalStateStore._as_float(row.get("north_south_ft")),
+                    "east_west_ft": LocalStateStore._as_float(row.get("east_west_ft")),
+                    "station_id": str(row["station_id"]).strip() if row.get("station_id") else None,
+                    "survey_type": str(row["survey_type"]).strip() if row.get("survey_type") else None,
+                    "source": "source",
+                    "page": row.get("page") if isinstance(row.get("page"), int) else None,
+                    "confidence": LocalStateStore._as_float(row.get("confidence")),
+                    "conflict": bool(row.get("conflict")),
+                }
+            )
+        return result
+
+    @staticmethod
+    def survey_rows_from_profiles(profiles: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Shared survey-row selection for report draft and Monday Report JSON.
+
+        Uses the same deterministically ranked profiles as the casing/timeline
+        builders (already workspace-scoped by the caller) and takes the first
+        profile that yields valid stations. Survey stations have **no**
+        reference fallback — no evidence means an empty list.
+        """
+        for profile in profiles:
+            rows = LocalStateStore._survey_rows_from_profile(profile)
+            if rows:
+                return rows
+        return []
+
+    @staticmethod
+    def survey_truncation_from_profiles(profiles: list[dict[str, object]]) -> bool:
+        for profile in profiles:
+            if LocalStateStore._survey_rows_from_profile(profile):
+                return bool(profile.get("survey_truncated"))
+        return False
 
     @staticmethod
     def reference_casing_rows() -> list[dict[str, object]]:
