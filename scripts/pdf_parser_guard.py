@@ -366,6 +366,19 @@ def main() -> int:
                 {"survey": draft_survey, "survey_source": draft.get("survey_source")},
             )
         )
+        checks.append(
+            assert_check(
+                "Trajectory stays honestly 'none' when conflicts separate the eligible stations",
+                # The fixture's two eligible stations (8000 and the metre-derived
+                # 8530.2) are separated by the same-MD conflict pair, so the
+                # calculation must not bridge them, and source rows stay intact.
+                draft.get("trajectory_source") == "none"
+                and draft.get("trajectory") is None
+                and len(draft_survey) == 4
+                and any(abs(float(row.get("measured_depth_ft") or 0) - 8000.0) < 0.01 for row in draft_survey),
+                {"trajectory_source": draft.get("trajectory_source")},
+            )
+        )
 
         from backend.app.store import LocalStateStore
 

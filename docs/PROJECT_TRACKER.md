@@ -11,12 +11,12 @@ The executable MVP path is now phase-gated end to end and the local client-data 
 | Accepted now | Pass | Executable MVP is working with Client Home, rig/MR list access, chat, report studio, Benchmarking, roadmap, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
 | Safe operating mode | Pass | Demo mode remains local; approved client mode uses PostgreSQL/RLS state, Redis queue, protected storage, API key, signing secret, and reviewed fixture/eval evidence. | Keep secrets out of Git and regenerate approval after environment changes. |
 | Real-client approval | Pass | Live client approval reports `APPROVED`; GA readiness reports `GA_READY`; readiness has zero blockers. | Run controlled client-package dry runs before broad distribution. |
-| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, and directional survey-station extraction are complete; remaining lanes: trajectory geometry and directional/hydraulics visualization, FORGE eval promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull trajectory geometry and directional/hydraulics visualization, then controlled client-package trials. |
+| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, directional survey-station extraction, and the review-gated minimum-curvature trajectory calculation are complete; remaining lanes: directional/trajectory and hydraulics visualization, FORGE eval promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull directional/trajectory and hydraulics visualization, then controlled client-package trials. |
 
 ## Current Tracker
 
 - Working now: Client Home, rig/MR list access, chat-first workflow, Benchmarking module, batched direct/ZIP upload, SHA-256 storage, malware baseline blocking, parser-worker queue, source chunks, failure extraction, validation tasks, Monday Report creation, JSON/CSV/HTML/PDF/XLSX exports, signed source/export downloads, redacted audit logs, and readiness reporting.
-- Recently added: typed source locators, readable citation labels, source-file actions directly from chat citation cards, command-center chat workflow, source-backed Report Studio drafts, MR-SCHEMA-1 DDR/BHA/mud/survey/directional report variants, client issue-readiness board, Benchmarking with Gordon/Noble seed config, critical anomaly workflow, diagnostic recommendations, MOC evidence exports, Product Roadmap execution board, direct-upload persistence batching, manifest-backed fixture readiness, Gemma 4 E2B local AI default, single-file partner preview packaging, page-aware PDF chunks, native PDF table row citations, high-confidence PDF report profiles, configurable local OCR extraction into image-page chunks, source-driven casing/timeline schematic rows with provenance, and source-only directional survey-station extraction with page citations, conflict flags, and an honest no-source state.
+- Recently added: typed source locators, readable citation labels, source-file actions directly from chat citation cards, command-center chat workflow, source-backed Report Studio drafts, MR-SCHEMA-1 DDR/BHA/mud/survey/directional report variants, client issue-readiness board, Benchmarking with Gordon/Noble seed config, critical anomaly workflow, diagnostic recommendations, MOC evidence exports, Product Roadmap execution board, direct-upload persistence batching, manifest-backed fixture readiness, Gemma 4 E2B local AI default, single-file partner preview packaging, page-aware PDF chunks, native PDF table row citations, high-confidence PDF report profiles, configurable local OCR extraction into image-page chunks, source-driven casing/timeline schematic rows with provenance, source-only directional survey-station extraction with page citations, conflict flags, and an honest no-source state, and a documented review-gated minimum-curvature trajectory calculation (`docs/TRAJECTORY_CALCULATION.md`) that never overwrites source values.
 - Real-client posture: approved in the local client environment with active PostgreSQL, active Redis, local AI, security configuration, golden fixture/eval evidence, and reviewed fixture attestation all passing.
 - Operator command: run `pnpm run audit:all` after every meaningful code change; run `pnpm run package:partner-approval` before sending the partner ZIP; run `pnpm run package:client-approval` to write the current real-client approval/blocker report.
 
@@ -132,12 +132,53 @@ Evidence paths: `output/screenshots/ui-quality/03-report-studio.png` (Directiona
 
 Notes:
 
-- Survey stations are **source extraction only**: no engineering calculation was introduced (no minimum-curvature, no TVD/DLS/northing/easting derivation, no interpolation, no trajectory chart), and missing optional values stay missing.
+- Survey stations are **source extraction only**: the survey-extraction increment introduced no engineering calculation, and missing optional values stay missing. (The later minimum-curvature increment below adds calculated geometry in a structurally separate, review-gated block without changing this extractor.)
 - Conflicting same-MD rows and decreasing-MD evidence remain visible with `conflict = true` and confidence clamped to `<= 0.5`; nothing is silently merged, repaired, or discarded.
 - Tenant/workspace isolation verified: another workspace's survey profile cannot populate a draft; citations stay within the owning workspace.
 - Benchmarking behaviour is unchanged, and `market_benchmark.current_dls` is untouched; no benchmark measurement is auto-populated from survey data.
 - Synthetic partner-demo approval remains separate from real-client production approval.
 - Follow-up: trajectory geometry (documented minimum-curvature calculator), directional/trajectory visualization, hydraulics visual extraction, formatted HTML/PDF/XLSX export provenance, field-level correction workflow, local-LLM extraction router (Phase 06), and normalized PostgreSQL repositories (Phase 04).
+
+## 2026-07-16 Minimum-Curvature Trajectory Calculation Evidence
+
+Increment completed on `2026-07-16` from base revision `a0e6d7fc3232ae113e1b0c7871418eed25c75bf9` (merged survey-station `main`) on branch `feat/trajectory-min-curvature`. Scope: a documented, test-backed **minimum-curvature calculation foundation** (`minimum_curvature v1`, specification in `docs/TRAJECTORY_CALCULATION.md`) derives per-interval dogleg/DLS/ΔTVD/ΔN-S/ΔE-W and cumulative positions from calculation-eligible source survey stations. **Calculation only — no trajectory chart.** Every result carries `source="calculated"`, `review_state="review_required"`, method and version; source survey values are never overwritten, conflicts and gaps are skipped per reason and never bridged, planned/actual sequences stay separate, per-axis coordinate anchoring is explicit (`source_absolute`/`relative_first_station`/`none` — relative values are never presented as absolute well coordinates), the near-antipodal singularity fails safely, and the pure result is deterministic and timestamp-free. This is a drafting aid, **not certified directional-survey software**, and calculated DLS is never written into Benchmarking.
+
+Files changed:
+
+- `docs/TRAJECTORY_CALCULATION.md` — required technical specification: canonical formulas, unit/coordinate conventions, zero/near-zero/antipodal numerical policy, anchoring, provenance, no-overwrite policy, worked test vectors, engineering-review disclaimer.
+- `backend/app/trajectory.py` — pure deterministic module (`dogleg_angle_rad`, `ratio_factor`, `calculate_minimum_curvature_interval`, `calculate_trajectory`) with no store/API/filesystem/env/timestamp dependencies.
+- `backend/app/schemas.py` — `TrajectoryCoordinateReference`, `TrajectoryAnchor`, `TrajectoryInterval`, `CalculatedTrajectoryStation`, `TrajectorySkipSummary`, `TrajectoryCalculation`; additive `trajectory`/`trajectory_source` on `ReportDraftResponse`.
+- `backend/app/store.py` — shared `trajectory_from_survey_rows` builder used by both the report draft and `morning_report.trajectory_calculation` (+ `trajectory_source`) so draft and Monday Report JSON stay identical.
+- `backend/app/main.py` — draft population and hash-chained `report_draft.generate` audit metadata (method/version, review state, segment/interval/eligible counts, skip totals, coordinate-reference modes).
+- `src/lib/api.ts` — exact TypeScript mirrors (`ApiTrajectoryCalculation` et al.) plus optional draft fields.
+- `src/components/ReportStudio.tsx`, `src/styles.css` — side-by-side `TVD calc`/`DLS calc` columns labelled `Calculated · minimum curvature v1 · review required`, informational source/calculated delta notes (no pass/fail engineering tolerance), calculation summary with reference modes and skip counts, keyboard-accessible calculated N/S–E/W details block, `—` for excluded rows.
+- `scripts/trajectory_calculation_guard.py` + `package.json` (`audit:trajectory-calculation`, wired into `audit:all`) — 31 behavioural vectors including the exact worked example (MD 3500/15°/20° → 3600/25°/45°), zero/near-zero continuity, antipodal safe failure, no-bridge segmentation, anchoring modes, no-overwrite, determinism, and a 200-station bounded set.
+- `scripts/report_draft_guard.py`, `scripts/pdf_parser_guard.py`, `scripts/ui_quality_e2e.mjs` — integration coverage: calculated interval with mixed anchors and audit provenance, no-bridge through the conflict block (honest `trajectory_source="none"` end-to-end from a real PDF), draft↔Monday-Report-JSON equality, source-vs-calculated disagreement without overwrite, and a UI check that no calculation claim renders without stations.
+
+| Final command | Exit | Evidence |
+|---|---:|---|
+| `python -m py_compile backend/app/*.py` | 0 | Backend modules incl. `trajectory.py` compile. |
+| `pnpm run build` | 0 | `tsc` typecheck and Vite production build passed. |
+| `pnpm run audit:trajectory-calculation` | 0 | 31/31 vectors passed. |
+| `pnpm run audit:pdf-parser` | 0 | 22/22 checks (incl. honest no-bridge trajectory "none" from real PDF parsing). |
+| `pnpm run audit:report-draft` | 0 | 21/21 checks (calc interval, mixed anchors, no-overwrite, JSON equality, audit provenance). |
+| `pnpm run audit:report-variants` | 0 | 11/11 retained. |
+| `pnpm run audit:source-lineage` | 0 | 6/6 retained. |
+| `pnpm run audit:benchmarking` | 0 | 23/23 — Gordon `528`/Noble `588`, recommended-only diagnostics, review-required AI interpretations unchanged; no calculated-DLS auto-population. |
+| `pnpm run test:e2e` | 0 | 22/22 with fresh branch servers. |
+| `pnpm run test:ui` | 0 | 86/86 with zero browser errors (incl. no-fabricated-calculation UI check). |
+| `pnpm run audit:all` | 0 | Full chain: 364 PASS, 0 FAIL. One environmental rerun: the temp-dir ripgrep copy used by the stale-branding scan had been cleaned; the machine's installed ripgrep binary was restored and the chain passed with no guard changes. |
+| `pnpm run ga:readiness` | 1 | `GA_BLOCKED`: software-owned GA checks pass (**0 software blockers**); remaining blockers are configuration/external-infrastructure/reviewed-evidence requirements in the current environment. Not client/production authorization. |
+| `pnpm run report:ui-screenshots` | 0 | UI evidence PDF regenerated and visually reviewed (survey empty state intact, no calculation claims without stations, Benchmarking/Roadmap unchanged). |
+
+Evidence paths: `output/screenshots/ui-quality/03-report-studio.png`, `04-benchmarking.png`, `10-roadmap.png` (unchanged order), `output/pdf/monday_report_ui_quality_screenshots.pdf`, `output/qa/ui_quality_e2e_manifest.json`.
+
+Notes:
+
+- The calculation block is structurally separate from source stations; source TVD/DLS/N-S/E-W are immutable and disagreements render side-by-side with an informational delta only.
+- `input_confidence_min` reflects the lowest source-extraction confidence among input stations — never numerical accuracy or certification.
+- Synthetic partner-demo approval remains separate from real-client production approval.
+- Follow-up: directional/trajectory visualization (chart), hydraulics extraction, formatted HTML/PDF/XLSX export provenance, field-level correction workflow, local-LLM extraction router (Phase 06), normalized PostgreSQL repositories (Phase 04).
 
 ## Phase Gate Rule
 
@@ -170,6 +211,7 @@ Every implementation slice must pass these checks before it is considered accept
 - Parser/OCR fixture eval guard: `pnpm run audit:parser-fixture-evals`
 - Parser/OCR eval report generator guard: `pnpm run audit:parser-fixture-report`
 - PDF parser guard: `pnpm run audit:pdf-parser`
+- Trajectory calculation guard: `pnpm run audit:trajectory-calculation`
 - OCR routing guard: `pnpm run audit:ocr-routing`
 - OCR extraction guard: `pnpm run audit:ocr-extraction`
 - Local AI runtime status guard: `pnpm run audit:local-ai`
@@ -218,6 +260,7 @@ pnpm run audit:golden-fixtures
 pnpm run audit:parser-fixture-evals
 pnpm run audit:parser-fixture-report
 pnpm run audit:pdf-parser
+pnpm run audit:trajectory-calculation
 pnpm run audit:ocr-routing
 pnpm run audit:ocr-extraction
 pnpm run audit:local-ai
@@ -254,10 +297,10 @@ pnpm run audit:all
 | 06 | Active | Local AI extraction | Deterministic scaffold extracts cited MWD failures, NPT hours, company, and validation tasks from parsed chunks; local AI defaults to Ollama `gemma4:e2b` and verifies the pinned model is available | Wire Ollama/LM Studio router, strict schemas, confidence scoring, and metrics |
 | 07 | Complete | Validated exports | E2E verifies unresolved validation blocks export, validates extracted failures, creates report, exports JSON/CSV/HTML/PDF/XLSX artifacts, inspects artifact signatures, and downloads through signed URLs | Polish report templates |
 | 08 | Complete | Real-client readiness | Live client-data approval is APPROVED with PostgreSQL/RLS, Redis, API key, signing secret, protected storage, retention, malware scanner, parser/OCR evals, reviewed fixture attestation, and local Gemma runtime | Run controlled client-package dry runs and maintain approval evidence |
-| 09 | Complete | Morning report studio | Chat command center and Report Studio now show workflow steps, insight cards, risk register, tool actions, technical telemetry, source-backed draft generation, DDR/BHA/mud/survey/directional variants, issue-readiness board, source-driven casing/well schematic with provenance, AI plan checks, source-driven activity timeline, a source-only directional survey-station table with conflict flags, and draft export | Extend source-driven extraction (casing, timeline, and survey stations complete) to trajectory geometry, hydraulics visuals, and directional visualization |
+| 09 | Complete | Morning report studio | Chat command center and Report Studio now show workflow steps, insight cards, risk register, tool actions, technical telemetry, source-backed draft generation, DDR/BHA/mud/survey/directional variants, issue-readiness board, source-driven casing/well schematic with provenance, AI plan checks, source-driven activity timeline, a source-only directional survey-station table with conflict flags plus side-by-side review-gated minimum-curvature calculations, and draft export | Extend to directional/trajectory and hydraulics visualization (calculation foundation complete) |
 | 10 | Complete | Roadmap cockpit | Product Roadmap view, execution board, typed roadmap data, UI screenshot coverage, tracker gate, and `audit:roadmap` guard are wired | Use roadmap execution board lanes to pull the next client-pilot hardening slice |
 | 11 | Complete | Client landing and rig MR access | Client Home renders live workspaces, rig/MR list rows, import coverage, and JSON/CSV/HTML/PDF/XLSX export coverage | Add workspace-specific drilldowns and keep screenshot evidence refreshed |
-| 12 | Complete | Reviewed normal report schemas | MR-SCHEMA-1 defines DDR, BHA, mud, survey, and directional extraction markers, drafting checks, and output sections; casing schematic, 24 hr activity timeline, and directional survey stations now extract from source evidence with page provenance | Pull trajectory geometry, hydraulics visuals, and directional visualization next |
+| 12 | Complete | Reviewed normal report schemas | MR-SCHEMA-1 defines DDR, BHA, mud, survey, and directional extraction markers, drafting checks, and output sections; casing schematic, 24 hr activity timeline, and directional survey stations extract from source evidence with page provenance, and minimum-curvature trajectory geometry is calculated behind an explicit review gate | Pull directional/trajectory and hydraulics visualization next |
 
 ## Audit Notes
 

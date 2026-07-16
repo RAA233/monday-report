@@ -33,9 +33,13 @@ import {
 import {
   getReportDraft,
   type ApiActivitySegment,
+  type ApiCalculatedTrajectoryStation,
   type ApiCasingString,
   type ApiReportDraft,
-  type ApiSurveyStation
+  type ApiSurveyStation,
+  type ApiTrajectoryCoordinateReference,
+  type ApiTrajectoryInterval,
+  type ApiTrajectorySkipSummary
 } from "../lib/api";
 import { formatSourceCitation } from "../lib/citationFormat";
 
@@ -621,6 +625,13 @@ function DailyReportPreview({
   activeVariant
 }: DailyReportPreviewProps): JSX.Element {
   const surveyStations = evidenceDraft?.survey_stations ?? [];
+  const trajectory = evidenceDraft?.trajectory ?? null;
+  const calcStationByMd = new Map<number, ApiCalculatedTrajectoryStation>(
+    (trajectory?.stations ?? []).map((station) => [station.measured_depth_ft, station])
+  );
+  const calcIntervalByEndMd = new Map<number, ApiTrajectoryInterval>(
+    (trajectory?.intervals ?? []).map((interval) => [interval.md_end_ft, interval])
+  );
   const controlMatrix = buildControlMatrix(form, casing, activities, clientChecks, surveyStations.length);
   const casingHasSource = casing.some((item) => item.source === "source");
   const timelineHasSource = activities.some((item) => item.source === "source");
@@ -776,8 +787,23 @@ function DailyReportPreview({
         {surveyStations.length > 0 ? (
           <>
             <p className="schematic-provenance-note is-source">
-              Survey stations extracted from source evidence — values are source-only, never calculated.
+              Survey stations extracted from source evidence — source values are never overwritten by calculations.
             </p>
+            {trajectory && (
+              <p
+                className="schematic-provenance-note is-calculated"
+                aria-label="Trajectory calculation summary"
+              >
+                {`Calculated · minimum curvature ${trajectory.method_version} · review required — `}
+                {`${trajectory.interval_count} interval(s) across ${trajectory.segment_count} segment(s), `}
+                {`${trajectorySkipTotal(trajectory.skips)} skipped input(s), `}
+                {trajectoryReferenceLabel(trajectory.coordinate_reference)}
+                {typeof trajectory.input_confidence_min === "number"
+                  ? ` · min input confidence ${Math.round(trajectory.input_confidence_min * 100)}%`
+                  : ""}
+                {" · not certified survey computation"}
+              </p>
+            )}
             <div className="survey-table-wrap">
               <table className="survey-station-table">
                 <thead>
@@ -787,7 +813,9 @@ function DailyReportPreview({
                     <th scope="col">Inc (deg)</th>
                     <th scope="col">Azi (deg)</th>
                     <th scope="col">TVD (ft)</th>
+                    <th scope="col">TVD calc (ft)</th>
                     <th scope="col">DLS</th>
+                    <th scope="col">DLS calc</th>
                     <th scope="col">N/S (ft)</th>
                     <th scope="col">E/W (ft)</th>
                     <th scope="col">Type</th>
@@ -795,38 +823,88 @@ function DailyReportPreview({
                   </tr>
                 </thead>
                 <tbody>
-                  {surveyStations.map((station, index) => (
-                    <tr key={`survey-${station.measured_depth_ft}-${index}`}>
-                      <td>{station.station_id || `#${index + 1}`}</td>
-                      <td>{surveyNumber(station.measured_depth_ft)}</td>
-                      <td>{surveyNumber(station.inclination_deg)}</td>
-                      <td>{surveyNumber(station.azimuth_deg)}</td>
-                      <td>{surveyNumber(station.true_vertical_depth_ft)}</td>
-                      <td>{surveyNumber(station.dogleg_severity_dp100ft)}</td>
-                      <td>{surveyNumber(station.north_south_ft)}</td>
-                      <td>{surveyNumber(station.east_west_ft)}</td>
-                      <td>{station.survey_type || "—"}</td>
-                      <td>
-                        <span
-                          className="provenance-badge is-source"
-                          aria-label={`Survey station MD ${station.measured_depth_ft}: ${schematicProvenanceLabel(station)}`}
+                  {surveyStations.map((station, index) => {
+                    const calcStation = calcStationByMd.get(station.measured_depth_ft);
+                    const calcInterval = calcIntervalByEndMd.get(station.measured_depth_ft);
+                    const sourceTvd = station.true_vertical_depth_ft;
+                    const tvdDelta =
+                      calcStation && typeof sourceTvd === "number"
+                        ? Math.abs(calcStation.tvd_ft - sourceTvd)
+                        : null;
+                    return (
+                      <tr key={`survey-${station.measured_depth_ft}-${index}`}>
+                        <td>{station.station_id || `#${index + 1}`}</td>
+                        <td>{surveyNumber(station.measured_depth_ft)}</td>
+                        <td>{surveyNumber(station.inclination_deg)}</td>
+                        <td>{surveyNumber(station.azimuth_deg)}</td>
+                        <td>{surveyNumber(sourceTvd)}</td>
+                        <td
+                          className="is-calculated-cell"
+                          aria-label={
+                            calcStation
+                              ? `Calculated TVD, minimum curvature v1, review required: ${calcStation.tvd_ft} ft`
+                              : "No calculated TVD for this station"
+                          }
                         >
-                          {schematicProvenanceLabel(station)}
-                        </span>
-                        {station.conflict && (
+                          {calcStation ? surveyNumber(calcStation.tvd_ft) : "—"}
+                          {tvdDelta !== null && (
+                            <span className="calc-delta-note">{`Source/calculated delta: ${tvdDelta.toFixed(1)} ft — review`}</span>
+                          )}
+                        </td>
+                        <td>{surveyNumber(station.dogleg_severity_dp100ft)}</td>
+                        <td
+                          className="is-calculated-cell"
+                          aria-label={
+                            calcInterval
+                              ? `Calculated DLS, minimum curvature v1, review required: ${calcInterval.dls_deg_per_100ft} deg per 100 ft`
+                              : "No calculated DLS for this station"
+                          }
+                        >
+                          {calcInterval ? surveyNumber(calcInterval.dls_deg_per_100ft) : "—"}
+                        </td>
+                        <td>{surveyNumber(station.north_south_ft)}</td>
+                        <td>{surveyNumber(station.east_west_ft)}</td>
+                        <td>{station.survey_type || "—"}</td>
+                        <td>
                           <span
-                            className="provenance-badge is-conflict"
-                            aria-label={`Survey station MD ${station.measured_depth_ft}: conflicting source evidence requires review`}
+                            className="provenance-badge is-source"
+                            aria-label={`Survey station MD ${station.measured_depth_ft}: ${schematicProvenanceLabel(station)}`}
                           >
-                            Conflict — review
+                            {schematicProvenanceLabel(station)}
                           </span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                          {station.conflict && (
+                            <span
+                              className="provenance-badge is-conflict"
+                              aria-label={`Survey station MD ${station.measured_depth_ft}: conflicting source evidence requires review`}
+                            >
+                              Conflict — review
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
+            {trajectory && trajectory.stations.length > 0 && (
+              <details className="trajectory-positions">
+                <summary>
+                  Calculated positions (N/S, E/W) · minimum curvature {trajectory.method_version} · review required
+                </summary>
+                <ul aria-label="Calculated trajectory positions">
+                  {trajectory.stations.map((calcStation, index) => (
+                    <li key={`traj-${calcStation.measured_depth_ft}-${index}`}>
+                      {`MD ${surveyNumber(calcStation.measured_depth_ft)} ft (segment ${calcStation.segment}): `}
+                      {`N/S ${surveyNumber(calcStation.north_south_ft)} ft, E/W ${surveyNumber(calcStation.east_west_ft)} ft, TVD ${surveyNumber(calcStation.tvd_ft)} ft`}
+                      {calcStation.coordinate_reference.north_south === "relative_first_station"
+                        ? " — relative to first calculated station, not absolute well coordinates"
+                        : ""}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
           </>
         ) : (
           <p className="schematic-provenance-note is-reference">
@@ -1072,6 +1150,25 @@ function surveyNumber(value: number | null | undefined): string {
     return "—";
   }
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function trajectorySkipTotal(skips: ApiTrajectorySkipSummary): number {
+  return (
+    skips.conflict +
+    skips.missing_inclination +
+    skips.missing_azimuth +
+    skips.invalid_numeric +
+    skips.zero_md_interval +
+    skips.decreasing_md +
+    skips.antipodal_singularity +
+    skips.truncated
+  );
+}
+
+function trajectoryReferenceLabel(reference: ApiTrajectoryCoordinateReference): string {
+  const axisLabel = (mode: ApiTrajectoryCoordinateReference["tvd"]): string =>
+    mode === "source_absolute" ? "source-anchored" : mode === "relative_first_station" ? "relative" : "none";
+  return `TVD ${axisLabel(reference.tvd)} / N-S ${axisLabel(reference.north_south)} / E-W ${axisLabel(reference.east_west)}`;
 }
 
 function parseDecisionRows(value: string): ActivitySegment[] {

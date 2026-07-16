@@ -98,6 +98,38 @@ def main() -> int:
                     "confidence": 0.5,
                     "conflict": True,
                 },
+                # Contiguous eligible pair after the conflict block: drives one
+                # calculated minimum-curvature interval in a second segment with
+                # a source-TVD anchor (mixed coordinate reference) and a
+                # deliberate source-vs-calculated TVD disagreement at 9400 ft.
+                {
+                    "measured_depth_ft": 9000.0,
+                    "inclination_deg": 27.0,
+                    "azimuth_deg": 120.0,
+                    "true_vertical_depth_ft": 8500.0,
+                    "dogleg_severity_dp100ft": None,
+                    "north_south_ft": None,
+                    "east_west_ft": None,
+                    "station_id": "S-4",
+                    "survey_type": None,
+                    "page": 2,
+                    "confidence": 0.85,
+                    "conflict": False,
+                },
+                {
+                    "measured_depth_ft": 9400.0,
+                    "inclination_deg": 29.0,
+                    "azimuth_deg": 121.0,
+                    "true_vertical_depth_ft": 8880.0,
+                    "dogleg_severity_dp100ft": None,
+                    "north_south_ft": None,
+                    "east_west_ft": None,
+                    "station_id": "S-5",
+                    "survey_type": None,
+                    "page": 2,
+                    "confidence": 0.9,
+                    "conflict": False,
+                },
             ],
             "survey_truncated": False,
         }
@@ -253,7 +285,7 @@ def main() -> int:
             assert_check(
                 "Source-backed survey stations carry page/confidence provenance",
                 draft.survey_source == "source"
-                and len(draft.survey_stations) == 3
+                and len(draft.survey_stations) == 5
                 and all(row.source == "source" for row in draft.survey_stations)
                 and all(row.page is not None for row in draft.survey_stations)
                 and all(row.confidence is not None for row in draft.survey_stations)
@@ -265,6 +297,62 @@ def main() -> int:
                     for row in draft.survey_stations
                 ),
                 payload,
+            )
+        )
+        trajectory = draft.trajectory
+        checks.append(
+            assert_check(
+                "Trajectory calculation derives one interval with calculated provenance",
+                draft.trajectory_source == "calculated"
+                and trajectory is not None
+                and trajectory.method == "minimum_curvature"
+                and trajectory.method_version == "v1"
+                and trajectory.review_state == "review_required"
+                and trajectory.interval_count == 1
+                and trajectory.segment_count == 1
+                and trajectory.eligible_station_count == 3
+                and trajectory.skips.conflict == 2
+                and trajectory.input_confidence_min == 0.85
+                and trajectory.intervals[0].md_start_ft == 9000.0
+                and trajectory.intervals[0].md_end_ft == 9400.0
+                and trajectory.intervals[0].source == "calculated"
+                and abs(trajectory.intervals[0].dls_deg_per_100ft - 0.51) < 0.05
+                and abs(trajectory.intervals[0].delta_tvd_ft - 353.16) < 0.5,
+                trajectory.model_dump(mode="json") if trajectory else None,
+            )
+        )
+        checks.append(
+            assert_check(
+                "Trajectory never bridges the conflict block (no 8000->9000 interval)",
+                trajectory is not None
+                and all(interval.md_start_ft >= 9000.0 for interval in trajectory.intervals),
+                [interval.model_dump(mode="json") for interval in trajectory.intervals] if trajectory else None,
+            )
+        )
+        checks.append(
+            assert_check(
+                "Trajectory anchor uses source TVD with relative N/S and E/W (mixed reference)",
+                trajectory is not None
+                and trajectory.coordinate_reference.tvd == "source_absolute"
+                and trajectory.coordinate_reference.north_south == "relative_first_station"
+                and trajectory.coordinate_reference.east_west == "relative_first_station"
+                and trajectory.anchor is not None
+                and trajectory.anchor.measured_depth_ft == 9000.0
+                and trajectory.anchor.tvd_ft == 8500.0
+                and trajectory.stations[0].tvd_ft == 8500.0
+                and trajectory.stations[0].north_south_ft == 0.0,
+                trajectory.anchor.model_dump(mode="json") if trajectory and trajectory.anchor else None,
+            )
+        )
+        source_9400 = next(row for row in draft.survey_stations if row.measured_depth_ft == 9400.0)
+        calc_9400 = next(item for item in trajectory.stations if item.measured_depth_ft == 9400.0)
+        checks.append(
+            assert_check(
+                "Source and calculated TVD disagree side-by-side without overwrite",
+                source_9400.true_vertical_depth_ft == 8880.0
+                and abs(calc_9400.tvd_ft - 8853.2) < 1.0
+                and abs(calc_9400.tvd_ft - source_9400.true_vertical_depth_ft) > 20.0,
+                {"source_tvd": source_9400.true_vertical_depth_ft, "calculated_tvd": calc_9400.tvd_ft},
             )
         )
         conflict_stations = [row for row in draft.survey_stations if row.conflict]
@@ -303,6 +391,16 @@ def main() -> int:
                 and [bool(row.get("conflict")) for row in report_survey]
                 == [row.conflict for row in draft.survey_stations],
                 report_survey,
+            )
+        )
+        report_trajectory = report.report_json.get("morning_report", {}).get("trajectory_calculation")
+        checks.append(
+            assert_check(
+                "Monday Report JSON trajectory block matches the report draft exactly",
+                report.report_json.get("morning_report", {}).get("trajectory_source") == "calculated"
+                and trajectory is not None
+                and report_trajectory == trajectory.model_dump(mode="json"),
+                report_trajectory,
             )
         )
 
@@ -347,6 +445,13 @@ def main() -> int:
                 reference_payload,
             )
         )
+        checks.append(
+            assert_check(
+                "No survey evidence yields no trajectory calculation",
+                reference_draft.trajectory is None and reference_draft.trajectory_source == "none",
+                reference_payload,
+            )
+        )
 
         store.refresh()
         source_audit = next(
@@ -365,9 +470,15 @@ def main() -> int:
                 and int(source_audit.metadata.get("casing_source_rows", 0)) >= 2
                 and int(source_audit.metadata.get("timeline_source_rows", 0)) >= 2
                 and source_audit.metadata.get("survey_source") == "source"
-                and int(source_audit.metadata.get("survey_source_rows", 0)) == 3
+                and int(source_audit.metadata.get("survey_source_rows", 0)) == 5
                 and int(source_audit.metadata.get("survey_conflict_rows", 0)) == 2
                 and source_audit.metadata.get("survey_truncated") is False
+                and source_audit.metadata.get("trajectory_source") == "calculated"
+                and source_audit.metadata.get("trajectory_method") == "minimum_curvature v1"
+                and source_audit.metadata.get("trajectory_review_state") == "review_required"
+                and int(source_audit.metadata.get("trajectory_intervals", 0)) == 1
+                and int(source_audit.metadata.get("trajectory_segments", 0)) == 1
+                and "tvd:source_absolute" in str(source_audit.metadata.get("trajectory_reference"))
                 and source_audit.metadata.get("parser_version") == "pdf_report_profile_v1",
                 source_audit.metadata if source_audit else None,
             )
@@ -387,7 +498,9 @@ def main() -> int:
                 and reference_audit.metadata.get("schematic_source") == "reference"
                 and int(reference_audit.metadata.get("casing_reference_rows", 0)) == 4
                 and reference_audit.metadata.get("survey_source") == "none"
-                and int(reference_audit.metadata.get("survey_source_rows", 0)) == 0,
+                and int(reference_audit.metadata.get("survey_source_rows", 0)) == 0
+                and reference_audit.metadata.get("trajectory_source") == "none"
+                and int(reference_audit.metadata.get("trajectory_intervals", 0)) == 0,
                 reference_audit.metadata if reference_audit else None,
             )
         )
