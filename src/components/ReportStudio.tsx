@@ -35,6 +35,7 @@ import {
   type ApiActivitySegment,
   type ApiCalculatedTrajectoryStation,
   type ApiCasingString,
+  type ApiHydraulicObservation,
   type ApiReportDraft,
   type ApiSurveyStation,
   type ApiTrajectoryCoordinateReference,
@@ -627,6 +628,7 @@ function DailyReportPreview({
   activeVariant
 }: DailyReportPreviewProps): JSX.Element {
   const surveyStations = evidenceDraft?.survey_stations ?? [];
+  const hydraulicsObservations = evidenceDraft?.hydraulics_observations ?? [];
   const trajectory = evidenceDraft?.trajectory ?? null;
   const calcStationByMd = new Map<number, ApiCalculatedTrajectoryStation>(
     (trajectory?.stations ?? []).map((station) => [station.measured_depth_ft, station])
@@ -634,7 +636,14 @@ function DailyReportPreview({
   const calcIntervalByEndMd = new Map<number, ApiTrajectoryInterval>(
     (trajectory?.intervals ?? []).map((interval) => [interval.md_end_ft, interval])
   );
-  const controlMatrix = buildControlMatrix(form, casing, activities, clientChecks, surveyStations.length);
+  const controlMatrix = buildControlMatrix(
+    form,
+    casing,
+    activities,
+    clientChecks,
+    surveyStations.length,
+    hydraulicsObservations.length
+  );
   const casingHasSource = casing.some((item) => item.source === "source");
   const timelineHasSource = activities.some((item) => item.source === "source");
 
@@ -917,6 +926,84 @@ function DailyReportPreview({
         )}
       </section>
 
+      <section className="report-section" aria-label="Hydraulics observations">
+        <div className="report-section-title">
+          <Gauge size={17} aria-hidden="true" />
+          <h3>Hydraulics observations</h3>
+        </div>
+        {hydraulicsObservations.length > 0 ? (
+          <>
+            <p className="schematic-provenance-note is-source">
+              Source-derived observations — informational and review-required. Hydraulics and
+              Torque &amp; Drag diagnostics remain recommended-only.
+            </p>
+            <div className="survey-table-wrap">
+              <table className="survey-station-table hydraulics-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Measurement</th>
+                    <th scope="col">Value</th>
+                    <th scope="col">Source value</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Time</th>
+                    <th scope="col">Equipment / system</th>
+                    <th scope="col">Evidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {hydraulicsObservations.map((observation, index) => (
+                    <tr key={`hyd-${observation.measurement}-${index}`}>
+                      <td>{hydraulicMeasurementLabel(observation.measurement)}</td>
+                      <td>
+                        {typeof observation.value === "number"
+                          ? `${surveyNumber(observation.value)} ${observation.unit ?? ""}`.trim()
+                          : "—"}
+                      </td>
+                      <td>{observation.source_value_text}</td>
+                      <td>{observation.observation_status}</td>
+                      <td>{observation.activity_time || observation.activity_time_source_text || "—"}</td>
+                      <td>
+                        {[observation.equipment_label, observation.fluid_system_label]
+                          .filter(Boolean)
+                          .join(" · ") || "—"}
+                      </td>
+                      <td>
+                        <span
+                          className="provenance-badge is-source"
+                          aria-label={`${hydraulicMeasurementLabel(observation.measurement)}: ${schematicProvenanceLabel(observation)}`}
+                        >
+                          {schematicProvenanceLabel(observation)}
+                        </span>
+                        {observation.conflict && (
+                          <span
+                            className="provenance-badge is-conflict"
+                            aria-label={`${hydraulicMeasurementLabel(observation.measurement)}: conflicting same-context source values require review`}
+                          >
+                            Conflict — review
+                          </span>
+                        )}
+                        {observation.review_flag && (
+                          <span
+                            className="provenance-badge is-conflict"
+                            aria-label={`${hydraulicMeasurementLabel(observation.measurement)}: ${observation.review_reason ?? "source value requires review"}`}
+                          >
+                            Source value — review
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          <p className="schematic-provenance-note is-reference">
+            No source hydraulics observations — confirm or enter from DDR
+          </p>
+        )}
+      </section>
+
       <section className="report-section">
         <div className="report-section-title">
           <ClipboardList size={17} aria-hidden="true" />
@@ -1154,6 +1241,20 @@ function surveyNumber(value: number | null | undefined): string {
     return "—";
   }
   return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function hydraulicMeasurementLabel(measurement: ApiHydraulicObservation["measurement"]): string {
+  const labels: Record<ApiHydraulicObservation["measurement"], string> = {
+    flow_rate: "Flow rate",
+    standpipe_pressure: "Standpipe pressure",
+    mud_weight: "Mud weight",
+    ecd: "ECD",
+    plastic_viscosity: "Plastic viscosity",
+    yield_point: "Yield point",
+    pump_rate: "Pump rate",
+    nozzle_configuration: "Nozzle configuration"
+  };
+  return labels[measurement];
 }
 
 function trajectorySkipTotal(skips: ApiTrajectorySkipSummary): number {
@@ -1428,7 +1529,8 @@ function buildControlMatrix(
   casing: CasingInterval[],
   activities: ActivitySegment[],
   clientChecks: string[],
-  surveyStationCount = 0
+  surveyStationCount = 0,
+  hydraulicsObservationCount = 0
 ): ControlMatrixItem[] {
   const safetyReady = Boolean(form.safety.trim());
   const depthReady = parseDepth(form.mdFt) > 0 && parseDepth(form.tvdFt) > 0;
@@ -1443,7 +1545,9 @@ function buildControlMatrix(
     {
       label: "Hydraulics",
       value: form.mudWeight.trim() ? "drafted" : "needs mud",
-      detail: `Mud ${form.mudWeight || "not entered"}; confirm flow, SPP, ECD, and rheology from source.`,
+      detail: `Mud ${form.mudWeight || "not entered"}; confirm flow, SPP, ECD, and rheology from source.${
+        hydraulicsObservationCount > 0 ? ` ${hydraulicsObservationCount} source observation(s).` : ""
+      }`,
     },
     {
       label: "Well control",

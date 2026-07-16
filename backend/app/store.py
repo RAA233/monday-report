@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import mimetypes
 import os
 import re
@@ -1546,6 +1547,11 @@ class LocalStateStore:
         # auto-populated from calculated DLS.
         trajectory_calculation = self.trajectory_from_survey_rows(survey_rows)
         trajectory_source = "calculated" if trajectory_calculation else "none"
+        # Source-derived hydraulics observations: informational and
+        # review-required; Hydraulics/T&D diagnostics remain recommended-only
+        # and are never created or altered by extraction.
+        hydraulics_rows = self.hydraulics_rows_from_profiles(report_profiles)
+        hydraulics_source = "source" if hydraulics_rows else "none"
         report = MondayReport(
             tenant_id=self.tenant.id,
             workspace_id=payload.workspace_id,
@@ -1670,6 +1676,8 @@ class LocalStateStore:
                     if trajectory_calculation
                     else None,
                     "trajectory_source": trajectory_source,
+                    "hydraulics_observations": hydraulics_rows,
+                    "hydraulics_source": hydraulics_source,
                     "market_benchmark": {
                         "current_ft_per_day": benchmark_status.current_ft_per_day,
                         "seven_day_average_ft_per_day": benchmark_status.seven_day_average_ft_per_day,
@@ -3886,7 +3894,12 @@ class LocalStateStore:
         casing_strings = LocalStateStore._extract_casing_strings(page_lines)
         activity_timeline = LocalStateStore._extract_activity_timeline(page_lines, tables)
         survey_stations, survey_truncated = LocalStateStore._extract_survey_stations(page_lines, tables)
-        structured_score = len(casing_strings) + len(activity_timeline) + len(survey_stations)
+        hydraulics_observations, hydraulics_truncated = LocalStateStore._extract_hydraulics_observations(
+            page_lines, tables
+        )
+        structured_score = (
+            len(casing_strings) + len(activity_timeline) + len(survey_stations) + len(hydraulics_observations)
+        )
         marker_score = sum(1 for value in section_presence.values() if value)
         field_score = len(fields) + len(sections)
         if field_score < 2 and marker_score < 2 and structured_score < 2:
@@ -3912,6 +3925,10 @@ class LocalStateStore:
             # Additive pdf_report_profile_v1 extension: structured survey stations.
             "survey_stations": survey_stations,
             "survey_truncated": survey_truncated,
+            # Additive extension: source-derived hydraulics observations
+            # (deterministic_hydraulics v1; explicit units only).
+            "hydraulics_observations": hydraulics_observations,
+            "hydraulics_truncated": hydraulics_truncated,
         }
 
     @staticmethod
@@ -4490,6 +4507,349 @@ class LocalStateStore:
         )
         return deduped
 
+    # ------------------------------------------------------------------
+    # Hydraulics observation extraction (deterministic_hydraulics v1).
+    # Source extraction only with explicit recognized units; no hydraulic
+    # calculation, no recommendation coupling, no Benchmarking writes.
+    # ------------------------------------------------------------------
+
+    HYDRAULICS_PARSER_METHOD = "deterministic_hydraulics"
+    HYDRAULICS_PARSER_VERSION = "v1"
+
+    # measurement -> (label regex, {unit regex -> (canonical unit, factor)})
+    _HYDRAULIC_MEASUREMENTS: dict[str, tuple[str, dict[str, tuple[str, float]]]] = {
+        "flow_rate": (
+            r"(?:flow\s*rate|pump\s*output|flow)",
+            {
+                r"gpm|gal/min": ("gpm", 1.0),
+                r"l/min|lpm|litres?/min|liters?/min": ("gpm", 1.0 / 3.785411784),
+            },
+        ),
+        "standpipe_pressure": (
+            r"(?:standpipe\s*pressure|spp)",
+            {
+                r"psi": ("psi", 1.0),
+                r"kpa": ("psi", 0.1450377377),
+            },
+        ),
+        "mud_weight": (
+            r"(?:mud\s*(?:weight|wt|density)|mw)",
+            {
+                r"ppg|lb/gal": ("ppg", 1.0),
+                r"sg|s\.g\.": ("ppg", 8.345404452),
+            },
+        ),
+        "ecd": (
+            r"(?:equivalent\s*circulating\s*density|ecd)",
+            {
+                r"ppg|lb/gal": ("ppg", 1.0),
+                r"sg|s\.g\.": ("ppg", 8.345404452),
+            },
+        ),
+        "plastic_viscosity": (
+            r"(?:plastic\s*viscosity|pv)",
+            {r"cp": ("cP", 1.0)},
+        ),
+        "yield_point": (
+            r"(?:yield\s*point|yp)",
+            {r"lbf?/100\s*ft2|lbf?/100\s*ft²|lb/100ft2": ("lbf/100ft2", 1.0)},
+        ),
+        "pump_rate": (
+            r"(?:pump\s*rate|pump\s*speed|strokes)",
+            {r"spm|strokes?/min": ("spm", 1.0)},
+        ),
+    }
+
+    # Documented review triggers: generous order-of-magnitude bands used only
+    # to set review_flag on structurally valid values. They are NOT engineering
+    # acceptance thresholds; flagged rows are always retained.
+    _HYDRAULIC_REVIEW_BANDS: dict[str, tuple[float, float]] = {
+        "flow_rate": (0.0, 5000.0),
+        "standpipe_pressure": (0.0, 10000.0),
+        "mud_weight": (1.0, 30.0),
+        "ecd": (1.0, 30.0),
+        "plastic_viscosity": (0.0, 200.0),
+        "yield_point": (0.0, 200.0),
+        "pump_rate": (0.0, 400.0),
+    }
+
+    @staticmethod
+    def _extract_hydraulics_observations(
+        page_lines: list[tuple[int, str]],
+        tables: list[dict[str, object]],
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Deterministically parse labelled hydraulics observations.
+
+        Emits an observation only for an explicitly labelled measurement with
+        an explicit recognized unit (nozzle configuration is text-only).
+        Multiple labelled measurements on one line are all captured. Unitless
+        or ambiguous values (e.g. bare ``MW 1.15``) are never converted or
+        emitted. Returns (rows, truncated).
+        """
+        row_cap = 100
+        collected: list[dict[str, object]] = []
+        for page_number, line in page_lines:
+            collected.extend(LocalStateStore._hydraulics_from_line(line, page_number, base_confidence=0.55))
+        for table in tables:
+            collected.extend(LocalStateStore._hydraulics_from_table(table))
+        rows = LocalStateStore._finalize_hydraulics_rows(collected)
+        truncated = len(rows) > row_cap
+        if truncated:
+            rows = rows[:row_cap]
+        return rows, truncated
+
+    @staticmethod
+    def _hydraulics_line_context(line: str) -> dict[str, object]:
+        lower = line.lower()
+        time_match = re.search(r"\b([01]?\d|2[0-3]):[0-5]\d(?:\s*-\s*(?:[01]?\d|2[0-3]):[0-5]\d)?\b", line)
+        equipment_match = re.search(r"\bpump\s*(?:no\.?\s*)?([0-9]+|[a-z])\b", lower)
+        fluid_match = re.search(r"\b(active|kill|reserve|pill)\s*(?:mud|fluid|system|pit)\b", lower)
+        if re.search(r"\b(planned|programme?d?|proposed|plan)\b", lower):
+            status = "planned"
+        elif re.search(r"\b(observed|measured|actual|recorded)\b", lower):
+            status = "observed"
+        else:
+            status = "unknown"
+        return {
+            "activity_time": LocalStateStore._normalize_clock(time_match.group(0).split("-")[0]) if time_match else None,
+            "activity_time_source_text": time_match.group(0) if time_match else None,
+            "equipment_label": f"Pump {equipment_match.group(1).upper()}" if equipment_match else None,
+            "fluid_system_label": f"{fluid_match.group(1)} mud" if fluid_match else None,
+            "observation_status": status,
+        }
+
+    @staticmethod
+    def _hydraulics_from_line(line: str, page_number: int, base_confidence: float) -> list[dict[str, object]]:
+        context = LocalStateStore._hydraulics_line_context(line)
+        rows: list[dict[str, object]] = []
+        # Nozzle configuration is captured verbatim: no numeric value, no TFA,
+        # no inferred count or sizes.
+        nozzle_match = re.search(r"\bnozzles?(?:\s*configuration)?\s*[:=]\s*([0-9][^.;|]{0,60})", line, flags=re.IGNORECASE)
+        if nozzle_match:
+            rows.append(
+                LocalStateStore._hydraulic_row(
+                    measurement="nozzle_configuration",
+                    value=None,
+                    unit=None,
+                    source_value_text=nozzle_match.group(1).strip(),
+                    source_unit=None,
+                    context=context,
+                    page=page_number,
+                    confidence=base_confidence + 0.05,
+                )
+            )
+        for measurement, (label_pattern, units) in LocalStateStore._HYDRAULIC_MEASUREMENTS.items():
+            for match in re.finditer(
+                rf"\b{label_pattern}\b\s*[:=]?\s*(-?[0-9][0-9,]*(?:\.[0-9]+)?)\s*([a-z/\.²%0-9 ]{{0,14}})",
+                line,
+                flags=re.IGNORECASE,
+            ):
+                row = LocalStateStore._hydraulic_value_row(
+                    measurement, match.group(1), match.group(2), units, context, page_number, base_confidence
+                )
+                if row:
+                    rows.append(row)
+        return rows
+
+    @staticmethod
+    def _hydraulic_value_row(
+        measurement: str,
+        value_text: str,
+        unit_text: str,
+        units: dict[str, tuple[str, float]],
+        context: dict[str, object],
+        page_number: int,
+        base_confidence: float,
+    ) -> dict[str, object] | None:
+        matched_unit: str | None = None
+        canonical: tuple[str, float] | None = None
+        trimmed_unit = unit_text.strip().lower()
+        for unit_pattern, target in units.items():
+            unit_match = re.match(rf"^(?:{unit_pattern})\b", trimmed_unit)
+            if unit_match:
+                matched_unit = unit_match.group(0)
+                canonical = target
+                break
+        if canonical is None or matched_unit is None:
+            # Explicit units only: unitless or unrecognized-unit values are
+            # never converted, emitted, or guessed.
+            return None
+        try:
+            raw_value = float(value_text.replace(",", ""))
+        except ValueError:
+            return None
+        if not math.isfinite(raw_value):
+            return None
+        if raw_value < 0:
+            # Structurally impossible for every supported measurement.
+            return None
+        normalized = raw_value * canonical[1]
+        return LocalStateStore._hydraulic_row(
+            measurement=measurement,
+            value=round(normalized, 2),
+            unit=canonical[0],
+            source_value_text=f"{value_text} {matched_unit}".strip(),
+            source_unit=matched_unit,
+            context=context,
+            page=page_number,
+            confidence=base_confidence,
+        )
+
+    @staticmethod
+    def _hydraulic_row(
+        *,
+        measurement: str,
+        value: float | None,
+        unit: str | None,
+        source_value_text: str,
+        source_unit: str | None,
+        context: dict[str, object],
+        page: int,
+        confidence: float,
+    ) -> dict[str, object]:
+        review_flag = False
+        review_reason = None
+        band = LocalStateStore._HYDRAULIC_REVIEW_BANDS.get(measurement)
+        if band and isinstance(value, (int, float)) and not (band[0] <= value <= band[1]):
+            review_flag = True
+            review_reason = "source value requires review"
+        adjusted = confidence
+        if context.get("observation_status") != "unknown":
+            adjusted += 0.05
+        if context.get("activity_time"):
+            adjusted += 0.05
+        return {
+            "measurement": measurement,
+            "value": value,
+            "unit": unit,
+            "source_value_text": source_value_text,
+            "source_unit": source_unit,
+            "observation_status": context.get("observation_status", "unknown"),
+            "equipment_label": context.get("equipment_label"),
+            "fluid_system_label": context.get("fluid_system_label"),
+            "context_note": None,
+            "activity_time": context.get("activity_time"),
+            "activity_time_source_text": context.get("activity_time_source_text"),
+            "parser_method": LocalStateStore.HYDRAULICS_PARSER_METHOD,
+            "parser_version": LocalStateStore.HYDRAULICS_PARSER_VERSION,
+            "page": page if isinstance(page, int) and page > 0 else 1,
+            "confidence": round(min(adjusted, 0.95), 3),
+            "conflict": False,
+            "review_flag": review_flag,
+            "review_reason": review_reason,
+        }
+
+    @staticmethod
+    def _hydraulics_from_table(table: dict[str, object]) -> list[dict[str, object]]:
+        table_rows = table.get("rows") if isinstance(table, dict) else None
+        page = table.get("page") if isinstance(table, dict) else None
+        if not isinstance(table_rows, list) or not table_rows:
+            return []
+        header = table_rows[0]
+        if not isinstance(header, list):
+            return []
+        columns: dict[int, tuple[str, dict[str, tuple[str, float]], str | None]] = {}
+        time_column: int | None = None
+        for index, raw_cell in enumerate(header):
+            cell = str(raw_cell).strip().lower()
+            if re.match(r"^time\b", cell):
+                time_column = index
+                continue
+            for measurement, (label_pattern, units) in LocalStateStore._HYDRAULIC_MEASUREMENTS.items():
+                if re.match(rf"^{label_pattern}\b", cell):
+                    header_unit = None
+                    unit_match = re.search(r"\(([^)]+)\)", cell)
+                    if unit_match:
+                        header_unit = unit_match.group(1).strip()
+                    columns[index] = (measurement, units, header_unit)
+                    break
+        if not columns:
+            return []
+        rows: list[dict[str, object]] = []
+        for table_row in table_rows[1:]:
+            if not isinstance(table_row, list):
+                continue
+            context = {
+                "activity_time": None,
+                "activity_time_source_text": None,
+                "equipment_label": None,
+                "fluid_system_label": None,
+                "observation_status": "unknown",
+            }
+            if time_column is not None and time_column < len(table_row):
+                time_text = str(table_row[time_column]).strip()
+                time_match = re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", time_text)
+                if time_match:
+                    context["activity_time"] = LocalStateStore._normalize_clock(time_text)
+                    context["activity_time_source_text"] = time_text
+                elif time_text:
+                    context["activity_time_source_text"] = time_text
+            for index, (measurement, units, header_unit) in columns.items():
+                if index >= len(table_row):
+                    continue
+                cell_text = str(table_row[index]).strip()
+                if not cell_text:
+                    continue
+                row = LocalStateStore._hydraulic_value_row(
+                    measurement, cell_text, header_unit or "", units, context, page if isinstance(page, int) else 1, 0.6
+                )
+                if row:
+                    rows.append(row)
+        return rows
+
+    @staticmethod
+    def _finalize_hydraulics_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Deduplicate exact repeats and flag same-context conflicts.
+
+        The conflict key includes measurement, time, status, equipment, and
+        fluid system — Pump 1 vs Pump 2, active vs kill mud, and planned vs
+        observed values are legitimately different contexts and never conflict
+        merely because their values differ.
+        """
+        deduped: list[dict[str, object]] = []
+        seen: set[tuple] = set()
+        for row in rows:
+            identity = (
+                row.get("measurement"),
+                row.get("value"),
+                row.get("source_value_text"),
+                row.get("observation_status"),
+                row.get("equipment_label"),
+                row.get("fluid_system_label"),
+                row.get("activity_time"),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            deduped.append(row)
+        by_context: dict[tuple, list[dict[str, object]]] = {}
+        for row in deduped:
+            key = (
+                row.get("measurement"),
+                row.get("activity_time"),
+                row.get("observation_status"),
+                row.get("equipment_label"),
+                row.get("fluid_system_label"),
+            )
+            by_context.setdefault(key, []).append(row)
+        for group in by_context.values():
+            values = {row.get("value") for row in group if row.get("value") is not None}
+            if len(values) > 1:
+                for row in group:
+                    row["conflict"] = True
+                    confidence = row.get("confidence")
+                    row["confidence"] = (
+                        round(min(float(confidence), 0.5), 3) if isinstance(confidence, (int, float)) else 0.5
+                    )
+        deduped.sort(
+            key=lambda row: (
+                str(row.get("measurement")),
+                str(row.get("activity_time") or ""),
+                int(row.get("page") or 0),
+            )
+        )
+        return deduped
+
     @staticmethod
     def _pdf_page_lines(pages: list[dict[str, object]]) -> list[tuple[int, str]]:
         lines: list[tuple[int, str]] = []
@@ -4663,6 +5023,37 @@ class LocalStateStore:
                         "section": "survey_stations",
                     }
                 )
+        hydraulics_observations = profile.get("hydraulics_observations")
+        if isinstance(hydraulics_observations, list):
+            for row in hydraulics_observations:
+                if not isinstance(row, dict):
+                    continue
+                measurement = str(row.get("measurement") or "").strip()
+                source_text = str(row.get("source_value_text") or "").strip()
+                if not measurement or not source_text:
+                    continue
+                context_bits = [
+                    part
+                    for part in [
+                        str(row.get("equipment_label") or ""),
+                        str(row.get("fluid_system_label") or ""),
+                        str(row.get("observation_status") or "") if row.get("observation_status") != "unknown" else "",
+                        str(row.get("activity_time") or ""),
+                    ]
+                    if part
+                ]
+                page = row.get("page")
+                label = LocalStateStore._humanize_report_key(measurement)
+                suffix = f" ({', '.join(context_bits)})" if context_bits else ""
+                records.append(
+                    {
+                        "text": f"PDF hydraulics {label}: {source_text}{suffix}",
+                        "page": page if isinstance(page, int) and page > 0 else 1,
+                        "field": "hydraulic_observation",
+                        "label": label,
+                        "section": "hydraulics_observations",
+                    }
+                )
         return records
 
     @staticmethod
@@ -4822,6 +5213,67 @@ class LocalStateStore:
         for profile in profiles:
             if LocalStateStore._survey_rows_from_profile(profile):
                 return bool(profile.get("survey_truncated"))
+        return False
+
+    @staticmethod
+    def _hydraulics_rows_from_profile(profile: dict[str, object]) -> list[dict[str, object]]:
+        rows = profile.get("hydraulics_observations") if isinstance(profile, dict) else None
+        result: list[dict[str, object]] = []
+        if not isinstance(rows, list):
+            return result
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            measurement = str(row.get("measurement") or "").strip()
+            source_text = str(row.get("source_value_text") or "").strip()
+            if not measurement or not source_text:
+                continue
+            result.append(
+                {
+                    "measurement": measurement,
+                    "value": LocalStateStore._as_float(row.get("value")),
+                    "unit": str(row["unit"]).strip() if row.get("unit") else None,
+                    "source_value_text": source_text,
+                    "source_unit": str(row["source_unit"]).strip() if row.get("source_unit") else None,
+                    "observation_status": str(row.get("observation_status") or "unknown"),
+                    "equipment_label": str(row["equipment_label"]).strip() if row.get("equipment_label") else None,
+                    "fluid_system_label": str(row["fluid_system_label"]).strip() if row.get("fluid_system_label") else None,
+                    "context_note": str(row["context_note"]).strip() if row.get("context_note") else None,
+                    "activity_time": str(row["activity_time"]).strip() if row.get("activity_time") else None,
+                    "activity_time_source_text": str(row["activity_time_source_text"]).strip()
+                    if row.get("activity_time_source_text")
+                    else None,
+                    "parser_method": LocalStateStore.HYDRAULICS_PARSER_METHOD,
+                    "parser_version": LocalStateStore.HYDRAULICS_PARSER_VERSION,
+                    "source": "source",
+                    "page": row.get("page") if isinstance(row.get("page"), int) else None,
+                    "confidence": LocalStateStore._as_float(row.get("confidence")),
+                    "conflict": bool(row.get("conflict")),
+                    "review_flag": bool(row.get("review_flag")),
+                    "review_reason": str(row["review_reason"]).strip() if row.get("review_reason") else None,
+                }
+            )
+        return result
+
+    @staticmethod
+    def hydraulics_rows_from_profiles(profiles: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Shared hydraulics-row selection for report draft and Monday Report JSON.
+
+        Same workspace-scoped, deterministically ranked profiles as the other
+        builders; first profile with observations wins. No fallback exists —
+        no evidence means an empty list (``hydraulics_source="none"``).
+        """
+        for profile in profiles:
+            rows = LocalStateStore._hydraulics_rows_from_profile(profile)
+            if rows:
+                return rows
+        return []
+
+    @staticmethod
+    def hydraulics_truncation_from_profiles(profiles: list[dict[str, object]]) -> bool:
+        for profile in profiles:
+            if LocalStateStore._hydraulics_rows_from_profile(profile):
+                return bool(profile.get("hydraulics_truncated"))
         return False
 
     @staticmethod
