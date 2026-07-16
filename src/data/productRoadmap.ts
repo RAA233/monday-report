@@ -103,7 +103,7 @@ export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
     id: "exec-next-pull",
     label: "Next audited pull",
     value: "schematic extraction",
-    detail: "Casing schematic, 24 hr activity timeline, directional survey stations, and review-gated minimum-curvature trajectory calculations are complete; directional/trajectory and hydraulics visualization remain the next pull.",
+    detail: "Casing schematic, timeline, survey stations, minimum-curvature calculations, and the segment-aware calculated plan view are complete; the vertical trajectory profile and hydraulics visualization remain the next pull.",
     command: "pnpm run audit:pdf-parser",
     tone: "warning"
   },
@@ -156,8 +156,8 @@ export const roadmapLanes: RoadmapLane[] = [
         owner: "Frontend + drilling SME",
         status: "complete",
         gate: "audit:report-variants",
-        evidence: "MR-SCHEMA-1 targets drive drafting; casing, timeline, and survey stations extract from source evidence with provenance, and minimum-curvature trajectory geometry is calculated side-by-side behind an explicit review gate without overwriting source values.",
-        next: "Build directional/trajectory and hydraulics visualization on the calculation foundation."
+        evidence: "MR-SCHEMA-1 targets drive drafting; casing, timeline, and survey stations extract with provenance, minimum-curvature geometry is review-gated, and the calculated plan view renders segment-aware paths with explicit relative-coordinate labelling.",
+        next: "Add the vertical trajectory profile and hydraulics visualization on the same reviewed geometry."
       },
       {
         id: "item-ui-execution-board",

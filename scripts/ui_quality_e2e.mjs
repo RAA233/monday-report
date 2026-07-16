@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,9 +6,11 @@ import { chromium } from "playwright";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const webBase = process.env.MONDAY_REPORT_WEB_BASE ?? "http://127.0.0.1:5173";
+const apiBase = process.env.MONDAY_REPORT_API_BASE ?? "http://127.0.0.1:8000";
 const screenshotDir = path.join(root, "output", "screenshots", "ui-quality");
 const manifestPath = path.join(root, "output", "qa", "ui_quality_e2e_manifest.json");
 const uploadFixturePath = path.join(root, "output", "qa", "ui_upload_fixture.txt");
+const trajectoryPdfPath = path.join(root, "output", "qa", "ui_trajectory_fixture.pdf");
 
 const views = [
   { label: "Client Home", title: /Advanced drilling reports without visual noise/i, file: "00-client-home.png" },
@@ -125,6 +128,48 @@ try {
       if (calcClaims !== 0) {
         throw new Error("Calculated trajectory text rendered without source survey stations");
       }
+      const planViewsWithoutData = await page.locator("svg.trajectory-plan-view").count();
+      record(
+        "Report Studio renders no plan view without stations",
+        planViewsWithoutData === 0,
+        `plan views with no survey stations: ${planViewsWithoutData}`
+      );
+
+      // Seed the deterministic survey fixture (expects a fresh/isolated server
+      // state so the pre-seed empty-state assertions above stay meaningful),
+      // then re-draft and prove the calculated plan view renders.
+      await seedTrajectoryFixture();
+      await openFresh(page);
+      await page.getByLabel("Primary", { exact: true }).getByRole("button", { name: view.label, exact: true }).click();
+      await expectText(page, view.title, "Report Studio reloaded after trajectory fixture");
+      await page.getByRole("button", { name: /Source draft/i }).click();
+      await expectText(page, /Source-backed draft ready/i, "Report Studio seeded source draft");
+      await expectText(page, /TVD calc/i, "Report Studio calculated TVD column");
+      await expectText(page, /Plan view \(E\/W vs N\/S\)/i, "Trajectory plan view rendered");
+      await expectText(page, /relative to the first calculated station/i, "Plan view relative-coordinate warning");
+      await expectText(page, /Not certified survey computation/i, "Plan view disclaimer");
+      const planPaths = page.locator("svg.trajectory-plan-view polyline.plan-path");
+      const planPathCount = await planPaths.count();
+      const pointCounts = [];
+      for (let index = 0; index < planPathCount; index += 1) {
+        const points = (await planPaths.nth(index).getAttribute("points")) ?? "";
+        pointCounts.push(points.trim().split(/\s+/).filter(Boolean).length);
+      }
+      const segmentPathsOk = planPathCount === 2 && pointCounts.every((count) => count === 2);
+      record(
+        "Plan view renders one path per segment and never bridges the conflict break",
+        segmentPathsOk,
+        `paths=${planPathCount} pointCounts=${pointCounts.join(",")} (expected 2 paths x 2 points)`
+      );
+      if (!segmentPathsOk) {
+        throw new Error("Plan view segment paths incorrect — possible bridge across skipped stations");
+      }
+      const svgTitle = (await page.locator("svg.trajectory-plan-view > title").textContent()) ?? "";
+      record(
+        "Plan view exposes accessible title/description",
+        svgTitle.includes("minimum curvature"),
+        svgTitle || "(missing svg title)"
+      );
       await page.getByRole("button", { name: /FORGE style/i }).click();
       await page.getByRole("tab", { name: /BHA/i }).click();
       await page.getByRole("button", { name: /Apply format/i }).click();
@@ -193,6 +238,59 @@ async function openFresh(activePage) {
   await activePage.goto(webBase, { waitUntil: "domcontentloaded", timeout: 30000 });
   await activePage.locator(".app-shell").waitFor({ state: "visible", timeout: 15000 });
   await activePage.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => undefined);
+}
+
+async function seedTrajectoryFixture() {
+  // Deterministic synthetic survey PDF: two eligible station pairs separated
+  // by a same-MD conflict pair, so the calculation yields exactly two
+  // segments (segment-break proof) with a source TVD anchor and relative
+  // N/S-E/W coordinates. Reuses the importable PDF builder from
+  // scripts/pdf_parser_guard.py rather than duplicating it.
+  const pythonBuilder = [
+    "import sys",
+    `sys.path.insert(0, ${JSON.stringify(root)})`,
+    "from scripts.pdf_parser_guard import build_pdf_fixture",
+    "lines = [",
+    "    'Daily Drilling Report',",
+    "    'Well: UI Plan View Fixture Well',",
+    "    'Survey Table',",
+    "    'MD (ft) | Inc (deg) | Azi (deg) | TVD (ft) | DLS (deg/100ft)',",
+    "    '8000 | 20.0 | 115.0 | 7600 | ',",
+    "    '8400 | 24.0 | 118.0 |  | ',",
+    "    '8600 | 25.0 | 120.0 |  | ',",
+    "    '8600 | 26.5 | 121.0 |  | ',",
+    "    '8900 | 27.0 | 122.0 |  | ',",
+    "    '9300 | 29.0 | 124.0 |  | ',",
+    "]",
+    `open(${JSON.stringify(trajectoryPdfPath)}, 'wb').write(build_pdf_fixture(['\\n'.join(lines)]))`,
+  ].join("\n");
+  execFileSync("python", ["-c", pythonBuilder], { cwd: root, stdio: "pipe" });
+
+  const workspacesResponse = await fetch(`${apiBase}/workspaces`);
+  if (!workspacesResponse.ok) {
+    throw new Error(`Trajectory fixture: workspace lookup failed (HTTP ${workspacesResponse.status})`);
+  }
+  const workspaces = await workspacesResponse.json();
+  if (!Array.isArray(workspaces) || workspaces.length === 0) {
+    throw new Error("Trajectory fixture: no workspace available");
+  }
+  const form = new FormData();
+  form.set("workspace_id", workspaces[0].id);
+  form.set("file_name", "qa/ui_trajectory_fixture.pdf");
+  form.set("source_type", "files");
+  form.set(
+    "file",
+    new Blob([await fs.readFile(trajectoryPdfPath)], { type: "application/pdf" }),
+    "ui_trajectory_fixture.pdf"
+  );
+  const uploadResponse = await fetch(`${apiBase}/uploads/direct`, { method: "POST", body: form });
+  if (uploadResponse.status !== 201) {
+    throw new Error(`Trajectory fixture upload failed (HTTP ${uploadResponse.status})`);
+  }
+  // The worker inherits this process's environment, so an isolated
+  // MONDAY_REPORT_STATE_PATH used for the servers applies here too.
+  execFileSync("python", ["-m", "backend.app.worker"], { cwd: root, stdio: "pipe" });
+  record("Trajectory fixture seeded", true, "survey PDF uploaded and parsed for the plan-view assertions");
 }
 
 async function expectText(activePage, pattern, name) {

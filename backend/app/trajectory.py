@@ -291,6 +291,9 @@ def _flush_segment(
             "source_station_id": str(station["station_id"]) if station.get("station_id") else None,
             "source_page": station.get("page") if isinstance(station.get("page"), int) else None,
             "segment": segment_index,
+            # Explicit survey-type identity so consumers never infer it from
+            # array order or interval joins (additive; no math change).
+            "survey_type": group_key if isinstance(group_key, str) else None,
             "coordinate_reference": dict(reference),
             "source": "calculated",
         }

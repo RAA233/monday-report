@@ -132,11 +132,22 @@ origin is ever implied unless the source stated it.
 
 ## Limitations and non-goals (v1)
 
-No trajectory chart; no vertical section (requires a reference azimuth the source does
-not provide); no interpolation between stations; no anti-collision, target optimization,
-magnetic/grid corrections, or survey-quality certification; no Benchmarking
-auto-population (`dogleg_severity` measurements remain manual); no formatted-export
-rendering beyond the generic JSON export.
+No vertical section (requires a reference azimuth the source does not provide); no
+interpolation between stations; no anti-collision, target optimization, magnetic/grid
+corrections, or survey-quality certification; no Benchmarking auto-population
+(`dogleg_severity` measurements remain manual); no formatted-export rendering beyond the
+generic JSON export.
+
+## Plan-view visualization
+
+The Report Studio plan view (`src/components/TrajectoryPlanView.tsx`) is a pure display
+of the calculated stations above — it performs **no additional calculation or
+interpolation**. It renders one path per calculation segment (never bridging skipped
+stations or survey-type boundaries), uses equal ft scale with north up and east right,
+labels relative coordinates explicitly, and suppresses the plot only when the lateral
+extent is below the 0.01 ft display precision (an honest degenerate state, not an
+engineering threshold). The review-required and not-certified labels apply to the
+visualization exactly as they do to the underlying calculation.
 
 ## Worked test vectors (enforced by `scripts/trajectory_calculation_guard.py`)
 

@@ -553,6 +553,7 @@ class CalculatedTrajectoryStation(BaseModel):
     source_station_id: str | None = None
     source_page: int | None = Field(default=None, ge=1)
     segment: int = Field(ge=1)
+    survey_type: str | None = None
     coordinate_reference: TrajectoryCoordinateReference
     source: Literal["calculated"]
 
