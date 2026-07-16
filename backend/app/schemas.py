@@ -494,6 +494,105 @@ class SurveyStation(BaseModel):
     conflict: bool = False
 
 
+class TrajectoryCoordinateReference(BaseModel):
+    """Per-axis anchoring mode for calculated trajectory positions.
+
+    ``source_absolute`` means the axis starts from a source-stated value at the
+    anchor station; ``relative_first_station`` values are offsets from the first
+    calculated station and must never be presented as absolute well coordinates;
+    ``none`` means nothing was calculable for that axis.
+    """
+
+    tvd: Literal["source_absolute", "relative_first_station", "none"]
+    north_south: Literal["source_absolute", "relative_first_station", "none"]
+    east_west: Literal["source_absolute", "relative_first_station", "none"]
+
+
+class TrajectoryAnchor(BaseModel):
+    measured_depth_ft: float = Field(ge=0)
+    tvd_ft: float | None = None
+    north_south_ft: float | None = None
+    east_west_ft: float | None = None
+    source_page: int | None = Field(default=None, ge=1)
+
+
+class TrajectoryInterval(BaseModel):
+    """One calculated minimum-curvature interval between two source stations.
+
+    ``source="calculated"`` — this is derived geometry, never source evidence;
+    ``input_confidence_min`` is the lowest source-extraction confidence among
+    the two input stations, not a statement about numerical accuracy.
+    """
+
+    md_start_ft: float = Field(ge=0)
+    md_end_ft: float = Field(ge=0)
+    start_station_id: str | None = None
+    end_station_id: str | None = None
+    survey_type: str | None = None
+    segment: int = Field(ge=1)
+    dogleg_deg: float = Field(ge=0)
+    dls_deg_per_100ft: float = Field(ge=0)
+    ratio_factor: float = Field(ge=1.0)
+    delta_tvd_ft: float
+    delta_ns_ft: float
+    delta_ew_ft: float
+    source_pages: list[int] = Field(default_factory=list)
+    input_confidence_min: float | None = Field(default=None, ge=0.0, le=1.0)
+    source: Literal["calculated"]
+    method: Literal["minimum_curvature"]
+    method_version: str
+
+
+class CalculatedTrajectoryStation(BaseModel):
+    """Cumulative calculated position projected from a source station."""
+
+    measured_depth_ft: float = Field(ge=0)
+    tvd_ft: float
+    north_south_ft: float
+    east_west_ft: float
+    source_station_id: str | None = None
+    source_page: int | None = Field(default=None, ge=1)
+    segment: int = Field(ge=1)
+    coordinate_reference: TrajectoryCoordinateReference
+    source: Literal["calculated"]
+
+
+class TrajectorySkipSummary(BaseModel):
+    conflict: int = Field(default=0, ge=0)
+    missing_inclination: int = Field(default=0, ge=0)
+    missing_azimuth: int = Field(default=0, ge=0)
+    invalid_numeric: int = Field(default=0, ge=0)
+    zero_md_interval: int = Field(default=0, ge=0)
+    decreasing_md: int = Field(default=0, ge=0)
+    survey_type_boundary: int = Field(default=0, ge=0)
+    antipodal_singularity: int = Field(default=0, ge=0)
+    truncated: int = Field(default=0, ge=0)
+
+
+class TrajectoryCalculation(BaseModel):
+    """Minimum-curvature calculation block — structurally separate from source.
+
+    Source survey stations are never modified; every value here carries
+    calculated provenance and ``review_state="review_required"``. This is a
+    deterministic drafting aid, not certified directional-survey software
+    (see docs/TRAJECTORY_CALCULATION.md).
+    """
+
+    method: Literal["minimum_curvature"]
+    method_version: str
+    review_state: Literal["review_required"] = "review_required"
+    coordinate_reference: TrajectoryCoordinateReference
+    anchor: TrajectoryAnchor | None = None
+    source_station_count: int = Field(ge=0)
+    eligible_station_count: int = Field(ge=0)
+    segment_count: int = Field(ge=0)
+    interval_count: int = Field(ge=0)
+    intervals: list[TrajectoryInterval] = Field(default_factory=list)
+    stations: list[CalculatedTrajectoryStation] = Field(default_factory=list)
+    skips: TrajectorySkipSummary = Field(default_factory=TrajectorySkipSummary)
+    input_confidence_min: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class ReportDraftResponse(BaseModel):
     workspace_id: UUID
     generated_at: datetime = Field(default_factory=utc_now)
@@ -518,6 +617,8 @@ class ReportDraftResponse(BaseModel):
     schematic_source: Literal["source", "reference"] = "reference"
     survey_stations: list[SurveyStation] = Field(default_factory=list)
     survey_source: Literal["source", "none"] = "none"
+    trajectory: TrajectoryCalculation | None = None
+    trajectory_source: Literal["calculated", "none"] = "none"
     evidence_summary: list[str] = Field(default_factory=list)
     source_document_count: int
     source_chunk_count: int

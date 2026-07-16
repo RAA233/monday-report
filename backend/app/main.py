@@ -766,6 +766,10 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     survey_stations = [SurveyStation(**row) for row in survey_source_rows]
     survey_source = "source" if survey_source_rows else "none"
     survey_truncated = store.survey_truncation_from_profiles(pdf_profiles)
+    # Calculated trajectory geometry (minimum curvature v1) lives in a separate
+    # block; source survey rows above remain untouched.
+    trajectory_calculation = store.trajectory_from_survey_rows(survey_source_rows)
+    trajectory_source = "calculated" if trajectory_calculation else "none"
 
     response = ReportDraftResponse(
         workspace_id=workspace_id,
@@ -800,6 +804,8 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
         schematic_source=schematic_source,
         survey_stations=survey_stations,
         survey_source=survey_source,
+        trajectory=trajectory_calculation,
+        trajectory_source=trajectory_source,
         evidence_summary=evidence_summary,
         source_document_count=len(documents),
         source_chunk_count=len(chunks),
@@ -833,6 +839,26 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
             "survey_source_rows": len(survey_source_rows),
             "survey_conflict_rows": sum(1 for row in survey_source_rows if row.get("conflict")),
             "survey_truncated": survey_truncated,
+            "trajectory_source": trajectory_source,
+            "trajectory_method": f"{trajectory_calculation.method} {trajectory_calculation.method_version}"
+            if trajectory_calculation
+            else "none",
+            "trajectory_review_state": trajectory_calculation.review_state if trajectory_calculation else "none",
+            "trajectory_segments": trajectory_calculation.segment_count if trajectory_calculation else 0,
+            "trajectory_intervals": trajectory_calculation.interval_count if trajectory_calculation else 0,
+            "trajectory_eligible_stations": trajectory_calculation.eligible_station_count if trajectory_calculation else 0,
+            "trajectory_skipped_total": sum(
+                trajectory_calculation.skips.model_dump().values()
+            )
+            if trajectory_calculation
+            else 0,
+            "trajectory_reference": (
+                f"tvd:{trajectory_calculation.coordinate_reference.tvd},"
+                f"ns:{trajectory_calculation.coordinate_reference.north_south},"
+                f"ew:{trajectory_calculation.coordinate_reference.east_west}"
+            )
+            if trajectory_calculation
+            else "none",
             "report_profiles": len(pdf_profiles),
             "parser_version": "pdf_report_profile_v1",
         },

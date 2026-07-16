@@ -116,6 +116,15 @@ try {
       await expectText(page, /confirm from DDR/i, "Report Studio schematic provenance");
       await expectText(page, /Directional survey stations/i, "Report Studio survey section");
       await expectText(page, /No source survey stations/i, "Report Studio survey empty state");
+      const calcClaims = await page.getByText(/minimum curvature/i).count();
+      record(
+        "Report Studio invents no calculated trajectory without stations",
+        calcClaims === 0,
+        `minimum-curvature claims with no survey stations: ${calcClaims}`
+      );
+      if (calcClaims !== 0) {
+        throw new Error("Calculated trajectory text rendered without source survey stations");
+      }
       await page.getByRole("button", { name: /FORGE style/i }).click();
       await page.getByRole("tab", { name: /BHA/i }).click();
       await page.getByRole("button", { name: /Apply format/i }).click();

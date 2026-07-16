@@ -110,6 +110,82 @@ export interface ApiSurveyStation {
   conflict?: boolean;
 }
 
+export type ApiTrajectoryReferenceMode = "source_absolute" | "relative_first_station" | "none";
+
+export interface ApiTrajectoryCoordinateReference {
+  tvd: ApiTrajectoryReferenceMode;
+  north_south: ApiTrajectoryReferenceMode;
+  east_west: ApiTrajectoryReferenceMode;
+}
+
+export interface ApiTrajectoryAnchor {
+  measured_depth_ft: number;
+  tvd_ft?: number | null;
+  north_south_ft?: number | null;
+  east_west_ft?: number | null;
+  source_page?: number | null;
+}
+
+export interface ApiTrajectoryInterval {
+  md_start_ft: number;
+  md_end_ft: number;
+  start_station_id?: string | null;
+  end_station_id?: string | null;
+  survey_type?: string | null;
+  segment: number;
+  dogleg_deg: number;
+  dls_deg_per_100ft: number;
+  ratio_factor: number;
+  delta_tvd_ft: number;
+  delta_ns_ft: number;
+  delta_ew_ft: number;
+  source_pages: number[];
+  input_confidence_min?: number | null;
+  source: "calculated";
+  method: "minimum_curvature";
+  method_version: string;
+}
+
+export interface ApiCalculatedTrajectoryStation {
+  measured_depth_ft: number;
+  tvd_ft: number;
+  north_south_ft: number;
+  east_west_ft: number;
+  source_station_id?: string | null;
+  source_page?: number | null;
+  segment: number;
+  coordinate_reference: ApiTrajectoryCoordinateReference;
+  source: "calculated";
+}
+
+export interface ApiTrajectorySkipSummary {
+  conflict: number;
+  missing_inclination: number;
+  missing_azimuth: number;
+  invalid_numeric: number;
+  zero_md_interval: number;
+  decreasing_md: number;
+  survey_type_boundary: number;
+  antipodal_singularity: number;
+  truncated: number;
+}
+
+export interface ApiTrajectoryCalculation {
+  method: "minimum_curvature";
+  method_version: string;
+  review_state: "review_required";
+  coordinate_reference: ApiTrajectoryCoordinateReference;
+  anchor?: ApiTrajectoryAnchor | null;
+  source_station_count: number;
+  eligible_station_count: number;
+  segment_count: number;
+  interval_count: number;
+  intervals: ApiTrajectoryInterval[];
+  stations: ApiCalculatedTrajectoryStation[];
+  skips: ApiTrajectorySkipSummary;
+  input_confidence_min?: number | null;
+}
+
 export interface ApiReportDraft {
   workspace_id: string;
   generated_at: string;
@@ -134,6 +210,8 @@ export interface ApiReportDraft {
   schematic_source?: "source" | "reference";
   survey_stations?: ApiSurveyStation[];
   survey_source?: "source" | "none";
+  trajectory?: ApiTrajectoryCalculation | null;
+  trajectory_source?: "calculated" | "none";
   evidence_summary: string[];
   source_document_count: number;
   source_chunk_count: number;

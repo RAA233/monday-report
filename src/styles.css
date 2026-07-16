@@ -3834,6 +3834,51 @@ td {
   white-space: nowrap;
 }
 
+.schematic-provenance-note.is-calculated {
+  border-color: #4338ca;
+  color: #312e81;
+  background: #eef2ff;
+}
+
+.survey-station-table td.is-calculated-cell {
+  background: #f5f6ff;
+  border-left: 1px dashed #c7d2fe;
+  color: #312e81;
+  font-weight: 700;
+}
+
+.calc-delta-note {
+  display: block;
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: #7f1d1d;
+  white-space: normal;
+  max-width: 170px;
+}
+
+.trajectory-positions {
+  margin-top: 10px;
+  border: 1px solid #d8e0e7;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 0.74rem;
+  color: #1f2937;
+}
+
+.trajectory-positions summary {
+  cursor: pointer;
+  font-weight: 800;
+  font-size: 0.7rem;
+  color: #312e81;
+}
+
+.trajectory-positions ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
 .client-check-list {
   display: grid;
   gap: 9px;

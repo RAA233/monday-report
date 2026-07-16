@@ -60,6 +60,7 @@ from .schemas import (
     RetentionRunResult,
     Role,
     Tenant,
+    TrajectoryCalculation,
     Upload,
     UploadCreate,
     UploadFileRecord,
@@ -70,6 +71,7 @@ from .schemas import (
     Workspace,
     WorkspaceCreate,
 )
+from .trajectory import calculate_trajectory
 
 INVALID_STORAGE_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
 UNSAFE_TEXT_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")
@@ -1538,6 +1540,12 @@ class LocalStateStore:
             }
             for row in survey_rows
         ]
+        # Calculated trajectory geometry lives in a structurally separate block
+        # built from the same shared survey rows as the report draft; source
+        # station values above are never modified and Benchmarking is never
+        # auto-populated from calculated DLS.
+        trajectory_calculation = self.trajectory_from_survey_rows(survey_rows)
+        trajectory_source = "calculated" if trajectory_calculation else "none"
         report = MondayReport(
             tenant_id=self.tenant.id,
             workspace_id=payload.workspace_id,
@@ -1658,6 +1666,10 @@ class LocalStateStore:
                     "activity_timeline": activity_timeline_rows,
                     "survey_stations": survey_station_rows,
                     "survey_source": survey_source,
+                    "trajectory_calculation": trajectory_calculation.model_dump(mode="json")
+                    if trajectory_calculation
+                    else None,
+                    "trajectory_source": trajectory_source,
                     "market_benchmark": {
                         "current_ft_per_day": benchmark_status.current_ft_per_day,
                         "seven_day_average_ft_per_day": benchmark_status.seven_day_average_ft_per_day,
@@ -4811,6 +4823,24 @@ class LocalStateStore:
             if LocalStateStore._survey_rows_from_profile(profile):
                 return bool(profile.get("survey_truncated"))
         return False
+
+    @staticmethod
+    def trajectory_from_survey_rows(survey_rows: list[dict[str, object]]) -> TrajectoryCalculation | None:
+        """Shared minimum-curvature calculation for draft and Monday Report JSON.
+
+        Feeds the already workspace-scoped source survey rows into the pure
+        trajectory module (backend/app/trajectory.py) and maps the result into
+        the calculation schema. Source rows are never modified; when no interval
+        is calculable the caller receives ``None`` and reports
+        ``trajectory_source="none"``. Calculated DLS is never written into
+        Benchmarking measurements.
+        """
+        if not survey_rows:
+            return None
+        result = calculate_trajectory(survey_rows)
+        if not result.get("interval_count"):
+            return None
+        return TrajectoryCalculation(**result)
 
     @staticmethod
     def reference_casing_rows() -> list[dict[str, object]]:
