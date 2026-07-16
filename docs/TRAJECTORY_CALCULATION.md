@@ -138,6 +138,29 @@ corrections, or survey-quality certification; no Benchmarking auto-population
 (`dogleg_severity` measurements remain manual); no formatted-export rendering beyond the
 generic JSON export.
 
+## Horizontal displacement (display field)
+
+`horizontal_displacement_ft` on each calculated station is the **unsigned lateral
+magnitude from that station's own segment anchor**:
+`hypot(ns − segment_anchor_ns, ew − segment_anchor_ew)`. It is result assembly, not a new
+minimum-curvature method: the deltas are the already-calculated cumulative N/S–E/W values,
+so the segment anchor is exactly 0 ft by construction and **non-zero source-absolute N/E
+anchors never leak a global-origin magnitude** (guard-enforced). Sign/direction is
+deliberately lost (direction lives in the plan view); it is never an absolute or east/west
+position, a vertical section, or a target departure. Each segment (including each
+planned/actual sequence) has its own independent anchor.
+
+## Vertical-profile visualization
+
+The Report Studio vertical profile (`src/components/TrajectoryVerticalProfile.tsx`)
+renders **one panel per explicit calculation segment** — segments are never overlaid on a
+shared TVD axis, so incompatible TVD references cannot be visually compared. Axes:
+horizontal = `horizontal_displacement_ft` from the segment anchor (zero at the anchor,
+positive right, magnitude only); vertical = calculated TVD in ft **increasing downward**.
+Equal ft scale with letterboxing; no interpolation; zero-lateral segments render as a
+vertical TVD progression with an explanatory note rather than being suppressed. The
+review-required and not-certified labels apply unchanged.
+
 ## Plan-view visualization
 
 The Report Studio plan view (`src/components/TrajectoryPlanView.tsx`) is a pure display

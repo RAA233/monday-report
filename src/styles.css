@@ -3907,56 +3907,68 @@ td {
   margin: 0 auto;
 }
 
-.trajectory-plan-view .plan-frame {
+.trajectory-plan-view .plan-frame,
+.trajectory-vertical-profile .plan-frame {
   fill: #fbfdff;
   stroke: #d8e0e7;
 }
 
-.trajectory-plan-view .plan-grid {
+.trajectory-plan-view .plan-grid,
+.trajectory-vertical-profile .plan-grid {
   stroke: #e8eef4;
   stroke-width: 1;
 }
 
 .trajectory-plan-view .plan-tick-label,
 .trajectory-plan-view .plan-axis-label,
-.trajectory-plan-view .plan-anchor-label {
+.trajectory-plan-view .plan-anchor-label,
+.trajectory-vertical-profile .plan-tick-label,
+.trajectory-vertical-profile .plan-axis-label,
+.trajectory-vertical-profile .plan-anchor-label {
   font-size: 9px;
   fill: #475569;
 }
 
-.trajectory-plan-view .plan-axis-label {
+.trajectory-plan-view .plan-axis-label,
+.trajectory-vertical-profile .plan-axis-label {
   font-weight: 700;
   fill: #1f2937;
 }
 
-.trajectory-plan-view .plan-path {
+.trajectory-plan-view .plan-path,
+.trajectory-vertical-profile .plan-path {
   fill: none;
   stroke: #1f2937;
   stroke-width: 2;
 }
 
-.trajectory-plan-view .plan-path.is-planned {
+.trajectory-plan-view .plan-path.is-planned,
+.trajectory-vertical-profile .plan-path.is-planned {
   stroke-dasharray: 6 4;
   stroke: #475569;
 }
 
-.trajectory-plan-view .plan-marker.is-actual {
+.trajectory-plan-view .plan-marker.is-actual,
+.trajectory-vertical-profile .plan-marker.is-actual {
   fill: #1f2937;
 }
 
-.trajectory-plan-view .plan-marker.is-planned {
+.trajectory-plan-view .plan-marker.is-planned,
+.trajectory-vertical-profile .plan-marker.is-planned {
   fill: #ffffff;
   stroke: #475569;
   stroke-width: 1.4;
 }
 
-.trajectory-plan-view .plan-anchor {
+.trajectory-plan-view .plan-anchor,
+.trajectory-vertical-profile .plan-anchor {
   fill: none;
   stroke: #b45309;
   stroke-width: 2;
 }
 
-.trajectory-plan-view .plan-anchor-label {
+.trajectory-plan-view .plan-anchor-label,
+.trajectory-vertical-profile .plan-anchor-label {
   fill: #7c3d06;
   font-weight: 700;
 }
@@ -3991,6 +4003,40 @@ td {
   height: 10px;
   border: 2px solid #b45309;
   border-top: 2px solid #b45309;
+}
+
+.trajectory-profile-block {
+  margin: 12px 0 0;
+  border: 1px solid #d8e0e7;
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+.trajectory-profile-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 8px;
+}
+
+.trajectory-profile-panel {
+  margin: 0;
+  flex: 1 1 260px;
+  max-width: 340px;
+}
+
+.trajectory-profile-panel figcaption {
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: #1f2937;
+  margin-bottom: 4px;
+}
+
+.trajectory-vertical-profile {
+  display: block;
+  width: 100%;
+  height: auto;
 }
 
 .client-check-list {

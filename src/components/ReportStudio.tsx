@@ -43,6 +43,7 @@ import {
 } from "../lib/api";
 import { formatSourceCitation } from "../lib/citationFormat";
 import { TrajectoryPlanView } from "./TrajectoryPlanView";
+import { TrajectoryVerticalProfile } from "./TrajectoryVerticalProfile";
 
 interface ReportForm {
   reportDate: string;
@@ -889,6 +890,7 @@ function DailyReportPreview({
               </table>
             </div>
             {trajectory && trajectory.stations.length > 0 && <TrajectoryPlanView trajectory={trajectory} />}
+            {trajectory && trajectory.stations.length > 0 && <TrajectoryVerticalProfile trajectory={trajectory} />}
             {trajectory && trajectory.stations.length > 0 && (
               <details className="trajectory-positions">
                 <summary>
@@ -898,7 +900,7 @@ function DailyReportPreview({
                   {trajectory.stations.map((calcStation, index) => (
                     <li key={`traj-${calcStation.measured_depth_ft}-${index}`}>
                       {`MD ${surveyNumber(calcStation.measured_depth_ft)} ft (segment ${calcStation.segment}): `}
-                      {`N/S ${surveyNumber(calcStation.north_south_ft)} ft, E/W ${surveyNumber(calcStation.east_west_ft)} ft, TVD ${surveyNumber(calcStation.tvd_ft)} ft`}
+                      {`N/S ${surveyNumber(calcStation.north_south_ft)} ft, E/W ${surveyNumber(calcStation.east_west_ft)} ft, TVD ${surveyNumber(calcStation.tvd_ft)} ft, HD ${surveyNumber(calcStation.horizontal_displacement_ft)} ft from segment anchor`}
                       {calcStation.coordinate_reference.north_south === "relative_first_station"
                         ? " — relative to first calculated station, not absolute well coordinates"
                         : ""}

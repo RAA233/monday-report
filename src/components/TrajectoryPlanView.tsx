@@ -3,6 +3,7 @@ import type {
   ApiCalculatedTrajectoryStation,
   ApiTrajectoryCalculation
 } from "../lib/api";
+import { DISPLAY_EPSILON_FT, formatFt, niceTickStep, tickValues } from "../lib/trajectoryGeometry";
 
 interface TrajectoryPlanViewProps {
   trajectory: ApiTrajectoryCalculation;
@@ -16,11 +17,6 @@ interface PlanSegment {
 
 const VIEW_SIZE = 360;
 const PADDING = 44;
-// Visual epsilon tied to the serialized display precision (coordinates are
-// rounded to 0.01 ft): below this total extent there is nothing displayable,
-// not an engineering judgement. Legitimate small lateral paths still render,
-// scaled up under the equal-axis rule.
-const DISPLAY_EPSILON_FT = 0.01;
 
 export function TrajectoryPlanView({ trajectory }: TrajectoryPlanViewProps): JSX.Element {
   const displayable = trajectory.stations.filter(
@@ -195,25 +191,4 @@ export function TrajectoryPlanView({ trajectory }: TrajectoryPlanViewProps): JSX
       </ul>
     </figure>
   );
-}
-
-function niceTickStep(span: number): number {
-  const rough = Math.max(span, DISPLAY_EPSILON_FT) / 4;
-  const magnitude = Math.pow(10, Math.floor(Math.log10(rough)));
-  const residual = rough / magnitude;
-  const factor = residual >= 5 ? 5 : residual >= 2 ? 2 : 1;
-  return factor * magnitude;
-}
-
-function tickValues(min: number, max: number, step: number): number[] {
-  const ticks: number[] = [];
-  const start = Math.ceil(min / step) * step;
-  for (let value = start; value <= max + step / 1000; value += step) {
-    ticks.push(Number(value.toFixed(4)));
-  }
-  return ticks;
-}
-
-function formatFt(value: number): string {
-  return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
 }

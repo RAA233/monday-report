@@ -342,7 +342,11 @@ def main() -> int:
                 and trajectory.stations[0].tvd_ft == 8500.0
                 and trajectory.stations[0].north_south_ft == 0.0
                 # Explicit segment/survey-type identity for visualization consumers.
-                and all(item.segment >= 1 and item.survey_type is None for item in trajectory.stations),
+                and all(item.segment >= 1 and item.survey_type is None for item in trajectory.stations)
+                # Segment-anchor-relative horizontal displacement: anchor at 0,
+                # later stations positive; never populated on source rows.
+                and trajectory.stations[0].horizontal_displacement_ft == 0.0
+                and trajectory.stations[1].horizontal_displacement_ft > 0.0,
                 trajectory.anchor.model_dump(mode="json") if trajectory and trajectory.anchor else None,
             )
         )
