@@ -366,6 +366,21 @@ def main() -> int:
                 {"survey": draft_survey, "survey_source": draft.get("survey_source")},
             )
         )
+        profile_hydraulics = report_profile.get("hydraulics_observations", []) if isinstance(report_profile, dict) else []
+        checks.append(
+            assert_check(
+                "PDF profile extracts the labelled mud weight as a hydraulics observation",
+                any(
+                    row.get("measurement") == "mud_weight"
+                    and row.get("value") == 10.2
+                    and row.get("unit") == "ppg"
+                    and row.get("parser_method") == "deterministic_hydraulics"
+                    for row in profile_hydraulics
+                )
+                and draft.get("hydraulics_source") == "source",
+                profile_hydraulics,
+            )
+        )
         checks.append(
             assert_check(
                 "Trajectory stays honestly 'none' when conflicts separate the eligible stations",

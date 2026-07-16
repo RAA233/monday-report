@@ -134,6 +134,7 @@ try {
         planViewsWithoutData === 0,
         `plan views with no survey stations: ${planViewsWithoutData}`
       );
+      await expectText(page, /No source hydraulics observations/i, "Hydraulics empty state before seeding");
 
       // Seed the deterministic survey fixture (expects a fresh/isolated server
       // state so the pre-seed empty-state assertions above stay meaningful),
@@ -210,6 +211,23 @@ try {
         detailsHd >= 1,
         `anchor HD-zero entries visible: ${detailsHd}`
       );
+      await expectText(page, /Hydraulics observations/i, "Hydraulics observations section");
+      await expectText(
+        page,
+        /remain recommended-only/i,
+        "Hydraulics recommended-only wording"
+      );
+      await expectText(page, /Standpipe pressure/i, "Hydraulics SPP row");
+      await expectText(page, /Nozzle configuration/i, "Hydraulics nozzle row");
+      const hydraulicsRows = await page.locator("table.hydraulics-table tbody tr").count();
+      record(
+        "Hydraulics table renders the seeded source observations",
+        hydraulicsRows >= 4,
+        `hydraulics rows: ${hydraulicsRows}`
+      );
+      if (hydraulicsRows < 4) {
+        throw new Error("Hydraulics observations table missing seeded rows");
+      }
       await page.getByRole("button", { name: /FORGE style/i }).click();
       await page.getByRole("tab", { name: /BHA/i }).click();
       await page.getByRole("button", { name: /Apply format/i }).click();
@@ -301,6 +319,10 @@ async function seedTrajectoryFixture() {
     "    '8600 | 26.5 | 121.0 |  | ',",
     "    '8900 | 27.0 | 122.0 |  | ',",
     "    '9300 | 29.0 | 124.0 |  | ',",
+    "    '06:00 Flow Rate: 650 gpm, SPP: 3,200 psi',",
+    "    'Planned flow rate: 700 gpm',",
+    "    'ECD: 9.8 ppg',",
+    "    'Nozzles: 3 x 12/32 in',",
     "]",
     `open(${JSON.stringify(trajectoryPdfPath)}, 'wb').write(build_pdf_fixture(['\\n'.join(lines)]))`,
   ].join("\n");

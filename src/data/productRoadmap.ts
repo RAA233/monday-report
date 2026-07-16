@@ -103,7 +103,7 @@ export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
     id: "exec-next-pull",
     label: "Next audited pull",
     value: "schematic extraction",
-    detail: "Casing schematic, timeline, survey stations, minimum-curvature calculations, the calculated plan view, and the per-segment vertical trajectory profile are complete; hydraulics visualization/extraction remains the next pull.",
+    detail: "Casing schematic, timeline, survey stations, minimum-curvature calculations, both trajectory visuals, and source-derived hydraulics observations are complete; FORGE eval promotion and the local LLM extraction router remain the next pull.",
     command: "pnpm run audit:pdf-parser",
     tone: "warning"
   },
@@ -156,8 +156,8 @@ export const roadmapLanes: RoadmapLane[] = [
         owner: "Frontend + drilling SME",
         status: "complete",
         gate: "audit:report-variants",
-        evidence: "MR-SCHEMA-1 targets drive drafting; casing, timeline, and survey stations extract with provenance, minimum-curvature geometry is review-gated, and the calculated plan view plus per-segment vertical profile render segment-aware paths with explicit reference labelling.",
-        next: "Add hydraulics visualization/extraction on the same reviewed evidence pipeline."
+        evidence: "MR-SCHEMA-1 targets drive drafting; casing, timeline, survey stations, and hydraulics observations extract with provenance and explicit units, minimum-curvature geometry is review-gated, and both trajectory visuals render segment-aware paths.",
+        next: "Promote FORGE corpus evals and the Phase 06 local-AI extraction router on the same reviewed pipeline."
       },
       {
         id: "item-ui-execution-board",

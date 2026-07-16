@@ -11,7 +11,7 @@ The executable MVP path is now phase-gated end to end and the local client-data 
 | Accepted now | Pass | Executable MVP is working with Client Home, rig/MR list access, chat, report studio, Benchmarking, roadmap, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
 | Safe operating mode | Pass | Demo mode remains local; approved client mode uses PostgreSQL/RLS state, Redis queue, protected storage, API key, signing secret, and reviewed fixture/eval evidence. | Keep secrets out of Git and regenerate approval after environment changes. |
 | Real-client approval | Pass | Live client approval reports `APPROVED`; GA readiness reports `GA_READY`; readiness has zero blockers. | Run controlled client-package dry runs before broad distribution. |
-| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, directional survey-station extraction, the review-gated minimum-curvature trajectory calculation, the segment-aware calculated plan view, and the per-segment vertical trajectory profile are complete; remaining lanes: hydraulics visualization/extraction, FORGE eval promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull hydraulics visualization/extraction, then controlled client-package trials. |
+| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, directional survey-station extraction, the review-gated minimum-curvature trajectory calculation, the segment-aware calculated plan view, the per-segment vertical trajectory profile, and source-derived hydraulics observations are complete; remaining lanes: FORGE eval promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull FORGE eval promotion or the local LLM extraction router (Phase 06), then controlled client-package trials. |
 
 ## Current Tracker
 
@@ -254,6 +254,43 @@ Evidence paths: `output/screenshots/ui-quality/03-report-studio.png`, `04-benchm
 
 Follow-up: hydraulics visualization/extraction, formatted HTML/PDF/XLSX export provenance, field-level correction workflow, local-LLM extraction router (Phase 06), normalized PostgreSQL repositories (Phase 04).
 
+Git result: PR #5 (`https://github.com/RAA233/monday-report/pull/5`) was reviewed and rebase-merged into `main` as `f9e1e5bad628cf6d0217509c71d5eb2c105f6773` on `2026-07-16`; the merged tree is byte-identical to verified commit `8fbf6b2`. The remote feature branch was deleted; the local branch remains (safe `-d` refused after the rebase hash rewrite).
+
+## 2026-07-16 Hydraulics Observation Extraction Evidence
+
+Increment completed on `2026-07-16` from base revision `f9e1e5bad628cf6d0217509c71d5eb2c105f6773` (merged vertical-profile `main`) on branch `feat/hydraulics-observations`. Scope: **source-derived hydraulics observations** (parser `deterministic_hydraulics v1`, specification in `docs/HYDRAULICS_EXTRACTION.md`) — flow rate, standpipe pressure, mud weight, ECD, PV, YP, pump rate, and text-only nozzle configuration extracted from labelled narrative (multiple measurements per line) and unit-headed tables with **explicit units only** (documented kPa→psi ×0.1450377377, L/min→gpm ÷3.785411784, sg→ppg ×8.345404452; ambiguous values such as bare `MW 1.15` and negative flow/pressure are never emitted), page-cited `hydraulic_observation` chunks, and an honest no-source state (`hydraulics_observations = []`, `hydraulics_source = "none"`, UI text "No source hydraulics observations — confirm or enter from DDR").
+
+Behaviour and boundaries:
+
+- **Context-aware conflicts**: the conflict key is (measurement, time, observation_status, equipment, fluid system) — Pump 1 vs Pump 2, active vs kill mud, and planned vs observed values never conflict merely because their values differ; same-context disagreements are flagged with confidence ≤ 0.5, never merged.
+- **`observation_status`** is `observed`/`planned`/`unknown` from explicit source wording only; equipment (`Pump 2`) and fluid system (`kill mud`) labels are captured; raw and normalized time are both retained and never inferred; a missing time never drops a row.
+- **No engineering sanity ranges**: structurally valid but out-of-band values (documented order-of-magnitude review bands) are retained with `review_flag=true` / `review_reason="source value requires review"` — a review prompt, not an acceptance judgement.
+- **Recommendation boundary preserved and guard-asserted**: extraction never creates, triggers, clears, or reprioritizes the recommended-only Hydraulics/Torque & Drag `DiagnosticAction`s and never writes any Benchmarking measurement; no hydraulic calculation of any kind (no ECD/pressure-loss/HHP/HSI/surge-swab/nozzle TFA).
+- Shared `hydraulics_rows_from_profiles` builder keeps the Report Draft and `morning_report.hydraulics_observations` identical; the legacy scalar `mud_weight` draft field is unchanged; audit metadata carries aggregate counts only (source/conflict/review/status/truncation + parser id), never raw source text; 100-row cap with recorded truncation.
+- Report Studio "Hydraulics observations" table shows Measurement / Value / Source value / Status / Time / Equipment-system / Evidence with the wording "Source-derived observations — informational and review-required. Hydraulics and Torque & Drag diagnostics remain recommended-only."; the Hydraulics control tile gains only a source-observation count.
+
+Files changed: `backend/app/schemas.py` (`HydraulicObservation` + additive draft fields), `backend/app/store.py` (parser, chunks, shared builder, Monday-Report block), `backend/app/main.py` (draft + audit metadata), `src/lib/api.ts` (mirrors), `src/components/ReportStudio.tsx` (table + tile count), `scripts/hydraulics_extraction_guard.py` (new, wired as `audit:hydraulics-extraction` into `audit:all`), `scripts/pdf_parser_guard.py`, `scripts/report_draft_guard.py`, `scripts/ui_quality_e2e.mjs` (fixture hydraulics lines + 6 assertions), `docs/HYDRAULICS_EXTRACTION.md` (new spec), `package.json`, tracker/roadmap/README.
+
+| Final command | Exit | Evidence |
+|---|---:|---|
+| `python -m py_compile backend/app/*.py` | 0 | Backend modules compile. |
+| `pnpm run build` | 0 | `tsc` typecheck and Vite production build passed. |
+| `pnpm run audit:hydraulics-extraction` | 0 | **21/21** — conversions, context-aware conflicts, review flags, nozzle text-only, rejection rules, determinism, truncation, tables, chunks, draft↔JSON equality, isolation, audit aggregates, legacy mud-weight, and the recommendation/Benchmarking boundary. |
+| `pnpm run audit:pdf-parser` | 0 | 23/23 (incl. the labelled mud-weight observation). |
+| `pnpm run audit:report-draft` | 0 | 22/22 (incl. the honest hydraulics none state). |
+| `pnpm run audit:report-variants` / `audit:source-lineage` | 0 | 11/11, 6/6 retained. |
+| `pnpm run audit:trajectory-calculation` | 0 | **38/38 regression clean.** |
+| `pnpm run audit:benchmarking` | 0 | **23/23 regression clean.** |
+| `pnpm run test:e2e` | 0 | 22/22 against fresh isolated-state servers. |
+| `pnpm run test:ui` | 0 | **109/109 with zero browser errors** — hydraulics empty state pre-seed, seeded table rows, recommended-only wording, and all prior survey/trajectory assertions. |
+| `pnpm run audit:all` | 0 | Full chain: **397 PASS, 0 FAIL.** |
+| `pnpm run ga:readiness` | 1 | `GA_BLOCKED`: software-owned checks pass (**0 software blockers**); remaining blockers are configuration/external-infrastructure/reviewed-evidence requirements. Not client/production authorization. |
+| `pnpm run report:ui-screenshots` | 0 | UI evidence PDF regenerated; `03-report-studio.png` shows the populated hydraulics table beneath the survey table, plan view, and vertical profiles; Benchmarking/Roadmap order unchanged. |
+
+Evidence paths: `output/screenshots/ui-quality/03-report-studio.png`, `04-benchmarking.png`, `10-roadmap.png` (unchanged order), `output/pdf/monday_report_ui_quality_screenshots.pdf`, `output/qa/ui_quality_e2e_manifest.json`.
+
+Follow-up: FORGE eval promotion, local-LLM extraction router (Phase 06), formatted HTML/PDF/XLSX export provenance, field-level correction workflow, normalized PostgreSQL repositories (Phase 04), hydraulics trend visualization (later slice on this extraction).
+
 ## Phase Gate Rule
 
 Every implementation slice must pass these checks before it is considered accepted:
@@ -286,6 +323,7 @@ Every implementation slice must pass these checks before it is considered accept
 - Parser/OCR eval report generator guard: `pnpm run audit:parser-fixture-report`
 - PDF parser guard: `pnpm run audit:pdf-parser`
 - Trajectory calculation guard: `pnpm run audit:trajectory-calculation`
+- Hydraulics extraction guard: `pnpm run audit:hydraulics-extraction`
 - OCR routing guard: `pnpm run audit:ocr-routing`
 - OCR extraction guard: `pnpm run audit:ocr-extraction`
 - Local AI runtime status guard: `pnpm run audit:local-ai`
@@ -335,6 +373,7 @@ pnpm run audit:parser-fixture-evals
 pnpm run audit:parser-fixture-report
 pnpm run audit:pdf-parser
 pnpm run audit:trajectory-calculation
+pnpm run audit:hydraulics-extraction
 pnpm run audit:ocr-routing
 pnpm run audit:ocr-extraction
 pnpm run audit:local-ai
@@ -371,7 +410,7 @@ pnpm run audit:all
 | 06 | Active | Local AI extraction | Deterministic scaffold extracts cited MWD failures, NPT hours, company, and validation tasks from parsed chunks; local AI defaults to Ollama `gemma4:e2b` and verifies the pinned model is available | Wire Ollama/LM Studio router, strict schemas, confidence scoring, and metrics |
 | 07 | Complete | Validated exports | E2E verifies unresolved validation blocks export, validates extracted failures, creates report, exports JSON/CSV/HTML/PDF/XLSX artifacts, inspects artifact signatures, and downloads through signed URLs | Polish report templates |
 | 08 | Complete | Real-client readiness | Live client-data approval is APPROVED with PostgreSQL/RLS, Redis, API key, signing secret, protected storage, retention, malware scanner, parser/OCR evals, reviewed fixture attestation, and local Gemma runtime | Run controlled client-package dry runs and maintain approval evidence |
-| 09 | Complete | Morning report studio | Chat command center and Report Studio now show workflow steps, insight cards, risk register, tool actions, technical telemetry, source-backed draft generation, DDR/BHA/mud/survey/directional variants, issue-readiness board, source-driven casing/well schematic with provenance, AI plan checks, source-driven activity timeline, a source-only directional survey-station table with conflict flags plus side-by-side review-gated minimum-curvature calculations, and draft export | Extend to hydraulics visualization (plan view and vertical profile complete) |
+| 09 | Complete | Morning report studio | Chat command center and Report Studio now show workflow steps, insight cards, risk register, tool actions, technical telemetry, source-backed draft generation, DDR/BHA/mud/survey/directional variants, issue-readiness board, source-driven casing/well schematic with provenance, AI plan checks, source-driven activity timeline, a source-only directional survey-station table with conflict flags plus side-by-side review-gated minimum-curvature calculations, and draft export | Extend the evidence pipeline to FORGE eval promotion and the Phase 06 local-AI router (hydraulics observations complete) |
 | 10 | Complete | Roadmap cockpit | Product Roadmap view, execution board, typed roadmap data, UI screenshot coverage, tracker gate, and `audit:roadmap` guard are wired | Use roadmap execution board lanes to pull the next client-pilot hardening slice |
 | 11 | Complete | Client landing and rig MR access | Client Home renders live workspaces, rig/MR list rows, import coverage, and JSON/CSV/HTML/PDF/XLSX export coverage | Add workspace-specific drilldowns and keep screenshot evidence refreshed |
 | 12 | Complete | Reviewed normal report schemas | MR-SCHEMA-1 defines DDR, BHA, mud, survey, and directional extraction markers, drafting checks, and output sections; casing schematic, 24 hr activity timeline, and directional survey stations extract from source evidence with page provenance, and minimum-curvature trajectory geometry is calculated behind an explicit review gate | Pull directional/trajectory and hydraulics visualization next |

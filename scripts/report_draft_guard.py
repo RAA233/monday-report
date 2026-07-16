@@ -458,6 +458,16 @@ def main() -> int:
                 reference_payload,
             )
         )
+        checks.append(
+            assert_check(
+                "No hydraulics evidence yields an empty list, never fabricated observations",
+                draft.hydraulics_source == "none"
+                and draft.hydraulics_observations == []
+                and reference_draft.hydraulics_source == "none"
+                and reference_draft.hydraulics_observations == [],
+                {"source": draft.hydraulics_source},
+            )
+        )
 
         store.refresh()
         source_audit = next(

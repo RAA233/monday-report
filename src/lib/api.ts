@@ -188,6 +188,38 @@ export interface ApiTrajectoryCalculation {
   input_confidence_min?: number | null;
 }
 
+export type ApiHydraulicMeasurement =
+  | "flow_rate"
+  | "standpipe_pressure"
+  | "mud_weight"
+  | "ecd"
+  | "plastic_viscosity"
+  | "yield_point"
+  | "pump_rate"
+  | "nozzle_configuration";
+
+export interface ApiHydraulicObservation {
+  measurement: ApiHydraulicMeasurement;
+  value?: number | null;
+  unit?: string | null;
+  source_value_text: string;
+  source_unit?: string | null;
+  observation_status: "observed" | "planned" | "unknown";
+  equipment_label?: string | null;
+  fluid_system_label?: string | null;
+  context_note?: string | null;
+  activity_time?: string | null;
+  activity_time_source_text?: string | null;
+  parser_method: "deterministic_hydraulics";
+  parser_version: string;
+  source: "source";
+  page?: number | null;
+  confidence?: number | null;
+  conflict?: boolean;
+  review_flag?: boolean;
+  review_reason?: string | null;
+}
+
 export interface ApiReportDraft {
   workspace_id: string;
   generated_at: string;
@@ -214,6 +246,8 @@ export interface ApiReportDraft {
   survey_source?: "source" | "none";
   trajectory?: ApiTrajectoryCalculation | null;
   trajectory_source?: "calculated" | "none";
+  hydraulics_observations?: ApiHydraulicObservation[];
+  hydraulics_source?: "source" | "none";
   evidence_summary: string[];
   source_document_count: number;
   source_chunk_count: number;

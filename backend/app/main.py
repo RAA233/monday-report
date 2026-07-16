@@ -33,6 +33,7 @@ from .schemas import (
     DashboardSummary,
     DocumentChunk,
     FailureRecord,
+    HydraulicObservation,
     LocalAIStatus,
     MondayReport,
     MondayReportCreate,
@@ -770,6 +771,13 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     # block; source survey rows above remain untouched.
     trajectory_calculation = store.trajectory_from_survey_rows(survey_source_rows)
     trajectory_source = "calculated" if trajectory_calculation else "none"
+    # Source-derived hydraulics observations (deterministic_hydraulics v1):
+    # informational, review-required, and never coupled to the recommended-only
+    # Hydraulics/T&D diagnostics or Benchmarking.
+    hydraulics_source_rows = store.hydraulics_rows_from_profiles(pdf_profiles)
+    hydraulics_observations = [HydraulicObservation(**row) for row in hydraulics_source_rows]
+    hydraulics_source = "source" if hydraulics_source_rows else "none"
+    hydraulics_truncated = store.hydraulics_truncation_from_profiles(pdf_profiles)
 
     response = ReportDraftResponse(
         workspace_id=workspace_id,
@@ -806,6 +814,8 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
         survey_source=survey_source,
         trajectory=trajectory_calculation,
         trajectory_source=trajectory_source,
+        hydraulics_observations=hydraulics_observations,
+        hydraulics_source=hydraulics_source,
         evidence_summary=evidence_summary,
         source_document_count=len(documents),
         source_chunk_count=len(chunks),
@@ -859,6 +869,21 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
             )
             if trajectory_calculation
             else "none",
+            "hydraulics_source": hydraulics_source,
+            "hydraulics_source_rows": len(hydraulics_source_rows),
+            "hydraulics_conflict_rows": sum(1 for row in hydraulics_source_rows if row.get("conflict")),
+            "hydraulics_review_rows": sum(1 for row in hydraulics_source_rows if row.get("review_flag")),
+            "hydraulics_observed_rows": sum(
+                1 for row in hydraulics_source_rows if row.get("observation_status") == "observed"
+            ),
+            "hydraulics_planned_rows": sum(
+                1 for row in hydraulics_source_rows if row.get("observation_status") == "planned"
+            ),
+            "hydraulics_unknown_rows": sum(
+                1 for row in hydraulics_source_rows if row.get("observation_status") == "unknown"
+            ),
+            "hydraulics_truncated": hydraulics_truncated,
+            "hydraulics_parser": "deterministic_hydraulics v1",
             "report_profiles": len(pdf_profiles),
             "parser_version": "pdf_report_profile_v1",
         },

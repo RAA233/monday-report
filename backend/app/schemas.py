@@ -597,6 +597,47 @@ class TrajectoryCalculation(BaseModel):
     input_confidence_min: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
+class HydraulicObservation(BaseModel):
+    """A single source-derived hydraulics observation.
+
+    Source extraction only: values come from explicitly labelled source text or
+    tables with explicit, recognized units — nothing is calculated, inferred,
+    or converted ambiguously. Observations are informational and review-
+    required; Hydraulics and Torque & Drag diagnostics remain recommended-only
+    and are never created, triggered, or altered by extraction. "No evidence"
+    is an empty list with ``hydraulics_source="none"`` — there is no fallback.
+    """
+
+    measurement: Literal[
+        "flow_rate",
+        "standpipe_pressure",
+        "mud_weight",
+        "ecd",
+        "plastic_viscosity",
+        "yield_point",
+        "pump_rate",
+        "nozzle_configuration",
+    ]
+    value: float | None = None
+    unit: str | None = None
+    source_value_text: str = Field(min_length=1)
+    source_unit: str | None = None
+    observation_status: Literal["observed", "planned", "unknown"] = "unknown"
+    equipment_label: str | None = None
+    fluid_system_label: str | None = None
+    context_note: str | None = None
+    activity_time: str | None = None
+    activity_time_source_text: str | None = None
+    parser_method: Literal["deterministic_hydraulics"] = "deterministic_hydraulics"
+    parser_version: str = "v1"
+    source: Literal["source"]
+    page: int | None = Field(default=None, ge=1)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    conflict: bool = False
+    review_flag: bool = False
+    review_reason: str | None = None
+
+
 class ReportDraftResponse(BaseModel):
     workspace_id: UUID
     generated_at: datetime = Field(default_factory=utc_now)
@@ -623,6 +664,8 @@ class ReportDraftResponse(BaseModel):
     survey_source: Literal["source", "none"] = "none"
     trajectory: TrajectoryCalculation | None = None
     trajectory_source: Literal["calculated", "none"] = "none"
+    hydraulics_observations: list[HydraulicObservation] = Field(default_factory=list)
+    hydraulics_source: Literal["source", "none"] = "none"
     evidence_summary: list[str] = Field(default_factory=list)
     source_document_count: int
     source_chunk_count: int
