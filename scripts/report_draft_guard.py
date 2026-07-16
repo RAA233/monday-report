@@ -340,7 +340,9 @@ def main() -> int:
                 and trajectory.anchor.measured_depth_ft == 9000.0
                 and trajectory.anchor.tvd_ft == 8500.0
                 and trajectory.stations[0].tvd_ft == 8500.0
-                and trajectory.stations[0].north_south_ft == 0.0,
+                and trajectory.stations[0].north_south_ft == 0.0
+                # Explicit segment/survey-type identity for visualization consumers.
+                and all(item.segment >= 1 and item.survey_type is None for item in trajectory.stations),
                 trajectory.anchor.model_dump(mode="json") if trajectory and trajectory.anchor else None,
             )
         )

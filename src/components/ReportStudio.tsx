@@ -42,6 +42,7 @@ import {
   type ApiTrajectorySkipSummary
 } from "../lib/api";
 import { formatSourceCitation } from "../lib/citationFormat";
+import { TrajectoryPlanView } from "./TrajectoryPlanView";
 
 interface ReportForm {
   reportDate: string;
@@ -887,6 +888,7 @@ function DailyReportPreview({
                 </tbody>
               </table>
             </div>
+            {trajectory && trajectory.stations.length > 0 && <TrajectoryPlanView trajectory={trajectory} />}
             {trajectory && trajectory.stations.length > 0 && (
               <details className="trajectory-positions">
                 <summary>

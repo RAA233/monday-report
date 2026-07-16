@@ -154,6 +154,7 @@ export interface ApiCalculatedTrajectoryStation {
   source_station_id?: string | null;
   source_page?: number | null;
   segment: number;
+  survey_type?: string | null;
   coordinate_reference: ApiTrajectoryCoordinateReference;
   source: "calculated";
 }

@@ -225,6 +225,12 @@ def main() -> int:
         and mixed_types["skips"]["survey_type_boundary"] == 3,
         mixed_types["intervals"],
     )
+    check(
+        "Calculated stations carry explicit segment and survey-type identity",
+        all(isinstance(item.get("segment"), int) and item["segment"] >= 1 for item in mixed_types["stations"])
+        and sorted({item.get("survey_type") for item in mixed_types["stations"]}) == ["actual", "planned"],
+        mixed_types["stations"],
+    )
 
     # --- 20-23. Coordinate anchoring ---
     anchored = calculate_trajectory(

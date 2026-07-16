@@ -3879,6 +3879,120 @@ td {
   gap: 4px;
 }
 
+.trajectory-plan-figure {
+  margin: 12px 0 0;
+  border: 1px solid #d8e0e7;
+  border-radius: 10px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+
+.trajectory-plan-caption {
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: #312e81;
+}
+
+.trajectory-plan-note {
+  margin: 6px 0 8px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #7c3d06;
+}
+
+.trajectory-plan-view {
+  display: block;
+  width: min(100%, 420px);
+  height: auto;
+  margin: 0 auto;
+}
+
+.trajectory-plan-view .plan-frame {
+  fill: #fbfdff;
+  stroke: #d8e0e7;
+}
+
+.trajectory-plan-view .plan-grid {
+  stroke: #e8eef4;
+  stroke-width: 1;
+}
+
+.trajectory-plan-view .plan-tick-label,
+.trajectory-plan-view .plan-axis-label,
+.trajectory-plan-view .plan-anchor-label {
+  font-size: 9px;
+  fill: #475569;
+}
+
+.trajectory-plan-view .plan-axis-label {
+  font-weight: 700;
+  fill: #1f2937;
+}
+
+.trajectory-plan-view .plan-path {
+  fill: none;
+  stroke: #1f2937;
+  stroke-width: 2;
+}
+
+.trajectory-plan-view .plan-path.is-planned {
+  stroke-dasharray: 6 4;
+  stroke: #475569;
+}
+
+.trajectory-plan-view .plan-marker.is-actual {
+  fill: #1f2937;
+}
+
+.trajectory-plan-view .plan-marker.is-planned {
+  fill: #ffffff;
+  stroke: #475569;
+  stroke-width: 1.4;
+}
+
+.trajectory-plan-view .plan-anchor {
+  fill: none;
+  stroke: #b45309;
+  stroke-width: 2;
+}
+
+.trajectory-plan-view .plan-anchor-label {
+  fill: #7c3d06;
+  font-weight: 700;
+}
+
+.trajectory-plan-legend {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 0.68rem;
+  color: #334155;
+}
+
+.trajectory-plan-legend .legend-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  border-top: 2px solid #1f2937;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.trajectory-plan-legend .legend-swatch.is-planned {
+  border-top-style: dashed;
+  border-top-color: #475569;
+}
+
+.trajectory-plan-legend .legend-swatch.is-anchor {
+  width: 10px;
+  height: 10px;
+  border: 2px solid #b45309;
+  border-top: 2px solid #b45309;
+}
+
 .client-check-list {
   display: grid;
   gap: 9px;
