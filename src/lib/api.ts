@@ -151,6 +151,7 @@ export interface ApiCalculatedTrajectoryStation {
   tvd_ft: number;
   north_south_ft: number;
   east_west_ft: number;
+  horizontal_displacement_ft: number;
   source_station_id?: string | null;
   source_page?: number | null;
   segment: number;

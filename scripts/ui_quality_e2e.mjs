@@ -170,6 +170,46 @@ try {
         svgTitle.includes("minimum curvature"),
         svgTitle || "(missing svg title)"
       );
+      await expectText(page, /Vertical trajectory profile \(HD vs TVD\)/i, "Vertical profile section");
+      await expectText(page, /HD from segment anchor \(ft\)/i, "Vertical profile HD axis label");
+      // The rotated SVG y-axis label is not reliably "visible" to Playwright,
+      // so the TVD-down convention is asserted via the accompanying HTML note.
+      await expectText(page, /TVD increases downward/i, "Vertical profile TVD-down label");
+      await expectText(page, /first calculated station/i, "Vertical profile HD anchor definition");
+      const profilePanels = page.locator("svg.trajectory-vertical-profile");
+      const profileCount = await profilePanels.count();
+      const profileSegments = [];
+      const profilePointCounts = [];
+      for (let index = 0; index < profileCount; index += 1) {
+        profileSegments.push(await profilePanels.nth(index).getAttribute("data-segment"));
+        const points =
+          (await profilePanels.nth(index).locator("polyline.plan-path").getAttribute("points")) ?? "";
+        profilePointCounts.push(points.trim().split(/\s+/).filter(Boolean).length);
+      }
+      const profilesOk =
+        profileCount === 2 &&
+        new Set(profileSegments).size === 2 &&
+        profilePointCounts.every((count) => count === 2);
+      record(
+        "Vertical profile renders one panel per segment with no bridged paths",
+        profilesOk,
+        `panels=${profileCount} segments=${profileSegments.join(",")} points=${profilePointCounts.join(",")}`
+      );
+      if (!profilesOk) {
+        throw new Error("Vertical profile segment panels incorrect");
+      }
+      const profileTitle = (await profilePanels.first().locator("title").textContent()) ?? "";
+      record(
+        "Vertical profile exposes accessible title",
+        profileTitle.includes("vertical profile"),
+        profileTitle || "(missing profile title)"
+      );
+      const detailsHd = await page.getByText(/HD 0 ft from segment anchor/i).count();
+      record(
+        "Details fallback lists HD anchored at zero per segment",
+        detailsHd >= 1,
+        `anchor HD-zero entries visible: ${detailsHd}`
+      );
       await page.getByRole("button", { name: /FORGE style/i }).click();
       await page.getByRole("tab", { name: /BHA/i }).click();
       await page.getByRole("button", { name: /Apply format/i }).click();

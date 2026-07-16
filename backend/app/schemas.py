@@ -550,6 +550,9 @@ class CalculatedTrajectoryStation(BaseModel):
     tvd_ft: float
     north_south_ft: float
     east_west_ft: float
+    # Lateral displacement magnitude from this station's own segment anchor
+    # (never a global origin); unsigned, display-only.
+    horizontal_displacement_ft: float = Field(ge=0)
     source_station_id: str | None = None
     source_page: int | None = Field(default=None, ge=1)
     segment: int = Field(ge=1)

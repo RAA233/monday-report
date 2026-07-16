@@ -278,6 +278,12 @@ def _flush_segment(
     tvd = anchor_tvd if anchor_tvd is not None else 0.0
     ns = anchor_ns if anchor_ns is not None else 0.0
     ew = anchor_ew if anchor_ew is not None else 0.0
+    # Horizontal displacement is defined per segment, relative to THIS
+    # segment's anchor N/E values (which may be non-zero source-absolute
+    # coordinates) — never a magnitude from a global origin. The anchor
+    # station is therefore exactly 0 ft by construction.
+    segment_anchor_ns = ns
+    segment_anchor_ew = ew
 
     def confidence_of(station: dict) -> float | None:
         return _finite(station.get("confidence"))
@@ -288,6 +294,12 @@ def _flush_segment(
             "tvd_ft": _round(tvd_value, 2),
             "north_south_ft": _round(ns_value, 2),
             "east_west_ft": _round(ew_value, 2),
+            # Display-only lateral magnitude from the segment anchor (sign is
+            # deliberately lost; direction lives in the plan view). This is
+            # result assembly, not a new engineering method.
+            "horizontal_displacement_ft": _round(
+                math.hypot(ns_value - segment_anchor_ns, ew_value - segment_anchor_ew), 2
+            ),
             "source_station_id": str(station["station_id"]) if station.get("station_id") else None,
             "source_page": station.get("page") if isinstance(station.get("page"), int) else None,
             "segment": segment_index,

@@ -351,6 +351,103 @@ def main() -> int:
         ANTIPODAL_TOLERANCE_RAD,
     )
 
+    # --- Horizontal displacement (display-only, segment-anchor-relative) ---
+    # Constant 30 deg inclination at azimuth atan2(4,3) over 10 ft MD gives
+    # exactly delta N = 3 ft, delta E = 4 ft (RF = 1), so HD must be 5 ft.
+    three_four_five_azi = math.degrees(math.atan2(4.0, 3.0))
+    hd_345 = calculate_trajectory(
+        [station(1000, 30, three_four_five_azi), station(1010, 30, three_four_five_azi)]
+    )
+    check(
+        "3-4-5 displacement: anchor HD is 0 and the next station is 5 ft",
+        hd_345["stations"][0]["horizontal_displacement_ft"] == 0.0
+        and abs(hd_345["stations"][1]["horizontal_displacement_ft"] - 5.0) < 0.01
+        and abs(hd_345["stations"][1]["north_south_ft"] - 3.0) < 0.01
+        and abs(hd_345["stations"][1]["east_west_ft"] - 4.0) < 0.01,
+        hd_345["stations"],
+    )
+    hd_absolute = calculate_trajectory(
+        [
+            station(1000, 30, three_four_five_azi, north_south_ft=1000.0, east_west_ft=2000.0),
+            station(1010, 30, three_four_five_azi),
+        ]
+    )
+    check(
+        "Non-zero absolute N/E anchors still give segment-relative HD (5 ft, not ~2241 ft)",
+        hd_absolute["stations"][0]["horizontal_displacement_ft"] == 0.0
+        and abs(hd_absolute["stations"][0]["north_south_ft"] - 1000.0) < 0.01
+        and abs(hd_absolute["stations"][1]["north_south_ft"] - 1003.0) < 0.01
+        and abs(hd_absolute["stations"][1]["east_west_ft"] - 2004.0) < 0.01
+        and abs(hd_absolute["stations"][1]["horizontal_displacement_ft"] - 5.0) < 0.01,
+        hd_absolute["stations"],
+    )
+    hd_segments = calculate_trajectory(
+        [
+            station(1000, 10, 100),
+            station(1500, 12, 102),
+            station(1700, 11, 101, conflict=True),
+            station(2000, 14, 104),
+            station(2500, 16, 106),
+        ]
+    )
+    segment_firsts = {}
+    for entry in hd_segments["stations"]:
+        segment_firsts.setdefault(entry["segment"], entry)
+    check(
+        "Each segment's first calculated station resets HD to zero (no carryover)",
+        hd_segments["segment_count"] == 2
+        and len(segment_firsts) == 2
+        and all(entry["horizontal_displacement_ft"] == 0.0 for entry in segment_firsts.values())
+        and all(
+            entry["horizontal_displacement_ft"] > 0.0
+            for entry in hd_segments["stations"]
+            if entry is not segment_firsts[entry["segment"]]
+        ),
+        hd_segments["stations"],
+    )
+    hd_types = calculate_trajectory(
+        [
+            station(1000, 10, 100, survey_type="actual"),
+            station(1500, 12, 102, survey_type="actual"),
+            station(1200, 11, 101, survey_type="planned"),
+            station(1700, 13, 103, survey_type="planned"),
+        ]
+    )
+    type_firsts = {}
+    for entry in hd_types["stations"]:
+        type_firsts.setdefault(entry["survey_type"], entry)
+    check(
+        "Planned and actual sequences have independent HD anchors",
+        sorted(type_firsts) == ["actual", "planned"]
+        and all(entry["horizontal_displacement_ft"] == 0.0 for entry in type_firsts.values()),
+        hd_types["stations"],
+    )
+    hd_vertical = calculate_trajectory([station(0, 0, 0), station(1000, 0, 0), station(2000, 0, 0)])
+    check(
+        "A vertical segment keeps HD exactly zero at every station",
+        all(entry["horizontal_displacement_ft"] == 0.0 for entry in hd_vertical["stations"])
+        and all(math.isfinite(number) for number in walk_numbers(hd_vertical)),
+        hd_vertical["stations"],
+    )
+    hd_repeat_a = json.dumps(calculate_trajectory([station(1000, 30, three_four_five_azi), station(1010, 30, three_four_five_azi)]), sort_keys=True)
+    hd_repeat_b = json.dumps(calculate_trajectory([station(1000, 30, three_four_five_azi), station(1010, 30, three_four_five_azi)]), sort_keys=True)
+    check(
+        "HD values are deterministic and consistent with the result's own deltas",
+        hd_repeat_a == hd_repeat_b
+        and all(
+            abs(
+                entry["horizontal_displacement_ft"]
+                - math.hypot(
+                    entry["north_south_ft"] - segment_firsts[entry["segment"]]["north_south_ft"],
+                    entry["east_west_ft"] - segment_firsts[entry["segment"]]["east_west_ft"],
+                )
+            )
+            < 0.02
+            for entry in hd_segments["stations"]
+        ),
+        "deterministic + delta-consistent",
+    )
+
     failed = [item for item in checks if not item["ok"]]
     for item in checks:
         status = "PASS" if item["ok"] else "FAIL"
