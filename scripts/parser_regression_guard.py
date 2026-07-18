@@ -428,6 +428,68 @@ def main() -> int:
         )
     )
 
+    ddr_acronym_heading = profile_for(
+        [
+            "DDR #12",
+            "Well: ALPINE 22B(45)-07",
+            "Rig: Vector Test Rig 7",
+            "Mud weight checks and casing status recorded with TVD.",
+        ]
+    )
+    checks.append(
+        check(
+            "D4 standalone DDR acronym heading is recognized",
+            ddr_acronym_heading.get("document_type") == "daily_drilling_report",
+            ddr_acronym_heading.get("document_type"),
+        )
+    )
+
+    address_completion = profile_for(
+        [
+            "DAILY COMPLETION REPORT",
+            *completion_body,
+            "Forwarding address updated for the town office records.",
+        ]
+    )
+    checks.append(
+        check(
+            "D4 the word 'address' never counts as DDR evidence",
+            address_completion.get("document_type") == "pdf_report",
+            address_completion.get("document_type"),
+        )
+    )
+
+    embedded_token = profile_for(
+        [
+            "MORNING OPERATIONS SUMMARY",
+            "Well: ALPINE 22B(45)-07",
+            "Rig: Vector Test Rig 7",
+            "Addressee list saddled with outdated contacts was raddled and rebuilt.",
+        ]
+    )
+    checks.append(
+        check(
+            "D4 longer tokens containing ddr never count as DDR evidence",
+            embedded_token.get("document_type") == "pdf_report",
+            embedded_token.get("document_type"),
+        )
+    )
+
+    body_ddr_word = profile_for(
+        [
+            "DAILY COMPLETION REPORT",
+            *completion_body,
+            "Cross-reference drilling history per DDR 34 for the interval.",
+        ]
+    )
+    checks.append(
+        check(
+            "D4 standalone body DDR word keeps existing affirmative-marker semantics",
+            body_ddr_word.get("document_type") == "daily_drilling_report",
+            body_ddr_word.get("document_type"),
+        )
+    )
+
     # ------------------------------------------------------------------
     # Determinism
     # ------------------------------------------------------------------

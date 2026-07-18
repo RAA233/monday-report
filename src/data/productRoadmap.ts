@@ -173,7 +173,7 @@ export const roadmapLanes: RoadmapLane[] = [
   {
     id: "lane-next",
     label: "Next",
-    intent: "Turn the open-source daily-report corpus into repeatable extraction and drafting proof.",
+    intent: "Turn the locally held Utah FORGE daily-report corpus into repeatable extraction and drafting proof.",
     status: "queued",
     items: [
       {

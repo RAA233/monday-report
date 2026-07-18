@@ -3891,7 +3891,10 @@ class LocalStateStore:
                 }
 
         section_presence = {
-            "daily_drilling_report": any(marker in lower_text for marker in ["daily drilling report", "ddr"]),
+            # The DDR acronym must stand alone as a word: plain substring
+            # containment matched inside unrelated words such as "address".
+            "daily_drilling_report": "daily drilling report" in lower_text
+            or bool(re.search(r"\bddr\b", lower_text)),
             "well_job_info": any(marker in lower_text for marker in ["well", "rig", "operator"]),
             "drilling_parameters": any(marker in lower_text for marker in ["hole size", "mud weight", "tvd", "measured depth"]),
             "mud_bha_survey": any(marker in lower_text for marker in ["mud", "bha", "survey", "mwd", "lwd"]),
