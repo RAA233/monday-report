@@ -11,7 +11,7 @@ The executable MVP path is now phase-gated end to end and the local client-data 
 | Accepted now | Pass | Executable MVP is working with Client Home, rig/MR list access, chat, report studio, Benchmarking, roadmap, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
 | Safe operating mode | Pass | Demo mode remains local; approved client mode uses PostgreSQL/RLS state, Redis queue, protected storage, API key, signing secret, and reviewed fixture/eval evidence. | Keep secrets out of Git and regenerate approval after environment changes. |
 | Real-client approval | Pass | Live client approval reports `APPROVED`; GA readiness reports `GA_READY`; readiness has zero blockers. | Run controlled client-package dry runs before broad distribution. |
-| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, directional survey-station extraction, the review-gated minimum-curvature trajectory calculation, the segment-aware calculated plan view, the per-segment vertical trajectory profile, and source-derived hydraulics observations are complete; remaining lanes: FORGE eval promotion, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull FORGE eval promotion or the local LLM extraction router (Phase 06), then controlled client-package trials. |
+| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, directional survey-station extraction, the review-gated minimum-curvature trajectory calculation, the segment-aware calculated plan view, the per-segment vertical trajectory profile, and source-derived hydraulics observations are complete; the reviewed FORGE evaluation set is authored and runs the real corpus pipeline but records four parser defects, so FORGE promotion is blocked pending a parser-fix PR; remaining lanes: FORGE parser fixes, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull the FORGE parser-fix PR (defects D1–D4 in `docs/FORGE_EVAL_PROMOTION.md`) or the local LLM extraction router (Phase 06), then controlled client-package trials. |
 
 ## Current Tracker
 
@@ -290,6 +290,41 @@ Files changed: `backend/app/schemas.py` (`HydraulicObservation` + additive draft
 Evidence paths: `output/screenshots/ui-quality/03-report-studio.png`, `04-benchmarking.png`, `10-roadmap.png` (unchanged order), `output/pdf/monday_report_ui_quality_screenshots.pdf`, `output/qa/ui_quality_e2e_manifest.json`.
 
 Follow-up: FORGE eval promotion, local-LLM extraction router (Phase 06), formatted HTML/PDF/XLSX export provenance, field-level correction workflow, normalized PostgreSQL repositories (Phase 04), hydraulics trend visualization (later slice on this extraction).
+
+Git result: PR #6 (`https://github.com/RAA233/monday-report/pull/6`) was reviewed and rebase-merged into `main` as `c81e3563f72d02f6db4c4a9604f68eba7ad7a16e` on `2026-07-18`; the merged tree is byte-identical to the verified head. The remote feature branch was deleted; the local branch remains (safe `-d` refused after the rebase hash rewrite).
+
+## 2026-07-18 FORGE Evaluation Promotion Evidence
+
+Increment completed on `2026-07-18` from base revision `c81e3563f72d02f6db4c4a9604f68eba7ad7a16e` (merged hydraulics `main`) on branch `feat/forge-eval-promotion`. Scope: **reviewed FORGE ground-truth evaluation set** (`evals/forge/manifest.v1.json` + `evals/forge/expectations.v1.json`, documented in `docs/FORGE_EVAL_PROMOTION.md`) — a fixed stratified five-document selection (three drilling phases, two completion templates) pinned by corpus-relative path, SHA-256, and page count, with 65 required and 2 explicitly informational manually reviewed checks (`equals`, `approximately_equals`, `contains_row`, `row_count`, `absent`, `source_state`, `evidence_present`). Two distinct gates: portable `audit:forge-eval-spec` (in `audit:all`, runs without the corpus) and corpus-backed `audit:forge-evals` (real upload → worker (`backend.app.worker.run_once`) → profile → report-draft path per document in isolated temporary state; `SKIPPED`, never PASS, when the corpus is absent).
+
+**Honest current result: PROMOTION BLOCKED.** The evaluation executed end-to-end (5/5 documents through the real pipeline) and recorded **11 required ground-truth failures across four parser defects** — D1 well-name bracket truncation (5 docs), D2 casing narrative overmatch fabricating rows from operational text (3 docs, including inch-fraction bit/pipe sizes misread as casing OD), D3 labeled-survey dot-thousands depth misparse with dropped azimuth (1 doc), D4 completion reports misclassified `daily_drilling_report` instead of the in-taxonomy generic `pdf_report` (2 docs). Per the no-parser-change rule, expectations were **not** weakened; a separate parser-fix PR is required, after which `audit:forge-evals` is rerun to complete promotion. 54/65 required checks pass (scalars, positive explicit-unit hydraulics with page evidence, survey count/evidence, honest absences, draft source states); recommendation/Benchmarking isolation and untouched demo state are guard-asserted. No parser, API, UI, or persistence file changed; no raw PDF, page image, prose, personnel name, or absolute path is committed.
+
+Files changed: `evals/forge/manifest.v1.json` + `evals/forge/expectations.v1.json` (new committed reviewed authority), `scripts/forge_eval_common.py` (shared validator/engine), `scripts/forge_eval_spec_guard.py` (portable gate, 19 checks incl. rejection matrix), `scripts/build_forge_eval_manifest.py` (committed-manifest verification, never regenerates), `scripts/forge_eval_guard.py` (corpus-backed evaluator + `output/forge-evals/forge_eval_report.json`), `docs/FORGE_EVAL_PROMOTION.md` (new), `package.json` (two new commands; spec gate wired into `audit:all`), tracker/roadmap/README.
+
+| Final command | Exit | Evidence |
+|---|---:|---|
+| `python -m py_compile backend/app/*.py scripts/forge_eval_*.py scripts/build_forge_eval_manifest.py` | 0 | Backend unchanged and new scripts compile. |
+| `pnpm run build` | 0 | `tsc` typecheck and Vite production build passed. |
+| `pnpm run audit:forge-eval-spec` | 0 | **19/19** — committed spec validates; duplicate IDs, absolute/backslash paths, bad SHA, missing/orphan coverage, unsupported check types, negative tolerance, long prose all rejected; tolerance enforcement and optional-cannot-mask-required proven. |
+| `pnpm run audit:forge-corpus` | 0 | Existing corpus guard retained and green. |
+| `pnpm run audit:forge-evals` | 1 | **Honest failing promotion gate**: 5/5 documents verified (SHA + page count) and processed through real upload/worker/draft; 67 checks — 54/65 required pass, **11 required failures = recorded parser defects D1–D4**, 2 informational failures; isolation clean (0 failures/validation tasks/anomalies/reports, demo state byte-identical); report at `output/forge-evals/forge_eval_report.json` with zero absolute paths. `PROMOTION BLOCKED` pending a separate parser-fix PR. |
+| `pnpm run audit:pdf-parser` | 0 | 23/23 regression clean (no parser change). |
+| `pnpm run audit:hydraulics-extraction` | 0 | 21/21 regression clean. |
+| `pnpm run audit:trajectory-calculation` | 0 | **38/38 regression clean.** |
+| `pnpm run audit:report-draft` | 0 | 22/22 regression clean. |
+| `pnpm run audit:source-lineage` | 0 | 6/6 retained. |
+| `pnpm run audit:benchmarking` | 0 | **23/23 regression clean.** |
+| `pnpm run test:e2e` | 0 | 22/22 against fresh isolated-state servers. |
+| `pnpm run test:ui` | 0 | **109/109 with zero browser errors** — no UI change. |
+| `pnpm run audit:all` | 0 | Full chain: **416 PASS, 0 FAIL** (adds the 19-check portable FORGE spec gate; corpus-backed evaluation deliberately not in `audit:all`, so its skip/fail state can never masquerade as chain green). |
+| `pnpm run ga:readiness` | 1 | `GA_BLOCKED`: software-owned checks pass (**0 software blockers**); remaining blockers are configuration/external-infrastructure/reviewed-evidence requirements. Not client/production authorization. |
+| `pnpm run report:ui-screenshots` | 0 | UI evidence PDF regenerated; `03-report-studio.png`, `04-benchmarking.png`, `10-roadmap.png` order unchanged. |
+
+Evidence paths: `output/forge-evals/forge_eval_report.json`, `output/forge-evals/forge_manifest_verification.json`, `output/forge-corpus/forge_corpus_summary.json`, `output/screenshots/ui-quality/` (order unchanged), `output/pdf/monday_report_ui_quality_screenshots.pdf`.
+
+Licensing: the local corpus folder carries no license/notice file, so redistribution is not asserted; raw PDFs stay untracked and committed expectations hold minimal technical facts only (no prose, images, personnel names, or phone numbers). FORGE evidence is extraction-quality evidence only and never substitutes for anonymized-client readiness evidence.
+
+Follow-up: **FORGE parser-fix PR (D1–D4) then rerun `audit:forge-evals` to complete promotion**, local-LLM extraction router (Phase 06), formatted HTML/PDF/XLSX export provenance, field-level correction workflow, normalized PostgreSQL repositories (Phase 04), hydraulics trend visualization.
 
 ## Phase Gate Rule
 

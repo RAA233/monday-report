@@ -1,0 +1,64 @@
+{
+  "manifest_version": "v1",
+  "corpus_id": "utah-forge-16a-78-32-daily-reports",
+  "corpus_description": "Utah FORGE well 16A(78)-32 daily drilling and completion reports. Raw PDFs stay local and untracked; this manifest pins the reviewed evaluation selection by corpus-relative path and SHA-256 only.",
+  "corpus_root_convention": "16A(78)-32_Daily_Reports directory at the repository root (git-ignored). Override with MONDAY_REPORT_FORGE_CORPUS_ROOT.",
+  "selection_method": "reviewed_stratified_fixed_set",
+  "selection_notes": "Fixed reviewed selection stratified across report family (drilling/completion), well phase (surface hole, coring, tangent drilling, completion wash/ream, rig release), narrative-heavy versus table-heavy layout, positive structured-extraction targets, and reviewed-absence targets. Not a first-N alphabetical sample. Changing this selection requires editing and re-reviewing this committed manifest.",
+  "coverage": {
+    "report_families": ["drilling", "completion"],
+    "narrative_heavy": ["forge-drilling-coring", "forge-completion-early"],
+    "table_heavy": ["forge-drilling-early", "forge-drilling-late"],
+    "multi_page": "not_available_in_corpus (all 184 corpus PDFs are single-page)",
+    "structured_targets": ["forge-drilling-coring", "forge-drilling-late"],
+    "reviewed_absence_targets": ["forge-drilling-early", "forge-completion-early", "forge-completion-late"],
+    "layout_variation": "drilling template versus completion template, plus early/mid/late phase variation within each family"
+  },
+  "documents": [
+    {
+      "document_id": "forge-drilling-early",
+      "relative_path": "drilling/11_04_2020_Utah_Forge_FORGE_16A_[78]-32_Drilling-C_11420201142020_25_reporttmp.pdf",
+      "sha256": "739acd0e055bf419dcf48a04d739c794ab016180d16a883d0bb18661a1e31e56",
+      "page_count": 1,
+      "report_family": "drilling",
+      "format_variant": "surface-hole-table-heavy",
+      "selection_reason": "Early surface-hole daily drilling report with casing, mud, and pump tables plus BOPE-test narrative. Exercises scalar fields, table-cell splitting behavior, bare-unit mud values, and the casing no-fabrication invariant."
+    },
+    {
+      "document_id": "forge-drilling-coring",
+      "relative_path": "drilling/11_22_2020_Utah_Forge_FORGE_16A_78-32_Drilling-C_1122202011222020_3_reporttmp.pdf",
+      "sha256": "087fe1b8621cc3a5273fb01ddb0148f595529546a63a80b44b231eed5b0ee3c8",
+      "page_count": 1,
+      "report_family": "drilling",
+      "format_variant": "coring-narrative-heavy",
+      "selection_reason": "Mid-well coring report dominated by operational narrative. Provides the positive explicit-unit hydraulics target (standpipe pressure in psi inside narrative) and reviewed casing/survey absence."
+    },
+    {
+      "document_id": "forge-drilling-late",
+      "relative_path": "drilling/12_14_2020_Utah_Forge_FORGE_16A_[78]-32_Drilling-C_1214202012142020_19_reporttmp.pdf",
+      "sha256": "0d7f548db0f0ed80d0e6d7584c5fc3a17771473d4c5b9768f2fb97352595fd09",
+      "page_count": 1,
+      "report_family": "drilling",
+      "format_variant": "tangent-drilling-labeled-survey",
+      "selection_reason": "Late tangent-drilling report with separate MD/TVD scalars and a labeled single-line directional survey. Provides the positive survey extraction target and numeric-notation stress (dot-thousands measured depth)."
+    },
+    {
+      "document_id": "forge-completion-early",
+      "relative_path": "completion/Utah_Forge_FORGE_16A_(78)-32_Completion-C_01072021_01072021_13_reporttmp.pdf",
+      "sha256": "a0a700b7d49029d84cbfc788a7e6ebd7fcbabfb19467f76c64074136e6320477",
+      "page_count": 1,
+      "report_family": "completion",
+      "format_variant": "completion-wash-ream",
+      "selection_reason": "Daily completion report (wash/ream and tripping operations) with a time log table. Exercises the completion template, document-type classification, and the casing no-fabrication invariant against tripping narrative."
+    },
+    {
+      "document_id": "forge-completion-late",
+      "relative_path": "completion/Utah_Forge_FORGE_16A_[78]-32_Completion-C_11220211122021_12_reporttmp.pdf",
+      "sha256": "be3a570a6999ba60fd3764c0f2d0822c180b6b83000e386775f46f15603bb394",
+      "page_count": 1,
+      "report_family": "completion",
+      "format_variant": "completion-rig-release-final",
+      "selection_reason": "Final completion report (rig release, pipe laydown). Second completion template sample for stability, with the inch-fraction laydown narrative that stresses the casing no-fabrication invariant."
+    }
+  ]
+}
