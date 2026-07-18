@@ -343,7 +343,7 @@ Fixes (all in `backend/app/store.py`, each behind failing-first vectors in the n
 |---|---:|---|
 | `python -m py_compile backend/app/*.py scripts/parser_regression_guard.py` | 0 | Modules compile. |
 | `pnpm run build` | 0 | `tsc` typecheck and Vite production build passed. |
-| `pnpm run audit:parser-regression` | 0 | **48/48** — the 23 pre-fix failing vectors now pass with all regression pins intact (bracketed/hash/ampersand wells, adjacent-label boundary, dangling-delimiter trim, five casing positives incl. fractions, eight casing negatives, thirteen survey vectors incl. corroborated promotion, datum safety, and the ambiguous multi-dot no-crash vector, six classification vectors, determinism, end-to-end upload→worker→profile/draft on synthetic PDFs, isolation). |
+| `pnpm run audit:parser-regression` | 0 | **52/52** — the 23 pre-fix failing vectors now pass with all regression pins intact (bracketed/hash/ampersand wells, adjacent-label boundary, dangling-delimiter trim, five casing positives incl. fractions, eight casing negatives, thirteen survey vectors incl. corroborated promotion, datum safety, and the ambiguous multi-dot no-crash vector, ten classification vectors incl. word-bounded DDR-marker evidence — `address` and longer embedded tokens never count as DDR while standalone `DDR` headings/words keep the repository's affirmative-marker semantics, determinism, end-to-end upload→worker→profile/draft on synthetic PDFs, isolation). |
 | `pnpm run audit:pdf-parser` | 0 | 23/23 regression clean — fixture values byte-identical. |
 | `pnpm run audit:hydraulics-extraction` | 0 | 21/21 regression clean. |
 | `pnpm run audit:trajectory-calculation` | 0 | **38/38 regression clean.** |
