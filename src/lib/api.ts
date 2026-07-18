@@ -248,6 +248,7 @@ export interface ApiReportDraft {
   trajectory_source?: "calculated" | "none";
   hydraulics_observations?: ApiHydraulicObservation[];
   hydraulics_source?: "source" | "none";
+  field_corrections?: ApiFieldCorrection[];
   evidence_summary: string[];
   source_document_count: number;
   source_chunk_count: number;
@@ -364,6 +365,41 @@ export interface ApiValidationTask {
   status: "open" | "validated" | "rejected" | "conflict";
   resolution_note?: string | null;
   created_at: string;
+}
+
+export type ApiFieldCorrectionTargetType =
+  | "report_field"
+  | "casing_string"
+  | "survey_station"
+  | "hydraulics_observation"
+  | "activity_segment"
+  | "failure";
+
+export interface ApiFieldCorrection {
+  id: string;
+  tenant_id: string;
+  workspace_id: string;
+  target_type: ApiFieldCorrectionTargetType;
+  field_key: string;
+  source_value?: string | null;
+  corrected_value?: string | null;
+  correction_reason: string;
+  reviewer_user_id: string;
+  reviewer_email: string;
+  reviewer_roles: string[];
+  status: "active" | "superseded" | "reverted";
+  supersedes_id?: string | null;
+  superseded_by_id?: string | null;
+  revert_reason?: string | null;
+  created_at: string;
+}
+
+export interface ApiFieldCorrectionCreate {
+  target_type: ApiFieldCorrectionTargetType;
+  field_key: string;
+  source_value?: string | null;
+  corrected_value?: string | null;
+  correction_reason: string;
 }
 
 export interface ApiMondayReport {
@@ -751,6 +787,34 @@ export async function updateValidationTask(params: {
       status: params.status,
       resolution_note: params.resolutionNote ?? null
     })
+  });
+}
+
+export async function recordFieldCorrection(
+  workspaceId: string,
+  payload: ApiFieldCorrectionCreate
+): Promise<ApiFieldCorrection> {
+  return request<ApiFieldCorrection>(`/workspaces/${workspaceId}/field-corrections`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export async function listFieldCorrections(
+  workspaceId: string,
+  activeOnly = false
+): Promise<ApiFieldCorrection[]> {
+  const query = activeOnly ? "?active_only=true" : "";
+  return request<ApiFieldCorrection[]>(`/workspaces/${workspaceId}/field-corrections${query}`);
+}
+
+export async function revertFieldCorrection(
+  correctionId: string,
+  revertReason: string
+): Promise<ApiFieldCorrection> {
+  return request<ApiFieldCorrection>(`/field-corrections/${correctionId}/revert`, {
+    method: "POST",
+    body: JSON.stringify({ revert_reason: revertReason })
   });
 }
 

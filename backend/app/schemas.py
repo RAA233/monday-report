@@ -387,6 +387,56 @@ class ValidationTaskUpdate(BaseModel):
     resolution_note: str | None = None
 
 
+# Field-level correction & review-provenance foundation.
+#
+# A FieldCorrection is an append-only overlay record: it captures a reviewer's
+# correction to a named extracted field WITHOUT overwriting the source-derived
+# value or its lineage. The original extracted value is preserved on the
+# record (source_value) and the underlying parsed document/profile is never
+# mutated. Re-correcting the same field supersedes the prior record (a version
+# chain), and reverting flips status without destroying history — so a full
+# who/what/from/to/when/why trail is always retrievable.
+FieldCorrectionTargetType = Literal[
+    "report_field",
+    "casing_string",
+    "survey_station",
+    "hydraulics_observation",
+    "activity_segment",
+    "failure",
+]
+
+
+class FieldCorrection(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    tenant_id: UUID
+    workspace_id: UUID
+    target_type: FieldCorrectionTargetType
+    field_key: str
+    source_value: str | None = None
+    corrected_value: str | None = None
+    correction_reason: str
+    reviewer_user_id: UUID
+    reviewer_email: str
+    reviewer_roles: list[Role] = Field(default_factory=list)
+    status: Literal["active", "superseded", "reverted"] = "active"
+    supersedes_id: UUID | None = None
+    superseded_by_id: UUID | None = None
+    revert_reason: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class FieldCorrectionCreate(BaseModel):
+    target_type: FieldCorrectionTargetType
+    field_key: str
+    source_value: str | None = None
+    corrected_value: str | None = None
+    correction_reason: str
+
+
+class FieldCorrectionRevert(BaseModel):
+    revert_reason: str
+
+
 class ChatRequest(BaseModel):
     workspace_id: UUID
     content: str
@@ -666,6 +716,9 @@ class ReportDraftResponse(BaseModel):
     trajectory_source: Literal["calculated", "none"] = "none"
     hydraulics_observations: list[HydraulicObservation] = Field(default_factory=list)
     hydraulics_source: Literal["source", "none"] = "none"
+    # Active reviewer corrections surfaced as review-required overlays; they
+    # never overwrite the source-derived values above.
+    field_corrections: list[FieldCorrection] = Field(default_factory=list)
     evidence_summary: list[str] = Field(default_factory=list)
     source_document_count: int
     source_chunk_count: int

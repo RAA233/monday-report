@@ -33,6 +33,9 @@ from .schemas import (
     DashboardSummary,
     DocumentChunk,
     FailureRecord,
+    FieldCorrection,
+    FieldCorrectionCreate,
+    FieldCorrectionRevert,
     HydraulicObservation,
     LocalAIStatus,
     MondayReport,
@@ -189,6 +192,19 @@ def require_benchmark_permission(permission: str) -> None:
         return
     store.audit(
         "benchmark.permission_denied",
+        "tenant",
+        store.tenant.id,
+        {"permission": permission, "user": store.user.email},
+    )
+    raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
+
+
+def require_permission(permission: str) -> None:
+    store.refresh()
+    if store.benchmark_permissions().get(permission):
+        return
+    store.audit(
+        "permission_denied",
         "tenant",
         store.tenant.id,
         {"permission": permission, "user": store.user.email},
@@ -382,6 +398,43 @@ def update_validation_task(task_id: UUID, payload: ValidationTaskUpdate) -> Vali
         raise HTTPException(status_code=404, detail="Validation task not found")
     require_client_data_ready("validation_task.update", "validation_task", task_id)
     return store.update_validation_task(task_id, payload)
+
+
+@app.post(
+    "/workspaces/{workspace_id}/field-corrections",
+    response_model=FieldCorrection,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_field_correction(workspace_id: UUID, payload: FieldCorrectionCreate) -> FieldCorrection:
+    store.refresh()
+    if workspace_id not in store.workspaces:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    require_client_data_ready("field_correction.record", "workspace", workspace_id)
+    require_permission("record_field_corrections")
+    return store.record_field_correction(workspace_id, payload)
+
+
+@app.get("/workspaces/{workspace_id}/field-corrections", response_model=list[FieldCorrection])
+def list_field_corrections(workspace_id: UUID, active_only: bool = False) -> list[FieldCorrection]:
+    store.refresh()
+    if workspace_id not in store.workspaces:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    require_client_data_ready("field_correction.list", "workspace", workspace_id)
+    require_permission("view_field_corrections")
+    return store.list_field_corrections(workspace_id, active_only=active_only)
+
+
+@app.post("/field-corrections/{correction_id}/revert", response_model=FieldCorrection)
+def revert_field_correction(correction_id: UUID, payload: FieldCorrectionRevert) -> FieldCorrection:
+    store.refresh()
+    if correction_id not in store.field_corrections:
+        raise HTTPException(status_code=404, detail="Field correction not found")
+    require_client_data_ready("field_correction.revert", "field_correction", correction_id)
+    require_permission("record_field_corrections")
+    try:
+        return store.revert_field_correction(correction_id, payload.revert_reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/dashboards/summary", response_model=DashboardSummary)
@@ -816,6 +869,7 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
         trajectory_source=trajectory_source,
         hydraulics_observations=hydraulics_observations,
         hydraulics_source=hydraulics_source,
+        field_corrections=store.list_field_corrections(workspace_id, active_only=True),
         evidence_summary=evidence_summary,
         source_document_count=len(documents),
         source_chunk_count=len(chunks),

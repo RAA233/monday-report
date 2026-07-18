@@ -52,6 +52,8 @@ from .schemas import (
     DiagnosticAction,
     DocumentChunk,
     FailureRecord,
+    FieldCorrection,
+    FieldCorrectionCreate,
     KeyDecision,
     MondayReport,
     ParsedDocument,
@@ -230,6 +232,7 @@ class LocalStateStore:
         self.benchmark_measurements: dict[UUID, BenchmarkMeasurement] = {}
         self.anomaly_events: dict[UUID, AnomalyEvent] = {}
         self.key_decisions: dict[UUID, KeyDecision] = {}
+        self.field_corrections: dict[UUID, FieldCorrection] = {}
         self.audit_logs: list[AuditLog] = []
 
         if self._state_exists():
@@ -262,6 +265,7 @@ class LocalStateStore:
         self.validation_tasks.clear()
         self.monday_reports.clear()
         self.report_exports.clear()
+        self.field_corrections.clear()
         self.audit_logs.clear()
         self._seed()
 
@@ -306,6 +310,7 @@ class LocalStateStore:
         )
         self.anomaly_events = self._load_map(AnomalyEvent, payload.get("anomaly_events", []))
         self.key_decisions = self._load_map(KeyDecision, payload.get("key_decisions", []))
+        self.field_corrections = self._load_map(FieldCorrection, payload.get("field_corrections", []))
         self.audit_logs = [AuditLog.model_validate(item) for item in payload.get("audit_logs", [])]
 
     def save(self) -> None:
@@ -340,6 +345,7 @@ class LocalStateStore:
             "benchmark_measurements": self._dump_map(self.benchmark_measurements),
             "anomaly_events": self._dump_map(self.anomaly_events),
             "key_decisions": self._dump_map(self.key_decisions),
+            "field_corrections": self._dump_map(self.field_corrections),
             "audit_logs": [item.model_dump(mode="json") for item in self.audit_logs],
         }
         return payload
@@ -893,6 +899,106 @@ class LocalStateStore:
         )
         return task
 
+    # ------------------------------------------------------------------
+    # Field-level correction & review-provenance foundation.
+    #
+    # Corrections are append-only overlay records. They capture who/what/from/
+    # to/when/why for a reviewer correction to a named extracted field without
+    # ever mutating the source-derived value or its lineage. Re-correcting the
+    # same (workspace, target_type, field_key) supersedes the prior active
+    # record (a version chain); reverting flips status without destroying
+    # history. Recording a correction never creates anomalies, benchmark
+    # measurements, failures, or validation tasks — the Benchmarking and
+    # recommended-only diagnostic boundaries are untouched.
+    # ------------------------------------------------------------------
+    def record_field_correction(
+        self, workspace_id: UUID, payload: FieldCorrectionCreate
+    ) -> FieldCorrection:
+        self.refresh()
+        prior = self._active_field_correction(workspace_id, payload.target_type, payload.field_key)
+        correction = FieldCorrection(
+            tenant_id=self.tenant.id,
+            workspace_id=workspace_id,
+            target_type=payload.target_type,
+            field_key=payload.field_key,
+            source_value=payload.source_value,
+            corrected_value=payload.corrected_value,
+            correction_reason=payload.correction_reason,
+            reviewer_user_id=self.user.id,
+            reviewer_email=self.user.email,
+            reviewer_roles=list(self.user.roles),
+            supersedes_id=prior.id if prior else None,
+        )
+        if prior is not None:
+            prior.status = "superseded"
+            prior.superseded_by_id = correction.id
+        self.field_corrections[correction.id] = correction
+        # Audit metadata carries attribution + shape only. Raw source/corrected
+        # values and the free-text reason are never written to the audit log;
+        # only booleans, lengths, and stable identifiers are recorded.
+        self.audit(
+            "field_correction.record",
+            "field_correction",
+            correction.id,
+            {
+                "workspace_id": str(workspace_id),
+                "target_type": correction.target_type,
+                "field_key": correction.field_key,
+                "source_present": correction.source_value is not None,
+                "corrected_present": correction.corrected_value is not None,
+                "value_changed": correction.source_value != correction.corrected_value,
+                "reason_length": len(correction.correction_reason),
+                "supersedes": str(prior.id) if prior else None,
+            },
+        )
+        return correction
+
+    def revert_field_correction(self, correction_id: UUID, revert_reason: str) -> FieldCorrection:
+        self.refresh()
+        correction = self.field_corrections[correction_id]
+        if correction.status != "active":
+            raise ValueError("Only an active correction can be reverted.")
+        correction.status = "reverted"
+        correction.revert_reason = revert_reason
+        self.audit(
+            "field_correction.revert",
+            "field_correction",
+            correction.id,
+            {
+                "workspace_id": str(correction.workspace_id),
+                "target_type": correction.target_type,
+                "field_key": correction.field_key,
+                "revert_reason_length": len(revert_reason),
+            },
+        )
+        return correction
+
+    def list_field_corrections(
+        self, workspace_id: UUID, active_only: bool = False
+    ) -> list[FieldCorrection]:
+        corrections = [
+            correction
+            for correction in self.field_corrections.values()
+            if correction.workspace_id == workspace_id and correction.tenant_id == self.tenant.id
+        ]
+        if active_only:
+            corrections = [item for item in corrections if item.status == "active"]
+        return sorted(corrections, key=lambda item: item.created_at)
+
+    def _active_field_correction(
+        self, workspace_id: UUID, target_type: str, field_key: str
+    ) -> FieldCorrection | None:
+        for correction in self.field_corrections.values():
+            if (
+                correction.workspace_id == workspace_id
+                and correction.tenant_id == self.tenant.id
+                and correction.target_type == target_type
+                and correction.field_key == field_key
+                and correction.status == "active"
+            ):
+                return correction
+        return None
+
     def benchmark_permissions(self) -> dict[str, bool]:
         roles = set(self.user.roles)
         is_admin = Role.ADMIN in roles
@@ -910,6 +1016,10 @@ class LocalStateStore:
             "export_evidence": is_admin or is_engineer or is_manager,
             "edit_decision_records": is_admin or is_engineer or is_manager,
             "view_audit_history": is_admin or is_validator or is_manager,
+            # Recording/reverting a field correction is a reviewer action;
+            # a read-only VIEWER may see the history but not write it.
+            "record_field_corrections": is_admin or is_engineer or is_validator or is_manager,
+            "view_field_corrections": True,
         }
 
     def update_benchmark_value(self, benchmark_id: UUID, payload: BenchmarkValueUpdate) -> BenchmarkValue:
