@@ -105,37 +105,60 @@ matches, every selected document is processed through the real pipeline,
 Benchmarking state changes, and the generated report records zero failed
 required checks. Exact pass semantics — no aggregate accuracy threshold.
 
-## Current status: promotion BLOCKED by recorded parser defects
+## Current status: PROMOTED — real corpus-backed result 65/65 required
 
-The evaluation set is authored and the corpus-backed run executes end-to-end
-(5/5 documents through upload → worker → profile → draft). The reviewed
-ground truth currently records **11 required failures across four known
-extraction defects**, so promotion is honestly blocked pending a separate
-parser-fix PR (parser behavior is deliberately unchanged in the
-evaluation-promotion increment):
+The evaluation set first ran as a blocked baseline: the initial real-corpus
+run recorded 11 required failures across four extraction defects (D1
+well-name bracket truncation, D2 casing rows fabricated from bit/pipe/BHA/
+tripping narrative including inch-fraction sizes misread as OD, D3 a
+dot-thousands survey depth read as 9.5 ft instead of 9,524 ft with the `AZM`
+azimuth dropped, D4 daily completion reports classified
+`daily_drilling_report` instead of the generic `pdf_report`).
 
-- **D1 — well-name truncation** (5 docs): the scalar capture stops before
-  `[`, extracting `FORGE 16A` instead of the page value `FORGE 16A [78]-32`.
-- **D2 — casing narrative overmatch** (3 docs): operational narrative is
-  misread as casing strings, including inch-fraction bit/pipe sizes misread
-  as casing OD (`12 1/4"` bit → `4 in`; `3 1/2"` drill pipe → `2 in`) and
-  tripping depths misread as shoe depths.
-- **D3 — labeled-survey misparse** (1 doc): a dot-thousands survey depth is
-  read as a decimal (9.5 ft instead of 9,524 ft) and the `AZM` azimuth value
-  is dropped.
-- **D4 — completion misclassification** (2 docs): daily completion reports
-  are affirmatively classified `daily_drilling_report` although the generic
-  `pdf_report` class is the correct in-taxonomy answer.
+A separate parser-fix PR then resolved D1–D4 with **general parser rules
+only** — no FORGE filename or document-ID special case, and the committed
+manifest and expectations were **not modified** (byte-identical SHA-256
+before and after):
 
-54 of 65 required checks pass, covering scalar fields, the positive
-explicit-unit hydraulics observation (standpipe pressure 2,770 psi with page
-provenance), survey row-count and evidence, honest absences (timeline,
-surveys, hydraulics, report number, completion TVD), draft source states, and
-isolation. Two informational checks (report-number capture under the `RPT
-NUM` label) are marked non-required and fail as documented future scope.
+- **D1**: the well-name capture accepts bracketed pad codes, `#`, and `&`,
+  stops before an adjacent same-line `Label:` boundary, and trims only
+  demonstrably unmatched trailing delimiters (balanced bracket suffixes are
+  preserved byte-correct).
+- **D2**: casing rows now require positive casing context (casing/liner
+  label, noun adjacency, casing verbs, shoe/set association, or
+  planned/proposed casing wording); bit, PDC, nozzle, drill-pipe, HWDP, BHA,
+  hole-opener, pipe-handling, and casing-readiness narrative is rejected;
+  mixed-fraction diameters parse as complete sizes (`12 1/4"` → 12.25 in,
+  `9 5/8"` → 9.625 in) and a fraction denominator can never re-match as a
+  standalone diameter; depths become shoe depths only with explicit
+  shoe/set/landed/planned association or casing-labelled context.
+- **D3**: `AZM`/`AZ` azimuth labels and table headers parse explicitly; a
+  dot-grouped labelled MD token is promoted to a thousands reading only with
+  same-record corroboration — an explicitly foot-marked MD paired with a
+  same-record feet-basis TVD that the decimal reading would impossibly
+  undercut (the inline path additionally requires an explicit TVD foot
+  marker); ambiguous multi-dot tokens are skipped, never guessed and never
+  crash extraction; legitimate decimal depths, inclination, azimuth, and DLS
+  values are never reinterpreted, and no global MD/TVD conflict rule exists
+  (different-datum reports stay untouched).
+- **D4**: completion detection uses positive heading evidence in the
+  first-page header region only; explicit DDR headings always win, the veto
+  applies only to the generic marker-score fallback, incidental completion
+  narrative never downgrades a drilling report, and filenames are never
+  consulted.
 
-Fixing D1–D4 must happen in a separate parser-fix PR; the expectations stay
-as reviewed ground truth and the evaluation is rerun after the fix.
+The rerun corpus-backed evaluation now passes **65/65 required checks**
+(5/5 documents through the real upload → worker → profile → draft pipeline,
+zero required failures, recommendation/Benchmarking isolation clean, demo
+state untouched). The two informational checks (report-number capture under
+the `RPT NUM` label) remain non-required, unchanged, and still failing as
+documented future scope — they do not gate promotion.
+
+These general rules are permanently pinned by the portable
+`audit:parser-regression` guard (wired into `audit:all`), which encodes one
+synthetic regression vector per failed FORGE expectation class plus general
+positive/negative vectors, so the defect classes stay CI-visible on machines
+without the corpus.
 
 ## Reproducibility
 

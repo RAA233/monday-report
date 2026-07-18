@@ -102,8 +102,8 @@ export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
   {
     id: "exec-next-pull",
     label: "Next audited pull",
-    value: "FORGE parser fixes",
-    detail: "Casing schematic extraction, timeline, survey stations, trajectory visuals, and hydraulics observations are complete; the reviewed FORGE evaluation set now runs the real corpus pipeline and records four parser defects that block promotion, so the parser-fix PR and the local LLM extraction router are the next pull.",
+    value: "Phase 06 router",
+    detail: "Casing schematic extraction, timeline, survey stations, trajectory visuals, hydraulics observations, and the promoted FORGE evaluation (65/65 required on the real corpus after general D1-D4 parser fixes) are complete; the Phase 06 local LLM extraction router is the next pull on the same reviewed pipeline.",
     command: "pnpm run audit:forge-evals",
     tone: "warning"
   },
@@ -157,7 +157,7 @@ export const roadmapLanes: RoadmapLane[] = [
         status: "complete",
         gate: "audit:report-variants",
         evidence: "MR-SCHEMA-1 targets drive drafting; casing, timeline, survey stations, and hydraulics observations extract with provenance and explicit units, minimum-curvature geometry is review-gated, and both trajectory visuals render segment-aware paths.",
-        next: "Land the recorded FORGE parser fixes and the Phase 06 local-AI extraction router on the same reviewed pipeline."
+        next: "Build the Phase 06 local-AI extraction router on the same reviewed pipeline, validated against the promoted FORGE evaluation set."
       },
       {
         id: "item-ui-execution-board",
@@ -180,10 +180,10 @@ export const roadmapLanes: RoadmapLane[] = [
         id: "item-forge-evals",
         title: "FORGE corpus evals",
         owner: "AI/data",
-        status: "watch",
+        status: "complete",
         gate: "audit:forge-evals",
-        evidence: "Reviewed manifest and expectations pin five SHA-256 documents; the corpus-backed audit runs the real upload, worker, and draft path and records 11 required ground-truth failures across four parser defects, so promotion is honestly blocked.",
-        next: "Land a separate parser-fix PR for the recorded defects, then rerun the corpus-backed evaluation to complete promotion."
+        evidence: "Reviewed manifest and expectations pin five SHA-256 documents; after general D1-D4 parser fixes the unchanged ground truth passes 65/65 required checks on the real upload, worker, and draft path, and the portable parser-regression guard pins the defect classes in audit:all.",
+        next: "Feed the promoted evaluation set into the Phase 06 local-AI extraction router as its reviewed acceptance target."
       },
       {
         id: "item-citation-drafts",
