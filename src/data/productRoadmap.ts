@@ -102,9 +102,9 @@ export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
   {
     id: "exec-next-pull",
     label: "Next audited pull",
-    value: "schematic extraction",
-    detail: "Casing schematic, timeline, survey stations, minimum-curvature calculations, both trajectory visuals, and source-derived hydraulics observations are complete; FORGE eval promotion and the local LLM extraction router remain the next pull.",
-    command: "pnpm run audit:pdf-parser",
+    value: "FORGE parser fixes",
+    detail: "Casing schematic extraction, timeline, survey stations, trajectory visuals, and hydraulics observations are complete; the reviewed FORGE evaluation set now runs the real corpus pipeline and records four parser defects that block promotion, so the parser-fix PR and the local LLM extraction router are the next pull.",
+    command: "pnpm run audit:forge-evals",
     tone: "warning"
   },
   {
@@ -157,7 +157,7 @@ export const roadmapLanes: RoadmapLane[] = [
         status: "complete",
         gate: "audit:report-variants",
         evidence: "MR-SCHEMA-1 targets drive drafting; casing, timeline, survey stations, and hydraulics observations extract with provenance and explicit units, minimum-curvature geometry is review-gated, and both trajectory visuals render segment-aware paths.",
-        next: "Promote FORGE corpus evals and the Phase 06 local-AI extraction router on the same reviewed pipeline."
+        next: "Land the recorded FORGE parser fixes and the Phase 06 local-AI extraction router on the same reviewed pipeline."
       },
       {
         id: "item-ui-execution-board",
@@ -180,10 +180,10 @@ export const roadmapLanes: RoadmapLane[] = [
         id: "item-forge-evals",
         title: "FORGE corpus evals",
         owner: "AI/data",
-        status: "queued",
-        gate: "audit:forge-corpus",
-        evidence: "Local ignored 16A(78)-32_Daily_Reports folder is detected and summarized without committing raw PDFs.",
-        next: "Promote representative report formats into reviewed eval manifests and extraction targets."
+        status: "watch",
+        gate: "audit:forge-evals",
+        evidence: "Reviewed manifest and expectations pin five SHA-256 documents; the corpus-backed audit runs the real upload, worker, and draft path and records 11 required ground-truth failures across four parser defects, so promotion is honestly blocked.",
+        next: "Land a separate parser-fix PR for the recorded defects, then rerun the corpus-backed evaluation to complete promotion."
       },
       {
         id: "item-citation-drafts",
