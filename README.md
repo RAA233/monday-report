@@ -27,7 +27,7 @@ Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-firs
 - Local AI defaults to Ollama with `gemma4:e2b`; readiness verifies both endpoint reachability and the pinned model.
 - Parser/OCR fixture eval readiness requires a passing `MONDAY_REPORT_PARSER_EVAL_REPORT`; real-client approval also requires the referenced fixture manifest to carry a reviewed anonymized-client attestation.
 - The local `16A(78)-32_Daily_Reports/` open-source FORGE corpus is ignored by Git; `audit:forge-corpus` parses representative PDFs, verifies drilling/completion markers, and writes `output/forge-corpus/forge_corpus_summary.json`.
-- A reviewed FORGE ground-truth evaluation set (`evals/forge/manifest.v1.json` + `expectations.v1.json`, spec in `docs/FORGE_EVAL_PROMOTION.md`) pins five SHA-256 corpus documents with page-reviewed expected values and explicit absences; `audit:forge-eval-spec` validates the committed specification portably (in `audit:all`), while `audit:forge-evals` runs the real upload→worker→draft pipeline against the local corpus, reports `SKIPPED` (never PASS) when the corpus is absent, and currently records 11 required ground-truth failures across four parser defects — promotion stays honestly blocked until a separate parser-fix PR lands. FORGE evidence never substitutes for client readiness evidence.
+- A reviewed FORGE ground-truth evaluation set (`evals/forge/manifest.v1.json` + `expectations.v1.json`, spec in `docs/FORGE_EVAL_PROMOTION.md`) pins five SHA-256 corpus documents with page-reviewed expected values and explicit absences; `audit:forge-eval-spec` validates the committed specification portably (in `audit:all`), while `audit:forge-evals` runs the real upload→worker→draft pipeline against the local corpus and reports `SKIPPED` (never PASS) when the corpus is absent. The evaluation is **promoted**: after general D1–D4 parser fixes (bracketed well identifiers, casing-context gating with mixed-fraction diameters, corroborated dot-thousands survey depths with `AZM` labels, header-region completion classification) the unchanged ground truth passes **65/65 required checks** on the real corpus, with the two informational report-number checks still failing and non-gating, and `audit:parser-regression` pins the defect classes portably inside `audit:all`. FORGE evidence never substitutes for client readiness evidence.
 - `fixtures:anonymized` creates a generated 13-family fixture pack for local smoke tests only; production client intake must use reviewed anonymized client fixtures, not generated evidence.
 - Partner preview packaging creates one ZIP with the built web app, backend, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.
 - Client-data approval tooling writes an explicit approved/blocked evidence report from the live readiness endpoint.
@@ -84,6 +84,7 @@ pnpm run audit:golden-fixtures
 pnpm run audit:parser-fixture-evals
 pnpm run audit:parser-fixture-report
 pnpm run audit:pdf-parser
+pnpm run audit:parser-regression
 pnpm run audit:forge-corpus
 pnpm run audit:forge-eval-spec
 pnpm run audit:forge-evals
@@ -150,7 +151,7 @@ The output is `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.j
 - Replace local JSON state with PostgreSQL repositories and Redis-backed workers.
 - Replace local file storage with production object storage and queued Python parser workers.
 - Harden OCR/PDF extraction on reviewed anonymized client fixtures, configure a production OCR engine, and complete customer-grade golden fixture coverage using `docs/GOLDEN_FIXTURE_MANIFEST.example.json`; then run `generate_parser_fixture_eval_report.py` and set `MONDAY_REPORT_PARSER_EVAL_REPORT` to the passing report.
-- Fix the four parser defects recorded by the FORGE ground-truth evaluation (well-name bracket truncation, casing narrative overmatch, labeled-survey depth/azimuth misparse, completion misclassification) in a dedicated parser PR, then rerun `audit:forge-evals` to complete promotion.
+- Build the Phase 06 local-AI extraction router on the reviewed pipeline, using the promoted FORGE evaluation set (65/65 required on the real corpus) as its acceptance target.
 - Add Postgres migrations from `db/schema.sql`.
 - Add auth/SSO, tenant-aware request context, persistent audit hardening, and source preview authorization.
 - Replace deterministic extraction with local LLM provider abstraction and evaluation sets before using customer data.

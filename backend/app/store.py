@@ -3818,7 +3818,15 @@ class LocalStateStore:
                 ("report no", r"\b(?:report\s*(?:no\.?|number|#)|ddr\s*(?:no\.?|#)?)\s*[:#-]\s*([A-Za-z0-9._/-]{1,40})"),
             ],
             "well": [
-                ("well", r"\b(?:well|well name)\s*[:#-]\s*([A-Za-z0-9()/_ .-]{2,80})"),
+                # Well names may legitimately carry bracketed pad codes, lease
+                # hashes, and ampersands; capture stops before an adjacent
+                # `Label:`/`Label#` field boundary on the same line.
+                (
+                    "well",
+                    r"\b(?:well|well name)\s*[:#-]\s*"
+                    r"((?:(?!\s*\b(?:rig(?:\s*name)?|operator|company|report\s*(?:no\.?|number|#)?|api|field|job|md|tvd|date)\s*[:#])"
+                    r"[A-Za-z0-9()\[\]#&/_ .-]){2,80})",
+                ),
             ],
             "rig": [
                 ("rig", r"\b(?:rig|rig name)\s*[:#-]\s*([A-Za-z0-9()/_ .-]{2,80})"),
@@ -3873,7 +3881,7 @@ class LocalStateStore:
             ],
         }
         for section, specs in section_specs.items():
-            match = LocalStateStore._match_pdf_profile_line(page_lines, specs, max_length=260)
+            match = LocalStateStore._match_pdf_profile_line(page_lines, specs, max_length=260, trim_delimiters=False)
             if match:
                 sections[section] = match["value"]
                 section_sources[section] = {
@@ -3908,7 +3916,23 @@ class LocalStateStore:
             0.97,
             0.35 + field_score * 0.045 + marker_score * 0.035 + structured_score * 0.02,
         )
-        document_type = "daily_drilling_report" if section_presence["daily_drilling_report"] or marker_score >= 4 else "pdf_report"
+        # Completion detection uses positive heading evidence only: the phrase
+        # (DAILY COMPLETION REPORT / WELL COMPLETION REPORT / COMPLETION
+        # REPORT) must appear in the first page's header region. Incidental
+        # completion mentions in narrative never veto classification,
+        # filenames are never consulted, and an explicit DDR heading always
+        # wins. The veto applies only to the generic marker-score fallback;
+        # no new document type is minted.
+        first_page_lines = [line for page_number, line in page_lines if page_number == 1]
+        heading_region = " ".join(first_page_lines[:12]).lower()
+        if section_presence["daily_drilling_report"]:
+            document_type = "daily_drilling_report"
+        elif "completion report" in heading_region:
+            document_type = "pdf_report"
+        elif marker_score >= 4:
+            document_type = "daily_drilling_report"
+        else:
+            document_type = "pdf_report"
         return {
             "profile_version": "pdf_report_profile_v1",
             "document_type": document_type,
@@ -3946,13 +3970,21 @@ class LocalStateStore:
             lower_line = line.lower()
             if not any(term in lower_line for term in casing_terms):
                 continue
+            # A leading `Casing:`/`Liner:` label grants casing context to every
+            # semicolon-delimited segment on this logical line only; the
+            # context never leaks into later lines.
+            label_context = bool(
+                re.match(r"\s*(?:casing(?:\s+(?:program|status))?|liner)\s*[:#-]", line, flags=re.IGNORECASE)
+            )
             segments = re.split(
                 r";|(?:,\s*(?=(?:conductor|surface|intermediate|production|liner)))",
                 line,
                 flags=re.IGNORECASE,
             )
             for segment in segments:
-                parsed = LocalStateStore._parse_casing_segment(segment.strip(" ."), page_number)
+                parsed = LocalStateStore._parse_casing_segment(
+                    segment.strip(" ."), page_number, label_context=label_context
+                )
                 if not parsed:
                     continue
                 key = (str(parsed["name"]).lower(), str(parsed.get("od") or ""), parsed.get("shoe_ft"))
@@ -3965,10 +3997,21 @@ class LocalStateStore:
         return rows
 
     @staticmethod
-    def _parse_casing_segment(segment: str, page_number: int) -> dict[str, object] | None:
+    def _parse_casing_segment(
+        segment: str, page_number: int, label_context: bool = False
+    ) -> dict[str, object] | None:
         if not segment:
             return None
         lower = segment.lower()
+        # Hard negatives: bit, pipe, BHA, nozzle, and pipe-handling narrative
+        # is never a casing string, whatever adjectives or depths it carries.
+        if re.search(
+            r"\b(?:pdc|bits?|nozzles?|jets?|drill\s*pipe|drillpipe|hwdp|bha|stands?|hole\s*opener"
+            r"|lay(?:ing|ed)?\s*down|laid\s*down|pick(?:ing|ed)?\s*up|wear\s*bushing"
+            r"|casing\s*(?:point|readiness|crew|tools))\b",
+            lower,
+        ):
+            return None
         name_match = re.search(r"\b(conductor|surface|intermediate|production|liner)\b", lower)
         if name_match:
             name = name_match.group(1).title()
@@ -3976,9 +4019,49 @@ class LocalStateStore:
             name = "Casing"
         else:
             return None
-        od_match = re.search(r"([0-9]{1,2}(?:\.[0-9]{1,3})?)\s*(?:in\b|inch|\")", segment, flags=re.IGNORECASE)
-        od = f"{od_match.group(1)} in" if od_match else None
+        # Positive casing context is required: a hole-section adjective, a
+        # diameter, or a depth alone never makes a casing row.
+        positive_context = (
+            label_context
+            or bool(re.search(r"\b(?:conductor|surface|intermediate|production)\s+(?:casing|liner|string)\b", lower))
+            or bool(
+                re.search(r"\b(?:casing|liner)\b", lower)
+                and re.search(r"\b(?:ran|run|set|cemented|cement|landed|rih)\b", lower)
+            )
+            or bool(re.search(r"\bshoe\b", lower))
+            or bool(
+                re.search(r"\b(?:planned|proposed)\b", lower) and re.search(r"\b(?:casing|liner)\b", lower)
+            )
+        )
+        if not positive_context:
+            return None
+        od = None
+        fraction_match = re.search(
+            r"\b([0-9]{1,2})[\s-]+([0-9]{1,2})\s*/\s*([0-9]{1,2})\s*(?:in\b|inch|\")",
+            segment,
+            flags=re.IGNORECASE,
+        )
+        decimal_match = re.search(
+            r"(?<![/\d.])([0-9]{1,2}(?:\.[0-9]{1,3})?)\s*(?:in\b|inch|\")",
+            segment,
+            flags=re.IGNORECASE,
+        )
+        # Mixed fractions are complete diameters (12 1/4 -> 12.25); the
+        # decimal matcher can never re-match a fraction denominator, and the
+        # leftmost stated size wins when both forms appear.
+        if fraction_match and (not decimal_match or fraction_match.start() <= decimal_match.start()):
+            denominator = int(fraction_match.group(3))
+            if denominator:
+                od = f"{int(fraction_match.group(1)) + int(fraction_match.group(2)) / denominator:g} in"
+        elif decimal_match:
+            od = f"{decimal_match.group(1)} in"
         shoe_ft = LocalStateStore._parse_depth_to_ft(segment)
+        # A depth is a shoe/set depth only with explicit association or inside
+        # a casing-labelled line; arbitrary apostrophe depths never qualify.
+        if shoe_ft is not None and not label_context and not re.search(
+            r"\b(?:shoe|set|landed|planned|proposed)\b", lower
+        ):
+            shoe_ft = None
         if od is None and shoe_ft is None:
             return None
         if re.search(r"\b(set|shoe|run|cemented|cement)\b", lower):
@@ -4144,7 +4227,7 @@ class LocalStateStore:
     _SURVEY_HEADER_FIELDS: tuple[tuple[str, str], ...] = (
         ("md", r"^(?:md|measured\s*depth)\b"),
         ("inclination", r"^(?:inc|incl|inclination)\b"),
-        ("azimuth", r"^(?:azi|az|azimuth)\b"),
+        ("azimuth", r"^(?:azimuth|azm|azi|az)\b"),
         ("tvd", r"^(?:tvd|true\s*vertical\s*depth)\b"),
         ("dls", r"^(?:dls|dogleg)\b"),
         ("ns", r"^(?:n/?s|north(?:ing)?|north\s*/?\s*south)\b"),
@@ -4208,6 +4291,29 @@ class LocalStateStore:
             return {}, {}
         return columns, units
 
+    _DOT_GROUPED_DEPTH_PATTERN = re.compile(r"^[0-9]{1,3}(?:\.[0-9]{3})+$")
+
+    @staticmethod
+    def _promote_dot_grouped_depth(raw_token: str, parsed_value: float, paired_tvd_ft: float) -> float:
+        """Scoped dot-thousands disambiguation for explicitly foot-marked MD tokens.
+
+        A token shaped ``D{1,3}(.DDD)+`` is only a *candidate* thousands
+        representation. It is promoted solely when the same source record
+        pairs it with an explicit-foot TVD that the decimal reading would
+        impossibly undercut while the thousands reading restores the normal
+        same-datum relationship. This is a source-token disambiguation aid,
+        never an engineering acceptance rule: it is never applied to
+        inclination, azimuth, or DLS, never without same-record
+        corroboration, and insufficient evidence preserves the ordinary
+        decimal interpretation unchanged.
+        """
+        if not LocalStateStore._DOT_GROUPED_DEPTH_PATTERN.match(raw_token):
+            return parsed_value
+        thousands = float(raw_token.replace(".", ""))
+        if parsed_value < paired_tvd_ft <= thousands:
+            return thousands
+        return parsed_value
+
     @staticmethod
     def _survey_cell_float(cell: object) -> float | None:
         text = str(cell).strip()
@@ -4250,10 +4356,19 @@ class LocalStateStore:
                 return None
             return str(cells[index]).strip()
 
-        md = LocalStateStore._survey_depth_from_cell(cell_at("md") or "", units.get("md", "ft"))
+        md_cell = cell_at("md") or ""
+        md = LocalStateStore._survey_depth_from_cell(md_cell, units.get("md", "ft"))
         inclination = LocalStateStore._survey_cell_float(cell_at("inclination"))
         azimuth = LocalStateStore._survey_cell_float(cell_at("azimuth"))
         tvd = LocalStateStore._survey_depth_from_cell(cell_at("tvd") or "", units.get("tvd", "ft"))
+        if md is not None and tvd is not None:
+            # Same-row dot-thousands disambiguation for an explicitly
+            # foot-marked MD cell; see _promote_dot_grouped_depth.
+            dot_grouped_cell = re.match(
+                r"^\s*([0-9]{1,3}(?:\.[0-9]{3})+)\s*(?:ft\b|feet\b|')\s*$", md_cell, flags=re.IGNORECASE
+            )
+            if dot_grouped_cell:
+                md = LocalStateStore._promote_dot_grouped_depth(dot_grouped_cell.group(1), md, tvd)
         dls = LocalStateStore._survey_cell_float(cell_at("dls"))
         ns = LocalStateStore._survey_depth_from_cell(cell_at("ns") or "", units.get("ns", "ft"))
         ew = LocalStateStore._survey_depth_from_cell(cell_at("ew") or "", units.get("ew", "ft"))
@@ -4413,7 +4528,7 @@ class LocalStateStore:
     @staticmethod
     def _parse_inline_survey_line(line: str, page_number: int) -> dict[str, object] | None:
         md_match = re.search(
-            r"\bmd\s*[:=]?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(m\b|ft\b|feet\b|')?",
+            r"\bmd\s*[:=]?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?(?:\.[0-9]{3})*)\s*(m\b|ft\b|feet\b|')?",
             line,
             flags=re.IGNORECASE,
         )
@@ -4423,27 +4538,40 @@ class LocalStateStore:
             flags=re.IGNORECASE,
         )
         azi_match = re.search(
-            r"\b(?:azi|azimuth)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",
+            r"\b(?:azimuth|azm|azi|az)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)",
             line,
             flags=re.IGNORECASE,
         )
         if not md_match or (not inc_match and not azi_match):
             return None
-        md = float(md_match.group(1).replace(",", ""))
-        unit = (md_match.group(2) or "ft").lower()
+        raw_md = md_match.group(1)
+        if raw_md.count(".") > 1:
+            # Multi-group dot tokens (e.g. 9.524.100) are ambiguous between a
+            # dot-thousands and a mixed-separator reading. They are never
+            # guessed and never crash extraction: the inline row is skipped
+            # rather than fabricated.
+            return None
+        md = float(raw_md.replace(",", ""))
+        unit_token = md_match.group(2)
+        unit = (unit_token or "ft").lower()
         if unit == "m":
             md = round(md * 3.28084, 1)
         tvd_match = re.search(
-            r"\btvd\s*[:=]?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)",
+            r"\btvd\s*[:=]?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]+(?:\.[0-9]+)?)\s*(ft\b|feet\b|')?",
             line,
             flags=re.IGNORECASE,
         )
+        tvd = float(tvd_match.group(1).replace(",", "")) if tvd_match else None
+        # Dot-thousands disambiguation only with same-line corroboration:
+        # explicit foot markers on both MD and TVD in one labelled record.
+        if unit_token is not None and unit != "m" and tvd_match is not None and tvd_match.group(2) and tvd is not None:
+            md = LocalStateStore._promote_dot_grouped_depth(raw_md, md, tvd)
         dls_match = re.search(r"\bdls\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)", line, flags=re.IGNORECASE)
         return LocalStateStore._validated_survey_row(
             md=md,
             inclination=float(inc_match.group(1)) if inc_match else None,
             azimuth=float(azi_match.group(1)) if azi_match else None,
-            tvd=float(tvd_match.group(1).replace(",", "")) if tvd_match else None,
+            tvd=tvd,
             dls=float(dls_match.group(1)) if dls_match else None,
             ns=None,
             ew=None,
@@ -4869,19 +4997,22 @@ class LocalStateStore:
         page_lines: list[tuple[int, str]],
         patterns: list[tuple[str, str]],
         max_length: int = 120,
+        trim_delimiters: bool = True,
     ) -> dict[str, object] | None:
         for page_number, line in page_lines:
             for label, pattern in patterns:
                 match = re.search(pattern, line, flags=re.IGNORECASE)
                 if not match:
                     continue
-                value = LocalStateStore._clean_report_profile_value(match.group(1), max_length=max_length)
+                value = LocalStateStore._clean_report_profile_value(
+                    match.group(1), max_length=max_length, trim_delimiters=trim_delimiters
+                )
                 if value:
                     return {"page": page_number, "label": label, "value": value}
         return None
 
     @staticmethod
-    def _clean_report_profile_value(value: str, max_length: int = 120) -> str:
+    def _clean_report_profile_value(value: str, max_length: int = 120, trim_delimiters: bool = True) -> str:
         cleaned = LocalStateStore._clean_extracted_text(value)
         cleaned = re.split(
             r"\b(?:report no|well|rig|operator|hole size|md|tvd|mud weight|present operations|next operations|safety|casing|bha|survey|time breakdown)\b\s*[:#-]",
@@ -4889,7 +5020,29 @@ class LocalStateStore:
             maxsplit=1,
             flags=re.IGNORECASE,
         )[0].strip(" .;|")
-        return cleaned[:max_length].strip(" .;|")
+        cleaned = cleaned[:max_length].strip(" .;|")
+        if trim_delimiters:
+            cleaned = LocalStateStore._trim_unbalanced_delimiters(cleaned)
+        return cleaned
+
+    @staticmethod
+    def _trim_unbalanced_delimiters(value: str) -> str:
+        """Remove demonstrably unmatched trailing bracket artifacts only.
+
+        Balanced bracketed suffixes are legitimate field content and are kept
+        byte-identical; an unmatched trailing opener (with everything after
+        it) or a lone unmatched trailing closer is a truncation artifact and
+        is dropped. Never a blanket bracket trim.
+        """
+        for opener, closer in (("[", "]"), ("(", ")")):
+            while value.count(opener) > value.count(closer):
+                cut = value.rfind(opener)
+                if cut < 0:
+                    break
+                value = value[:cut].rstrip(" .;|-")
+            while value.endswith(closer) and value.count(closer) > value.count(opener):
+                value = value[:-1].rstrip(" .;|-")
+        return value
 
     @staticmethod
     def _pdf_table_mentions(table: dict[str, object], markers: list[str]) -> bool:

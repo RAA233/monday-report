@@ -11,7 +11,7 @@ The executable MVP path is now phase-gated end to end and the local client-data 
 | Accepted now | Pass | Executable MVP is working with Client Home, rig/MR list access, chat, report studio, Benchmarking, roadmap, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
 | Safe operating mode | Pass | Demo mode remains local; approved client mode uses PostgreSQL/RLS state, Redis queue, protected storage, API key, signing secret, and reviewed fixture/eval evidence. | Keep secrets out of Git and regenerate approval after environment changes. |
 | Real-client approval | Pass | Live client approval reports `APPROVED`; GA readiness reports `GA_READY`; readiness has zero blockers. | Run controlled client-package dry runs before broad distribution. |
-| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, directional survey-station extraction, the review-gated minimum-curvature trajectory calculation, the segment-aware calculated plan view, the per-segment vertical trajectory profile, and source-derived hydraulics observations are complete; the reviewed FORGE evaluation set is authored and runs the real corpus pipeline but records four parser defects, so FORGE promotion is blocked pending a parser-fix PR; remaining lanes: FORGE parser fixes, local LLM extraction router, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull the FORGE parser-fix PR (defects D1–D4 in `docs/FORGE_EVAL_PROMOTION.md`) or the local LLM extraction router (Phase 06), then controlled client-package trials. |
+| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, directional survey-station extraction, the review-gated minimum-curvature trajectory calculation, the segment-aware calculated plan view, the per-segment vertical trajectory profile, source-derived hydraulics observations, and the promoted FORGE evaluation (general D1–D4 parser fixes; unchanged ground truth passes 65/65 required on the real corpus; portable parser-regression guard in `audit:all`) are complete; remaining lanes: local LLM extraction router (Phase 06), normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull the Phase 06 local LLM extraction router on the promoted evaluation set, then controlled client-package trials. |
 
 ## Current Tracker
 
@@ -325,6 +325,37 @@ Evidence paths: `output/forge-evals/forge_eval_report.json`, `output/forge-evals
 Licensing: the local corpus folder carries no license/notice file, so redistribution is not asserted; raw PDFs stay untracked and committed expectations hold minimal technical facts only (no prose, images, personnel names, or phone numbers). FORGE evidence is extraction-quality evidence only and never substitutes for anonymized-client readiness evidence.
 
 Follow-up: **FORGE parser-fix PR (D1–D4) then rerun `audit:forge-evals` to complete promotion**, local-LLM extraction router (Phase 06), formatted HTML/PDF/XLSX export provenance, field-level correction workflow, normalized PostgreSQL repositories (Phase 04), hydraulics trend visualization.
+
+Git result: PR #7 (`https://github.com/RAA233/monday-report/pull/7`), retitled `Add FORGE corpus evaluation baseline` with an explicit promotion-blocked body before merge, was reviewed and rebase-merged into `main` as `d3671aad2265360968c0c6b433dacc083d1b4f2f` on `2026-07-18`; the merged tree is byte-identical to verified head `d8de756`. The remote feature branch was deleted; the local branch remains (safe `-d` refused after the rebase hash rewrite).
+
+## 2026-07-18 FORGE Parser-Fix Promotion Evidence
+
+Increment completed on `2026-07-18` from base revision `d3671aad2265360968c0c6b433dacc083d1b4f2f` (merged FORGE-baseline `main`) on branch `feat/forge-parser-fixes`. Scope: **general parser fixes for the four recorded FORGE defects (D1–D4)** — no FORGE filename or document-ID special case, and the committed evaluation ground truth (`evals/forge/manifest.v1.json`, `evals/forge/expectations.v1.json`) is **byte-unchanged** (SHA-256 `ddb2094c…` / `ff6b7d19…` before and after).
+
+Fixes (all in `backend/app/store.py`, each behind failing-first vectors in the new portable `scripts/parser_regression_guard.py`, wired as `audit:parser-regression` into `audit:all`):
+
+- **D1 well identifiers**: the well-field capture accepts brackets, `#`, and `&`, stops before an adjacent same-line `Label:` boundary via a tempered lookahead, and trims only demonstrably unmatched trailing delimiters — balanced bracketed suffixes stay byte-correct, and existing well/rig/operator/report-number fixtures are pinned unchanged.
+- **D2 casing fabrication**: casing rows require positive casing context (casing/liner label with same-line semicolon inheritance, noun adjacency, ran/set/cemented/landed verbs, shoe association, or planned/proposed casing wording); bit/PDC/nozzle/drill-pipe/HWDP/BHA/hole-opener/pipe-handling/casing-readiness narrative is rejected outright; mixed fractions parse as complete diameters (`12 1/4"` → 12.25 in, `9 5/8"` → 9.625 in, `9-5/8` and `13 3/8"` supported) with the leftmost stated size winning and denominators never re-matched; depths become shoe depths only with explicit shoe/set/landed/planned association or label context.
+- **D3 survey depth/azimuth**: `AZM`/`AZ`/`AZI`/`AZIMUTH` labels and `AZM (deg)` headers parse explicitly (azimuth is never fabricated when absent); a dot-grouped labelled MD token (`D{1,3}(.DDD)+`) is promoted to a thousands reading only with same-record corroboration — an explicitly foot-marked MD paired with a same-record feet-basis TVD that the decimal reading would impossibly undercut (the inline path additionally requires an explicit TVD foot marker; the table path requires an in-cell foot marker on the MD cell) — as a source-token disambiguation aid; ambiguous multi-dot tokens are skipped, never guessed and never crash extraction; legitimate decimals (152.5, 8530.2), inclination, DLS, metre conversions, and different-datum MD<TVD rows are untouched, and **no global MD≥TVD conflict rule was added** to `_validated_survey_row`.
+- **D4 completion classification**: completion headings (`DAILY COMPLETION REPORT` / `COMPLETION REPORT` / `WELL COMPLETION REPORT`) are detected in the first page's header region only and veto only the generic marker-score fallback to yield the existing `pdf_report` type; explicit DDR headings always win, incidental completion narrative never downgrades a drilling report, no new document-type enum was added, and filenames are never consulted.
+
+| Final command | Exit | Evidence |
+|---|---:|---|
+| `python -m py_compile backend/app/*.py scripts/parser_regression_guard.py` | 0 | Modules compile. |
+| `pnpm run build` | 0 | `tsc` typecheck and Vite production build passed. |
+| `pnpm run audit:parser-regression` | 0 | **48/48** — the 23 pre-fix failing vectors now pass with all regression pins intact (bracketed/hash/ampersand wells, adjacent-label boundary, dangling-delimiter trim, five casing positives incl. fractions, eight casing negatives, thirteen survey vectors incl. corroborated promotion, datum safety, and the ambiguous multi-dot no-crash vector, six classification vectors, determinism, end-to-end upload→worker→profile/draft on synthetic PDFs, isolation). |
+| `pnpm run audit:pdf-parser` | 0 | 23/23 regression clean — fixture values byte-identical. |
+| `pnpm run audit:hydraulics-extraction` | 0 | 21/21 regression clean. |
+| `pnpm run audit:trajectory-calculation` | 0 | **38/38 regression clean.** |
+| `pnpm run audit:report-draft` | 0 | 22/22 regression clean. |
+| `pnpm run audit:report-variants` / `audit:source-lineage` | 0 | 11/11, 6/6 retained. |
+| `pnpm run audit:benchmarking` | 0 | **23/23 regression clean.** |
+| `pnpm run audit:forge-eval-spec` | 0 | 19/19 — committed spec still validates portably. |
+| `pnpm run audit:forge-evals` | 0 | **PROMOTED: 65/65 required PASS** — 5/5 SHA-verified documents through the real upload → worker → profile → draft pipeline; zero required failures; the two informational report-number checks remain non-required, unchanged, and still failing as documented future scope; recommendation/Benchmarking isolation clean; demo state byte-identical; report at `output/forge-evals/forge_eval_report.json` with zero absolute paths. |
+
+FORGE evidence remains extraction-quality evidence only and never substitutes for anonymized-client readiness evidence.
+
+Follow-up: local-LLM extraction router (Phase 06) validated against the promoted evaluation set, formatted HTML/PDF/XLSX export provenance, field-level correction workflow, normalized PostgreSQL repositories (Phase 04), hydraulics trend visualization.
 
 ## Phase Gate Rule
 
