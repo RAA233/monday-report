@@ -11,7 +11,7 @@ The executable MVP path is now phase-gated end to end and the local client-data 
 | Accepted now | Pass | Executable MVP is working with Client Home, rig/MR list access, chat, report studio, Benchmarking, roadmap, upload, parser worker, typed citations, validation, exports, signed downloads, audit, client approval, and readiness gates. | Keep every slice behind targeted audits and `pnpm run audit:all` in demo posture. |
 | Safe operating mode | Pass | Demo mode remains local; approved client mode uses PostgreSQL/RLS state, Redis queue, protected storage, API key, signing secret, and reviewed fixture/eval evidence. | Keep secrets out of Git and regenerate approval after environment changes. |
 | Real-client approval | Pass | Live client approval reports `APPROVED`; GA readiness reports `GA_READY`; readiness has zero blockers. | Run controlled client-package dry runs before broad distribution. |
-| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, directional survey-station extraction, the review-gated minimum-curvature trajectory calculation, the segment-aware calculated plan view, the per-segment vertical trajectory profile, source-derived hydraulics observations, and the promoted FORGE evaluation (general D1–D4 parser fixes; unchanged ground truth passes 65/65 required on the real corpus; portable parser-regression guard in `audit:all`) are complete; remaining lanes: local LLM extraction router (Phase 06), normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull the Phase 06 local LLM extraction router on the promoted evaluation set, then controlled client-package trials. |
+| Next execution order | Pending | Source-driven casing schematic, 24 hr activity timeline, directional survey-station extraction, the review-gated minimum-curvature trajectory calculation, the segment-aware calculated plan view, the per-segment vertical trajectory profile, source-derived hydraulics observations, the promoted FORGE evaluation (general D1–D4 parser fixes; unchanged ground truth passes 65/65 required on the real corpus; portable parser-regression guard in `audit:all`), and the auditable append-only field-level correction & review-provenance foundation (`docs/FIELD_CORRECTIONS.md`, `audit:field-corrections`) are complete; `ga:readiness` reports GA_BLOCKED with 0 software/config/evidence blockers and only 2 external-infrastructure blockers (PostgreSQL, Redis); remaining lanes: local LLM extraction router (Phase 06), field-correction export application, normalized PostgreSQL repositories, OCR/malware production hardening, and client pilot approval. | Pull the Phase 06 local LLM extraction router on the promoted evaluation set, then controlled client-package trials. |
 
 ## Current Tracker
 
@@ -356,6 +356,36 @@ Fixes (all in `backend/app/store.py`, each behind failing-first vectors in the n
 FORGE evidence remains extraction-quality evidence only and never substitutes for anonymized-client readiness evidence.
 
 Follow-up: local-LLM extraction router (Phase 06) validated against the promoted evaluation set, formatted HTML/PDF/XLSX export provenance, field-level correction workflow, normalized PostgreSQL repositories (Phase 04), hydraulics trend visualization.
+
+## 2026-07-19 Field-Level Correction Foundation Evidence
+
+Increment completed on `2026-07-19` from base revision `fcf6c6a47217d05657231d58a8f835b7e0ece249` (merged parser-fix `main`) on branch `feat/review-corrections-foundation`. Scope: an **auditable, tenant-scoped, append-only field-level correction & review-provenance foundation** (`docs/FIELD_CORRECTIONS.md`) selected from the enterprise GA readiness ledger — it closes the "no correction / revision-history entity" gap (extractions could previously only be accepted or rejected, never corrected with a preserved from/to trail). `pnpm run ga:readiness` reports `GA_BLOCKED` with **0 software / 0 configuration / 0 evidence blockers** and exactly **2 external-infrastructure blockers** (PostgreSQL, Redis), so this increment targets a priority-2 audit/data-integrity/operator-control deficiency rather than a readiness-reported software blocker.
+
+Behaviour and boundaries:
+
+- **Append-only overlay, source never overwritten.** A `FieldCorrection` records `source_value` / `corrected_value` / `correction_reason` / reviewer identity / timestamp / status without mutating the parsed document, `report_profile`, chunks, or citation lineage. Re-correcting the same `(workspace, target_type, field_key)` supersedes the prior record (version chain); reverting flips status without destroying history.
+- **Redacted, hash-chained audit.** `field_correction.record` / `field_correction.revert` events attribute the actor and carry attribution + shape only (field key, target type, value-present/changed booleans, reason length, version linkage) — never the raw source value, corrected value, or reason text; the audit chain stays sealed.
+- **Recommendation / Benchmarking boundary intact.** Recording a correction creates no anomaly events, benchmark measurements, failures, or validation tasks, and never touches the recommended-only Hydraulics / Torque & Drag diagnostics.
+- **Additive persistence, no migration.** The `field_corrections` collection is stored inside the existing tenant snapshot; old snapshots load as empty and both the local-JSON and PostgreSQL (JSONB) backends persist it with no migration.
+- **Report Draft overlay.** `GET /workspaces/{id}/report-draft` returns active corrections in `field_corrections` as review-required overlays; the source-derived scalar/casing/survey/hydraulics values are unchanged. Applying corrected values into official JSON / formatted exports is deliberately out of scope (the separate export-provenance increment). Reviewer identity is the single configured user until the RBAC increment lands.
+
+Files changed: `backend/app/schemas.py` (`FieldCorrection`/`FieldCorrectionCreate`/`FieldCorrectionRevert` + `ReportDraftResponse.field_corrections`), `backend/app/store.py` (snapshot collection + `record_field_correction`/`revert_field_correction`/`list_field_corrections` + `record_field_corrections`/`view_field_corrections` permissions), `backend/app/main.py` (three routes + `require_permission` + draft surfacing), `src/lib/api.ts` (`ApiFieldCorrection` mirrors + typed client methods), `scripts/field_correction_guard.py` (new, wired as `audit:field-corrections` into `audit:all`), `docs/FIELD_CORRECTIONS.md` (new), `package.json`, tracker/roadmap/README.
+
+| Final command | Exit | Evidence |
+|---|---:|---|
+| `python -m py_compile backend/app/*.py scripts/field_correction_guard.py` | 0 | Modules compile. |
+| `pnpm run build` | 0 | `tsc` typecheck (api.ts mirrors) and Vite production build passed. |
+| `pnpm run audit:field-corrections` | 0 | **12/12** — reviewer identity + provenance, redacted hash-chained audit, version supersession, active-only filter, revert + 409, draft overlay without source overwrite, recommendation/Benchmarking/failure/validation isolation, workspace scoping, least-privilege permission hook, persistence round-trip. |
+| `pnpm run audit:report-draft` | 0 | 22/22 regression clean (additive `field_corrections` field). |
+| `pnpm run audit:pdf-parser` / `audit:parser-regression` | 0 | 23/23, 52/52 regression clean. |
+| `pnpm run audit:hydraulics-extraction` / `audit:trajectory-calculation` | 0 | 21/21, **38/38** regression clean. |
+| `pnpm run audit:benchmarking` | 0 | **23/23** — recommended-only boundary intact. |
+| `pnpm run audit:integrity` / `audit:redaction` / `audit:auth` | 0 | Audit hash-chain, redaction, and API-auth guards clean after the new audit actions. |
+| `pnpm run audit:forge-eval-spec` / `audit:forge-evals` | 0 | 19/19; **corpus-backed 65/65 required PASS** — deterministic extraction unchanged. |
+
+FORGE evidence and this correction foundation are software-owned readiness evidence only; neither confers client or production authorization.
+
+Follow-up: field-correction application into official JSON / formatted export provenance, per-user identity/RBAC (reviewer attribution), Phase 06 local-AI extraction router, Phase 04 normalized PostgreSQL repositories, hydraulics trend visualization.
 
 ## Phase Gate Rule
 
