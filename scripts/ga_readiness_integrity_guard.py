@@ -239,8 +239,14 @@ def main() -> int:
     readiness_infra = dict(readiness_demo, postgres_repository="pass", redis_queue="pass", local_llm_runtime="pass")
     infra_checks = evaluate_blockers(readiness_infra, forge_report=good_report)
     status_infra, ready_infra = decide_ga(mode="client", parity_ok=True, checks=infra_checks, commands_skipped=False, commands_passed=True, worktree_clean=True)
-    rbac_blocked = any(c["id"] == "ga_rbac_role_separation" and c["disposition"] == "BLOCKED" for c in infra_checks)
-    checks.append(check("PostgreSQL+Redis provisioned while RBAC unresolved still GA_BLOCKED", status_infra == "GA_BLOCKED" and not ready_infra and rbac_blocked))
+    # Route-level RBAC role separation is now evidence-driven PASS (distinct
+    # least-privilege roles + fully-enforced per-user route authorization). GA must
+    # still be BLOCKED by the OTHER unresolved controls (tenant authorization,
+    # per-user identity deployment, keyed audit, etc.) — resolving one control can
+    # never leak GA_READY.
+    rbac_pass = any(c["id"] == "ga_rbac_role_separation" and c["disposition"] == "PASS" for c in infra_checks)
+    tenant_blocked = any(c["id"] == "ga_tenant_authorization" and c["disposition"] == "BLOCKED" for c in infra_checks)
+    checks.append(check("Infra provisioned + RBAC resolved still GA_BLOCKED by other controls", status_infra == "GA_BLOCKED" and not ready_infra and rbac_pass and tenant_blocked))
     audit_blocked = any(c["id"] == "ga_audit_keyed_integrity" and c["disposition"] == "BLOCKED" for c in infra_checks)
     checks.append(check("All infrastructure resolved while audit keying unresolved still GA_BLOCKED", status_infra == "GA_BLOCKED" and audit_blocked))
     approval_blocking = any(c["id"] == "ga_client_organizational_approval" and is_blocking(c) for c in infra_checks)

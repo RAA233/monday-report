@@ -102,7 +102,9 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
         (
             "State is stored in the active PostgreSQL repository."
             if state_uses_postgres
-            else f"State path is {state_path}."
+            else "State path is configured outside the repository."
+            if (state_configured and state_outside_repo)
+            else "State path is unset or inside the repository."
         ),
         "Set MONDAY_REPORT_STATE_PATH to a protected path outside the repository, or replace local JSON with PostgreSQL.",
     )
@@ -114,7 +116,11 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
         "storage_root_configured",
         "Upload storage root",
         storage_configured and storage_outside_repo,
-        f"Upload storage root is {storage_root}.",
+        (
+            "Upload storage root is configured outside the repository."
+            if (storage_configured and storage_outside_repo)
+            else "Upload storage root is unset or inside the repository."
+        ),
         "Set MONDAY_REPORT_STORAGE_ROOT to encrypted tenant-scoped storage outside the repository.",
     )
 
@@ -125,7 +131,11 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
         "export_root_configured",
         "Export storage root",
         export_configured and export_outside_repo,
-        f"Export storage root is {export_root}.",
+        (
+            "Export storage root is configured outside the repository."
+            if (export_configured and export_outside_repo)
+            else "Export storage root is unset or inside the repository."
+        ),
         "Set MONDAY_REPORT_EXPORT_ROOT to encrypted tenant-scoped export storage outside the repository.",
     )
 

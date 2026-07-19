@@ -660,15 +660,36 @@ persistence redesign.
   `route_policy_fully_enforced()` requires zero errors, zero `pending`, and a
   static proof that each `permission_required` route carries its declared guard.
   Validated: 48 routes, 0 errors, 0 pending, fully enforced.
-- **Blockers intentionally left open**: this increment **closes no GA blocker**.
-  `rbac-role-separation` is **conservatively retained as BLOCKED** (its mechanism
-  is in place but it is coupled to the still-blocked per-user-identity
-  **deployment** posture); `tenant-authorization-enforcement`,
-  `verified-reviewer-identity`, and the audit-integrity blockers are unchanged.
-  **`ga:readiness` remains `GA_BLOCKED`**.
+- **`rbac-role-separation` is now evidence-driven PASS** (corrected during PR #12
+  review): its registry resolution condition is met, so
+  `ga_readiness._rbac_role_separation_probe()` evaluates the actual policy/route
+  evidence (distinct least-privilege roles, default-deny, `route_policy_fully_
+  enforced()`) instead of defaulting to BLOCKED. The **blocker registry is
+  unchanged** — only the evaluator probe became evidence-based. This resolves the
+  role-separation **mechanism** only; the separate `per-user-identity`
+  **deployment**, `tenant-authorization-enforcement`, `verified-reviewer-identity`,
+  and audit-integrity blockers are unchanged, so **`ga:readiness` remains
+  `GA_BLOCKED`** (25 blockers; resolving one control never leaks `GA_READY`).
+
+### Review corrections (PR #12, 2026-07-19)
+
+Corrections applied before merge, each behavior-proven in `route_rbac_guard.py`:
+- **Detailed readiness protected** (Part D): `/readiness/client-data` moved from
+  public to `permission_required("view_runtime_status")` — it exposed blocker
+  ids, dispositions, remediation, deployment mode, and **absolute filesystem
+  paths**. Only minimal `/health` stays public, and the absolute paths were
+  scrubbed from readiness detail (`backend/app/readiness.py`).
+- **Authorize-before-lookup everywhere** (Part E): field-corrections
+  (create/list/revert), `workspace_benchmarking`, `create_benchmark_measurement`,
+  `report_draft`, `create_monday_report`, and `create_direct_upload` (both modes)
+  now check the permission before any 404 / 409 / readiness gate. An automated
+  scan over all handlers confirms zero residual lookup-before-authorization.
+- **Signed downloads verify the token first** (Part H): both `/signed/*` handlers
+  now verify the signed token before any resource lookup, readiness gate, or audit
+  write — closing an unauthenticated existence oracle and audit-write vector.
 
 | Command | Exit | Result |
 | --- | --- | --- |
-| `pnpm run audit:route-rbac` | 0 | **73/73** — policy structure/parity, role→permission matrix, every-mutation denial for roles lacking the permission, privileged-read denial, signed-capability (resource-bound/expiring/GET-only), permission-before-lookup ordering, redacted denial audit (permission/route/method), and regression that tenant/reviewer/audit-integrity/RBAC-deployment blockers stay BLOCKED and GA stays `GA_BLOCKED`. |
-| `pnpm run audit:identity-rbac` | 0 | 73/73 — unchanged; identity foundation intact. |
-| `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — RBAC enforcement closes no blocker. |
+| `pnpm run audit:route-rbac` | 0 | **103/103** — policy structure/parity, role→permission matrix, every-mutation denial for roles lacking the permission, privileged-read denial, signed-capability (resource-bound/expiring/GET-only, **token-verified-first, no existence oracle, no audit write**), permission-before-lookup ordering (unauthorized same-403 vs authorized-404), minimal public `/health` + **gated detailed readiness** (401/403/200, no path leak), client-mode docs hidden, redacted denial audit, evidence-driven `rbac-role-separation` **PASS**, and regression that tenant/reviewer/audit-integrity blockers stay BLOCKED and GA stays `GA_BLOCKED`. |
+| `pnpm run audit:identity-rbac` | 0 | 73/73 — updated: `rbac-role-separation` now evidence-driven PASS. |
+| `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — 25 blockers remain (rbac resolved; software 14→13). |

@@ -134,7 +134,18 @@ def main() -> int:
 
         os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
         os.environ[PARSER_EVAL_REPORT_ENV] = str(partial_report)
-        client_mode_partial = client.get("/readiness/client-data").json()
+        # Detailed readiness is now a permission-gated (view_runtime_status) read.
+        # Client mode fails closed unless the shared key is configured (deployment
+        # precondition) AND rejects the shared key for auth, so also authenticate
+        # with a per-user admin credential.
+        os.environ["MONDAY_REPORT_API_KEY"] = "parser-eval-guard-client-key-0123456789"
+        from backend.app.schemas import Role
+
+        _admin = store.create_user("parser-eval-admin@example.test", "Parser Eval Admin", [Role.ADMIN])
+        _cred, _tok = store.create_credential(_admin.id)
+        client_mode_partial = client.get(
+            "/readiness/client-data", headers={"X-Monday-Report-Key": _tok}
+        ).json()
         client_mode_check = readiness_check(client_mode_partial, "parser_fixture_evals")
         checks.append(
             assert_check(

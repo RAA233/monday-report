@@ -122,14 +122,20 @@ Every route is classified in `ROUTE_ACCESS_POLICY` with a `classification` and a
 
 Current inventory (48 routes):
 
-- **public (8)**: `/health`, `/readiness/client-data`, the four API-docs routes
-  (`/docs`, `/redoc`, `/openapi.json`, `/docs/oauth2-redirect` — hidden with 404
-  from non-admins in client mode), and the **two signed-capability download
-  routes** (`auth_mechanism = signed_capability`).
+- **public (7)**: `/health` (minimal liveness only — `{status, service}`, no
+  secrets or paths), the four API-docs routes (`/docs`, `/redoc`,
+  `/openapi.json`, `/docs/oauth2-redirect` — hidden with 404 from non-admins in
+  client mode), and the **two signed-capability download routes**
+  (`auth_mechanism = signed_capability`).
 - **authenticated_read (2)**: `/auth/session`, `/field-corrections/registry` —
   any authenticated caller, no specific permission.
-- **permission_required (38)**: every privileged read and every mutation, each
+- **permission_required (39)**: every privileged read and every mutation, each
   bound to exactly one permission (or `__admin__` for identity administration).
+  This includes **`/readiness/client-data`** — the DETAILED client-data readiness
+  report (blocker ids, dispositions, remediation, deployment mode, and configured
+  paths) is **not** public; it requires `view_runtime_status`. Only the minimal
+  `/health` liveness stays public, and readiness detail no longer embeds absolute
+  filesystem paths.
 
 `route_policy_fully_enforced()` is stricter than a row-status check: it requires
 `validate_route_access_policy()` to return **zero errors**, **zero `pending`**
@@ -145,11 +151,13 @@ route makes the policy **not** fully enforced.
 
 The two download routes are `public` + `signed_capability`: they are **not**
 gated by a credential/permission because the **signed URL itself is the
-capability** — it is resource-bound (issued for one resource id), expiring
-(TTL), and method-restricted (GET only). The token is minted only by an
+capability** — it is resource-bound (issued for one resource id), purpose-bound,
+expiring (TTL), and method-restricted (GET only). The token is minted only by an
 authenticated, permission-gated issuing route (`export_evidence` /
-`issue_client_reports`) and verified per request via
-`signed_urls.verify_signed_token`. The inventory enforces that signed-capability
+`issue_client_reports`) and **verified FIRST** in the download handler — before
+any resource lookup, readiness gate, or audit side effect — so an unauthenticated
+caller with an invalid token cannot probe resource existence (no 404-vs-403
+oracle) or trigger audit writes. The inventory enforces that signed-capability
 routes are read-only.
 
 ## Enforcement mechanics
@@ -169,22 +177,48 @@ routes are read-only.
 
 ## Readiness
 
-The `rbac-role-separation` readiness signal now has its resolution mechanism in
-place (a generic, enforced, guard-proven role matrix). It is **conservatively
-retained as BLOCKED** because it is coupled to the still-blocked per-user-identity
-**deployment** posture (real provisioned operators, tenant isolation). Multi-tenant
-authorization, verified reviewer identity, and audit-integrity blockers are
-untouched and remain BLOCKED. **GA remains `GA_BLOCKED`.**
+The `rbac-role-separation` GA control is now **evidence-driven PASS**. Its
+registry resolution condition — *"distinct roles with enforced least privilege
+exist and route authorization checks a per-user role, not the single configured
+all-role user"* — is satisfied, so `ga_readiness._rbac_role_separation_probe()`
+inspects the ACTUAL policy/route code (distinct least-privilege role matrix with
+ADMIN=all and proper non-admin subsets, VIEWER unactivated, default-deny
+evaluation, and `route_policy_fully_enforced()`) rather than defaulting to
+BLOCKED. The **blocker registry is unchanged** — only the evaluator probe became
+evidence-based. This control evaluates the role-separation **mechanism** only; the
+separate `per-user-identity` **deployment** control, multi-tenant authorization,
+verified reviewer identity, and audit-integrity blockers are untouched and remain
+BLOCKED, so **GA remains `GA_BLOCKED`** (resolving one control never leaks
+`GA_READY`).
+
+### Reserved permissions
+
+Three permissions preserved from the historical `benchmark_permissions` DTO —
+`run_diagnostics`, `approve_ai_content`, `edit_decision_records` — are held by
+roles but not yet wired to a route (their workflows are not yet implemented). They
+are reserved capabilities in the stable permission surface; a granted-but-unchecked
+permission authorizes nothing. They will bind to routes when those workflows land.
+
+### Known follow-up
+
+Denial audit events are unbounded by design (every authorization failure is
+recorded for intrusion detection). Rate-limiting/retention for auth-failure floods
+is an operational/audit-hardening follow-up tracked outside this increment.
 
 ## Tests
 
 `scripts/route_rbac_guard.py` (`pnpm run audit:route-rbac`, also chained into
-`audit:all`) asserts 70+ cases: policy structure and parity, the role/permission
+`audit:all`) asserts 100+ cases: policy structure and parity, the role/permission
 matrix, denial of every mutation for roles lacking the permission, denial of
 privileged reads, signed-capability behavior (resource-bound, expiring,
-method-restricted), permission-before-lookup ordering, redacted denial audit
-with correct permission/route/method, and regression that tenant/reviewer/
-audit-integrity/RBAC-deployment blockers stay BLOCKED and GA stays `GA_BLOCKED`.
+method-restricted, token-verified-first with no existence oracle and no audit
+write), permission-before-lookup ordering (unauthorized callers get the same 403
+for existing and nonexistent resources; authorized callers reach 404), minimal
+public `/health` and gated detailed readiness (unauthenticated 401 / wrong-role
+403 / admin 200, no path leak), client-mode docs hidden from non-admins, redacted
+denial audit with correct permission/route/method, the evidence-driven
+`rbac-role-separation` PASS, and regression that tenant/reviewer/audit-integrity
+blockers stay BLOCKED and GA stays `GA_BLOCKED`.
 
 ## Non-goals (explicitly out of scope for this increment)
 

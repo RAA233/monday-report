@@ -140,11 +140,16 @@ legacy `VIEWER` role stays unactivated) gate **every privileged read and every
 mutation**. A classified route inventory (`ROUTE_ACCESS_POLICY`) covers all 48
 routes; `route_policy_fully_enforced()` proves each `permission_required` route
 carries its declared guard; the two download routes are public
-**signed-capability** endpoints (resource-bound, expiring, GET-only); permission
-is checked **before** any resource lookup (no existence leak); and every denial
-writes a redacted audit event (permission/route/method). This is **route-level**
-authorization only — it does **not** implement multi-tenant resource
-authorization, verified reviewer workflow, or keyed audit integrity. The
-`rbac-role-separation` readiness signal is **conservatively retained as a
-blocker** (coupled to the still-blocked per-user-identity deployment posture), so
-`ga:readiness` stays `GA_BLOCKED`.
+**signed-capability** endpoints (resource-bound, expiring, GET-only, token
+verified **first**); permission is checked **before** any resource lookup (no
+existence leak). The **detailed** `/readiness/client-data` report (blocker ids,
+dispositions, remediation, mode, paths) is `permission_required("view_runtime_
+status")` — only minimal `/health` is public — and readiness detail no longer
+embeds absolute paths. Every denial writes a redacted audit event
+(permission/route/method). This is **route-level** authorization only — it does
+**not** implement multi-tenant resource authorization, verified reviewer workflow,
+or keyed audit integrity. The `rbac-role-separation` GA control is now
+**evidence-driven PASS** (its resolution condition is met; the blocker registry is
+unchanged, only the evaluator probe became evidence-based); the separate per-user
+identity deployment, tenant-authorization, verified-reviewer, and audit-integrity
+controls remain BLOCKED, so `ga:readiness` stays `GA_BLOCKED`.

@@ -95,7 +95,18 @@ def main() -> int:
 
         os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
         os.environ["MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST"] = str(generated_complete_manifest)
-        generated_client_mode = client.get("/readiness/client-data").json()
+        # Detailed readiness is now a permission-gated (view_runtime_status) read.
+        # Client mode fails closed unless the shared key is configured (deployment
+        # precondition) AND rejects the shared key for auth, so also authenticate
+        # with a per-user admin credential.
+        os.environ["MONDAY_REPORT_API_KEY"] = "golden-fixture-guard-client-key-0123456789"
+        from backend.app.store import store
+        from backend.app.schemas import Role
+
+        _admin = store.create_user("golden-admin@example.test", "Golden Admin", [Role.ADMIN])
+        _cred, _tok = store.create_credential(_admin.id)
+        _h = {"X-Monday-Report-Key": _tok}
+        generated_client_mode = client.get("/readiness/client-data", headers=_h).json()
         generated_client_attestation = readiness_check(generated_client_mode, "reviewed_fixture_attestation")
         checks.append(
             assert_check(
@@ -113,7 +124,7 @@ def main() -> int:
         )
         os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
         os.environ["MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST"] = str(client_mode_manifest)
-        client_mode = client.get("/readiness/client-data").json()
+        client_mode = client.get("/readiness/client-data", headers=_h).json()
         client_mode_check = readiness_check(client_mode, "golden_fixture_coverage")
         checks.append(
             assert_check(
@@ -131,7 +142,7 @@ def main() -> int:
             reviewed=True,
         )
         os.environ["MONDAY_REPORT_GOLDEN_FIXTURE_MANIFEST"] = str(reviewed_manifest)
-        reviewed = client.get("/readiness/client-data").json()
+        reviewed = client.get("/readiness/client-data", headers=_h).json()
         reviewed_check = readiness_check(reviewed, "reviewed_fixture_attestation")
         checks.append(
             assert_check(
