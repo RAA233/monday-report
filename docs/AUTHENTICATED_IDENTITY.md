@@ -8,6 +8,12 @@ authorization, complete route-level RBAC, or verified reviewer identity. Those
 remain declared blockers in `evals/ga/blocker_registry.v1.json`, and the
 readiness gate stays **`GA_BLOCKED`**.
 
+> **See also:** complete route-level RBAC — the generic authorization authority
+> (`backend/app/permissions.py`) that permission-gates every privileged read and
+> mutation on top of this identity foundation — is documented separately in
+> [`ROUTE_RBAC.md`](ROUTE_RBAC.md). Multi-tenant resource authorization and
+> verified reviewer identity remain out of scope there too.
+
 ## What existed before
 
 - A single shared `MONDAY_REPORT_API_KEY` authenticated **every** request (in

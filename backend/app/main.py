@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from pathlib import Path
 from statistics import mean
 from typing import Literal
 from uuid import UUID
@@ -12,7 +13,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from .auth import API_KEY_HEADER, api_key_configured, api_key_valid
-from .identity import get_current_identity, reset_current_identity, set_current_identity
+from .identity import (
+    get_current_identity,
+    get_request_context,
+    reset_current_identity,
+    reset_request_context,
+    set_current_identity,
+    set_request_context,
+)
+from .permissions import ALL_PERMISSIONS
 from .limits import max_upload_bytes, upload_too_large
 from .local_ai import evaluate_local_ai_status
 from .retention import retention_days
@@ -100,13 +109,18 @@ app.add_middleware(
 )
 
 
+# Genuinely public, unauthenticated surfaces. Operational/security reads
+# (runtime backends, local-AI details, audit-integrity) are NO LONGER exempt —
+# they require authentication + a permission. /readiness/client-data stays public
+# as the pre-auth readiness gate the app polls (it exposes check statuses and
+# remediation guidance, not secrets).
 CLIENT_AUTH_EXEMPT_PATHS = {
     "/health",
     "/readiness/client-data",
-    "/runtime/backends",
-    "/local-ai/status",
-    "/audit-logs/integrity",
 }
+# Interactive API documentation is public in demo/local mode but is disabled
+# (404) in client mode unless the request resolves to an administrator.
+DOCS_PATHS = {"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
 
 
 @app.middleware("http")
@@ -154,13 +168,20 @@ async def enforce_client_api_key(request: Request, call_next):
             or store.demo_bootstrap_identity()
         )
 
+    # Client-mode interactive docs are hidden from non-administrators.
+    if mode == "client" and request.url.path in DOCS_PATHS:
+        if identity is None or Role.ADMIN not in identity.roles:
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
     identity_token = set_current_identity(identity)
+    context_token = set_request_context(request.method, request.url.path)
     try:
         return await call_next(request)
     finally:
-        # Request cleanup: clear the request-scoped identity so it never leaks
-        # to another request or to worker/system operations.
+        # Request cleanup: clear the request-scoped identity + context so they
+        # never leak to another request or to worker/system operations.
         reset_current_identity(identity_token)
+        reset_request_context(context_token)
 
 
 def _client_auth_exempt(request: Request) -> bool:
@@ -182,7 +203,7 @@ def session() -> SessionResponse:
     identity = get_current_identity()
     # Non-secret identity context only: roles, permissions, authentication
     # source, credential id/fingerprint, account status. Never the token/hash.
-    permissions = store.benchmark_permissions(identity) if identity is not None else {}
+    permissions = store.permission_map(identity) if identity is not None else {}
     return SessionResponse(
         tenant=store.tenant,
         user=store.user,
@@ -198,11 +219,13 @@ def client_data_readiness() -> ClientDataReadiness:
 
 @app.get("/runtime/backends", response_model=RuntimeBackendStatus)
 def runtime_backends() -> RuntimeBackendStatus:
+    require_permission("view_runtime_status")
     return runtime_backend_status(evaluate_client_data_readiness(store), store)
 
 
 @app.get("/local-ai/status", response_model=LocalAIStatus)
 def local_ai_status() -> LocalAIStatus:
+    require_permission("view_runtime_status")
     store.refresh()
     return evaluate_local_ai_status(store.tenant.local_llm_policy)
 
@@ -238,35 +261,36 @@ def _active_request_identity() -> AuthenticatedIdentity | None:
     return identity
 
 
-def require_benchmark_permission(permission: str) -> None:
-    identity = _active_request_identity()
-    if identity is None or not store.benchmark_permissions(identity).get(permission):
-        store.audit(
-            "benchmark.permission_denied",
-            "tenant",
-            store.tenant.id,
-            {
-                "permission": permission,
-                "actor_source": identity.actor_source if identity else None,
-                "reason": "no_active_identity" if identity is None else "role_not_permitted",
-            },
-        )
-        raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
+def _audit_permission_denied(action: str, permission: str, identity: AuthenticatedIdentity | None) -> None:
+    method, path = get_request_context() or (None, None)
+    store.audit(
+        action,
+        "tenant",
+        store.tenant.id,
+        {
+            "permission": permission,
+            "method": method,
+            "route": path,
+            "actor_source": identity.actor_source if identity else None,
+            "reason": "no_active_identity" if identity is None else "role_not_permitted",
+        },
+    )
 
 
 def require_permission(permission: str) -> None:
+    """Default-deny route permission gate driven by the generic permission policy.
+    A missing/disabled identity or a role lacking the permission is denied."""
     identity = _active_request_identity()
-    if identity is None or not store.benchmark_permissions(identity).get(permission):
-        store.audit(
-            "permission_denied",
-            "tenant",
-            store.tenant.id,
-            {
-                "permission": permission,
-                "actor_source": identity.actor_source if identity else None,
-                "reason": "no_active_identity" if identity is None else "role_not_permitted",
-            },
-        )
+    if identity is None or not store.has_permission(permission, identity):
+        _audit_permission_denied("permission_denied", permission, identity)
+        raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
+
+
+def require_benchmark_permission(permission: str) -> None:
+    # Retained for the Benchmarking routes; delegates to the same generic policy.
+    identity = _active_request_identity()
+    if identity is None or not store.has_permission(permission, identity):
+        _audit_permission_denied("benchmark.permission_denied", permission, identity)
         raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
 
 
@@ -367,20 +391,19 @@ def revoke_credential_endpoint(credential_id: UUID) -> CredentialAdminView:
 
 
 # ---------------------------------------------------------------------------
-# Route access inventory (RBAC foundation).
+# Route access inventory (complete route-level RBAC).
 #
 # Every API route is classified as exactly one of the four approved categories:
-#   public              - no API key (framework/read-only status/signed-token).
-#   authenticated_read  - authenticated, read-only, no granular permission.
-#   permission_required - a specific permission gate. `enforcement_status` is
-#                         "enforced" (the route calls a require_* dependency with
-#                         a named permission) or "pending" (the route is sensitive
-#                         and SHOULD be permission-gated but is not yet — it does
-#                         NOT count as protected, and it keeps rbac-role-separation
-#                         a declared blocker).
+#   public              - no API credential (liveness/readiness/framework docs)
+#                         or a signed-capability download.
+#   authenticated_read  - authenticated, read-only, benign, no granular permission.
+#   permission_required - a specific permission gate (enforcement_status
+#                         "enforced"; "pending" means a sensitive route that is not
+#                         yet enforced and keeps rbac-role-separation blocked).
 #   system_internal     - internal/worker-only surface.
-# Sensitive mutations (POST/PUT/PATCH/DELETE) may only be permission_required or
-# system_internal — never public or authenticated_read.
+# Sensitive mutations may only be permission_required or system_internal. Each
+# row also records an `auth_mechanism` (none | api_credential | signed_capability
+# | internal_process) — this is metadata, not a fifth category.
 # ---------------------------------------------------------------------------
 ROUTE_ACCESS_CLASSIFICATIONS = {
     "public",
@@ -389,93 +412,108 @@ ROUTE_ACCESS_CLASSIFICATIONS = {
     "system_internal",
 }
 ROUTE_ENFORCEMENT_STATUSES = {"enforced", "pending"}
+AUTH_MECHANISMS = {"none", "api_credential", "signed_capability", "internal_process"}
 ADMIN_PERMISSION = "__admin__"
-KNOWN_PERMISSIONS = {
-    "view_benchmarks",
-    "manage_benchmark_config",
-    "review_anomalies",
-    "dismiss_anomalies",
-    "run_diagnostics",
-    "approve_ai_content",
-    "issue_client_reports",
-    "export_evidence",
-    "edit_decision_records",
-    "view_audit_history",
-    "record_field_corrections",
-    "view_field_corrections",
-}
+# The generic permission policy is the source of truth for known permissions.
+KNOWN_PERMISSIONS = set(ALL_PERMISSIONS)
+
+
+def _public(mechanism: str = "none") -> dict[str, str]:
+    return {"classification": "public", "auth_mechanism": mechanism}
+
+
+def _authenticated_read() -> dict[str, str]:
+    return {"classification": "authenticated_read", "auth_mechanism": "api_credential"}
 
 
 def _enforced(permission: str) -> dict[str, str]:
-    return {"classification": "permission_required", "permission": permission, "enforcement_status": "enforced"}
-
-
-def _pending() -> dict[str, str]:
-    # A sensitive route that must be permission-gated but is not yet — honestly
-    # marked pending. It is NOT protected and keeps rbac-role-separation blocked.
-    return {"classification": "permission_required", "enforcement_status": "pending"}
+    return {
+        "classification": "permission_required",
+        "permission": permission,
+        "enforcement_status": "enforced",
+        "auth_mechanism": "api_credential",
+    }
 
 
 ROUTE_ACCESS_POLICY: dict[tuple[str, str], dict[str, str]] = {
-    # --- public (no API key; framework, read-only status, or signed-token) ---
-    ("GET", "/health"): {"classification": "public"},
-    ("GET", "/docs"): {"classification": "public"},
-    ("GET", "/docs/oauth2-redirect"): {"classification": "public"},
-    ("GET", "/openapi.json"): {"classification": "public"},
-    ("GET", "/redoc"): {"classification": "public"},
-    ("GET", "/readiness/client-data"): {"classification": "public"},
-    ("GET", "/runtime/backends"): {"classification": "public"},
-    ("GET", "/local-ai/status"): {"classification": "public"},
-    ("GET", "/audit-logs/integrity"): {"classification": "public"},
-    ("GET", "/signed/report-exports/{export_id}"): {"classification": "public"},
-    ("GET", "/signed/upload-files/{file_id}"): {"classification": "public"},
-    # --- authenticated reads (auth required; benign read; no granular permission) ---
-    ("GET", "/auth/session"): {"classification": "authenticated_read"},
-    ("GET", "/workspaces"): {"classification": "authenticated_read"},
-    ("GET", "/documents"): {"classification": "authenticated_read"},
-    ("GET", "/documents/{document_id}/chunks"): {"classification": "authenticated_read"},
-    ("GET", "/failures"): {"classification": "authenticated_read"},
-    ("GET", "/processing-jobs"): {"classification": "authenticated_read"},
-    ("GET", "/validation-tasks"): {"classification": "authenticated_read"},
-    ("GET", "/monday-reports"): {"classification": "authenticated_read"},
-    ("GET", "/uploads/{upload_id}/files"): {"classification": "authenticated_read"},
-    ("GET", "/dashboards/summary"): {"classification": "authenticated_read"},
-    ("GET", "/field-corrections/registry"): {"classification": "authenticated_read"},
-    ("GET", "/workspaces/{workspace_id}/report-draft"): {"classification": "authenticated_read"},
-    # --- permission_required / enforced (route calls a require_* dependency) ---
+    # --- public: liveness, pre-auth readiness gate, and framework docs (docs are
+    #     additionally hidden from non-admins in client mode by the middleware) ---
+    ("GET", "/health"): _public(),
+    ("GET", "/readiness/client-data"): _public(),
+    ("GET", "/docs"): _public(),
+    ("GET", "/docs/oauth2-redirect"): _public(),
+    ("GET", "/openapi.json"): _public(),
+    ("GET", "/redoc"): _public(),
+    # --- public: signed-capability downloads (gated by an expiring, resource-bound
+    #     signed token, verified in the handler; see docs/ROUTE_RBAC.md) ---
+    ("GET", "/signed/report-exports/{export_id}"): _public("signed_capability"),
+    ("GET", "/signed/upload-files/{file_id}"): _public("signed_capability"),
+    # --- authenticated_read: benign authenticated reads (no granular permission) ---
+    ("GET", "/auth/session"): _authenticated_read(),
+    ("GET", "/field-corrections/registry"): _authenticated_read(),
+    # --- permission_required / enforced: operational & security reads ---
+    ("GET", "/runtime/backends"): _enforced("view_runtime_status"),
+    ("GET", "/local-ai/status"): _enforced("view_runtime_status"),
+    ("GET", "/audit-logs"): _enforced("view_audit_history"),
+    ("GET", "/audit-logs/integrity"): _enforced("view_audit_history"),
+    # --- permission_required / enforced: workspace/source/report reads ---
+    ("GET", "/workspaces"): _enforced("view_workspaces"),
+    ("GET", "/documents"): _enforced("view_source_documents"),
+    ("GET", "/documents/{document_id}/chunks"): _enforced("view_source_documents"),
+    ("GET", "/failures"): _enforced("view_source_documents"),
+    ("GET", "/uploads/{upload_id}/files"): _enforced("view_source_documents"),
+    ("GET", "/processing-jobs"): _enforced("view_processing_status"),
+    ("GET", "/validation-tasks"): _enforced("view_validation_queue"),
+    ("GET", "/monday-reports"): _enforced("view_reports"),
+    ("GET", "/dashboards/summary"): _enforced("view_reports"),
+    ("GET", "/workspaces/{workspace_id}/report-draft"): _enforced("view_reports"),
+    # --- permission_required / enforced: mutations ---
+    ("POST", "/workspaces"): _enforced("manage_workspaces"),
+    ("POST", "/uploads"): _enforced("manage_uploads"),
+    ("POST", "/uploads/direct"): _enforced("manage_uploads"),
+    ("POST", "/uploads/{upload_id}/complete"): _enforced("manage_uploads"),
+    ("POST", "/chat/messages"): _enforced("generate_reports"),
+    ("POST", "/monday-reports"): _enforced("generate_reports"),
+    ("POST", "/monday-reports/{report_id}/exports/{export_format}"): _enforced("issue_client_reports"),
+    ("POST", "/report-exports/{export_id}/signed-url"): _enforced("export_evidence"),
+    ("POST", "/upload-files/{file_id}/signed-url"): _enforced("export_evidence"),
+    ("POST", "/retention/run"): _enforced("run_retention"),
+    ("PATCH", "/validation-tasks/{task_id}"): _enforced("resolve_validation"),
+    # --- permission_required / enforced: Benchmarking (preserved) ---
     ("GET", "/benchmarking/config"): _enforced("view_benchmarks"),
     ("PATCH", "/benchmarking/values/{benchmark_id}"): _enforced("manage_benchmark_config"),
     ("GET", "/workspaces/{workspace_id}/benchmarking"): _enforced("view_benchmarks"),
     ("POST", "/workspaces/{workspace_id}/benchmarking/measurements"): _enforced("review_anomalies"),
     ("PATCH", "/benchmarking/anomalies/{anomaly_id}/diagnostics/{action_id}/dismiss"): _enforced("dismiss_anomalies"),
+    # --- permission_required / enforced: field corrections (preserved) ---
     ("POST", "/workspaces/{workspace_id}/field-corrections"): _enforced("record_field_corrections"),
     ("GET", "/workspaces/{workspace_id}/field-corrections"): _enforced("view_field_corrections"),
     ("POST", "/field-corrections/{correction_id}/revert"): _enforced("record_field_corrections"),
+    # --- permission_required / enforced: identity/credential administration ---
     ("GET", "/auth/users"): _enforced(ADMIN_PERMISSION),
     ("POST", "/auth/users"): _enforced(ADMIN_PERMISSION),
     ("POST", "/auth/users/{user_id}/credentials"): _enforced(ADMIN_PERMISSION),
     ("GET", "/auth/credentials"): _enforced(ADMIN_PERMISSION),
     ("POST", "/auth/credentials/{credential_id}/revoke"): _enforced(ADMIN_PERMISSION),
-    # --- permission_required / pending (sensitive, granular permission not yet
-    #     enforced; keeps rbac-role-separation blocked) ---
-    ("POST", "/workspaces"): _pending(),
-    ("POST", "/uploads"): _pending(),
-    ("POST", "/uploads/direct"): _pending(),
-    ("POST", "/uploads/{upload_id}/complete"): _pending(),
-    ("POST", "/chat/messages"): _pending(),
-    ("POST", "/monday-reports"): _pending(),
-    ("POST", "/monday-reports/{report_id}/exports/{export_format}"): _pending(),
-    ("POST", "/report-exports/{export_id}/signed-url"): _pending(),
-    ("POST", "/upload-files/{file_id}/signed-url"): _pending(),
-    ("POST", "/retention/run"): _pending(),
-    ("PATCH", "/validation-tasks/{task_id}"): _pending(),
-    # audit-history viewing is a privileged read; a granular view_audit_history
-    # gate is not yet enforced -> pending.
-    ("GET", "/audit-logs"): _pending(),
 }
 
-# Mutations that may only be permission_required or system_internal.
 _SENSITIVE_MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+# Public is minimal and allow-listed: liveness, the pre-auth readiness gate,
+# framework docs (client-mode-gated by the middleware), and signed downloads.
+_ALLOWED_PUBLIC_ROUTES = {
+    ("GET", "/health"),
+    ("GET", "/readiness/client-data"),
+    ("GET", "/docs"),
+    ("GET", "/docs/oauth2-redirect"),
+    ("GET", "/openapi.json"),
+    ("GET", "/redoc"),
+    ("GET", "/signed/report-exports/{export_id}"),
+    ("GET", "/signed/upload-files/{file_id}"),
+}
+_SIGNED_CAPABILITY_ROUTES = {
+    ("GET", "/signed/report-exports/{export_id}"),
+    ("GET", "/signed/upload-files/{file_id}"),
+}
 
 
 def audited_routes() -> list[tuple[str, str]]:
@@ -493,10 +531,38 @@ def audited_routes() -> list[tuple[str, str]]:
     return sorted(seen)
 
 
+def _main_source() -> str:
+    return Path(__file__).read_text(encoding="utf-8")
+
+
+def _route_dependency_present(entry: dict[str, str], source: str) -> bool:
+    """Static proof that the declared permission gate is wired somewhere in the
+    route layer. The behavioral guard proves per-route enforcement."""
+    permission = entry.get("permission")
+    if permission == ADMIN_PERMISSION:
+        return "require_admin()" in source
+    return (
+        f'require_permission("{permission}")' in source
+        or f'require_benchmark_permission("{permission}")' in source
+    )
+
+
+def _mechanism_compatible(classification: str, mechanism: str, is_mutation: bool) -> bool:
+    if classification == "public":
+        return mechanism in {"none", "signed_capability"}
+    if classification in {"authenticated_read", "permission_required"}:
+        return mechanism == "api_credential"
+    if classification == "system_internal":
+        return mechanism == "internal_process"
+    return False
+
+
 def validate_route_access_policy() -> list[str]:
-    """Return a list of route-policy errors (empty when consistent)."""
+    """Return a list of route-policy errors (empty when the policy is consistent
+    and security-appropriate)."""
     errors: list[str] = []
     routes = set(audited_routes())
+    source = _main_source()
     for method, path in sorted(routes):
         entry = ROUTE_ACCESS_POLICY.get((method, path))
         if entry is None:
@@ -506,9 +572,17 @@ def validate_route_access_policy() -> list[str]:
         if classification not in ROUTE_ACCESS_CLASSIFICATIONS:
             errors.append(f"route {method} {path} has unknown classification {classification!r}")
             continue
+        mechanism = entry.get("auth_mechanism", "api_credential")
+        if mechanism not in AUTH_MECHANISMS:
+            errors.append(f"route {method} {path} has unknown auth_mechanism {mechanism!r}")
         is_mutation = method in _SENSITIVE_MUTATION_METHODS
-        if classification == "public" and is_mutation:
-            errors.append(f"sensitive mutation {method} {path} must not be classified public")
+        if classification == "public":
+            if is_mutation:
+                errors.append(f"sensitive mutation {method} {path} must not be classified public")
+            if (method, path) not in _ALLOWED_PUBLIC_ROUTES:
+                errors.append(f"route {method} {path} is not an approved public route")
+            if mechanism == "signed_capability" and (method, path) not in _SIGNED_CAPABILITY_ROUTES:
+                errors.append(f"route {method} {path} claims signed_capability but is not a signed route")
         if classification == "authenticated_read" and is_mutation:
             errors.append(f"sensitive mutation {method} {path} must not be classified authenticated_read")
         if classification == "permission_required":
@@ -521,8 +595,16 @@ def validate_route_access_policy() -> list[str]:
                     errors.append(f"enforced route {method} {path} has no permission")
                 elif permission != ADMIN_PERMISSION and permission not in KNOWN_PERMISSIONS:
                     errors.append(f"route {method} {path} references unknown permission {permission!r}")
+                elif not _route_dependency_present(entry, source):
+                    errors.append(f"enforced route {method} {path} does not invoke its permission dependency")
             elif status == "pending" and entry.get("permission"):
                 errors.append(f"pending route {method} {path} must not claim an enforced permission")
+        if not _mechanism_compatible(classification, mechanism, is_mutation):
+            errors.append(f"route {method} {path} auth_mechanism {mechanism!r} incompatible with {classification!r}")
+    # Signed-capability routes must be read-only.
+    for method, path in _SIGNED_CAPABILITY_ROUTES:
+        if method not in {"GET", "HEAD"}:
+            errors.append(f"signed_capability route {method} {path} must be GET/HEAD only")
     # Every policy entry must correspond to a real route (no stale rows).
     for method, path in ROUTE_ACCESS_POLICY:
         if (method, path) not in routes:
@@ -540,25 +622,39 @@ def pending_permission_routes() -> list[tuple[str, str]]:
 
 
 def route_policy_fully_enforced() -> bool:
-    """True only when every permission_required route is enforced (no pending).
-    While False, rbac-role-separation must remain a declared blocker."""
-    return not pending_permission_routes()
+    """True ONLY when the route policy is complete AND security-appropriate:
+    zero policy errors (parity, categories, auth mechanisms, signed-capability,
+    minimal public set), zero pending routes, and every enforced permission_required
+    route proves its permission dependency. Not merely "no pending rows"."""
+    if validate_route_access_policy():
+        return False
+    if pending_permission_routes():
+        return False
+    source = _main_source()
+    for (method, path), entry in ROUTE_ACCESS_POLICY.items():
+        if entry.get("classification") == "permission_required" and entry.get("enforcement_status") == "enforced":
+            if not _route_dependency_present(entry, source):
+                return False
+    return True
 
 
 @app.get("/workspaces", response_model=list[Workspace])
 def list_workspaces() -> list[Workspace]:
+    require_permission("view_workspaces")
     store.refresh()
     return list(store.workspaces.values())
 
 
 @app.post("/workspaces", response_model=Workspace, status_code=status.HTTP_201_CREATED)
 def create_workspace(payload: WorkspaceCreate) -> Workspace:
+    require_permission("manage_workspaces")
     return store.create_workspace(payload)
 
 
 @app.post("/uploads", response_model=UploadCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_upload(payload: UploadCreate) -> UploadCreateResponse:
     store.refresh()
+    require_permission("manage_uploads")
     require_client_data_ready("upload.create", "workspace", payload.workspace_id)
     if payload.workspace_id not in store.workspaces:
         raise HTTPException(status_code=404, detail="Workspace not found")
@@ -587,6 +683,7 @@ async def create_direct_upload(
     file: UploadFile = File(...),
 ) -> UploadCreateResponse:
     if client_data_mode() == "client":
+        require_permission("manage_uploads")
         require_client_data_ready("upload.direct", "workspace", workspace_id)
     else:
         store.refresh()
@@ -631,6 +728,7 @@ async def create_direct_upload(
 @app.post("/uploads/{upload_id}/complete")
 def complete_upload(upload_id: UUID, payload: UploadCompleteRequest) -> dict[str, str]:
     store.refresh()
+    require_permission("manage_uploads")
     if upload_id not in store.uploads:
         raise HTTPException(status_code=404, detail="Upload not found")
     require_client_data_ready("upload.complete", "upload", upload_id)
@@ -657,6 +755,7 @@ def complete_upload(upload_id: UUID, payload: UploadCompleteRequest) -> dict[str
 @app.get("/uploads/{upload_id}/files", response_model=list[UploadFileRecord])
 def list_upload_files(upload_id: UUID) -> list[UploadFileRecord]:
     store.refresh()
+    require_permission("view_source_documents")
     if upload_id not in store.uploads:
         raise HTTPException(status_code=404, detail="Upload not found")
     require_client_data_ready("upload.files.list", "upload", upload_id)
@@ -669,6 +768,7 @@ def list_processing_jobs(
     status_filter: ProcessingStatus | None = None,
 ) -> list[ProcessingJob]:
     store.refresh()
+    require_permission("view_processing_status")
     require_client_data_ready("processing_jobs.list", "processing_job", None)
     jobs = list(store.jobs.values())
     if upload_id:
@@ -681,6 +781,7 @@ def list_processing_jobs(
 @app.get("/documents", response_model=list[ParsedDocument])
 def list_documents(workspace_id: UUID | None = None) -> list[ParsedDocument]:
     store.refresh()
+    require_permission("view_source_documents")
     require_client_data_ready("documents.list", "workspace", workspace_id)
     documents = list(store.parsed_documents.values())
     if workspace_id:
@@ -691,6 +792,7 @@ def list_documents(workspace_id: UUID | None = None) -> list[ParsedDocument]:
 @app.get("/documents/{document_id}/chunks", response_model=list[DocumentChunk])
 def list_document_chunks(document_id: UUID) -> list[DocumentChunk]:
     store.refresh()
+    require_permission("view_source_documents")
     if document_id not in store.parsed_documents:
         raise HTTPException(status_code=404, detail="Document not found")
     require_client_data_ready("documents.chunks.list", "parsed_document", document_id)
@@ -700,6 +802,7 @@ def list_document_chunks(document_id: UUID) -> list[DocumentChunk]:
 
 @app.get("/audit-logs", response_model=list[AuditLog])
 def list_audit_logs(limit: int = 50) -> list[AuditLog]:
+    require_permission("view_audit_history")
     store.refresh()
     bounded_limit = min(max(limit, 1), 200)
     return list(reversed(store.audit_logs))[:bounded_limit]
@@ -707,12 +810,14 @@ def list_audit_logs(limit: int = 50) -> list[AuditLog]:
 
 @app.get("/audit-logs/integrity", response_model=AuditIntegrityStatus)
 def audit_log_integrity() -> AuditIntegrityStatus:
+    require_permission("view_audit_history")
     return store.audit_integrity_status()
 
 
 @app.post("/retention/run", response_model=RetentionRunResult)
 def run_retention(apply: bool = False) -> RetentionRunResult:
     store.refresh()
+    require_permission("run_retention")
     require_client_data_ready("retention.run", "tenant", store.tenant.id)
     return store.run_retention(retention_days(), apply=apply)
 
@@ -720,6 +825,7 @@ def run_retention(apply: bool = False) -> RetentionRunResult:
 @app.get("/validation-tasks", response_model=list[ValidationTask])
 def list_validation_tasks() -> list[ValidationTask]:
     store.refresh()
+    require_permission("view_validation_queue")
     require_client_data_ready("validation_tasks.list", "validation_task", None)
     return list(store.validation_tasks.values())
 
@@ -727,6 +833,7 @@ def list_validation_tasks() -> list[ValidationTask]:
 @app.patch("/validation-tasks/{task_id}", response_model=ValidationTask)
 def update_validation_task(task_id: UUID, payload: ValidationTaskUpdate) -> ValidationTask:
     store.refresh()
+    require_permission("resolve_validation")
     if task_id not in store.validation_tasks:
         raise HTTPException(status_code=404, detail="Validation task not found")
     require_client_data_ready("validation_task.update", "validation_task", task_id)
@@ -796,6 +903,7 @@ def revert_field_correction(correction_id: UUID, payload: FieldCorrectionRevert)
 @app.get("/dashboards/summary", response_model=DashboardSummary)
 def dashboard_summary(workspace_id: UUID | None = None) -> DashboardSummary:
     store.refresh()
+    require_permission("view_reports")
     require_client_data_ready("dashboard.summary", "workspace", workspace_id)
     failures = list(store.failures.values())
     if workspace_id:
@@ -817,6 +925,7 @@ def dashboard_summary(workspace_id: UUID | None = None) -> DashboardSummary:
 @app.get("/failures", response_model=list[FailureRecord])
 def list_failures(workspace_id: UUID | None = None) -> list[FailureRecord]:
     store.refresh()
+    require_permission("view_source_documents")
     require_client_data_ready("failures.list", "workspace", workspace_id)
     failures = list(store.failures.values())
     if workspace_id:
@@ -1088,6 +1197,7 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     store.refresh()
     if workspace_id not in store.workspaces:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    require_permission("view_reports")
     require_client_data_ready("report_draft.generate", "workspace", workspace_id)
 
     workspace = store.workspaces[workspace_id]
@@ -1304,6 +1414,7 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
 @app.post("/chat/messages", response_model=ChatResponse)
 def chat(payload: ChatRequest) -> ChatResponse:
     store.refresh()
+    require_permission("generate_reports")
     require_client_data_ready("chat.message", "workspace", payload.workspace_id)
     failures = [
         failure for failure in store.failures.values() if failure.workspace_id == payload.workspace_id
@@ -1493,6 +1604,7 @@ def create_monday_report(payload: MondayReportCreate) -> MondayReport:
     store.refresh()
     if payload.workspace_id not in store.workspaces:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    require_permission("generate_reports")
     require_client_data_ready("monday_report.create", "workspace", payload.workspace_id)
     return store.create_monday_report(payload)
 
@@ -1500,6 +1612,7 @@ def create_monday_report(payload: MondayReportCreate) -> MondayReport:
 @app.get("/monday-reports", response_model=list[MondayReport])
 def list_monday_reports(workspace_id: UUID | None = None) -> list[MondayReport]:
     store.refresh()
+    require_permission("view_reports")
     require_client_data_ready("monday_reports.list", "workspace", workspace_id)
     reports = list(store.monday_reports.values())
     if workspace_id:
@@ -1514,6 +1627,7 @@ def export_monday_report(
     allow_unresolved_validation: bool = False,
 ) -> ReportExport:
     store.refresh()
+    require_permission("issue_client_reports")
     if report_id not in store.monday_reports:
         raise HTTPException(status_code=404, detail="Monday Report not found")
     require_client_data_ready("monday_report.export", "monday_report", report_id)
@@ -1558,6 +1672,7 @@ def export_monday_report(
 @app.post("/report-exports/{export_id}/signed-url", response_model=SignedUrlResponse)
 def create_report_export_signed_url(export_id: UUID, request: Request) -> SignedUrlResponse:
     store.refresh()
+    require_permission("export_evidence")
     if export_id not in store.report_exports:
         raise HTTPException(status_code=404, detail="Report export not found")
     if client_data_mode() == "client" and not signing_secret_configured():
@@ -1640,6 +1755,7 @@ def download_report_export(export_id: UUID, token: str) -> Response:
 @app.post("/upload-files/{file_id}/signed-url", response_model=SignedUrlResponse)
 def create_upload_file_signed_url(file_id: UUID, request: Request) -> SignedUrlResponse:
     store.refresh()
+    require_permission("export_evidence")
     if file_id not in store.files:
         raise HTTPException(status_code=404, detail="Upload file not found")
     if client_data_mode() == "client" and not signing_secret_configured():
