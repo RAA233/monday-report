@@ -221,14 +221,14 @@ export const clearTrackerLanes: TrackerLane[] = [
   {
     id: "real-client-blockers",
     title: "Real-Client Approval",
-    status: "pass",
-    summary: "The local client-approval environment is green with zero readiness blockers.",
+    status: "watch",
+    summary: "Provisioning PostgreSQL, Redis, fixtures, and local AI does not approve real-client data: the truthful GA gate still reports GA_BLOCKED across registered software, security, and governance blockers.",
     items: [
-      "PostgreSQL/RLS state snapshot adapter is active.",
-      "Redis-backed processing queue is active.",
-      "Reviewed anonymized fixture attestation and 13-family parser/OCR eval report pass.",
-      "Local Ollama `gemma4:e2b` is reachable and hosted fallback remains disabled.",
-      "Client approval JSON reports `APPROVED`."
+      "PostgreSQL/RLS state snapshot adapter and Redis queue can be provisioned locally, but provisioning alone cannot yield GA_READY.",
+      "The registry-backed GA gate keeps declared software/security/governance controls BLOCKED or REVIEW_REQUIRED (RBAC, keyed audit integrity, backup/restore, client organizational approval, etc.).",
+      "No waiver, environment variable, static configured actor, or unsigned file can resolve a registered blocker in this version.",
+      "Client approval JSON reports `BLOCKED` until every registry blocker is resolved by separate approved pull requests.",
+      "See `docs/GA_READINESS_INTEGRITY.md` and `evals/ga/blocker_registry.v1.json` for the truthful blocker inventory."
     ]
   },
   {
@@ -532,9 +532,9 @@ export const testGates: TestGate[] = [
   {
     id: "gate-ga-readiness",
     name: "GA readiness classification",
-    status: "pass",
+    status: "watch",
     command: "pnpm run audit:ga-readiness",
-    lastResult: "Strict GA readiness reports GA_READY with zero software, configuration, infrastructure, or evidence blockers."
+    lastResult: "The truthful registry-backed GA gate reports GA_BLOCKED with non-zero blockers across software, security, infrastructure, configuration, and client approval; PostgreSQL+Redis provisioning alone cannot yield GA_READY."
   },
   {
     id: "gate-runtime-backends",

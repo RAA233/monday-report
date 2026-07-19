@@ -555,12 +555,44 @@ interface ExportMondayReportOptions {
   allowUnresolvedValidation?: boolean;
 }
 
+export type ApiReadinessDisposition =
+  | "PASS"
+  | "FAIL"
+  | "BLOCKED"
+  | "SKIPPED"
+  | "NOT_APPLICABLE"
+  | "REVIEW_REQUIRED";
+
+export type ApiReadinessCategory =
+  | "software"
+  | "configuration"
+  | "infrastructure"
+  | "security_review"
+  | "data_review_evidence"
+  | "client_approval";
+
 export interface ApiClientDataReadinessCheck {
   id: string;
   label: string;
   status: "pass" | "warn" | "fail";
   detail: string;
   remediation: string;
+  // Additive, optional GA-integrity metadata (legacy consumers ignore these).
+  disposition?: ApiReadinessDisposition | null;
+  category?: ApiReadinessCategory | null;
+  severity?: "blocker" | "high" | "medium" | "low" | null;
+  owner_type?:
+    | "engineering"
+    | "security"
+    | "platform"
+    | "operations"
+    | "data_review"
+    | "client_organization"
+    | null;
+  policy_reference?: string | null;
+  evidence_reference?: string | null;
+  resolution_condition?: string | null;
+  applicability_justification?: string | null;
 }
 
 export interface ApiClientDataReadiness {

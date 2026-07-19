@@ -3,64 +3,157 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "output" / "ga-readiness"
 OUTPUT_JSON = OUTPUT_DIR / "Monday_Report_GA_READINESS.json"
 OUTPUT_MD = OUTPUT_DIR / "Monday_Report_GA_READINESS.md"
 DEFAULT_ENV_FILE = OUTPUT_DIR / "monday_report_ga.env"
+FORGE_REPORT_PATH = ROOT / "output" / "forge-evals" / "forge_eval_report.json"
 
-SOFTWARE_CHECK_IDS = {
-    "demo_seed_removed",
-    "hosted_fallback_disabled",
-    "official_export_gate",
-    "local_llm_runtime",
-    "audit_trail",
-    "audit_hash_chain",
-    "audit_metadata_redaction",
-}
-CONFIGURATION_CHECK_IDS = {
-    "client_mode",
-    "state_path_configured",
-    "storage_root_configured",
-    "export_root_configured",
-    "api_key_configured",
-    "signed_url_secret",
-    "upload_size_limit",
-    "archive_limits",
-    "retention_policy",
-    "parser_coverage",
-    "malware_scanner",
-}
-INFRASTRUCTURE_CHECK_IDS = {"postgres_repository", "redis_queue"}
-EVIDENCE_CHECK_IDS = {"parser_fixture_evals", "golden_fixture_coverage", "reviewed_fixture_attestation"}
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from backend.app.ga_readiness import (  # noqa: E402
+    blocker_counts,
+    check_registry_parity,
+    decide_ga,
+    evaluate_blockers,
+    load_registry,
+    payload_sha256,
+    registry_sha256,
+    validate_registry,
+    verify_evidence_hash,
+)
+
+EVIDENCE_SCHEMA_VERSION = "ga_readiness_evidence_v1"
+
+# Path/identity redaction: evidence must never carry machine-specific paths.
+_PATH_PATTERNS = (
+    re.compile(r"[A-Za-z]:\\[^\s\"']*"),
+    re.compile(r"\\\\[^\s\"']+"),
+    re.compile(r"/(?:Users|home)/[^\s\"']*"),
+    re.compile(r"/tmp/[^\s\"']*"),
+)
+_LEAK_PATTERNS = (
+    re.compile(r"[A-Za-z]:\\"),
+    re.compile(r"/Users/"),
+    re.compile(r"/home/"),
+    re.compile(r"AppData"),
+)
+
+
+def _redact(value: Any) -> Any:
+    if isinstance(value, str):
+        redacted = value
+        for pattern in _PATH_PATTERNS:
+            redacted = pattern.sub("<redacted-path>", redacted)
+        return redacted
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact(item) for key, item in value.items()}
+    return value
+
+
+def _scan_leaks(payload: Any) -> list[str]:
+    leaks: list[str] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            for pattern in _LEAK_PATTERNS:
+                if pattern.search(value):
+                    leaks.append(value[:80])
+                    return
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+
+    walk(payload)
+    return leaks
 
 
 def main() -> int:
     args = parse_args()
-    load_env_file(Path(args.env_file)) if args.env_file else None
-    command_results = run_software_commands() if not args.skip_commands else []
-    readiness, backends, local_ai = read_in_process_readiness()
-    result = build_result(command_results, readiness, backends, local_ai)
-    write_outputs(result)
-    print_result(result)
-    if any(not item["ok"] for item in command_results):
+    if args.env_file:
+        load_env_file(Path(args.env_file))
+
+    registry = load_registry()
+    registry_errors = validate_registry(registry)
+    if registry_errors:
+        for error in registry_errors[:10]:
+            print(f"FAIL: registry invalid - {error}")
         return 1
-    if args.strict and not result["ga_ready"]:
+
+    command_results = [] if args.skip_commands else run_software_commands()
+    commands_skipped = args.skip_commands
+    commands_passed = (not commands_skipped) and all(item["ok"] for item in command_results)
+
+    readiness, backends, local_ai = read_in_process_readiness()
+    readiness_by_id = {check.get("id"): check.get("status") for check in readiness.get("checks", [])}
+    forge_report = _load_forge_report()
+
+    ga_checks = evaluate_blockers(readiness_by_id, forge_report=forge_report)
+    parity_errors = check_registry_parity(ga_checks)
+    parity_ok = not parity_errors
+    counts = blocker_counts(ga_checks)
+    mode = str(readiness.get("mode", "demo"))
+
+    git_commit, git_tree, worktree_clean = git_binding()
+
+    status, ga_ready = decide_ga(
+        mode=mode,
+        parity_ok=parity_ok,
+        checks=ga_checks,
+        commands_skipped=commands_skipped,
+        commands_passed=commands_passed,
+        worktree_clean=worktree_clean,
+    )
+
+    payload = build_payload(
+        status=status,
+        ga_ready=ga_ready,
+        args=args,
+        registry=registry,
+        ga_checks=ga_checks,
+        parity_errors=parity_errors,
+        counts=counts,
+        commands_skipped=commands_skipped,
+        command_results=command_results,
+        commands_passed=commands_passed,
+        readiness=readiness,
+        backends=backends,
+        local_ai=local_ai,
+        git_commit=git_commit,
+        git_tree=git_tree,
+        worktree_clean=worktree_clean,
+    )
+
+    write_outputs(payload)
+    print_result(payload)
+
+    if not commands_skipped and any(not item["ok"] for item in command_results):
+        return 1
+    if parity_errors:
+        return 1
+    if args.strict and not ga_ready:
         return 1
     return 0
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate Monday Report GA readiness evidence.")
-    parser.add_argument("--strict", action="store_true", help="Exit non-zero unless all real-client GA checks pass.")
-    parser.add_argument("--skip-commands", action="store_true", help="Do not rerun software-owned guard commands.")
+    parser = argparse.ArgumentParser(description="Generate Monday Report registry-backed GA readiness evidence.")
+    parser.add_argument("--strict", action="store_true", help="Exit non-zero unless a full GA evaluation is GA_READY.")
+    parser.add_argument("--skip-commands", action="store_true", help="Do not run the software-owned guard commands.")
     parser.add_argument(
         "--env-file",
         default=str(DEFAULT_ENV_FILE),
@@ -106,9 +199,8 @@ def run_software_commands() -> list[dict[str, Any]]:
 
 
 def read_in_process_readiness() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
     from fastapi.testclient import TestClient
+
     from backend.app.main import app
 
     client = TestClient(app)
@@ -126,130 +218,161 @@ def response_json(response) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {"payload": payload}
 
 
-def build_result(
-    command_results: list[dict[str, Any]],
-    readiness: dict[str, Any],
-    backends: dict[str, Any],
-    local_ai: dict[str, Any],
-) -> dict[str, Any]:
-    checks = readiness.get("checks", [])
-    non_passing = [check for check in checks if check.get("status") != "pass"]
-    categorized = {
-        "software": categorize(non_passing, SOFTWARE_CHECK_IDS),
-        "configuration": categorize(non_passing, CONFIGURATION_CHECK_IDS),
-        "infrastructure": categorize(non_passing, INFRASTRUCTURE_CHECK_IDS),
-        "evidence_or_approval": categorize(non_passing, EVIDENCE_CHECK_IDS),
-        "uncategorized": [
-            check
-            for check in non_passing
-            if check.get("id") not in SOFTWARE_CHECK_IDS
-            | CONFIGURATION_CHECK_IDS
-            | INFRASTRUCTURE_CHECK_IDS
-            | EVIDENCE_CHECK_IDS
-        ],
-    }
-    software_commands_pass = all(item["ok"] for item in command_results)
-    software_readiness_pass = not categorized["software"]
-    ga_ready = bool(readiness.get("ready")) and not non_passing and software_commands_pass
-    status = "GA_READY" if ga_ready else "GA_BLOCKED"
-    return {
-        "status": status,
-        "ga_ready": ga_ready,
-        "software_checks_passed": software_commands_pass and software_readiness_pass,
+def _load_forge_report() -> dict | None:
+    if not FORGE_REPORT_PATH.exists():
+        return None
+    try:
+        return json.loads(FORGE_REPORT_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def git_binding() -> tuple[str, str, bool]:
+    def git(*parts: str) -> tuple[str, int]:
+        completed = subprocess.run(["git", *parts], cwd=ROOT, text=True, capture_output=True, check=False)
+        return completed.stdout.strip(), completed.returncode
+
+    commit_out, commit_rc = git("rev-parse", "HEAD")
+    tree_out, tree_rc = git("rev-parse", "HEAD^{tree}")
+    status_out, status_rc = git("status", "--porcelain")
+    commit = commit_out if commit_rc == 0 and commit_out else "unknown"
+    tree = tree_out if tree_rc == 0 and tree_out else "unknown"
+    # Fail-closed: only a *successful* and empty porcelain status counts as a
+    # clean worktree. A git error (non-zero exit, e.g. not a repo or an index
+    # lock) yields empty stdout, which must never be read as "clean".
+    worktree_clean = status_rc == 0 and status_out == ""
+    return commit, tree, worktree_clean
+
+
+def build_payload(**kwargs: Any) -> dict[str, Any]:
+    args = kwargs["args"]
+    counts = kwargs["counts"]
+    ga_checks = _redact(kwargs["ga_checks"])
+    readiness = _redact(kwargs["readiness"])
+    command_results = _redact(
+        [{k: v for k, v in item.items()} for item in kwargs["command_results"]]
+    )
+    payload: dict[str, Any] = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "status": kwargs["status"],
+        "ga_ready": kwargs["ga_ready"],
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "readiness": readiness,
-        "runtime_backends": backends,
-        "local_ai": local_ai,
-        "software_commands": command_results,
-        "blockers": categorized,
-        "summary": summary_text(ga_ready, categorized, software_commands_pass, software_readiness_pass),
+        "git_commit": kwargs["git_commit"],
+        "git_tree": kwargs["git_tree"],
+        "worktree_clean": kwargs["worktree_clean"],
+        "registry_version": kwargs["registry"].get("registry_version"),
+        "registry_sha256": registry_sha256(),
+        "command": "python scripts/ga_readiness_guard.py",
+        "command_arguments": {"strict": args.strict, "skip_commands": args.skip_commands},
+        "commands_skipped": kwargs["commands_skipped"],
+        "commands_passed": kwargs["commands_passed"],
+        "full_ga_evaluation_complete": not kwargs["commands_skipped"],
+        "readiness_structure_valid": not kwargs["parity_errors"],
+        "parity_errors": _redact(kwargs["parity_errors"]),
+        "command_results": command_results,
+        "readiness_checks": ga_checks,
+        "client_data_readiness": readiness,
+        "runtime_backends": _redact(kwargs["backends"]),
+        "local_ai": _redact(kwargs["local_ai"]),
+        "blocker_counts": counts,
+        "top_level_status": kwargs["status"],
+        "summary": summary_text(kwargs["status"], counts, kwargs["commands_skipped"]),
+        # Legacy-compatible blockers view (grouped registry-backed checks).
+        "blockers": _grouped_blockers(ga_checks),
+        "software_checks_passed": kwargs["commands_passed"] and counts.get("software", 0) == 0,
     }
+    leaks = _scan_leaks(payload)
+    if leaks:
+        raise SystemExit(f"refusing to write GA evidence with path/identity leaks: {leaks[:3]}")
+    payload["payload_sha256"] = payload_sha256(payload)
+    # Authoritative integrity seal: the written evidence must carry a verifiable
+    # canonical hash. Verify at write time and refuse to emit corrupt evidence.
+    if not verify_evidence_hash(payload):
+        raise SystemExit("refusing to write GA evidence: canonical payload hash failed self-verification")
+    return payload
 
 
-def categorize(checks: list[dict[str, Any]], ids: set[str]) -> list[dict[str, Any]]:
-    return [
-        {
-            "id": check.get("id"),
-            "label": check.get("label"),
-            "status": check.get("status"),
-            "detail": check.get("detail"),
-            "remediation": check.get("remediation"),
-        }
-        for check in checks
-        if check.get("id") in ids
-    ]
-
-
-def summary_text(
-    ga_ready: bool,
-    blockers: dict[str, list[dict[str, Any]]],
-    software_commands_pass: bool,
-    software_readiness_pass: bool,
-) -> str:
-    if ga_ready:
-        return "Monday Report is GA-ready for real client data according to the live readiness checks."
-    if software_commands_pass and software_readiness_pass:
-        return (
-            "Software-owned GA checks pass. Real-client GA remains blocked by configuration, "
-            "external infrastructure, or reviewed evidence/approval requirements."
+def _grouped_blockers(ga_checks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for check in ga_checks:
+        if check.get("disposition") in {"PASS", "NOT_APPLICABLE"}:
+            continue
+        grouped.setdefault(str(check.get("category")), []).append(
+            {
+                "id": check.get("id"),
+                "label": check.get("label"),
+                "disposition": check.get("disposition"),
+                "severity": check.get("severity"),
+                "owner_type": check.get("owner_type"),
+                "detail": check.get("detail"),
+                "resolution_condition": check.get("resolution_condition"),
+            }
         )
+    return grouped
+
+
+def summary_text(status: str, counts: dict[str, int], commands_skipped: bool) -> str:
+    if status == "GA_READY":
+        return "Monday Report is GA-ready: every registry-backed GA blocker is resolved and evidence is bound to a clean commit."
+    parts = [f"{category}={counts.get(category, 0)}" for category in
+             ("software", "configuration", "infrastructure", "security_review", "data_review_evidence", "client_approval")]
+    skipped = " Software commands were skipped (not a full GA evaluation)." if commands_skipped else ""
     return (
-        "GA readiness is blocked by software-owned checks plus any listed configuration, "
-        "infrastructure, or evidence requirements."
+        "GA_BLOCKED: registry-backed blockers are unresolved ("
+        + ", ".join(parts)
+        + f"; total={counts.get('total', 0)})."
+        + skipped
     )
 
 
-def write_outputs(result: dict[str, Any]) -> None:
+def write_outputs(payload: dict[str, Any]) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    OUTPUT_JSON.write_text(json.dumps(result, indent=2, sort_keys=True), encoding="utf-8")
-    OUTPUT_MD.write_text(render_markdown(result), encoding="utf-8")
+    OUTPUT_JSON.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    OUTPUT_MD.write_text(render_markdown(payload), encoding="utf-8")
 
 
-def render_markdown(result: dict[str, Any]) -> str:
+def render_markdown(payload: dict[str, Any]) -> str:
     lines = [
         "# Monday Report GA Readiness",
         "",
-        f"Status: `{result['status']}`",
-        f"Generated: `{result['generated_at']}`",
-        f"Software checks passed: `{str(result['software_checks_passed']).lower()}`",
+        f"Status: `{payload['status']}`",
+        f"Generated: `{payload['generated_at']}`",
+        f"Commit: `{payload['git_commit']}` Tree: `{payload['git_tree']}` Worktree clean: `{str(payload['worktree_clean']).lower()}`",
+        f"Registry: `{payload['registry_version']}` (`{payload['registry_sha256'][:16]}…`)",
+        f"Full GA evaluation complete: `{str(payload['full_ga_evaluation_complete']).lower()}`",
         "",
         "## Summary",
         "",
-        result["summary"],
+        payload["summary"],
         "",
-        "## Software Command Checks",
+        "## Blocker counts by category",
         "",
     ]
-    for item in result.get("software_commands", []):
-        lines.append(f"- {'PASS' if item['ok'] else 'FAIL'}: `{item['command']}`")
-
-    for title, key in [
-        ("Software Blockers", "software"),
-        ("Configuration Blockers", "configuration"),
-        ("Infrastructure Blockers", "infrastructure"),
-        ("Evidence Or Approval Blockers", "evidence_or_approval"),
-        ("Uncategorized Blockers", "uncategorized"),
-    ]:
-        lines.extend(["", f"## {title}", ""])
-        checks = result.get("blockers", {}).get(key, [])
-        if not checks:
-            lines.append("- None.")
-            continue
+    for category, count in payload["blocker_counts"].items():
+        lines.append(f"- {category}: {count}")
+    lines.extend(["", "## Unresolved blockers", ""])
+    for category, checks in payload.get("blockers", {}).items():
         for check in checks:
             lines.append(
-                f"- {str(check.get('status', '')).upper()}: `{check.get('id')}` - "
-                f"{check.get('detail')} Remediation: {check.get('remediation')}"
+                f"- [{category}/{check.get('severity')}] `{check.get('id')}` "
+                f"({check.get('disposition')}, owner {check.get('owner_type')}): {check.get('detail')}"
             )
+    if not payload.get("blockers"):
+        lines.append("- None.")
     lines.append("")
     return "\n".join(lines)
 
 
-def print_result(result: dict[str, Any]) -> None:
-    print(f"{result['status']}: {result['summary']}")
-    for category, checks in result["blockers"].items():
-        print(f"{category}: {len(checks)} blocker(s)")
+def print_result(payload: dict[str, Any]) -> None:
+    print(f"{payload['status']}: {payload['summary']}")
+    for category, count in payload["blocker_counts"].items():
+        if category == "total":
+            continue
+        print(f"{category}: {count} blocker(s)")
+    print(f"total: {payload['blocker_counts'].get('total', 0)} blocker(s)")
+    for category, checks in payload.get("blockers", {}).items():
         for check in checks:
-            print(f"  {str(check.get('status', '')).upper()}: {check.get('id')} - {check.get('detail')}")
+            print(f"  {check.get('disposition')}: {check.get('id')} - {check.get('detail')}")
     print(f"GA JSON: {OUTPUT_JSON}")
     print(f"GA MD: {OUTPUT_MD}")
 
