@@ -130,3 +130,21 @@ blocker**: `per-user-identity`, `rbac-role-separation`,
 `tenant-authorization-enforcement`, and `verified-reviewer-identity` remain
 declared blockers and `ga:readiness` stays `GA_BLOCKED` until resolved by
 separate approved pull requests.
+
+## Route-level RBAC (enforcement)
+
+Built on that foundation, route-level RBAC (`docs/ROUTE_RBAC.md`,
+`audit:route-rbac`) makes `backend/app/permissions.py` the single authorization
+authority: 23 stable permissions and a conservative role→permission matrix (the
+legacy `VIEWER` role stays unactivated) gate **every privileged read and every
+mutation**. A classified route inventory (`ROUTE_ACCESS_POLICY`) covers all 48
+routes; `route_policy_fully_enforced()` proves each `permission_required` route
+carries its declared guard; the two download routes are public
+**signed-capability** endpoints (resource-bound, expiring, GET-only); permission
+is checked **before** any resource lookup (no existence leak); and every denial
+writes a redacted audit event (permission/route/method). This is **route-level**
+authorization only — it does **not** implement multi-tenant resource
+authorization, verified reviewer workflow, or keyed audit integrity. The
+`rbac-role-separation` readiness signal is **conservatively retained as a
+blocker** (coupled to the still-blocked per-user-identity deployment posture), so
+`ga:readiness` stays `GA_BLOCKED`.

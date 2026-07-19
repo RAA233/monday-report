@@ -627,3 +627,48 @@ identity + request actor + RBAC foundation** (`docs/AUTHENTICATED_IDENTITY.md`).
 | `pnpm run audit:auth` | 0 | **9/9** — 503/401 fail-closed, client-mode shared-key rejected, per-user credential accepted, revoked fails, demo-mode compatibility. |
 | `pnpm run audit:ga-readiness-integrity` | 0 | 44/44 — unchanged; identity blockers remain BLOCKED. |
 | `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — the foundation closes no blocker. |
+
+## Route-level RBAC enforcement (2026-07-19)
+
+Increment on branch `feat/complete-route-rbac` from the merged
+authenticated-identity foundation `main`. Scope: **complete route-level RBAC**
+(`docs/ROUTE_RBAC.md`) built on the merged identity foundation. It is a bounded
+**authorization** increment — it does **not** implement multi-tenant resource
+authorization, verified reviewer workflow, keyed audit integrity, or a
+persistence redesign.
+
+- **Authorization authority**: new `backend/app/permissions.py` is now the single
+  source of truth — 23 stable permission ids (the 12 historical
+  Benchmarking/field-correction keys preserved exactly + 11 route-grounded keys),
+  a conservative role→permission matrix, and **default-deny** evaluation.
+  `store.benchmark_permissions()` is a thin compatibility wrapper delegating here,
+  so the Benchmarking 12-key contract is byte-for-byte unchanged.
+- **Roles**: only the four active roles (`ADMIN`/`ENGINEER`/`VALIDATOR`/`MANAGER`);
+  the legacy **`VIEWER` role stays unactivated** with no permissions. Separations
+  are conservative and route-grounded (e.g. VALIDATOR owns the validation queue
+  and AI approval but cannot upload or issue reports; ENGINEER ingests and drafts
+  but cannot approve/resolve/issue or view audit history; `run_retention` and
+  identity administration are ADMIN-only).
+- **Enforcement**: every privileged read and every mutation now requires a
+  permission (`require_permission` / `require_benchmark_permission`), checked
+  **before** any resource lookup so existence never leaks (403, not 404). The two
+  download routes are public **signed-capability** endpoints (resource-bound,
+  expiring, GET-only). Every denial writes a redacted audit event carrying the
+  permission, route, and method.
+- **Route inventory**: `ROUTE_ACCESS_POLICY` classifies all **48** routes
+  (`public`/`authenticated_read`/`permission_required`) with an `auth_mechanism`;
+  `route_policy_fully_enforced()` requires zero errors, zero `pending`, and a
+  static proof that each `permission_required` route carries its declared guard.
+  Validated: 48 routes, 0 errors, 0 pending, fully enforced.
+- **Blockers intentionally left open**: this increment **closes no GA blocker**.
+  `rbac-role-separation` is **conservatively retained as BLOCKED** (its mechanism
+  is in place but it is coupled to the still-blocked per-user-identity
+  **deployment** posture); `tenant-authorization-enforcement`,
+  `verified-reviewer-identity`, and the audit-integrity blockers are unchanged.
+  **`ga:readiness` remains `GA_BLOCKED`**.
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `pnpm run audit:route-rbac` | 0 | **73/73** — policy structure/parity, role→permission matrix, every-mutation denial for roles lacking the permission, privileged-read denial, signed-capability (resource-bound/expiring/GET-only), permission-before-lookup ordering, redacted denial audit (permission/route/method), and regression that tenant/reviewer/audit-integrity/RBAC-deployment blockers stay BLOCKED and GA stays `GA_BLOCKED`. |
+| `pnpm run audit:identity-rbac` | 0 | 73/73 — unchanged; identity foundation intact. |
+| `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — RBAC enforcement closes no blocker. |

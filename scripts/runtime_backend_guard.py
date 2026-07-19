@@ -26,16 +26,44 @@ def main() -> int:
             configure_guard_env(Path(tmp), ollama_url)
 
             from backend.app.main import app
+            from backend.app.schemas import Role
             from backend.app.store import store
 
             client = TestClient(app)
+
+            # Operational runtime-backend status is now a permission-gated read
+            # (view_runtime_status): in client mode it requires an authenticated
+            # administrator credential. Provision one; the legacy shared key is
+            # rejected and no longer grants operator visibility.
+            admin = store.create_user("runtime-admin@example.test", "Runtime Admin", [Role.ADMIN])
+            _cred, admin_token = store.create_credential(admin.id)
+            admin_headers = {"X-Monday-Report-Key": admin_token}
+
             unauthenticated_status = client.get("/runtime/backends")
-            payload = unauthenticated_status.json()
             checks.append(
                 assert_check(
-                    "Runtime backend status is operator-readable in client mode",
-                    unauthenticated_status.status_code == 200,
+                    "Runtime backend status requires authentication in client mode",
+                    unauthenticated_status.status_code == 401,
                     response_detail(unauthenticated_status),
+                )
+            )
+
+            shared_key_status = client.get("/runtime/backends", headers=CLIENT_HEADERS)
+            checks.append(
+                assert_check(
+                    "Runtime backend status rejects the legacy shared key",
+                    shared_key_status.status_code == 401,
+                    response_detail(shared_key_status),
+                )
+            )
+
+            authorized_status = client.get("/runtime/backends", headers=admin_headers)
+            payload = authorized_status.json()
+            checks.append(
+                assert_check(
+                    "Runtime backend status is operator-readable with an authorized credential",
+                    authorized_status.status_code == 200,
+                    response_detail(authorized_status),
                 )
             )
 
@@ -75,15 +103,6 @@ def main() -> int:
                     and {"postgres_repository", "redis_queue"}.issubset(runtime_blockers)
                     and runtime_blockers == readiness_blockers,
                     {"runtime": sorted(runtime_blockers), "readiness": sorted(readiness_blockers)},
-                )
-            )
-
-            authorized_status = client.get("/runtime/backends", headers=CLIENT_HEADERS)
-            checks.append(
-                assert_check(
-                    "Runtime backend status accepts authorized requests",
-                    authorized_status.status_code == 200 and authorized_status.json() == payload,
-                    response_detail(authorized_status),
                 )
             )
 

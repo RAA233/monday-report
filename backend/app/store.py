@@ -1281,33 +1281,48 @@ class LocalStateStore:
                 return correction
         return None
 
+    # Historical Benchmarking/field-correction permission keys, preserved for
+    # existing consumers. The generic backend.app.permissions policy is the
+    # authorization authority; this returns its verdict for these keys.
+    _LEGACY_BENCHMARK_PERMISSION_KEYS = (
+        "view_benchmarks",
+        "manage_benchmark_config",
+        "review_anomalies",
+        "dismiss_anomalies",
+        "run_diagnostics",
+        "approve_ai_content",
+        "issue_client_reports",
+        "export_evidence",
+        "edit_decision_records",
+        "view_audit_history",
+        "record_field_corrections",
+        "view_field_corrections",
+    )
+
     def benchmark_permissions(self, identity: AuthenticatedIdentity | None = None) -> dict[str, bool]:
-        # Permission decisions are driven by the ROLES of the resolved request
-        # identity (or, for display outside a request, the current identity).
-        # There is no all-role fallback: an identity with no roles receives no
-        # protected permissions.
+        """Backward-compatibility wrapper. Delegates to the generic permission
+        policy (default-deny; no all-role fallback) and returns the historical
+        Benchmarking/field-correction permission shape."""
+        from .permissions import has_permission
+
         source = identity if identity is not None else self.current_identity()
-        roles = set(source.roles)
-        is_admin = Role.ADMIN in roles
-        is_engineer = Role.ENGINEER in roles
-        is_validator = Role.VALIDATOR in roles
-        is_manager = Role.MANAGER in roles
         return {
-            "view_benchmarks": True,
-            "manage_benchmark_config": is_admin or is_manager,
-            "review_anomalies": is_admin or is_engineer or is_validator or is_manager,
-            "dismiss_anomalies": is_admin or is_validator or is_manager,
-            "run_diagnostics": is_admin or is_engineer or is_manager,
-            "approve_ai_content": is_admin or is_validator or is_manager,
-            "issue_client_reports": is_admin or is_manager,
-            "export_evidence": is_admin or is_engineer or is_manager,
-            "edit_decision_records": is_admin or is_engineer or is_manager,
-            "view_audit_history": is_admin or is_validator or is_manager,
-            # Recording/reverting a field correction is a reviewer action;
-            # a read-only VIEWER may see the history but not write it.
-            "record_field_corrections": is_admin or is_engineer or is_validator or is_manager,
-            "view_field_corrections": True,
+            key: has_permission(source.roles, key)
+            for key in self._LEGACY_BENCHMARK_PERMISSION_KEYS
         }
+
+    def permission_map(self, identity: AuthenticatedIdentity | None = None) -> dict[str, bool]:
+        """The full {permission: bool} verdict for the request identity's roles."""
+        from .permissions import permission_map
+
+        source = identity if identity is not None else self.current_identity()
+        return permission_map(source.roles)
+
+    def has_permission(self, permission: str, identity: AuthenticatedIdentity | None = None) -> bool:
+        from .permissions import has_permission
+
+        source = identity if identity is not None else self.current_identity()
+        return has_permission(source.roles, permission)
 
     def update_benchmark_value(self, benchmark_id: UUID, payload: BenchmarkValueUpdate) -> BenchmarkValue:
         self.refresh()

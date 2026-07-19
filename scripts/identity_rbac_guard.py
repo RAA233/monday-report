@@ -355,11 +355,13 @@ def main() -> int:
         check("G4 Every admin-denied event carries the non-admin actor", bool(denied) and all(str(e.actor_user_id) == multi_id for e in denied))
         check("G5 No stale actor context after failure-path concurrency", _gci() is None)
 
-        # I. Honest route inventory: approved categories only; pending keeps rbac open.
+        # I. Honest route inventory: approved categories only. The route-RBAC
+        # increment has since fully enforced every route (no pending rows remain);
+        # see scripts/route_rbac_guard.py for the complete authorization coverage.
         from backend.app import main as _m
 
         check("I1 authenticated_write is not an allowed classification", "authenticated_write" not in _m.ROUTE_ACCESS_CLASSIFICATIONS)
-        check("I2 Route policy is NOT fully enforced (pending rows exist)", _m.route_policy_fully_enforced() is False and len(_m.pending_permission_routes()) > 0)
+        check("I2 Route policy is fully enforced after route-RBAC increment (no pending rows)", _m.route_policy_fully_enforced() is True and len(_m.pending_permission_routes()) == 0)
         # validator rejects a sensitive mutation mislabelled authenticated_read
         _saved = dict(_m.ROUTE_ACCESS_POLICY)
         _m.ROUTE_ACCESS_POLICY[("POST", "/uploads")] = {"classification": "authenticated_read"}

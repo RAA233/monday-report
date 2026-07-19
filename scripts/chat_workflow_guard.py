@@ -25,6 +25,13 @@ def main() -> int:
             ValidationTask,
         )
         from backend.app.store import store
+        from backend.app.identity import set_current_identity
+
+        # chat now enforces route-level RBAC via the request-scoped identity the
+        # HTTP middleware normally sets. This guard invokes the handler
+        # in-process, so establish the same demo_bootstrap administrator identity
+        # the middleware would resolve in demo mode.
+        set_current_identity(store.demo_bootstrap_identity())
 
         workspace = next(iter(store.workspaces.values()))
         citation = Citation(
