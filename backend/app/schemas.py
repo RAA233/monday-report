@@ -389,13 +389,23 @@ class ValidationTaskUpdate(BaseModel):
 
 # Field-level correction & review-provenance foundation.
 #
-# A FieldCorrection is an append-only overlay record: it captures a reviewer's
-# correction to a named extracted field WITHOUT overwriting the source-derived
-# value or its lineage. The original extracted value is preserved on the
-# record (source_value) and the underlying parsed document/profile is never
-# mutated. Re-correcting the same field supersedes the prior record (a version
-# chain), and reverting flips status without destroying history — so a full
-# who/what/from/to/when/why trail is always retrievable.
+# A FieldCorrection is a versioned overlay record: it captures an actor's
+# correction to a registered extracted field WITHOUT overwriting the
+# source-derived value or its lineage. The original extracted value is
+# preserved on the record (source_value) and the underlying parsed
+# document/profile is never mutated. Re-correcting the same field supersedes
+# the prior record (a version chain) and reverting flips status, so a full
+# who/what/from/to/when/why trail is retrievable.
+#
+# This is versioned history stored in the tenant snapshot, NOT an immutable
+# append-only event log: superseding and reverting update the `status`/linkage
+# of an already-persisted record. A tamper-resistant immutable-event model
+# (and cross-process atomicity via normalized persistence) is tracked follow-up
+# work; AUDIT-004 is a foundation, not fully closed.
+#
+# `actor_*` fields record the CONFIGURED actor context, not a verified
+# per-user reviewer (no authenticated per-user identity exists yet — a separate
+# identity/RBAC increment); `actor_source` states this explicitly.
 FieldCorrectionTargetType = Literal[
     "report_field",
     "casing_string",
@@ -415,9 +425,10 @@ class FieldCorrection(BaseModel):
     source_value: str | None = None
     corrected_value: str | None = None
     correction_reason: str
-    reviewer_user_id: UUID
-    reviewer_email: str
-    reviewer_roles: list[Role] = Field(default_factory=list)
+    actor_user_id: UUID
+    actor_email: str
+    actor_roles: list[Role] = Field(default_factory=list)
+    actor_source: Literal["configured"] = "configured"
     status: Literal["active", "superseded", "reverted"] = "active"
     supersedes_id: UUID | None = None
     superseded_by_id: UUID | None = None
@@ -427,14 +438,14 @@ class FieldCorrection(BaseModel):
 
 class FieldCorrectionCreate(BaseModel):
     target_type: FieldCorrectionTargetType
-    field_key: str
-    source_value: str | None = None
-    corrected_value: str | None = None
-    correction_reason: str
+    field_key: str = Field(max_length=120)
+    source_value: str | None = Field(default=None, max_length=200)
+    corrected_value: str | None = Field(default=None, max_length=200)
+    correction_reason: str = Field(min_length=1, max_length=500)
 
 
 class FieldCorrectionRevert(BaseModel):
-    revert_reason: str
+    revert_reason: str = Field(min_length=1, max_length=500)
 
 
 class ChatRequest(BaseModel):

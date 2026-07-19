@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import sys
+import threading
 import time
 import zipfile
 import zlib
@@ -233,6 +234,15 @@ class LocalStateStore:
         self.anomaly_events: dict[UUID, AnomalyEvent] = {}
         self.key_decisions: dict[UUID, KeyDecision] = {}
         self.field_corrections: dict[UUID, FieldCorrection] = {}
+        # Serializes the WHOLE field-correction route (refresh -> checks ->
+        # record/revert -> save) within one process, so a concurrent handler's
+        # refresh() cannot clobber an in-flight append on this shared singleton.
+        # Re-entrant so the store methods can re-acquire it. This makes the
+        # single-active-lineage-and-no-lost-write invariant safe in-process;
+        # cross-process atomicity still requires normalized persistence
+        # (Phase 04) — the local JSON snapshot is last-writer-wins across
+        # processes.
+        self.field_correction_lock = threading.RLock()
         self.audit_logs: list[AuditLog] = []
 
         if self._state_exists():
@@ -902,76 +912,88 @@ class LocalStateStore:
     # ------------------------------------------------------------------
     # Field-level correction & review-provenance foundation.
     #
-    # Corrections are append-only overlay records. They capture who/what/from/
-    # to/when/why for a reviewer correction to a named extracted field without
-    # ever mutating the source-derived value or its lineage. Re-correcting the
-    # same (workspace, target_type, field_key) supersedes the prior active
-    # record (a version chain); reverting flips status without destroying
-    # history. Recording a correction never creates anomalies, benchmark
-    # measurements, failures, or validation tasks — the Benchmarking and
-    # recommended-only diagnostic boundaries are untouched.
+    # Corrections are versioned overlay records (versioned history in the
+    # tenant snapshot, NOT an immutable append-only event log). They capture
+    # who/what/from/to/when/why for a correction to a REGISTERED extracted
+    # field without ever mutating the source-derived value or its lineage.
+    # Re-correcting the same (workspace, target_type, field_key) supersedes the
+    # prior active record (a version chain, updating its status/linkage);
+    # reverting flips status without destroying history. `actor_*` fields
+    # record the configured actor context, not a verified per-user reviewer.
+    #
+    # The whole correction route (refresh -> checks -> record/revert -> save)
+    # is serialized in-process by field_correction_lock so the single-active-
+    # lineage-and-no-lost-write invariant holds under threadpool concurrency;
+    # cross-process atomicity requires normalized persistence (Phase 04).
+    # Recording never creates anomalies, benchmark measurements,
+    # failures, or validation tasks — the Benchmarking and recommended-only
+    # diagnostic boundaries are untouched.
     # ------------------------------------------------------------------
     def record_field_correction(
         self, workspace_id: UUID, payload: FieldCorrectionCreate
     ) -> FieldCorrection:
-        self.refresh()
-        prior = self._active_field_correction(workspace_id, payload.target_type, payload.field_key)
-        correction = FieldCorrection(
-            tenant_id=self.tenant.id,
-            workspace_id=workspace_id,
-            target_type=payload.target_type,
-            field_key=payload.field_key,
-            source_value=payload.source_value,
-            corrected_value=payload.corrected_value,
-            correction_reason=payload.correction_reason,
-            reviewer_user_id=self.user.id,
-            reviewer_email=self.user.email,
-            reviewer_roles=list(self.user.roles),
-            supersedes_id=prior.id if prior else None,
-        )
-        if prior is not None:
-            prior.status = "superseded"
-            prior.superseded_by_id = correction.id
-        self.field_corrections[correction.id] = correction
-        # Audit metadata carries attribution + shape only. Raw source/corrected
-        # values and the free-text reason are never written to the audit log;
-        # only booleans, lengths, and stable identifiers are recorded.
-        self.audit(
-            "field_correction.record",
-            "field_correction",
-            correction.id,
-            {
-                "workspace_id": str(workspace_id),
-                "target_type": correction.target_type,
-                "field_key": correction.field_key,
-                "source_present": correction.source_value is not None,
-                "corrected_present": correction.corrected_value is not None,
-                "value_changed": correction.source_value != correction.corrected_value,
-                "reason_length": len(correction.correction_reason),
-                "supersedes": str(prior.id) if prior else None,
-            },
-        )
-        return correction
+        with self.field_correction_lock:
+            self.refresh()
+            prior = self._active_field_correction(workspace_id, payload.target_type, payload.field_key)
+            correction = FieldCorrection(
+                tenant_id=self.tenant.id,
+                workspace_id=workspace_id,
+                target_type=payload.target_type,
+                field_key=payload.field_key,
+                source_value=payload.source_value,
+                corrected_value=payload.corrected_value,
+                correction_reason=payload.correction_reason,
+                actor_user_id=self.user.id,
+                actor_email=self.user.email,
+                actor_roles=list(self.user.roles),
+                supersedes_id=prior.id if prior else None,
+            )
+            if prior is not None:
+                prior.status = "superseded"
+                prior.superseded_by_id = correction.id
+            self.field_corrections[correction.id] = correction
+            # Audit metadata carries attribution + shape only. Raw source/
+            # corrected values and the free-text reason are never written to the
+            # audit log; only booleans, lengths, and stable identifiers are
+            # recorded. audit() persists the correction state and the audit
+            # event in one save(), so they cannot diverge in-process.
+            self.audit(
+                "field_correction.record",
+                "field_correction",
+                correction.id,
+                {
+                    "workspace_id": str(workspace_id),
+                    "target_type": correction.target_type,
+                    "field_key": correction.field_key,
+                    "source_present": correction.source_value is not None,
+                    "corrected_present": correction.corrected_value is not None,
+                    "value_changed": correction.source_value != correction.corrected_value,
+                    "reason_length": len(correction.correction_reason),
+                    "supersedes": str(prior.id) if prior else None,
+                },
+            )
+            return correction
 
     def revert_field_correction(self, correction_id: UUID, revert_reason: str) -> FieldCorrection:
-        self.refresh()
-        correction = self.field_corrections[correction_id]
-        if correction.status != "active":
-            raise ValueError("Only an active correction can be reverted.")
-        correction.status = "reverted"
-        correction.revert_reason = revert_reason
-        self.audit(
-            "field_correction.revert",
-            "field_correction",
-            correction.id,
-            {
-                "workspace_id": str(correction.workspace_id),
-                "target_type": correction.target_type,
-                "field_key": correction.field_key,
-                "revert_reason_length": len(revert_reason),
-            },
-        )
-        return correction
+        with self.field_correction_lock:
+            self.refresh()
+            correction = self.field_corrections[correction_id]
+            if correction.status != "active":
+                raise ValueError("Only an active correction can be reverted.")
+            correction.status = "reverted"
+            correction.revert_reason = revert_reason
+            self.audit(
+                "field_correction.revert",
+                "field_correction",
+                correction.id,
+                {
+                    "workspace_id": str(correction.workspace_id),
+                    "target_type": correction.target_type,
+                    "field_key": correction.field_key,
+                    "revert_reason_length": len(revert_reason),
+                },
+            )
+            return correction
 
     def list_field_corrections(
         self, workspace_id: UUID, active_only: bool = False

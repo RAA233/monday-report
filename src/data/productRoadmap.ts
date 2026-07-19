@@ -156,8 +156,8 @@ export const roadmapLanes: RoadmapLane[] = [
         owner: "Frontend + drilling SME",
         status: "complete",
         gate: "audit:report-variants",
-        evidence: "MR-SCHEMA-1 targets drive drafting; casing, timeline, survey stations, and hydraulics observations extract with provenance and explicit units, minimum-curvature geometry is review-gated, both trajectory visuals render segment-aware paths, and an auditable append-only field-level correction foundation records reviewer corrections without overwriting source lineage.",
-        next: "Build the Phase 06 local-AI extraction router on the same reviewed pipeline, validated against the promoted FORGE evaluation set, and apply reviewed corrections into official JSON/formatted export provenance."
+        evidence: "MR-SCHEMA-1 targets drive drafting; casing, timeline, survey stations, and hydraulics observations extract with provenance and explicit units, minimum-curvature geometry is review-gated, both trajectory visuals render segment-aware paths, and an auditable versioned field-level correction foundation (registry-gated, in-process-serialized, configured-actor context) records corrections without overwriting source lineage.",
+        next: "Close correction gaps with immutable-event history, verified per-user reviewer identity, and cross-process atomicity; build the Phase 06 local-AI extraction router validated against the promoted FORGE evaluation set; apply reviewed corrections into official JSON/formatted export provenance."
       },
       {
         id: "item-ui-execution-board",
