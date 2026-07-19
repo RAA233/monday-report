@@ -414,7 +414,7 @@ Files changed: `evals/ga/blocker_registry.v1.json` (new), `backend/app/ga_readin
 |---|---:|---|
 | `python -m py_compile backend/app/*.py scripts/ga_readiness_*.py` | 0 | Modules compile. |
 | `pnpm run build` | 0 | `tsc` (additive api.ts mirrors) + Vite build passed. |
-| `pnpm run audit:ga-readiness-integrity` | 0 | **43/43** — registry schema + rejections, parity (missing/orphan check), disposition blocking, skip/empty/missing-evidence never PASS, `--skip-commands` cannot be GA_READY, NOT_APPLICABLE restrictions, critical controls not N/A, hardened export/parser/audit checks, evidence commit/tree/hash + tamper, path redaction, client-approval REVIEW_REQUIRED, PostgreSQL+Redis-provisioned-still-GA_BLOCKED, count reconciliation, legacy compatibility, determinism. |
+| `pnpm run audit:ga-readiness-integrity` | 0 | **44/44** — registry schema + rejections, parity (missing/orphan check), disposition blocking, skip/empty/missing-evidence never PASS, `--skip-commands` cannot be GA_READY, NOT_APPLICABLE restrictions, critical controls not N/A, hardened export/parser/audit checks, degenerate 0/0 FORGE report fails, evidence commit/tree/hash + tamper, path redaction, client-approval REVIEW_REQUIRED, PostgreSQL+Redis-provisioned-still-GA_BLOCKED, count reconciliation, legacy compatibility, determinism. |
 | `pnpm run audit:field-corrections` / `audit:report-draft` | 0 | 16/16, 22/22 regression clean. |
 | `audit:pdf-parser` / `parser-regression` / `hydraulics` / `trajectory` / `benchmarking` | 0 | 23/23, 52/52, 21/21, **38/38**, **23/23**. |
 | `audit:integrity` / `audit:redaction` / `audit:auth` | 0 | clean. |
