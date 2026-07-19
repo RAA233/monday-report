@@ -91,7 +91,7 @@ def main() -> int:
                 )
             )
 
-            readiness = client.get("/readiness/client-data").json()
+            readiness = client.get("/readiness/client-data", headers=admin_headers).json()
             readiness_blockers = {
                 check.get("id") for check in readiness.get("checks", []) if check.get("status") == "fail"
             }

@@ -239,12 +239,83 @@ def main() -> int:
         check("67 Tenant authorization remains blocked", ga_checks["ga_tenant_authorization"]["disposition"] == "BLOCKED")
         check("68 Verified reviewer identity remains blocked", gar.is_blocking(ga_checks["ga_verified_reviewer_identity"]))
         check("69 Audit-integrity blockers remain blocked", ga_checks["ga_audit_keyed_integrity"]["disposition"] == "BLOCKED" and ga_checks["ga_audit_tail_truncation"]["disposition"] == "BLOCKED")
-        check("69b RBAC blocker conservatively retained", ga_checks["ga_rbac_role_separation"]["disposition"] == "BLOCKED")
+        check("69b RBAC role-separation is evidence-driven PASS (matches resolution condition)", ga_checks["ga_rbac_role_separation"]["disposition"] == "PASS")
         status_ga, ready_ga = gar.decide_ga(mode="client", parity_ok=not gar.check_registry_parity(list(ga_checks.values())), checks=list(ga_checks.values()), commands_skipped=False, commands_passed=True, worktree_clean=True)
         check("70 GA remains GA_BLOCKED", status_ga == "GA_BLOCKED" and ready_ga is False)
         check("66 No recommendation/anomaly mutation from RBAC ops", len(store.anomaly_events) == 0 and len(store.benchmark_measurements) == 0)
         # 63/64/65 are exercised by the separate FORGE/trajectory/benchmarking guards in audit:all.
         check("63 FORGE/trajectory/benchmarking regression covered by audit:all", True)
+
+        # ---- Corrections: readiness gating (Part D), field-correction ordering
+        #      (Part E), demo/client docs (Part F), signed-download oracle (Part H) ----
+        import re as _re
+
+        # Public /health stays minimal (only status/service, status ok).
+        h = client.get("/health")
+        check("71 Public /health is minimal", h.status_code == 200 and set(h.json().keys()) <= {"status", "service"} and h.json().get("status") == "ok")
+        # Detailed readiness metadata: permission_required(view_runtime_status); health public.
+        check("72 Readiness policy is permission_required view_runtime_status", m.ROUTE_ACCESS_POLICY[("GET", "/readiness/client-data")] == m._enforced("view_runtime_status"))
+        check("73b Health policy is public", m.ROUTE_ACCESS_POLICY[("GET", "/health")]["classification"] == "public")
+        # Public allow-list minimal (8: health + 4 docs + 2 signed) and excludes readiness.
+        check("74 Public allow-list minimal (7) and excludes readiness", len(m._ALLOWED_PUBLIC_ROUTES) == 7 and ("GET", "/readiness/client-data") not in m._ALLOWED_PUBLIC_ROUTES)
+        # Demo-only docs classified public (mode-gated by middleware, tested below in client mode).
+        for _dp in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+            check("75 Docs %s classified public" % _dp, m.ROUTE_ACCESS_POLICY[("GET", _dp)]["classification"] == "public")
+        # Readiness (demo mode): unauthorized role denied, authorized role allowed, no path leak.
+        check("76 Readiness denies unauthorized role (ENGINEER)", status_of("GET", "/readiness/client-data", tokens["engineer"]) == 403)
+        _rd = client.get("/readiness/client-data", headers=hdr(tokens["manager"]))
+        check("77 Readiness allows authorized operational role (MANAGER)", _rd.status_code == 200)
+        check("78 Readiness response leaks no absolute machine path", not _re.search(r"[A-Za-z]:\\|/Users/|AppData", json.dumps(_rd.json())))
+        # Permission-before-lookup ordering: an UNAUTHORIZED caller gets the SAME 403 for an
+        # existing and a nonexistent resource (no existence disclosure); an AUTHORIZED caller
+        # reaches the resource layer (404). Demonstrated where active roles genuinely differ
+        # (VALIDATOR lacks generate_reports; ENGINEER lacks resolve_validation). Every active
+        # role holds field-correction permissions (all-authorized by design), and VIEWER cannot
+        # be provisioned, so there is no authenticated-but-unauthorized field-correction subject;
+        # the field-correction authorize-before-lookup guarantee is asserted at source level.
+        _rnd = str(uuid.uuid4())
+        _rep = {"period_start": "2026-01-01", "period_end": "2026-01-02"}
+        check("79 Unauthorized create-report on existing workspace -> 403", status_of("POST", "/monday-reports", tokens["validator"], json={**_rep, "workspace_id": str(ws.id)}) == 403)
+        check("80 Unauthorized create-report on nonexistent workspace -> same 403", status_of("POST", "/monday-reports", tokens["validator"], json={**_rep, "workspace_id": _rnd}) == 403)
+        check("81 Authorized create-report on nonexistent workspace -> 404", status_of("POST", "/monday-reports", tokens["engineer"], json={**_rep, "workspace_id": _rnd}) == 404)
+        check("82 Unauthorized resolve-validation (ENGINEER) nonexistent task -> 403", status_of("PATCH", "/validation-tasks/%s" % _rnd, tokens["engineer"], json={"status": "validated"}) == 403)
+        check("83 Authorized resolve-validation (VALIDATOR) nonexistent task -> 404", status_of("PATCH", "/validation-tasks/%s" % _rnd, tokens["validator"], json={"status": "validated"}) == 404)
+        check("84 Authorized field-correction list nonexistent workspace -> 404", status_of("GET", "/workspaces/%s/field-corrections" % _rnd, tokens["validator"]) == 404)
+        check("85 Authorized field-correction revert nonexistent correction -> 404", status_of("POST", "/field-corrections/%s/revert" % _rnd, tokens["engineer"], json={"revert_reason": "guard"}) == 404)
+        _src = m._main_source()
+
+        def _authorizes_before_404(fn_marker, perm_marker):
+            i = _src.find(fn_marker)
+            seg = _src[i:i + 1000] if i != -1 else ""
+            pi, fi = seg.find(perm_marker), seg.find("status_code=404")
+            return i != -1 and pi != -1 and (fi == -1 or pi < fi)
+
+        check("86 Field-correction create authorizes before workspace lookup (source)", _authorizes_before_404("def create_field_correction", 'require_permission("record_field_corrections")'))
+        check("86b Field-correction list authorizes before workspace lookup (source)", _authorizes_before_404("def list_field_corrections", 'require_permission("view_field_corrections")'))
+        check("86c Field-correction revert authorizes before correction lookup (source)", _authorizes_before_404("def revert_field_correction", 'require_permission("record_field_corrections")'))
+        check("86d Route policy remains fully enforced (no unauthorized existence disclosure)", m.route_policy_fully_enforced() is True)
+        # Signed-download endpoints verify the token FIRST: a garbage token yields 403 for a
+        # nonexistent id (no 404 oracle) and writes no audit event.
+        _before = len(store.audit_logs)
+        _o1 = client.get("/signed/report-exports/%s?token=a.b" % _rnd).status_code
+        _o2 = client.get("/signed/upload-files/%s?token=a.b" % _rnd).status_code
+        check("87 Signed download rejects invalid token before existence lookup (no oracle)", _o1 == 403 and _o2 == 403)
+        store.refresh()
+        check("88 Invalid signed-download token writes no audit event", len(store.audit_logs) == _before)
+
+        # ---- Client-mode denial behavior: readiness 401/403/200, docs 401/404/200 ----
+        os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
+        os.environ["MONDAY_REPORT_API_KEY"] = "route-rbac-guard-client-key-0123456789"
+        try:
+            check("89 Client-mode readiness unauthenticated -> 401", client.get("/readiness/client-data").status_code == 401)
+            check("90 Client-mode readiness unauthorized role (ENGINEER) -> 403", status_of("GET", "/readiness/client-data", tokens["engineer"]) == 403)
+            check("91 Client-mode readiness authorized (ADMIN) -> 200", status_of("GET", "/readiness/client-data", tokens["admin"]) == 200)
+            check("92 Client-mode docs unauthenticated -> 401", client.get("/openapi.json").status_code == 401)
+            check("93 Client-mode docs non-admin -> 404 (hidden)", status_of("GET", "/openapi.json", tokens["engineer"]) == 404)
+            check("94 Client-mode docs admin -> 200", status_of("GET", "/openapi.json", tokens["admin"]) == 200)
+        finally:
+            os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "demo"
+            os.environ.pop("MONDAY_REPORT_API_KEY", None)
 
     failed = [c for c in checks if not c["ok"]]
     for c in checks:

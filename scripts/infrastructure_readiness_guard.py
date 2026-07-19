@@ -30,7 +30,16 @@ def main() -> int:
             from backend.app.store import store
 
             client = TestClient(app)
-            readiness = client.get("/readiness/client-data").json()
+
+            # Client mode rejects the shared key; provision a per-user admin
+            # credential up front. Detailed readiness is now a permission-gated
+            # (view_runtime_status) operational read, so it needs the credential.
+            from backend.app.schemas import Role
+
+            _admin = store.create_user("infra-admin@example.test", "Infra Admin", [Role.ADMIN])
+            _cred, _token = store.create_credential(_admin.id)
+            client_headers = {"X-Monday-Report-Key": _token}
+            readiness = client.get("/readiness/client-data", headers=client_headers).json()
             postgres_check = readiness_check(readiness, "postgres_repository")
             redis_check = readiness_check(readiness, "redis_queue")
             checks.append(
@@ -56,13 +65,6 @@ def main() -> int:
                 )
             )
 
-            # Client mode rejects the shared key; authenticate with a per-user
-            # admin credential so the request reaches the readiness gate.
-            from backend.app.schemas import Role
-
-            _admin = store.create_user("infra-admin@example.test", "Infra Admin", [Role.ADMIN])
-            _cred, _token = store.create_credential(_admin.id)
-            client_headers = {"X-Monday-Report-Key": _token}
             workspace = next(iter(store.workspaces.values()))
             blocked_chat = client.post(
                 "/chat/messages",

@@ -215,6 +215,55 @@ def _forge_probe(forge_report: dict | None) -> tuple[str, str, str | None]:
     )
 
 
+def _rbac_role_separation_probe() -> tuple[str, str]:
+    """Evidence-driven evaluation of the ``rbac-role-separation`` control.
+
+    Resolution condition (registry): distinct roles with enforced least privilege
+    exist AND route authorization checks a per-user role, not the single
+    configured all-role user. This probe inspects the ACTUAL policy/route code as
+    evidence — it never accepts mere method/row presence. It evaluates ONLY the
+    role-separation mechanism; the separate ``per-user-identity`` deployment
+    control (and tenant/reviewer/audit-integrity controls) remain independent
+    blockers, so this passing cannot by itself make GA ready.
+    """
+    try:
+        from .permissions import ALL_PERMISSIONS, ROLE_PERMISSIONS, has_permission
+        from .schemas import Role
+        from . import main as _main
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return "BLOCKED", f"RBAC policy could not be evaluated: {exc}"
+
+    active = (Role.ADMIN, Role.ENGINEER, Role.VALIDATOR, Role.MANAGER)
+    perms = {role: frozenset(ROLE_PERMISSIONS.get(role, frozenset())) for role in active}
+    reasons: list[str] = []
+    if len({perms[role] for role in active}) != len(active):
+        reasons.append("active roles are not pairwise-distinct")
+    if not all(perms[role] for role in active):
+        reasons.append("an active role has no permissions")
+    if perms[Role.ADMIN] != frozenset(ALL_PERMISSIONS):
+        reasons.append("ADMIN does not hold all permissions")
+    if not all(perms[role] < frozenset(ALL_PERMISSIONS) for role in (Role.ENGINEER, Role.VALIDATOR, Role.MANAGER)):
+        reasons.append("a non-admin role is not a proper least-privilege subset")
+    if ROLE_PERMISSIONS.get(Role.VIEWER):
+        reasons.append("legacy VIEWER role is activated")
+    # Default-deny: empty roles and unknown permissions grant nothing.
+    if has_permission((), next(iter(ALL_PERMISSIONS))) or has_permission(active, "__unknown_permission__"):
+        reasons.append("default-deny is not enforced")
+    # Complete per-route coverage with proven per-route dependencies.
+    if not _main.route_policy_fully_enforced():
+        reasons.append("route policy is not fully enforced")
+
+    if reasons:
+        return "BLOCKED", "RBAC role separation incomplete: " + "; ".join(reasons) + "."
+    return (
+        "PASS",
+        "Distinct least-privilege roles (ADMIN=all; ENGINEER/VALIDATOR/MANAGER proper subsets; "
+        "VIEWER unactivated) evaluate default-deny, and every route enforces a per-user permission "
+        "(route policy fully enforced). Route authorization checks the request identity's roles, not a "
+        "single configured all-role user.",
+    )
+
+
 def evaluate_blockers(
     readiness_by_id: dict[str, str],
     *,
@@ -244,6 +293,8 @@ def evaluate_blockers(
             disposition, detail = _delegate(readiness_by_id, _FIXTURE_READINESS_IDS)
         elif check_id == "ga_clean_client_state":
             disposition, detail = _delegate(readiness_by_id, ("demo_seed_removed",))
+        elif check_id == "ga_rbac_role_separation":
+            disposition, detail = _rbac_role_separation_probe()
         elif check_id == "ga_parser_coverage_evidence":
             disposition, detail, evidence_reference = _forge_probe(forge_report)
         elif check_id == "ga_official_export_gate":

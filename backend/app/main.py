@@ -109,14 +109,14 @@ app.add_middleware(
 )
 
 
-# Genuinely public, unauthenticated surfaces. Operational/security reads
-# (runtime backends, local-AI details, audit-integrity) are NO LONGER exempt —
-# they require authentication + a permission. /readiness/client-data stays public
-# as the pre-auth readiness gate the app polls (it exposes check statuses and
-# remediation guidance, not secrets).
+# Genuinely public, unauthenticated surfaces. Only minimal liveness is exempt.
+# Operational/security reads (runtime backends, local-AI details, audit-integrity)
+# and DETAILED client-data readiness are NO LONGER exempt — detailed readiness
+# exposes blocker ids, dispositions, remediation, deployment mode, and configured
+# paths, so it requires authentication + view_runtime_status. `/health` remains
+# the minimal public liveness/load-balancer probe.
 CLIENT_AUTH_EXEMPT_PATHS = {
     "/health",
-    "/readiness/client-data",
 }
 # Interactive API documentation is public in demo/local mode but is disabled
 # (404) in client mode unless the request resolves to an administrator.
@@ -214,6 +214,10 @@ def session() -> SessionResponse:
 
 @app.get("/readiness/client-data", response_model=ClientDataReadiness)
 def client_data_readiness() -> ClientDataReadiness:
+    # Detailed readiness (blocker ids, dispositions, remediation, mode) is an
+    # operational status surface: authenticated + view_runtime_status only.
+    # Minimal public liveness is served by /health.
+    require_permission("view_runtime_status")
     return evaluate_client_data_readiness(store)
 
 
@@ -436,10 +440,9 @@ def _enforced(permission: str) -> dict[str, str]:
 
 
 ROUTE_ACCESS_POLICY: dict[tuple[str, str], dict[str, str]] = {
-    # --- public: liveness, pre-auth readiness gate, and framework docs (docs are
-    #     additionally hidden from non-admins in client mode by the middleware) ---
+    # --- public: minimal liveness and framework docs (docs are additionally
+    #     hidden from non-admins in client mode by the middleware) ---
     ("GET", "/health"): _public(),
-    ("GET", "/readiness/client-data"): _public(),
     ("GET", "/docs"): _public(),
     ("GET", "/docs/oauth2-redirect"): _public(),
     ("GET", "/openapi.json"): _public(),
@@ -452,6 +455,7 @@ ROUTE_ACCESS_POLICY: dict[tuple[str, str], dict[str, str]] = {
     ("GET", "/auth/session"): _authenticated_read(),
     ("GET", "/field-corrections/registry"): _authenticated_read(),
     # --- permission_required / enforced: operational & security reads ---
+    ("GET", "/readiness/client-data"): _enforced("view_runtime_status"),
     ("GET", "/runtime/backends"): _enforced("view_runtime_status"),
     ("GET", "/local-ai/status"): _enforced("view_runtime_status"),
     ("GET", "/audit-logs"): _enforced("view_audit_history"),
@@ -502,7 +506,6 @@ _SENSITIVE_MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # framework docs (client-mode-gated by the middleware), and signed downloads.
 _ALLOWED_PUBLIC_ROUTES = {
     ("GET", "/health"),
-    ("GET", "/readiness/client-data"),
     ("GET", "/docs"),
     ("GET", "/docs/oauth2-redirect"),
     ("GET", "/openapi.json"),
@@ -682,8 +685,10 @@ async def create_direct_upload(
     source_type: Literal["zip", "folder", "files"] = Form("files"),
     file: UploadFile = File(...),
 ) -> UploadCreateResponse:
+    # Authorization first and in every mode (a non-admin per-user token must be
+    # denied in demo mode too), before any workspace-existence disclosure.
+    require_permission("manage_uploads")
     if client_data_mode() == "client":
-        require_permission("manage_uploads")
         require_client_data_ready("upload.direct", "workspace", workspace_id)
     else:
         store.refresh()
@@ -851,10 +856,12 @@ def create_field_correction(workspace_id: UUID, payload: FieldCorrectionCreate) 
     # shared store singleton (re-entrant with record_field_correction's lock).
     with store.field_correction_lock:
         store.refresh()
+        # Authorization first: an unauthorized caller must get 403 whether or not
+        # the workspace exists (no existence/readiness disclosure).
+        require_permission("record_field_corrections")
         if workspace_id not in store.workspaces:
             raise HTTPException(status_code=404, detail="Workspace not found")
         require_client_data_ready("field_correction.record", "workspace", workspace_id)
-        require_permission("record_field_corrections")
         # Only a registered correctable field may be corrected; unknown or
         # sensitive fields (audit/identity/tenant/recommendation/Benchmarking/
         # parser/source-provenance/validation/config/immutable) are rejected.
@@ -879,10 +886,12 @@ def field_correction_registry() -> list[dict[str, object]]:
 @app.get("/workspaces/{workspace_id}/field-corrections", response_model=list[FieldCorrection])
 def list_field_corrections(workspace_id: UUID, active_only: bool = False) -> list[FieldCorrection]:
     store.refresh()
+    # Authorization first: an unauthorized caller must get 403 whether or not the
+    # workspace exists (no existence/readiness disclosure).
+    require_permission("view_field_corrections")
     if workspace_id not in store.workspaces:
         raise HTTPException(status_code=404, detail="Workspace not found")
     require_client_data_ready("field_correction.list", "workspace", workspace_id)
-    require_permission("view_field_corrections")
     return store.list_field_corrections(workspace_id, active_only=active_only)
 
 
@@ -890,10 +899,12 @@ def list_field_corrections(workspace_id: UUID, active_only: bool = False) -> lis
 def revert_field_correction(correction_id: UUID, payload: FieldCorrectionRevert) -> FieldCorrection:
     with store.field_correction_lock:
         store.refresh()
+        # Authorization first: an unauthorized caller must get 403 whether or not
+        # the correction exists (no existence/readiness disclosure).
+        require_permission("record_field_corrections")
         if correction_id not in store.field_corrections:
             raise HTTPException(status_code=404, detail="Field correction not found")
         require_client_data_ready("field_correction.revert", "field_correction", correction_id)
-        require_permission("record_field_corrections")
         try:
             return store.revert_field_correction(correction_id, payload.revert_reason)
         except ValueError as exc:
@@ -956,9 +967,11 @@ def update_benchmark_value(benchmark_id: UUID, payload: BenchmarkValueUpdate) ->
 @app.get("/workspaces/{workspace_id}/benchmarking", response_model=BenchmarkingStatus)
 def workspace_benchmarking(workspace_id: UUID) -> BenchmarkingStatus:
     store.refresh()
+    # Authorization first: never disclose workspace existence or readiness state
+    # to an unauthorized caller.
+    require_benchmark_permission("view_benchmarks")
     if workspace_id not in store.workspaces:
         require_client_data_ready("benchmarking.status", "workspace", workspace_id)
-        require_benchmark_permission("view_benchmarks")
         store.audit(
             "benchmarking.workspace_missing_status",
             "workspace",
@@ -967,7 +980,6 @@ def workspace_benchmarking(workspace_id: UUID) -> BenchmarkingStatus:
         )
         return store._build_benchmarking_status(workspace_id)
     require_client_data_ready("benchmarking.status", "workspace", workspace_id)
-    require_benchmark_permission("view_benchmarks")
     try:
         return store.benchmarking_status(workspace_id)
     except ValueError as exc:
@@ -980,10 +992,10 @@ def create_benchmark_measurement(
     payload: BenchmarkMeasurementCreate,
 ) -> BenchmarkingStatus:
     store.refresh()
+    require_benchmark_permission("review_anomalies")
     if workspace_id not in store.workspaces:
         raise HTTPException(status_code=404, detail="Workspace not found")
     require_client_data_ready("benchmarking.measurement.create", "workspace", workspace_id)
-    require_benchmark_permission("review_anomalies")
     try:
         return store.record_benchmark_measurement(workspace_id, payload)
     except ValueError as exc:
@@ -1195,9 +1207,9 @@ def report_draft_profile_note(profiles: list[dict[str, object]]) -> str | None:
 @app.get("/workspaces/{workspace_id}/report-draft", response_model=ReportDraftResponse)
 def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     store.refresh()
+    require_permission("view_reports")
     if workspace_id not in store.workspaces:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    require_permission("view_reports")
     require_client_data_ready("report_draft.generate", "workspace", workspace_id)
 
     workspace = store.workspaces[workspace_id]
@@ -1602,9 +1614,9 @@ def chat(payload: ChatRequest) -> ChatResponse:
 @app.post("/monday-reports", response_model=MondayReport, status_code=status.HTTP_201_CREATED)
 def create_monday_report(payload: MondayReportCreate) -> MondayReport:
     store.refresh()
+    require_permission("generate_reports")
     if payload.workspace_id not in store.workspaces:
         raise HTTPException(status_code=404, detail="Workspace not found")
-    require_permission("generate_reports")
     require_client_data_ready("monday_report.create", "workspace", payload.workspace_id)
     return store.create_monday_report(payload)
 
@@ -1704,6 +1716,12 @@ def create_report_export_signed_url(export_id: UUID, request: Request) -> Signed
 
 @app.get("/signed/report-exports/{export_id}")
 def download_report_export(export_id: UUID, token: str) -> Response:
+    # The signed token is the SOLE authorization for this public route. Verify it
+    # FIRST — before any resource lookup, readiness gate, or audit side effect —
+    # so an unauthenticated caller with an invalid/garbage token cannot probe
+    # resource existence (404 vs 403 oracle) or trigger audit writes.
+    if not verify_signed_token(token, export_id, "report_export_download"):
+        raise HTTPException(status_code=403, detail="Invalid or expired signed URL")
     store.refresh()
     if export_id not in store.report_exports:
         raise HTTPException(status_code=404, detail="Report export not found")
@@ -1716,8 +1734,6 @@ def download_report_export(export_id: UUID, token: str) -> Response:
         )
         raise HTTPException(status_code=409, detail="Signing secret is required in client data mode")
     require_client_data_ready("report_export.download", "report_export", export_id)
-    if not verify_signed_token(token, export_id, "report_export_download"):
-        raise HTTPException(status_code=403, detail="Invalid or expired signed URL")
 
     report_export = store.report_exports[export_id]
     export_path = store.export_path_from_uri(report_export.storage_uri)
@@ -1789,6 +1805,12 @@ def create_upload_file_signed_url(file_id: UUID, request: Request) -> SignedUrlR
 
 @app.get("/signed/upload-files/{file_id}")
 def download_upload_file(file_id: UUID, token: str) -> Response:
+    # The signed token is the SOLE authorization for this public route. Verify it
+    # FIRST — before any resource lookup, readiness gate, or audit side effect —
+    # so an unauthenticated caller with an invalid/garbage token cannot probe
+    # resource existence (404 vs 403 oracle) or trigger audit writes.
+    if not verify_signed_token(token, file_id, "upload_file_download"):
+        raise HTTPException(status_code=403, detail="Invalid or expired signed URL")
     store.refresh()
     if file_id not in store.files:
         raise HTTPException(status_code=404, detail="Upload file not found")
@@ -1801,8 +1823,6 @@ def download_upload_file(file_id: UUID, token: str) -> Response:
         )
         raise HTTPException(status_code=409, detail="Signing secret is required in client data mode")
     require_client_data_ready("upload_file.download", "upload_file", file_id)
-    if not verify_signed_token(token, file_id, "upload_file_download"):
-        raise HTTPException(status_code=403, detail="Invalid or expired signed URL")
 
     file_record = store.files[file_id]
     if file_record.malware_status == "blocked" or not file_record.storage_uri.startswith("object://"):
