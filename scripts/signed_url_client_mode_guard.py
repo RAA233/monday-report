@@ -31,6 +31,13 @@ def main() -> int:
         from backend.app.store import store
 
         client = TestClient(app)
+        # Client mode rejects the shared key; provision a per-user admin
+        # credential and authenticate with it.
+        from backend.app.schemas import Role
+
+        _admin = store.create_user("signed-url-admin@example.test", "Signed URL Admin", [Role.ADMIN])
+        _cred, _token = store.create_credential(_admin.id)
+        client_headers = {"X-Monday-Report-Key": _token}
         workspace = next(iter(store.workspaces.values()))
         report = store.create_monday_report(
             MondayReportCreate(
@@ -51,7 +58,7 @@ def main() -> int:
             content=b"client source evidence",
         )
 
-        blocked_export_url = client.post(f"/report-exports/{export.id}/signed-url", headers=CLIENT_HEADERS)
+        blocked_export_url = client.post(f"/report-exports/{export.id}/signed-url", headers=client_headers)
         checks.append(
             assert_check(
                 "Client mode blocks export signed URL without secret",
@@ -59,7 +66,7 @@ def main() -> int:
                 blocked_export_url.text,
             )
         )
-        blocked_file_url = client.post(f"/upload-files/{file_record.id}/signed-url", headers=CLIENT_HEADERS)
+        blocked_file_url = client.post(f"/upload-files/{file_record.id}/signed-url", headers=client_headers)
         checks.append(
             assert_check(
                 "Client mode blocks source signed URL without secret",
@@ -70,7 +77,7 @@ def main() -> int:
 
         with local_ollama_server() as ollama_url:
             configure_infrastructure_pending_client_mode(ollama_url)
-            export_with_secret = client.post(f"/report-exports/{export.id}/signed-url", headers=CLIENT_HEADERS)
+            export_with_secret = client.post(f"/report-exports/{export.id}/signed-url", headers=client_headers)
             checks.append(
                 assert_check(
                     "Client mode reaches readiness gate after signing secret",
@@ -78,7 +85,7 @@ def main() -> int:
                     export_with_secret.text,
                 )
             )
-            source_with_secret = client.post(f"/upload-files/{file_record.id}/signed-url", headers=CLIENT_HEADERS)
+            source_with_secret = client.post(f"/upload-files/{file_record.id}/signed-url", headers=client_headers)
             checks.append(
                 assert_check(
                     "Client source URL reaches readiness gate after signing secret",
