@@ -129,11 +129,13 @@ async def enforce_client_api_key(request: Request, call_next):
                 status_code=503,
                 content={"detail": "Client API key is not configured"},
             )
-        # Client mode requires a resolvable credential (a per-user token or the
-        # configured shared key mapped to the labelled demo_bootstrap identity).
-        # Identity is resolved exclusively server-side from the presented
-        # credential — client-supplied identity headers are never trusted.
-        identity = store.resolve_request_identity(supplied_key)
+        # Client mode requires an ACTIVE PERSISTED PER-USER credential. The
+        # legacy configured shared key and any bootstrap-only credential are
+        # rejected (allow_shared_key_bootstrap=False) — the shared key is NOT a
+        # client-mode administrator. Identity is resolved exclusively server-side
+        # from the presented credential; client-supplied identity headers are
+        # never trusted.
+        identity = store.resolve_request_identity(supplied_key, allow_shared_key_bootstrap=False)
         if identity is None:
             store.audit(
                 "api.auth_blocked",
@@ -145,8 +147,12 @@ async def enforce_client_api_key(request: Request, call_next):
     else:
         # Demo/local mode does not enforce auth, but every request still carries
         # a request-scoped actor: a per-user token if a valid one is presented,
-        # otherwise the explicit demo_bootstrap identity.
-        identity = store.resolve_request_identity(supplied_key) or store.demo_bootstrap_identity()
+        # otherwise the explicit in-memory demo_bootstrap identity (local
+        # compatibility only).
+        identity = (
+            store.resolve_request_identity(supplied_key, allow_shared_key_bootstrap=True)
+            or store.demo_bootstrap_identity()
+        )
 
     identity_token = set_current_identity(identity)
     try:
@@ -363,21 +369,26 @@ def revoke_credential_endpoint(credential_id: UUID) -> CredentialAdminView:
 # ---------------------------------------------------------------------------
 # Route access inventory (RBAC foundation).
 #
-# Every API route is classified. `permission_required` routes name the exact
-# permission enforced (a key of store.benchmark_permissions(), or the special
-# ADMIN_PERMISSION for identity/credential administration). `authenticated_write`
-# is an honest extension for authenticated mutations that do NOT yet carry a
-# granular permission — that incomplete coverage is why rbac-role-separation
-# remains a declared blocker; those routes are non-public and require auth in
-# client mode, but granular per-route permissions are future work.
+# Every API route is classified as exactly one of the four approved categories:
+#   public              - no API key (framework/read-only status/signed-token).
+#   authenticated_read  - authenticated, read-only, no granular permission.
+#   permission_required - a specific permission gate. `enforcement_status` is
+#                         "enforced" (the route calls a require_* dependency with
+#                         a named permission) or "pending" (the route is sensitive
+#                         and SHOULD be permission-gated but is not yet — it does
+#                         NOT count as protected, and it keeps rbac-role-separation
+#                         a declared blocker).
+#   system_internal     - internal/worker-only surface.
+# Sensitive mutations (POST/PUT/PATCH/DELETE) may only be permission_required or
+# system_internal — never public or authenticated_read.
 # ---------------------------------------------------------------------------
 ROUTE_ACCESS_CLASSIFICATIONS = {
     "public",
     "authenticated_read",
-    "authenticated_write",
     "permission_required",
     "system_internal",
 }
+ROUTE_ENFORCEMENT_STATUSES = {"enforced", "pending"}
 ADMIN_PERMISSION = "__admin__"
 KNOWN_PERMISSIONS = {
     "view_benchmarks",
@@ -394,8 +405,19 @@ KNOWN_PERMISSIONS = {
     "view_field_corrections",
 }
 
+
+def _enforced(permission: str) -> dict[str, str]:
+    return {"classification": "permission_required", "permission": permission, "enforcement_status": "enforced"}
+
+
+def _pending() -> dict[str, str]:
+    # A sensitive route that must be permission-gated but is not yet — honestly
+    # marked pending. It is NOT protected and keeps rbac-role-separation blocked.
+    return {"classification": "permission_required", "enforcement_status": "pending"}
+
+
 ROUTE_ACCESS_POLICY: dict[tuple[str, str], dict[str, str]] = {
-    # --- public (no API key; framework or read-only status) ---
+    # --- public (no API key; framework, read-only status, or signed-token) ---
     ("GET", "/health"): {"classification": "public"},
     ("GET", "/docs"): {"classification": "public"},
     ("GET", "/docs/oauth2-redirect"): {"classification": "public"},
@@ -405,10 +427,9 @@ ROUTE_ACCESS_POLICY: dict[tuple[str, str], dict[str, str]] = {
     ("GET", "/runtime/backends"): {"classification": "public"},
     ("GET", "/local-ai/status"): {"classification": "public"},
     ("GET", "/audit-logs/integrity"): {"classification": "public"},
-    # signed downloads are gated by their expiring signed token, not the API key
     ("GET", "/signed/report-exports/{export_id}"): {"classification": "public"},
     ("GET", "/signed/upload-files/{file_id}"): {"classification": "public"},
-    # --- authenticated reads (auth required; no granular permission) ---
+    # --- authenticated reads (auth required; benign read; no granular permission) ---
     ("GET", "/auth/session"): {"classification": "authenticated_read"},
     ("GET", "/workspaces"): {"classification": "authenticated_read"},
     ("GET", "/documents"): {"classification": "authenticated_read"},
@@ -421,65 +442,39 @@ ROUTE_ACCESS_POLICY: dict[tuple[str, str], dict[str, str]] = {
     ("GET", "/dashboards/summary"): {"classification": "authenticated_read"},
     ("GET", "/field-corrections/registry"): {"classification": "authenticated_read"},
     ("GET", "/workspaces/{workspace_id}/report-draft"): {"classification": "authenticated_read"},
-    # audit-history viewing is authenticated; a granular view_audit_history gate
-    # is future route coverage (rbac-role-separation stays BLOCKED).
-    ("GET", "/audit-logs"): {"classification": "authenticated_read"},
-    # --- permission-gated (enforce a specific permission) ---
-    ("GET", "/benchmarking/config"): {"classification": "permission_required", "permission": "view_benchmarks"},
-    ("PATCH", "/benchmarking/values/{benchmark_id}"): {
-        "classification": "permission_required",
-        "permission": "manage_benchmark_config",
-    },
-    ("GET", "/workspaces/{workspace_id}/benchmarking"): {
-        "classification": "permission_required",
-        "permission": "view_benchmarks",
-    },
-    ("POST", "/workspaces/{workspace_id}/benchmarking/measurements"): {
-        "classification": "permission_required",
-        "permission": "review_anomalies",
-    },
-    ("PATCH", "/benchmarking/anomalies/{anomaly_id}/diagnostics/{action_id}/dismiss"): {
-        "classification": "permission_required",
-        "permission": "dismiss_anomalies",
-    },
-    ("POST", "/workspaces/{workspace_id}/field-corrections"): {
-        "classification": "permission_required",
-        "permission": "record_field_corrections",
-    },
-    ("GET", "/workspaces/{workspace_id}/field-corrections"): {
-        "classification": "permission_required",
-        "permission": "view_field_corrections",
-    },
-    ("POST", "/field-corrections/{correction_id}/revert"): {
-        "classification": "permission_required",
-        "permission": "record_field_corrections",
-    },
-    ("GET", "/auth/users"): {"classification": "permission_required", "permission": ADMIN_PERMISSION},
-    ("POST", "/auth/users"): {"classification": "permission_required", "permission": ADMIN_PERMISSION},
-    ("POST", "/auth/users/{user_id}/credentials"): {
-        "classification": "permission_required",
-        "permission": ADMIN_PERMISSION,
-    },
-    ("GET", "/auth/credentials"): {"classification": "permission_required", "permission": ADMIN_PERMISSION},
-    ("POST", "/auth/credentials/{credential_id}/revoke"): {
-        "classification": "permission_required",
-        "permission": ADMIN_PERMISSION,
-    },
-    # --- authenticated writes (auth required; granular permission pending) ---
-    ("POST", "/workspaces"): {"classification": "authenticated_write"},
-    ("POST", "/uploads"): {"classification": "authenticated_write"},
-    ("POST", "/uploads/direct"): {"classification": "authenticated_write"},
-    ("POST", "/uploads/{upload_id}/complete"): {"classification": "authenticated_write"},
-    ("POST", "/chat/messages"): {"classification": "authenticated_write"},
-    ("POST", "/monday-reports"): {"classification": "authenticated_write"},
-    ("POST", "/monday-reports/{report_id}/exports/{export_format}"): {"classification": "authenticated_write"},
-    ("POST", "/report-exports/{export_id}/signed-url"): {"classification": "authenticated_write"},
-    ("POST", "/upload-files/{file_id}/signed-url"): {"classification": "authenticated_write"},
-    ("POST", "/retention/run"): {"classification": "authenticated_write"},
-    ("PATCH", "/validation-tasks/{task_id}"): {"classification": "authenticated_write"},
+    # --- permission_required / enforced (route calls a require_* dependency) ---
+    ("GET", "/benchmarking/config"): _enforced("view_benchmarks"),
+    ("PATCH", "/benchmarking/values/{benchmark_id}"): _enforced("manage_benchmark_config"),
+    ("GET", "/workspaces/{workspace_id}/benchmarking"): _enforced("view_benchmarks"),
+    ("POST", "/workspaces/{workspace_id}/benchmarking/measurements"): _enforced("review_anomalies"),
+    ("PATCH", "/benchmarking/anomalies/{anomaly_id}/diagnostics/{action_id}/dismiss"): _enforced("dismiss_anomalies"),
+    ("POST", "/workspaces/{workspace_id}/field-corrections"): _enforced("record_field_corrections"),
+    ("GET", "/workspaces/{workspace_id}/field-corrections"): _enforced("view_field_corrections"),
+    ("POST", "/field-corrections/{correction_id}/revert"): _enforced("record_field_corrections"),
+    ("GET", "/auth/users"): _enforced(ADMIN_PERMISSION),
+    ("POST", "/auth/users"): _enforced(ADMIN_PERMISSION),
+    ("POST", "/auth/users/{user_id}/credentials"): _enforced(ADMIN_PERMISSION),
+    ("GET", "/auth/credentials"): _enforced(ADMIN_PERMISSION),
+    ("POST", "/auth/credentials/{credential_id}/revoke"): _enforced(ADMIN_PERMISSION),
+    # --- permission_required / pending (sensitive, granular permission not yet
+    #     enforced; keeps rbac-role-separation blocked) ---
+    ("POST", "/workspaces"): _pending(),
+    ("POST", "/uploads"): _pending(),
+    ("POST", "/uploads/direct"): _pending(),
+    ("POST", "/uploads/{upload_id}/complete"): _pending(),
+    ("POST", "/chat/messages"): _pending(),
+    ("POST", "/monday-reports"): _pending(),
+    ("POST", "/monday-reports/{report_id}/exports/{export_format}"): _pending(),
+    ("POST", "/report-exports/{export_id}/signed-url"): _pending(),
+    ("POST", "/upload-files/{file_id}/signed-url"): _pending(),
+    ("POST", "/retention/run"): _pending(),
+    ("PATCH", "/validation-tasks/{task_id}"): _pending(),
+    # audit-history viewing is a privileged read; a granular view_audit_history
+    # gate is not yet enforced -> pending.
+    ("GET", "/audit-logs"): _pending(),
 }
 
-# Mutations that must never be classified "public".
+# Mutations that may only be permission_required or system_internal.
 _SENSITIVE_MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -511,19 +506,43 @@ def validate_route_access_policy() -> list[str]:
         if classification not in ROUTE_ACCESS_CLASSIFICATIONS:
             errors.append(f"route {method} {path} has unknown classification {classification!r}")
             continue
-        if classification == "permission_required":
-            permission = entry.get("permission")
-            if not permission:
-                errors.append(f"permission_required route {method} {path} has no permission")
-            elif permission != ADMIN_PERMISSION and permission not in KNOWN_PERMISSIONS:
-                errors.append(f"route {method} {path} references unknown permission {permission!r}")
-        if classification == "public" and method in _SENSITIVE_MUTATION_METHODS:
+        is_mutation = method in _SENSITIVE_MUTATION_METHODS
+        if classification == "public" and is_mutation:
             errors.append(f"sensitive mutation {method} {path} must not be classified public")
+        if classification == "authenticated_read" and is_mutation:
+            errors.append(f"sensitive mutation {method} {path} must not be classified authenticated_read")
+        if classification == "permission_required":
+            status = entry.get("enforcement_status")
+            if status not in ROUTE_ENFORCEMENT_STATUSES:
+                errors.append(f"permission_required route {method} {path} has invalid enforcement_status {status!r}")
+            elif status == "enforced":
+                permission = entry.get("permission")
+                if not permission:
+                    errors.append(f"enforced route {method} {path} has no permission")
+                elif permission != ADMIN_PERMISSION and permission not in KNOWN_PERMISSIONS:
+                    errors.append(f"route {method} {path} references unknown permission {permission!r}")
+            elif status == "pending" and entry.get("permission"):
+                errors.append(f"pending route {method} {path} must not claim an enforced permission")
     # Every policy entry must correspond to a real route (no stale rows).
     for method, path in ROUTE_ACCESS_POLICY:
         if (method, path) not in routes:
             errors.append(f"policy row {method} {path} does not match any route")
     return errors
+
+
+def pending_permission_routes() -> list[tuple[str, str]]:
+    """Sensitive routes classified permission_required but not yet enforced."""
+    return sorted(
+        (method, path)
+        for (method, path), entry in ROUTE_ACCESS_POLICY.items()
+        if entry.get("classification") == "permission_required" and entry.get("enforcement_status") == "pending"
+    )
+
+
+def route_policy_fully_enforced() -> bool:
+    """True only when every permission_required route is enforced (no pending).
+    While False, rbac-role-separation must remain a declared blocker."""
+    return not pending_permission_routes()
 
 
 @app.get("/workspaces", response_model=list[Workspace])

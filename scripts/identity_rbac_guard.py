@@ -120,7 +120,7 @@ def main() -> int:
         ep = perms(empty_token)
         check("30 Empty roles deny protected action", not any(ep.get(k) for k in ("manage_benchmark_config", "review_anomalies", "dismiss_anomalies", "record_field_corrections")))
         check("31 Unknown role denies (validation rejects unknown role)", client.post("/auth/users", json={"email": "u@x.test", "full_name": "U", "roles": ["superuser"]}, headers=hdr(adm_token)).status_code in (400, 422))
-        check("32 Unknown permission denies", store.benchmark_permissions(store.resolve_request_identity(adm_token)).get("nonexistent_permission") in (None, False))
+        check("32 Unknown permission denies", store.benchmark_permissions(store.resolve_request_identity(adm_token, allow_shared_key_bootstrap=False)).get("nonexistent_permission") in (None, False))
         mp1, mp2 = perms(multi_token), perms(multi_token)
         check("33 Multi-role union is deterministic", mp1 == mp2 and mp1.get("review_anomalies") and mp1.get("dismiss_anomalies"))
 
@@ -168,12 +168,12 @@ def main() -> int:
             if c["user_id"] == eng_id and c["token_fingerprint"]:
                 pass
         # find the credential id for eng_token by resolving it
-        resolved = store.resolve_request_identity(eng_token)
+        resolved = store.resolve_request_identity(eng_token, allow_shared_key_bootstrap=False)
         eng_cred_id = str(resolved.credential_id) if resolved else None
         rev = client.post(f"/auth/credentials/{eng_cred_id}/revoke", headers=hdr(adm_token))
         check("46 Admin revokes credential", rev.status_code == 200 and rev.json().get("status") == "revoked")
         check("4 Revoked token returns 401", client.get("/auth/session", headers=hdr(eng_token)).status_code == 401)
-        check("47 Revoked credential immediately fails", store.resolve_request_identity(eng_token) is None)
+        check("47 Revoked credential immediately fails", store.resolve_request_identity(eng_token, allow_shared_key_bootstrap=False) is None)
         rev2 = client.post(f"/auth/credentials/{eng_cred_id}/revoke", headers=hdr(adm_token))
         check("48 Duplicate revoke has stable behavior", rev2.status_code == 200 and rev2.json().get("status") == "revoked")
         # disabled user
@@ -186,7 +186,7 @@ def main() -> int:
         check("42 Non-admin cannot create user", client.post("/auth/users", json={"email": "z@z.test", "full_name": "Z", "roles": ["engineer"]}, headers=hdr(mgr_token)).status_code == 403)
 
         # 21-25. Tenant boundary.
-        check("21 Matching configured tenant succeeds", store.resolve_request_identity(adm_token) is not None)
+        check("21 Matching configured tenant succeeds", store.resolve_request_identity(adm_token, allow_shared_key_bootstrap=False) is not None)
         # craft a user + credential bound to a DIFFERENT tenant directly in the store
         import uuid as _uuid
 
@@ -200,7 +200,7 @@ def main() -> int:
             store.users[other_user.id] = other_user
             store.api_credentials[other_cred.credential_id] = other_cred
             store.save()
-        check("22 Different-tenant credential fails", store.resolve_request_identity(other_raw) is None)
+        check("22 Different-tenant credential fails", store.resolve_request_identity(other_raw, allow_shared_key_bootstrap=False) is None)
         # user/credential tenant mismatch (credential tenant != user tenant)
         mismatch_user = User(id=_uuid.uuid4(), tenant_id=store.tenant.id, email="mm@identity-guard.test", full_name="MM", roles=[Role.ENGINEER], account_status="active")
         mismatch_raw = generate_api_token()
@@ -209,11 +209,19 @@ def main() -> int:
             store.users[mismatch_user.id] = mismatch_user
             store.api_credentials[mismatch_cred.credential_id] = mismatch_cred
             store.save()
-        check("23 User/credential tenant mismatch fails", store.resolve_request_identity(mismatch_raw) is None)
-        check("24 Missing tenant binding fails (unknown token)", store.resolve_request_identity(generate_api_token()) is None)
-        # 25 shared key (bootstrap) authenticates only the configured tenant, not another
-        boot = store.resolve_request_identity(SHARED_KEY)
-        check("25 Configured bootstrap resolves configured tenant only", boot is not None and str(boot.tenant_id) == str(store.tenant.id) and boot.actor_source == "demo_bootstrap")
+        check("23 User/credential tenant mismatch fails", store.resolve_request_identity(mismatch_raw, allow_shared_key_bootstrap=False) is None)
+        check("24 Missing tenant binding fails (unknown token)", store.resolve_request_identity(generate_api_token(), allow_shared_key_bootstrap=False) is None)
+        # 25 shared key is rejected in client mode; in demo/local it resolves to
+        # the configured tenant's demo_bootstrap only.
+        boot_client = store.resolve_request_identity(SHARED_KEY, allow_shared_key_bootstrap=False)
+        boot_demo = store.resolve_request_identity(SHARED_KEY, allow_shared_key_bootstrap=True)
+        check(
+            "25 Shared key rejected in client mode; demo bootstrap stays in configured tenant",
+            boot_client is None
+            and boot_demo is not None
+            and str(boot_demo.tenant_id) == str(store.tenant.id)
+            and boot_demo.actor_source == "demo_bootstrap",
+        )
         # clean up the crafted cross-tenant records so they don't affect later checks
         with store.identity_lock:
             store.users.pop(other_user.id, None)
@@ -260,13 +268,20 @@ def main() -> int:
         # multi_token holds engineer+validator (no admin) and is still active.
         check("34b permission_required route enforces (non-admin denied admin route)", client.get("/auth/users", headers=hdr(multi_token)).status_code == 403)
 
-        # 49-51. Demo bootstrap compatibility + client-mode evidence.
+        # 49-51. Demo bootstrap compatibility + client-mode rejection.
         check("49 Demo bootstrap still supports local demo mode", store.demo_bootstrap_identity().actor_source == "demo_bootstrap")
         check("50 Demo bootstrap is clearly identified", store.demo_bootstrap_identity().authentication_source == "shared_key_bootstrap")
-        # bootstrap-only would keep per-user identity un-evidenced; here we DID provision real users
-        check("51 Client mode cannot use bootstrap-only identity as per-user evidence", store.resolve_request_identity(SHARED_KEY).actor_source == "demo_bootstrap")
+        # In client mode the shared key is REJECTED, so a bootstrap-only identity
+        # can never be client-mode per-user evidence.
+        check(
+            "51 Client mode rejects the shared key (bootstrap is not per-user evidence)",
+            store.resolve_request_identity(SHARED_KEY, allow_shared_key_bootstrap=False) is None,
+        )
 
-        # 52. Old snapshot loads safely (no users/api_credentials keys).
+        # 52. Old snapshot loads safely (no users/api_credentials keys) and no
+        # bootstrap user is persisted on load.
+        import hashlib as _hashlib
+
         legacy_path = tmp / "legacy_state.json"
         legacy_payload = json.loads(state_blob)
         legacy_payload.pop("users", None)
@@ -277,13 +292,83 @@ def main() -> int:
             os.environ["MONDAY_REPORT_STATE_PATH"] = str(legacy_path)
             from backend.app.store import create_store
 
+            before_bytes = _hashlib.sha256(legacy_path.read_bytes()).hexdigest()
             legacy_store = create_store()
-            check("52 Old snapshot loads safely", legacy_store._bootstrap_user() is not None)
+            after_bytes = _hashlib.sha256(legacy_path.read_bytes()).hexdigest()
+            check(
+                "52 Old snapshot loads safely with no startup persistence",
+                len(legacy_store.list_users()) == 0 and before_bytes == after_bytes,
+            )
         finally:
             os.environ["MONDAY_REPORT_STATE_PATH"] = prev_state
 
-        # 53. Existing API client header remains compatible (shared key accepted in client mode).
-        check("53 Existing API client header remains compatible", client.get("/auth/session", headers=hdr(SHARED_KEY)).status_code == 200)
+        # 53. Existing API client header remains compatible in LOCAL/DEMO mode only.
+        os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "demo"
+        demo_shared = client.get("/auth/session", headers=hdr(SHARED_KEY))
+        check(
+            "53 Existing API client header remains compatible in demo mode",
+            demo_shared.status_code == 200
+            and (demo_shared.json().get("authenticated_identity") or {}).get("actor_source") == "demo_bootstrap",
+        )
+        os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
+
+        # D. Client-mode shared-key rejection via the HTTP path.
+        check(
+            "D1 Client mode HTTP rejects the legacy shared key (401)",
+            client.get("/auth/session", headers=hdr(SHARED_KEY)).status_code == 401,
+        )
+        check(
+            "D2 Client mode HTTP accepts an active per-user credential",
+            client.get("/auth/session", headers=hdr(adm_token)).status_code == 200,
+        )
+
+        # G. Failure-path concurrency: a request that RAISES (non-admin -> 403 in
+        # require_admin) runs concurrently with a succeeding admin request; the
+        # request actors never cross and no stale actor context leaks.
+        from backend.app.identity import get_current_identity as _gci
+
+        base_events = len(store.audit_logs)
+        gerr: list[str] = []
+
+        def deny_loop() -> None:
+            for _ in range(8):
+                r = client.post("/auth/users", json={"email": "gx@identity-guard.test", "full_name": "GX", "roles": ["engineer"]}, headers=hdr(multi_token))
+                if r.status_code != 403:
+                    gerr.append(f"denied-loop got {r.status_code}")
+
+        def allow_loop() -> None:
+            for i in range(8):
+                r = client.post("/auth/users", json={"email": f"gok{i}@identity-guard.test", "full_name": "GOK", "roles": ["engineer"]}, headers=hdr(adm_token))
+                if r.status_code != 201:
+                    gerr.append(f"allow-loop got {r.status_code}")
+
+        ta = threading.Thread(target=deny_loop)
+        tb = threading.Thread(target=allow_loop)
+        ta.start(); tb.start(); ta.join(); tb.join()
+        store.refresh()
+        new_events = store.audit_logs[base_events:]
+        created = [e for e in new_events if e.action == "auth.user.create"]
+        denied = [e for e in new_events if e.action == "auth.admin_denied"]
+        check("G1 Concurrent success/failure loops behaved", not gerr, gerr[:2])
+        check("G2 Every created-user event has ONLY the admin actor", bool(created) and all(str(e.actor_user_id) == adm_id for e in created))
+        check("G3 No created-user event carries the non-admin actor", not any(str(e.actor_user_id) == multi_id for e in created))
+        check("G4 Every admin-denied event carries the non-admin actor", bool(denied) and all(str(e.actor_user_id) == multi_id for e in denied))
+        check("G5 No stale actor context after failure-path concurrency", _gci() is None)
+
+        # I. Honest route inventory: approved categories only; pending keeps rbac open.
+        from backend.app import main as _m
+
+        check("I1 authenticated_write is not an allowed classification", "authenticated_write" not in _m.ROUTE_ACCESS_CLASSIFICATIONS)
+        check("I2 Route policy is NOT fully enforced (pending rows exist)", _m.route_policy_fully_enforced() is False and len(_m.pending_permission_routes()) > 0)
+        # validator rejects a sensitive mutation mislabelled authenticated_read
+        _saved = dict(_m.ROUTE_ACCESS_POLICY)
+        _m.ROUTE_ACCESS_POLICY[("POST", "/uploads")] = {"classification": "authenticated_read"}
+        _bad_read = _m.validate_route_access_policy()
+        _m.ROUTE_ACCESS_POLICY[("POST", "/uploads")] = {"classification": "public"}
+        _bad_public = _m.validate_route_access_policy()
+        _m.ROUTE_ACCESS_POLICY.clear(); _m.ROUTE_ACCESS_POLICY.update(_saved)
+        check("I3 Validator rejects a sensitive mutation marked authenticated_read", any("authenticated_read" in e for e in _bad_read))
+        check("I4 Validator rejects a sensitive mutation marked public", any("public" in e for e in _bad_public))
 
         # 54. Per-user identity evidence is store/credential-driven, not a flag.
         os.environ["MONDAY_REPORT_PER_USER_IDENTITY"] = "true"  # an env flag must NOT flip evidence
