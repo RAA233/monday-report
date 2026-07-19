@@ -59,6 +59,11 @@ from .schemas import (
     Workspace,
     WorkspaceCreate,
 )
+from .corrections_registry import (
+    CorrectionValidationError,
+    correctable_field_catalog,
+    validate_correction,
+)
 from .readiness import client_data_mode, evaluate_client_data_readiness
 from .runtime_backends import runtime_backend_status
 from .signed_urls import create_signed_token, signing_secret_configured, verify_signed_token
@@ -406,12 +411,34 @@ def update_validation_task(task_id: UUID, payload: ValidationTaskUpdate) -> Vali
     status_code=status.HTTP_201_CREATED,
 )
 def create_field_correction(workspace_id: UUID, payload: FieldCorrectionCreate) -> FieldCorrection:
-    store.refresh()
-    if workspace_id not in store.workspaces:
-        raise HTTPException(status_code=404, detail="Workspace not found")
-    require_client_data_ready("field_correction.record", "workspace", workspace_id)
-    require_permission("record_field_corrections")
-    return store.record_field_correction(workspace_id, payload)
+    # Hold the correction lock across the WHOLE handler so no concurrent
+    # correction request's refresh() can clobber this in-flight append on the
+    # shared store singleton (re-entrant with record_field_correction's lock).
+    with store.field_correction_lock:
+        store.refresh()
+        if workspace_id not in store.workspaces:
+            raise HTTPException(status_code=404, detail="Workspace not found")
+        require_client_data_ready("field_correction.record", "workspace", workspace_id)
+        require_permission("record_field_corrections")
+        # Only a registered correctable field may be corrected; unknown or
+        # sensitive fields (audit/identity/tenant/recommendation/Benchmarking/
+        # parser/source-provenance/validation/config/immutable) are rejected.
+        try:
+            validate_correction(
+                payload.target_type,
+                payload.field_key,
+                payload.source_value,
+                payload.corrected_value,
+                payload.correction_reason,
+            )
+        except CorrectionValidationError as exc:
+            raise HTTPException(status_code=422, detail={"code": exc.code, "message": exc.message})
+        return store.record_field_correction(workspace_id, payload)
+
+
+@app.get("/field-corrections/registry")
+def field_correction_registry() -> list[dict[str, object]]:
+    return correctable_field_catalog()
 
 
 @app.get("/workspaces/{workspace_id}/field-corrections", response_model=list[FieldCorrection])
@@ -426,15 +453,16 @@ def list_field_corrections(workspace_id: UUID, active_only: bool = False) -> lis
 
 @app.post("/field-corrections/{correction_id}/revert", response_model=FieldCorrection)
 def revert_field_correction(correction_id: UUID, payload: FieldCorrectionRevert) -> FieldCorrection:
-    store.refresh()
-    if correction_id not in store.field_corrections:
-        raise HTTPException(status_code=404, detail="Field correction not found")
-    require_client_data_ready("field_correction.revert", "field_correction", correction_id)
-    require_permission("record_field_corrections")
-    try:
-        return store.revert_field_correction(correction_id, payload.revert_reason)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+    with store.field_correction_lock:
+        store.refresh()
+        if correction_id not in store.field_corrections:
+            raise HTTPException(status_code=404, detail="Field correction not found")
+        require_client_data_ready("field_correction.revert", "field_correction", correction_id)
+        require_permission("record_field_corrections")
+        try:
+            return store.revert_field_correction(correction_id, payload.revert_reason)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.get("/dashboards/summary", response_model=DashboardSummary)

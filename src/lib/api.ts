@@ -384,9 +384,10 @@ export interface ApiFieldCorrection {
   source_value?: string | null;
   corrected_value?: string | null;
   correction_reason: string;
-  reviewer_user_id: string;
-  reviewer_email: string;
-  reviewer_roles: string[];
+  actor_user_id: string;
+  actor_email: string;
+  actor_roles: string[];
+  actor_source: "configured";
   status: "active" | "superseded" | "reverted";
   supersedes_id?: string | null;
   superseded_by_id?: string | null;
