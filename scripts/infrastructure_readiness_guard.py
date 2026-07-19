@@ -56,11 +56,18 @@ def main() -> int:
                 )
             )
 
+            # Client mode rejects the shared key; authenticate with a per-user
+            # admin credential so the request reaches the readiness gate.
+            from backend.app.schemas import Role
+
+            _admin = store.create_user("infra-admin@example.test", "Infra Admin", [Role.ADMIN])
+            _cred, _token = store.create_credential(_admin.id)
+            client_headers = {"X-Monday-Report-Key": _token}
             workspace = next(iter(store.workspaces.values()))
             blocked_chat = client.post(
                 "/chat/messages",
                 json={"workspace_id": str(workspace.id), "content": "Generate Monday Report", "filters": {}},
-                headers=CLIENT_HEADERS,
+                headers=client_headers,
             )
             checks.append(
                 assert_check(

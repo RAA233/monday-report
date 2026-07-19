@@ -27,6 +27,13 @@ def main() -> int:
         from backend.app.store import store
 
         client = TestClient(app)
+        # Client mode rejects the shared key; authenticate with a per-user admin
+        # credential so requests reach the readiness gate.
+        from backend.app.schemas import Role
+
+        _admin = store.create_user("client-op-admin@example.test", "Client Op Admin", [Role.ADMIN])
+        _cred, _token = store.create_credential(_admin.id)
+        client_headers = {"X-Monday-Report-Key": _token}
         workspace = next(iter(store.workspaces.values()))
         seeded_report = store.create_monday_report(
             MondayReportCreate(
@@ -39,7 +46,7 @@ def main() -> int:
         blocked_chat = client.post(
             "/chat/messages",
             json={"workspace_id": str(workspace.id), "content": "Generate Monday Report", "filters": {}},
-            headers=CLIENT_HEADERS,
+            headers=client_headers,
         )
         checks.append(assert_check("Client mode blocks chat when not ready", blocked_chat.status_code == 423, blocked_chat.text))
 
@@ -50,7 +57,7 @@ def main() -> int:
                 "period_start": "2026-07-06",
                 "period_end": "2026-07-12",
             },
-            headers=CLIENT_HEADERS,
+            headers=client_headers,
         )
         checks.append(
             assert_check(
@@ -60,7 +67,7 @@ def main() -> int:
             )
         )
 
-        blocked_export = client.post(f"/monday-reports/{seeded_report.id}/exports/json", headers=CLIENT_HEADERS)
+        blocked_export = client.post(f"/monday-reports/{seeded_report.id}/exports/json", headers=client_headers)
         checks.append(
             assert_check(
                 "Client mode blocks report export when not ready",
@@ -69,7 +76,7 @@ def main() -> int:
             )
         )
 
-        blocked_documents = client.get(f"/documents?workspace_id={workspace.id}", headers=CLIENT_HEADERS)
+        blocked_documents = client.get(f"/documents?workspace_id={workspace.id}", headers=client_headers)
         checks.append(
             assert_check(
                 "Client mode blocks document reads when not ready",
