@@ -23,6 +23,16 @@ from xml.sax.saxutils import escape as xml_escape
 
 from .archive_limits import max_zip_entries, max_zip_uncompressed_bytes
 from .audit_safety import sanitize_audit_metadata
+from .auth import (
+    api_key_configured,
+    api_key_valid,
+    generate_api_token,
+    hash_token,
+    is_well_formed_token,
+    token_fingerprint,
+    tokens_match,
+)
+from .identity import get_current_identity
 from .malware import MalwareScanResult, scan_upload_content
 from .ocr import extract_ocr_text
 from .queue_backend import (
@@ -43,6 +53,8 @@ from .schemas import (
     AuditLog,
     AnomalyEvent,
     AnomalyRule,
+    AuthenticatedIdentity,
+    StoredApiCredential,
     BenchmarkComparison,
     BenchmarkMeasurement,
     BenchmarkMeasurementCreate,
@@ -234,6 +246,12 @@ class LocalStateStore:
         self.anomaly_events: dict[UUID, AnomalyEvent] = {}
         self.key_decisions: dict[UUID, KeyDecision] = {}
         self.field_corrections: dict[UUID, FieldCorrection] = {}
+        # Authenticated-identity foundation: server-side user records and their
+        # per-user API credentials (only hashes + fingerprints are stored).
+        self.users: dict[UUID, User] = {}
+        self.api_credentials: dict[UUID, StoredApiCredential] = {}
+        # Serializes identity provisioning/revocation on the shared singleton.
+        self.identity_lock = threading.RLock()
         # Serializes the WHOLE field-correction route (refresh -> checks ->
         # record/revert -> save) within one process, so a concurrent handler's
         # refresh() cannot clobber an in-flight append on this shared singleton.
@@ -254,6 +272,8 @@ class LocalStateStore:
             self._seed()
             self.save()
         if self._ensure_benchmarking_defaults():
+            self.save()
+        if self._ensure_identity_bootstrap():
             self.save()
 
     def _state_exists(self) -> bool:
@@ -276,6 +296,8 @@ class LocalStateStore:
         self.monday_reports.clear()
         self.report_exports.clear()
         self.field_corrections.clear()
+        self.users.clear()
+        self.api_credentials.clear()
         self.audit_logs.clear()
         self._seed()
 
@@ -293,6 +315,238 @@ class LocalStateStore:
             email=os.getenv("MONDAY_REPORT_USER_EMAIL", "operator@monday-report.invalid"),
             full_name=os.getenv("MONDAY_REPORT_USER_FULL_NAME", "Monday Report Operator"),
             roles=[Role.ADMIN, Role.ENGINEER, Role.VALIDATOR],
+        )
+
+    # ------------------------------------------------------------------
+    # Authenticated-identity foundation.
+    #
+    # This is a BOUNDED first slice: opaque per-user credentials are resolved
+    # server-side to a request-scoped identity, wired to the existing role/
+    # permission policy and audit actor. It is NOT complete multi-tenant
+    # authorization, complete route-level RBAC, or verified reviewer identity —
+    # those remain declared blockers in evals/ga/blocker_registry.v1.json.
+    # ------------------------------------------------------------------
+    def _bootstrap_user(self) -> User | None:
+        for user in self.users.values():
+            if user.is_bootstrap:
+                return user
+        return None
+
+    def _ensure_identity_bootstrap(self) -> bool:
+        """Ensure the configured user exists as the explicit demo_bootstrap admin
+        in the users collection. Returns True if the snapshot changed."""
+        if self._bootstrap_user() is not None:
+            return False
+        if not self.user.is_bootstrap:
+            self.user.is_bootstrap = True
+        if self.user.account_status != "active":
+            self.user.account_status = "active"
+        self.users[self.user.id] = self.user
+        return True
+
+    def _identity_from_user(
+        self,
+        user: User,
+        *,
+        actor_source: str,
+        authentication_source: str,
+        credential: StoredApiCredential | None = None,
+    ) -> AuthenticatedIdentity:
+        return AuthenticatedIdentity(
+            user_id=user.id,
+            tenant_id=user.tenant_id,
+            email=user.email,
+            display_name=user.full_name,
+            roles=list(user.roles),
+            account_status=user.account_status,
+            authentication_source=authentication_source,  # type: ignore[arg-type]
+            credential_id=credential.credential_id if credential else None,
+            credential_fingerprint=credential.token_fingerprint if credential else None,
+            actor_source=actor_source,  # type: ignore[arg-type]
+        )
+
+    def demo_bootstrap_identity(self) -> AuthenticatedIdentity:
+        # The demo bootstrap identity mirrors the CURRENT configured user
+        # (store.user), so its roles reflect the live configured identity.
+        return self._identity_from_user(
+            self.user, actor_source="demo_bootstrap", authentication_source="shared_key_bootstrap"
+        )
+
+    def resolve_request_identity(self, token: str | None) -> AuthenticatedIdentity | None:
+        """Resolve a presented credential to a request identity, or None.
+
+        Never trusts client-asserted identity; the identity comes exclusively
+        from the credential and server-side records. Malformed/oversized tokens
+        are rejected before any hash/compare. A matched credential bound to a
+        disabled user, a revoked credential, or a tenant mismatch is denied.
+        The legacy configured key resolves to the labelled demo_bootstrap
+        identity (compatibility), which never counts as verified per-user
+        identity.
+        """
+        if not is_well_formed_token(token):
+            # Still allow the legacy configured key even if it is short, but only
+            # via the constant-time api_key_valid path below.
+            if token is not None and api_key_valid(token):
+                return self.demo_bootstrap_identity()
+            return None
+        candidate_hash = hash_token(token)  # type: ignore[arg-type]
+        for credential in list(self.api_credentials.values()):
+            if credential.status != "active":
+                continue
+            if not tokens_match(candidate_hash, credential.token_hash):
+                continue
+            user = self.users.get(credential.user_id)
+            if user is None or user.account_status != "active":
+                return None
+            if user.tenant_id != self.tenant.id or credential.tenant_id != self.tenant.id:
+                return None
+            actor_source = (
+                "demo_bootstrap"
+                if credential.authentication_source == "shared_key_bootstrap"
+                else "authenticated"
+            )
+            return self._identity_from_user(
+                user,
+                actor_source=actor_source,
+                authentication_source=credential.authentication_source,
+                credential=credential,
+            )
+        # Legacy configured shared key -> demo_bootstrap (resolved against the
+        # CURRENT env key via constant-time comparison; not a decision-layer
+        # bypass — it flows through identity + RBAC and never satisfies per-user
+        # identity readiness).
+        if api_key_valid(token):
+            return self.demo_bootstrap_identity()
+        return None
+
+    def current_identity(self) -> AuthenticatedIdentity:
+        """The request-scoped identity, or an explicit system actor for
+        worker/CLI operations that run outside any request."""
+        request_identity = get_current_identity()
+        if request_identity is not None:
+            return request_identity
+        return AuthenticatedIdentity(
+            user_id=self.user.id,
+            tenant_id=self.tenant.id,
+            email=self.user.email,
+            display_name=self.user.full_name,
+            roles=list(self.user.roles),
+            account_status="active",
+            authentication_source="system",
+            credential_id=None,
+            credential_fingerprint=None,
+            actor_source="system",
+        )
+
+    def create_user(self, email: str, full_name: str, roles: list[Role]) -> User:
+        with self.identity_lock:
+            self.refresh()
+            normalized = [Role(role) for role in roles]
+            if not normalized:
+                raise ValueError("At least one role is required.")
+            # VIEWER is intentionally not enabled in this increment.
+            if Role.VIEWER in normalized:
+                raise ValueError("The VIEWER role is not enabled in this increment.")
+            user = User(
+                tenant_id=self.tenant.id,
+                email=email,
+                full_name=full_name,
+                roles=normalized,
+                account_status="active",
+                is_bootstrap=False,
+            )
+            self.users[user.id] = user
+            self.audit(
+                "auth.user.create",
+                "user",
+                user.id,
+                {"roles": [role.value for role in normalized], "account_status": "active"},
+            )
+            return user
+
+    def set_user_status(self, user_id: UUID, account_status: str) -> User:
+        with self.identity_lock:
+            self.refresh()
+            user = self.users.get(user_id)
+            if user is None:
+                raise KeyError("Unknown user.")
+            if account_status not in {"active", "disabled"}:
+                raise ValueError("Invalid account status.")
+            user.account_status = account_status  # type: ignore[assignment]
+            self.audit("auth.user.status", "user", user.id, {"account_status": account_status})
+            return user
+
+    def list_users(self) -> list[User]:
+        self.refresh()
+        return list(self.users.values())
+
+    def get_user(self, user_id: UUID) -> User | None:
+        self.refresh()
+        return self.users.get(user_id)
+
+    def create_credential(self, user_id: UUID) -> tuple[StoredApiCredential, str]:
+        """Provision a per-user credential. Returns the stored record and the
+        RAW token, which is returned to the caller exactly once and never
+        persisted, logged, or audited."""
+        with self.identity_lock:
+            self.refresh()
+            user = self.users.get(user_id)
+            if user is None:
+                raise KeyError("Unknown user.")
+            if user.tenant_id != self.tenant.id:
+                raise ValueError("User is not in the configured tenant.")
+            raw_token = generate_api_token()
+            credential = StoredApiCredential(
+                user_id=user.id,
+                tenant_id=user.tenant_id,
+                token_hash=hash_token(raw_token),
+                token_fingerprint=token_fingerprint(raw_token),
+                status="active",
+                authentication_source="api_token",
+            )
+            self.api_credentials[credential.credential_id] = credential
+            self.audit(
+                "auth.credential.create",
+                "api_credential",
+                credential.credential_id,
+                {"user_id": str(user.id), "fingerprint": credential.token_fingerprint},
+            )
+            return credential, raw_token
+
+    def revoke_credential(self, credential_id: UUID) -> StoredApiCredential:
+        with self.identity_lock:
+            self.refresh()
+            credential = self.api_credentials.get(credential_id)
+            if credential is None:
+                raise KeyError("Unknown credential.")
+            if credential.status == "revoked":
+                return credential  # idempotent
+            credential.status = "revoked"
+            credential.revoked_at = datetime.now(timezone.utc)
+            self.audit(
+                "auth.credential.revoke",
+                "api_credential",
+                credential.credential_id,
+                {"user_id": str(credential.user_id), "fingerprint": credential.token_fingerprint},
+            )
+            return credential
+
+    def list_credentials(self) -> list[StoredApiCredential]:
+        self.refresh()
+        return list(self.api_credentials.values())
+
+    def has_non_bootstrap_identity(self) -> bool:
+        """True iff at least one active non-bootstrap user has an active
+        credential. Used as evidence that per-user identity is more than the
+        local bootstrap; never satisfied by an env flag alone."""
+        active_users = {
+            user.id
+            for user in self.users.values()
+            if user.account_status == "active" and not user.is_bootstrap
+        }
+        return any(
+            credential.status == "active" and credential.user_id in active_users
+            for credential in self.api_credentials.values()
         )
 
     def refresh(self) -> None:
@@ -321,6 +575,16 @@ class LocalStateStore:
         self.anomaly_events = self._load_map(AnomalyEvent, payload.get("anomaly_events", []))
         self.key_decisions = self._load_map(KeyDecision, payload.get("key_decisions", []))
         self.field_corrections = self._load_map(FieldCorrection, payload.get("field_corrections", []))
+        # Additive identity collections: old snapshots load as empty and are
+        # bootstrapped on init.
+        self.users = self._load_map(User, payload.get("users", []))
+        self.api_credentials = {
+            credential.credential_id: credential
+            for credential in (
+                StoredApiCredential.model_validate(item)
+                for item in payload.get("api_credentials", [])
+            )
+        }
         self.audit_logs = [AuditLog.model_validate(item) for item in payload.get("audit_logs", [])]
 
     def save(self) -> None:
@@ -356,6 +620,10 @@ class LocalStateStore:
             "anomaly_events": self._dump_map(self.anomaly_events),
             "key_decisions": self._dump_map(self.key_decisions),
             "field_corrections": self._dump_map(self.field_corrections),
+            "users": self._dump_map(self.users),
+            "api_credentials": [
+                credential.model_dump(mode="json") for credential in self.api_credentials.values()
+            ],
             "audit_logs": [item.model_dump(mode="json") for item in self.audit_logs],
         }
         return payload
@@ -935,6 +1203,7 @@ class LocalStateStore:
         with self.field_correction_lock:
             self.refresh()
             prior = self._active_field_correction(workspace_id, payload.target_type, payload.field_key)
+            identity = self.current_identity()
             correction = FieldCorrection(
                 tenant_id=self.tenant.id,
                 workspace_id=workspace_id,
@@ -943,9 +1212,11 @@ class LocalStateStore:
                 source_value=payload.source_value,
                 corrected_value=payload.corrected_value,
                 correction_reason=payload.correction_reason,
-                actor_user_id=self.user.id,
-                actor_email=self.user.email,
-                actor_roles=list(self.user.roles),
+                actor_user_id=identity.user_id,
+                actor_email=identity.email,
+                actor_roles=list(identity.roles),
+                actor_source=identity.actor_source,
+                actor_credential_fingerprint=identity.credential_fingerprint,
                 supersedes_id=prior.id if prior else None,
             )
             if prior is not None:
@@ -1021,8 +1292,13 @@ class LocalStateStore:
                 return correction
         return None
 
-    def benchmark_permissions(self) -> dict[str, bool]:
-        roles = set(self.user.roles)
+    def benchmark_permissions(self, identity: AuthenticatedIdentity | None = None) -> dict[str, bool]:
+        # Permission decisions are driven by the ROLES of the resolved request
+        # identity (or, for display outside a request, the current identity).
+        # There is no all-role fallback: an identity with no roles receives no
+        # protected permissions.
+        source = identity if identity is not None else self.current_identity()
+        roles = set(source.roles)
         is_admin = Role.ADMIN in roles
         is_engineer = Role.ENGINEER in roles
         is_validator = Role.VALIDATOR in roles
@@ -5984,16 +6260,23 @@ class LocalStateStore:
         metadata: dict | None = None,
         save: bool = True,
     ) -> None:
+        identity = self.current_identity()
         previous_hash = self._audit_chain_hash(self.audit_logs[-1]) if self.audit_logs else None
         audit_log = AuditLog(
             tenant_id=self.tenant.id,
-            actor_user_id=self.user.id,
+            actor_user_id=identity.user_id,
             action=action,
             resource_type=resource_type,
             resource_id=resource_id,
             metadata=sanitize_audit_metadata(metadata),
             previous_hash=previous_hash,
+            actor_source=identity.actor_source,
+            actor_roles=list(identity.roles),
+            actor_credential_fingerprint=identity.credential_fingerprint,
         )
+        # entry_hash payload is intentionally unchanged (actor_user_id is already
+        # sealed) so existing sealed chains still verify; keyed integrity remains
+        # a separate declared blocker.
         audit_log.entry_hash = self._audit_event_hash(audit_log)
         self.audit_logs.append(audit_log)
         if save:

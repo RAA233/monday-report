@@ -589,3 +589,33 @@ pnpm run audit:all
 - Client-data approval output: `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.json`; current approved local client environment reports `APPROVED` after every `/readiness/client-data` check passes, including reviewed fixture attestation.
 - Fresh startup creates a neutral workspace only; failure records must come from uploaded evidence or explicit fixture/eval commands.
 - Every chat, upload, validation, report generation, signed URL, and admin policy action must produce an audit event.
+
+## Authenticated identity foundation (2026-07-19)
+
+Increment on branch `feat/authenticated-identity-foundation` from merged base
+`c867b24d7eb91938f5530a000391c7832ed20ff9`. Scope: a **bounded authenticated
+identity + request actor + RBAC foundation** (`docs/AUTHENTICATED_IDENTITY.md`).
+
+- **Identity/credentials**: opaque per-user credentials (≥32 random bytes; only a
+  SHA-256 hash + non-secret fingerprint stored; raw token returned once, never
+  logged/audited/persisted) resolved **server-side** to a **request-scoped**
+  identity (contextvar, cleared per request; concurrency-safe). Client-supplied
+  identity headers are never trusted.
+- **RBAC**: existing roles only (`ADMIN`/`ENGINEER`/`VALIDATOR`/`MANAGER`;
+  `VIEWER` not enabled), **default-deny**, no all-role fallback; the existing
+  permission checks and audit/field-correction actors are driven by the resolved
+  identity. Admin-only `/auth/users` + `/auth/credentials` provision/revoke.
+- **Tenant**: the configured-tenant boundary is enforced (credential/user/runtime
+  tenant must match); full multi-tenant/workspace authorization is **not**
+  delivered.
+- **Blockers intentionally left open**: this increment **closes no GA blocker** —
+  `per-user-identity`, `rbac-role-separation` (route coverage incomplete),
+  `tenant-authorization-enforcement`, and `verified-reviewer-identity` remain
+  declared `BLOCKED`/`REVIEW_REQUIRED`; registry resolution conditions are
+  unchanged and **`ga:readiness` remains `GA_BLOCKED`**.
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `pnpm run audit:identity-rbac` | 0 | **62/62** — server-side credential resolution, request scoping + concurrency, default-deny RBAC, configured-tenant boundary, admin-only provisioning/revocation, one-time token, no token leakage, GA stays `GA_BLOCKED`. |
+| `pnpm run audit:ga-readiness-integrity` | 0 | 44/44 — unchanged; identity blockers remain BLOCKED. |
+| `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — the foundation closes no blocker. |

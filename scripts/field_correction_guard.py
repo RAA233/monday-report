@@ -87,10 +87,14 @@ def main() -> int:
     first = record.json() if record.status_code == 201 else {}
     checks.append(
         check(
-            "Recording a correction captures the configured actor context and provenance",
+            "Recording a correction captures the resolved request actor and provenance",
             record.status_code == 201
             and first.get("actor_email") == "reviewer@example.test"
-            and first.get("actor_source") == "configured"
+            # With the authenticated-identity foundation, a correction records the
+            # RESOLVED request actor. In demo mode that is the explicit
+            # demo_bootstrap identity (a per-user authenticated request would be
+            # "authenticated"); it is never a fabricated verified reviewer.
+            and first.get("actor_source") in {"demo_bootstrap", "authenticated"}
             and bool(first.get("actor_user_id"))
             and first.get("actor_roles")
             and first.get("status") == "active"

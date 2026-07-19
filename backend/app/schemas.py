@@ -53,11 +53,100 @@ class User(BaseModel):
     email: str
     full_name: str
     roles: list[Role] = Field(default_factory=list)
+    # Additive identity-foundation fields (default-compatible with old snapshots).
+    account_status: Literal["active", "disabled"] = "active"
+    is_bootstrap: bool = False
+
+
+# --- Authenticated identity foundation -------------------------------------
+# A bounded first slice: opaque per-user credentials resolved server-side to a
+# request-scoped identity. This is NOT complete multi-tenant authorization,
+# complete route-level RBAC, or verified reviewer identity — those remain
+# declared blockers in evals/ga/blocker_registry.v1.json.
+AccountStatus = Literal["active", "disabled"]
+CredentialStatus = Literal["active", "revoked"]
+# `demo_bootstrap` is an explicit local/compatibility identity, NOT a verified
+# human per-user identity.
+ActorSource = Literal["authenticated", "demo_bootstrap", "system"]
+AuthenticationSource = Literal["api_token", "shared_key_bootstrap", "system"]
+
+
+class StoredApiCredential(BaseModel):
+    """Persisted per-user API credential. Only a hash + fingerprint are stored;
+    the raw token exists only at creation time and is never persisted."""
+
+    credential_id: UUID = Field(default_factory=uuid4)
+    user_id: UUID
+    tenant_id: UUID
+    token_hash: str
+    token_fingerprint: str
+    status: CredentialStatus = "active"
+    authentication_source: AuthenticationSource = "api_token"
+    created_at: datetime = Field(default_factory=utc_now)
+    revoked_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
+class AuthenticatedIdentity(BaseModel):
+    """Request-scoped identity resolved from a presented credential. Not
+    persisted; carries no secret material."""
+
+    user_id: UUID
+    tenant_id: UUID
+    email: str
+    display_name: str
+    roles: list[Role] = Field(default_factory=list)
+    account_status: AccountStatus = "active"
+    authentication_source: AuthenticationSource
+    credential_id: UUID | None = None
+    credential_fingerprint: str | None = None
+    actor_source: ActorSource
+
+
+class UserCreateRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+    full_name: str = Field(min_length=1, max_length=200)
+    roles: list[Role] = Field(min_length=1)
+
+
+class UserAdminView(BaseModel):
+    id: UUID
+    tenant_id: UUID
+    email: str
+    full_name: str
+    roles: list[Role]
+    account_status: AccountStatus
+    is_bootstrap: bool
+
+
+class CredentialAdminView(BaseModel):
+    credential_id: UUID
+    user_id: UUID
+    tenant_id: UUID
+    token_fingerprint: str
+    status: CredentialStatus
+    authentication_source: AuthenticationSource
+    created_at: datetime
+    revoked_at: datetime | None = None
+    last_used_at: datetime | None = None
+
+
+class CredentialCreateResponse(BaseModel):
+    credential_id: UUID
+    user_id: UUID
+    token_fingerprint: str
+    # The raw token is returned exactly once at creation and never again.
+    token: str
+    created_at: datetime
+    note: str = "Store this token now; it is shown once and cannot be retrieved again."
 
 
 class SessionResponse(BaseModel):
     tenant: Tenant
     user: User
+    # Additive identity context for the resolved request identity.
+    authenticated_identity: AuthenticatedIdentity | None = None
+    permissions: dict[str, bool] = Field(default_factory=dict)
 
 
 class WorkspaceCreate(BaseModel):
@@ -403,9 +492,13 @@ class ValidationTaskUpdate(BaseModel):
 # (and cross-process atomicity via normalized persistence) is tracked follow-up
 # work; AUDIT-004 is a foundation, not fully closed.
 #
-# `actor_*` fields record the CONFIGURED actor context, not a verified
-# per-user reviewer (no authenticated per-user identity exists yet — a separate
-# identity/RBAC increment); `actor_source` states this explicitly.
+# `actor_*` fields record the resolved request actor. With the authenticated
+# identity foundation, a correction made by an authenticated request records
+# `actor_source="authenticated"` (or `demo_bootstrap` for the local bootstrap
+# identity); older records remain `configured`. A *verified reviewer identity*
+# with review-role eligibility and review-workflow coverage remains a separate
+# declared blocker — the presence of an authenticated actor alone does not
+# resolve it.
 FieldCorrectionTargetType = Literal[
     "report_field",
     "casing_string",
@@ -428,7 +521,10 @@ class FieldCorrection(BaseModel):
     actor_user_id: UUID
     actor_email: str
     actor_roles: list[Role] = Field(default_factory=list)
-    actor_source: Literal["configured"] = "configured"
+    # "configured" remains the default for old records; an authenticated request
+    # records "authenticated"/"demo_bootstrap", a worker/CLI action "system".
+    actor_source: Literal["configured", "authenticated", "demo_bootstrap", "system"] = "configured"
+    actor_credential_fingerprint: str | None = None
     status: Literal["active", "superseded", "reverted"] = "active"
     supersedes_id: UUID | None = None
     superseded_by_id: UUID | None = None
@@ -874,6 +970,12 @@ class AuditLog(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     previous_hash: str | None = None
     entry_hash: str | None = None
+    # Additive actor provenance (default None/[] for old snapshots). These are
+    # NOT part of the entry_hash payload, so existing sealed chains still verify;
+    # keyed/sealed audit integrity remains a separate declared blocker.
+    actor_source: str | None = None
+    actor_roles: list[Role] = Field(default_factory=list)
+    actor_credential_fingerprint: str | None = None
 
 
 class AuditIntegrityStatus(BaseModel):

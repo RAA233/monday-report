@@ -18,11 +18,32 @@ export interface ApiUser {
   email: string;
   full_name: string;
   roles: string[];
+  // Additive identity-foundation fields (optional for backward compatibility).
+  account_status?: "active" | "disabled";
+  is_bootstrap?: boolean;
+}
+
+// Request-scoped authenticated identity (no secret material). `demo_bootstrap`
+// is the explicit local/compatibility identity, not a verified per-user one.
+export interface ApiAuthenticatedIdentity {
+  user_id: string;
+  tenant_id: string;
+  email: string;
+  display_name: string;
+  roles: string[];
+  account_status: "active" | "disabled";
+  authentication_source: "api_token" | "shared_key_bootstrap" | "system";
+  credential_id?: string | null;
+  credential_fingerprint?: string | null;
+  actor_source: "authenticated" | "demo_bootstrap" | "system";
 }
 
 export interface ApiSession {
   tenant: ApiTenant;
   user: ApiUser;
+  // Additive identity context; older clients ignore these.
+  authenticated_identity?: ApiAuthenticatedIdentity | null;
+  permissions?: Record<string, boolean>;
 }
 
 export interface ApiWorkspace {
@@ -387,7 +408,8 @@ export interface ApiFieldCorrection {
   actor_user_id: string;
   actor_email: string;
   actor_roles: string[];
-  actor_source: "configured";
+  actor_source: "configured" | "authenticated" | "demo_bootstrap" | "system";
+  actor_credential_fingerprint?: string | null;
   status: "active" | "superseded" | "reverted";
   supersedes_id?: string | null;
   superseded_by_id?: string | null;
