@@ -273,8 +273,11 @@ class LocalStateStore:
             self.save()
         if self._ensure_benchmarking_defaults():
             self.save()
-        if self._ensure_identity_bootstrap():
-            self.save()
+        # NOTE: the demo bootstrap identity is derived in memory (see
+        # demo_bootstrap_identity); it is intentionally NOT persisted on import,
+        # construction, start, reload, health, or route access. A user is
+        # persisted ONLY through an explicit provisioning operation
+        # (create_user / the identity_admin CLI).
 
     def _state_exists(self) -> bool:
         return self.state_path.exists()
@@ -326,24 +329,6 @@ class LocalStateStore:
     # authorization, complete route-level RBAC, or verified reviewer identity —
     # those remain declared blockers in evals/ga/blocker_registry.v1.json.
     # ------------------------------------------------------------------
-    def _bootstrap_user(self) -> User | None:
-        for user in self.users.values():
-            if user.is_bootstrap:
-                return user
-        return None
-
-    def _ensure_identity_bootstrap(self) -> bool:
-        """Ensure the configured user exists as the explicit demo_bootstrap admin
-        in the users collection. Returns True if the snapshot changed."""
-        if self._bootstrap_user() is not None:
-            return False
-        if not self.user.is_bootstrap:
-            self.user.is_bootstrap = True
-        if self.user.account_status != "active":
-            self.user.account_status = "active"
-        self.users[self.user.id] = self.user
-        return True
-
     def _identity_from_user(
         self,
         user: User,
@@ -372,50 +357,54 @@ class LocalStateStore:
             self.user, actor_source="demo_bootstrap", authentication_source="shared_key_bootstrap"
         )
 
-    def resolve_request_identity(self, token: str | None) -> AuthenticatedIdentity | None:
+    def resolve_request_identity(
+        self, token: str | None, *, allow_shared_key_bootstrap: bool
+    ) -> AuthenticatedIdentity | None:
         """Resolve a presented credential to a request identity, or None.
 
-        Never trusts client-asserted identity; the identity comes exclusively
-        from the credential and server-side records. Malformed/oversized tokens
-        are rejected before any hash/compare. A matched credential bound to a
-        disabled user, a revoked credential, or a tenant mismatch is denied.
-        The legacy configured key resolves to the labelled demo_bootstrap
-        identity (compatibility), which never counts as verified per-user
-        identity.
+        Identity comes exclusively from the credential and server-side records;
+        client-asserted identity is never trusted. Malformed/oversized tokens are
+        rejected before any hash/compare. A persisted per-user credential is
+        accepted only when it is active, its user is active, and both are bound to
+        the configured tenant.
+
+        The legacy configured shared key resolves to the labelled ``demo_bootstrap``
+        identity ONLY when ``allow_shared_key_bootstrap`` is True (local/demo
+        compatibility). In client mode the caller passes False, so the shared key
+        (and any bootstrap-only credential) is rejected — a client-mode request
+        must present an active persisted per-user credential.
         """
-        if not is_well_formed_token(token):
-            # Still allow the legacy configured key even if it is short, but only
-            # via the constant-time api_key_valid path below.
-            if token is not None and api_key_valid(token):
-                return self.demo_bootstrap_identity()
-            return None
-        candidate_hash = hash_token(token)  # type: ignore[arg-type]
-        for credential in list(self.api_credentials.values()):
-            if credential.status != "active":
-                continue
-            if not tokens_match(candidate_hash, credential.token_hash):
-                continue
-            user = self.users.get(credential.user_id)
-            if user is None or user.account_status != "active":
-                return None
-            if user.tenant_id != self.tenant.id or credential.tenant_id != self.tenant.id:
-                return None
-            actor_source = (
-                "demo_bootstrap"
-                if credential.authentication_source == "shared_key_bootstrap"
-                else "authenticated"
-            )
-            return self._identity_from_user(
-                user,
-                actor_source=actor_source,
-                authentication_source=credential.authentication_source,
-                credential=credential,
-            )
-        # Legacy configured shared key -> demo_bootstrap (resolved against the
-        # CURRENT env key via constant-time comparison; not a decision-layer
-        # bypass — it flows through identity + RBAC and never satisfies per-user
-        # identity readiness).
-        if api_key_valid(token):
+        # 1) Persisted per-user credential (works in both modes).
+        if is_well_formed_token(token):
+            candidate_hash = hash_token(token)  # type: ignore[arg-type]
+            for credential in list(self.api_credentials.values()):
+                if credential.status != "active":
+                    continue
+                # Bootstrap-only credentials never authenticate in client mode.
+                if not allow_shared_key_bootstrap and credential.authentication_source != "api_token":
+                    continue
+                if not tokens_match(candidate_hash, credential.token_hash):
+                    continue
+                user = self.users.get(credential.user_id)
+                if user is None or user.account_status != "active":
+                    return None
+                if user.tenant_id != self.tenant.id or credential.tenant_id != self.tenant.id:
+                    return None
+                if not allow_shared_key_bootstrap and user.is_bootstrap:
+                    return None
+                actor_source = (
+                    "demo_bootstrap"
+                    if credential.authentication_source == "shared_key_bootstrap"
+                    else "authenticated"
+                )
+                return self._identity_from_user(
+                    user,
+                    actor_source=actor_source,
+                    authentication_source=credential.authentication_source,
+                    credential=credential,
+                )
+        # 2) Legacy configured shared key -> demo_bootstrap, LOCAL/DEMO ONLY.
+        if allow_shared_key_bootstrap and token is not None and api_key_valid(token):
             return self.demo_bootstrap_identity()
         return None
 

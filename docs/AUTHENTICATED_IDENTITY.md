@@ -49,18 +49,49 @@ presented credential and server-side records.
 
 ## Bootstrap compatibility and client-mode restriction
 
-- **Demo/local mode:** the configured user is provisioned as an explicit
-  `demo_bootstrap` administrator. The existing shared key (and existing local
-  clients) continue to work; every request still carries a request-scoped actor.
-  `demo_bootstrap` is **not** verified per-user identity.
-- **Client mode:** requests require a resolvable credential. The legacy
-  configured key resolves — via the same credential-resolution path, subject to
-  identity + RBAC — to the labelled `demo_bootstrap` identity (compatibility);
-  it is **not** a decision-layer superuser bypass, and it never satisfies
-  per-user-identity readiness. For real per-user identity, provision per-user
-  users + credentials and rely on those. When only the demo bootstrap identity
-  exists, per-user identity is **not** evidenced. No environment flag alone can
-  claim per-user identity complete.
+- **Demo/local mode:** the configured user is exposed as an explicit
+  `demo_bootstrap` administrator, derived **in memory** (never persisted — see
+  "No startup persistence"). The existing shared key and existing local clients
+  continue to work; every request still carries a request-scoped actor.
+  `demo_bootstrap` is **not** verified per-user identity and is **not** suitable
+  for client mode.
+- **Client mode:** the legacy configured shared key and any bootstrap-only
+  credential are **rejected** (HTTP 401). There is **no** client-mode shared-key
+  administrator. A client-mode request must present an **active persisted
+  non-bootstrap per-user credential** whose user is active and whose user and
+  credential are both bound to the configured tenant, with server-side roles.
+  When no such credential exists, the client-mode server **fails closed** (all
+  authenticated routes 401) and readiness stays blocked. No environment flag can
+  re-enable a global client-mode administrator.
+
+## Secure initial provisioning
+
+Because client mode rejects the shared key, the first client administrator is
+provisioned **out-of-band** with the local CLI (no unauthenticated network
+bootstrap route exists):
+
+```
+python -m backend.app.identity_admin create-user \
+    --email admin@client.example --full-name "Client Admin" \
+    --role admin --confirm-tenant <tenant-slug> --yes
+python -m backend.app.identity_admin create-credential \
+    --user-id <uuid> --confirm-tenant <tenant-slug> --yes
+python -m backend.app.identity_admin revoke-credential --credential-id <uuid> --yes
+```
+
+The CLI runs locally against the configured state, operates only through the
+validated store methods, never embeds a default credential, returns the raw
+token **once** (only its hash + fingerprint are stored, audited without the raw
+token), enforces `--confirm-tenant` against the configured tenant slug, and
+requires an interactive confirmation or the non-interactive `--yes` flag.
+
+## No startup persistence
+
+The demo bootstrap identity is derived in memory from the configured local
+settings. A user is persisted **only** through an explicit provisioning
+operation (`create_user` / the CLI). Importing the store, constructing the app,
+starting or reloading the server, running `/health`, or viewing a route
+**never** writes a user or credential to the snapshot.
 
 ## Request-scoped identity
 
@@ -89,19 +120,24 @@ are ignored.
 ## Route-policy inventory
 
 `ROUTE_ACCESS_POLICY` in `backend/app/main.py` classifies **every** route as
-`public`, `authenticated_read`, `authenticated_write`, `permission_required`, or
-`system_internal`. `permission_required` rows name the exact enforced permission
-(a `benchmark_permissions()` key, or `__admin__` for identity/credential
-administration). `validate_route_access_policy()` fails if a route lacks a
-classification, a `permission_required` route lacks or references an unknown
-permission, a sensitive mutation is classified `public`, or a policy row does not
-match a real route. `audit:identity-rbac` enforces this.
+exactly one of the four approved categories: `public`, `authenticated_read`,
+`permission_required`, or `system_internal`. A `permission_required` row carries
+an `enforcement_status`:
 
-`authenticated_write` is an **honest extension** of the four canonical labels: it
-marks authenticated mutations that do **not yet** carry a granular per-route
-permission. That incomplete coverage is exactly why **`rbac-role-separation`
-remains a declared blocker** — those routes are non-public and require auth, but
-granular per-route permissions are future work.
+- **`enforced`** — the route calls a `require_*` dependency with a named
+  permission (a `benchmark_permissions()` key, or `__admin__` for
+  identity/credential administration).
+- **`pending`** — the route is sensitive and **must** be permission-gated but is
+  **not yet** enforced. A pending route does **not** count as protected.
+
+`validate_route_access_policy()` fails if a route lacks a classification; a
+sensitive mutation (POST/PUT/PATCH/DELETE) is classified `public` or
+`authenticated_read`; an `enforced` row lacks or names an unknown permission; a
+`pending` row claims an enforced permission; or a policy row does not match a
+real route. `route_policy_fully_enforced()` is **False** while any `pending`
+route exists, and `pending_permission_routes()` lists them. Because pending
+routes remain, **`rbac-role-separation` stays a declared blocker** —
+route-level RBAC is **not** complete. `audit:identity-rbac` enforces all of this.
 
 ## Tenant boundary (this increment)
 

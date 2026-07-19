@@ -601,10 +601,17 @@ identity + request actor + RBAC foundation** (`docs/AUTHENTICATED_IDENTITY.md`).
   logged/audited/persisted) resolved **server-side** to a **request-scoped**
   identity (contextvar, cleared per request; concurrency-safe). Client-supplied
   identity headers are never trusted.
+- **Client-mode hardening (review corrections)**: the legacy shared key is
+  **rejected in client mode** (401) — no client-mode shared-key administrator;
+  an active persisted non-bootstrap per-user credential is required. A bootstrap
+  identity is **never persisted on startup** (derived in memory). Initial client
+  admins are provisioned out-of-band with the local `python -m
+  backend.app.identity_admin` CLI (no unauthenticated network bootstrap route).
 - **RBAC**: existing roles only (`ADMIN`/`ENGINEER`/`VALIDATOR`/`MANAGER`;
-  `VIEWER` not enabled), **default-deny**, no all-role fallback; the existing
-  permission checks and audit/field-correction actors are driven by the resolved
-  identity. Admin-only `/auth/users` + `/auth/credentials` provision/revoke.
+  `VIEWER` not enabled), **default-deny**, no all-role fallback. The route
+  inventory uses only the four approved categories; sensitive mutation routes are
+  `permission_required` with `enforcement_status` `enforced` or **`pending`**.
+  Pending routes keep `rbac-role-separation` a declared blocker.
 - **Tenant**: the configured-tenant boundary is enforced (credential/user/runtime
   tenant must match); full multi-tenant/workspace authorization is **not**
   delivered.
@@ -616,6 +623,7 @@ identity + request actor + RBAC foundation** (`docs/AUTHENTICATED_IDENTITY.md`).
 
 | Command | Exit | Result |
 | --- | --- | --- |
-| `pnpm run audit:identity-rbac` | 0 | **62/62** — server-side credential resolution, request scoping + concurrency, default-deny RBAC, configured-tenant boundary, admin-only provisioning/revocation, one-time token, no token leakage, GA stays `GA_BLOCKED`. |
+| `pnpm run audit:identity-rbac` | 0 | **73/73** — server-side credential resolution, request scoping + failure-path concurrency, default-deny RBAC, configured-tenant boundary, admin-only provisioning/revocation, one-time token, no token leakage, client-mode shared-key rejection, no startup persistence, route-inventory parity (pending rows keep RBAC blocked), GA stays `GA_BLOCKED`. |
+| `pnpm run audit:auth` | 0 | **9/9** — 503/401 fail-closed, client-mode shared-key rejected, per-user credential accepted, revoked fails, demo-mode compatibility. |
 | `pnpm run audit:ga-readiness-integrity` | 0 | 44/44 — unchanged; identity blockers remain BLOCKED. |
 | `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — the foundation closes no blocker. |
