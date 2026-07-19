@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from .auth import API_KEY_HEADER, api_key_configured, api_key_valid
+from .identity import get_current_identity, reset_current_identity, set_current_identity
 from .limits import max_upload_bytes, upload_too_large
 from .local_ai import evaluate_local_ai_status
 from .retention import retention_days
@@ -20,6 +21,13 @@ from .schemas import (
     AuditIntegrityStatus,
     AuditLog,
     AnomalyEvent,
+    AuthenticatedIdentity,
+    CredentialAdminView,
+    CredentialCreateResponse,
+    Role,
+    StoredApiCredential,
+    UserAdminView,
+    UserCreateRequest,
     BenchmarkConfigResponse,
     BenchmarkMeasurementCreate,
     BenchmarkValue,
@@ -105,32 +113,48 @@ CLIENT_AUTH_EXEMPT_PATHS = {
 async def enforce_client_api_key(request: Request, call_next):
     if _client_auth_exempt(request):
         return await call_next(request)
-    if client_data_mode() != "client":
-        return await call_next(request)
-
-    if not api_key_configured():
-        store.audit(
-            "api.auth_blocked",
-            "api",
-            None,
-            {"reason": "api_key_not_configured", "path": request.url.path, "method": request.method},
-        )
-        return JSONResponse(
-            status_code=503,
-            content={"detail": "Client API key is not configured"},
-        )
 
     supplied_key = request.headers.get(API_KEY_HEADER)
-    if not api_key_valid(supplied_key):
-        store.audit(
-            "api.auth_blocked",
-            "api",
-            None,
-            {"reason": "invalid_or_missing_api_key", "path": request.url.path, "method": request.method},
-        )
-        return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    mode = client_data_mode()
 
-    return await call_next(request)
+    if mode == "client":
+        if not api_key_configured():
+            store.audit(
+                "api.auth_blocked",
+                "api",
+                None,
+                {"reason": "api_key_not_configured", "path": request.url.path, "method": request.method},
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Client API key is not configured"},
+            )
+        # Client mode requires a resolvable credential (a per-user token or the
+        # configured shared key mapped to the labelled demo_bootstrap identity).
+        # Identity is resolved exclusively server-side from the presented
+        # credential — client-supplied identity headers are never trusted.
+        identity = store.resolve_request_identity(supplied_key)
+        if identity is None:
+            store.audit(
+                "api.auth_blocked",
+                "api",
+                None,
+                {"reason": "invalid_or_missing_api_key", "path": request.url.path, "method": request.method},
+            )
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})
+    else:
+        # Demo/local mode does not enforce auth, but every request still carries
+        # a request-scoped actor: a per-user token if a valid one is presented,
+        # otherwise the explicit demo_bootstrap identity.
+        identity = store.resolve_request_identity(supplied_key) or store.demo_bootstrap_identity()
+
+    identity_token = set_current_identity(identity)
+    try:
+        return await call_next(request)
+    finally:
+        # Request cleanup: clear the request-scoped identity so it never leaks
+        # to another request or to worker/system operations.
+        reset_current_identity(identity_token)
 
 
 def _client_auth_exempt(request: Request) -> bool:
@@ -149,7 +173,16 @@ def health() -> dict[str, str]:
 @app.get("/auth/session", response_model=SessionResponse)
 def session() -> SessionResponse:
     store.refresh()
-    return SessionResponse(tenant=store.tenant, user=store.user)
+    identity = get_current_identity()
+    # Non-secret identity context only: roles, permissions, authentication
+    # source, credential id/fingerprint, account status. Never the token/hash.
+    permissions = store.benchmark_permissions(identity) if identity is not None else {}
+    return SessionResponse(
+        tenant=store.tenant,
+        user=store.user,
+        authenticated_identity=identity,
+        permissions=permissions,
+    )
 
 
 @app.get("/readiness/client-data", response_model=ClientDataReadiness)
@@ -190,31 +223,307 @@ def require_client_data_ready(operation: str, resource_type: str, resource_id: U
     raise HTTPException(status_code=423, detail="Client data readiness checks are failing")
 
 
+def _active_request_identity() -> AuthenticatedIdentity | None:
+    """The resolved request identity if it is present and active, else None.
+    Default-deny: a missing or disabled identity yields no permissions."""
+    identity = get_current_identity()
+    if identity is None or identity.account_status != "active":
+        return None
+    return identity
+
+
 def require_benchmark_permission(permission: str) -> None:
-    store.refresh()
-    permissions = store.benchmark_permissions()
-    if permissions.get(permission):
-        return
-    store.audit(
-        "benchmark.permission_denied",
-        "tenant",
-        store.tenant.id,
-        {"permission": permission, "user": store.user.email},
-    )
-    raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
+    identity = _active_request_identity()
+    if identity is None or not store.benchmark_permissions(identity).get(permission):
+        store.audit(
+            "benchmark.permission_denied",
+            "tenant",
+            store.tenant.id,
+            {
+                "permission": permission,
+                "actor_source": identity.actor_source if identity else None,
+                "reason": "no_active_identity" if identity is None else "role_not_permitted",
+            },
+        )
+        raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
 
 
 def require_permission(permission: str) -> None:
-    store.refresh()
-    if store.benchmark_permissions().get(permission):
-        return
-    store.audit(
-        "permission_denied",
-        "tenant",
-        store.tenant.id,
-        {"permission": permission, "user": store.user.email},
+    identity = _active_request_identity()
+    if identity is None or not store.benchmark_permissions(identity).get(permission):
+        store.audit(
+            "permission_denied",
+            "tenant",
+            store.tenant.id,
+            {
+                "permission": permission,
+                "actor_source": identity.actor_source if identity else None,
+                "reason": "no_active_identity" if identity is None else "role_not_permitted",
+            },
+        )
+        raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
+
+
+def require_admin() -> AuthenticatedIdentity:
+    """Administrator-only gate for identity/credential provisioning."""
+    identity = _active_request_identity()
+    if identity is None or Role.ADMIN not in identity.roles:
+        store.audit(
+            "auth.admin_denied",
+            "tenant",
+            store.tenant.id,
+            {"reason": "no_active_identity" if identity is None else "not_admin"},
+        )
+        raise HTTPException(status_code=403, detail="Administrator role required")
+    return identity
+
+
+def _user_admin_view(user) -> UserAdminView:
+    return UserAdminView(
+        id=user.id,
+        tenant_id=user.tenant_id,
+        email=user.email,
+        full_name=user.full_name,
+        roles=list(user.roles),
+        account_status=user.account_status,
+        is_bootstrap=user.is_bootstrap,
     )
-    raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
+
+
+def _credential_admin_view(credential: StoredApiCredential) -> CredentialAdminView:
+    return CredentialAdminView(
+        credential_id=credential.credential_id,
+        user_id=credential.user_id,
+        tenant_id=credential.tenant_id,
+        token_fingerprint=credential.token_fingerprint,
+        status=credential.status,
+        authentication_source=credential.authentication_source,
+        created_at=credential.created_at,
+        revoked_at=credential.revoked_at,
+        last_used_at=credential.last_used_at,
+    )
+
+
+@app.get("/auth/users", response_model=list[UserAdminView])
+def list_users_endpoint() -> list[UserAdminView]:
+    require_admin()
+    return [_user_admin_view(user) for user in store.list_users()]
+
+
+@app.post("/auth/users", response_model=UserAdminView, status_code=status.HTTP_201_CREATED)
+def create_user_endpoint(payload: UserCreateRequest) -> UserAdminView:
+    require_admin()
+    try:
+        user = store.create_user(payload.email, payload.full_name, payload.roles)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return _user_admin_view(user)
+
+
+@app.post(
+    "/auth/users/{user_id}/credentials",
+    response_model=CredentialCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_credential_endpoint(user_id: UUID) -> CredentialCreateResponse:
+    require_admin()
+    try:
+        credential, raw_token = store.create_credential(user_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown user")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # The raw token is returned exactly once here and is never persisted,
+    # logged, or audited.
+    return CredentialCreateResponse(
+        credential_id=credential.credential_id,
+        user_id=credential.user_id,
+        token_fingerprint=credential.token_fingerprint,
+        token=raw_token,
+        created_at=credential.created_at,
+    )
+
+
+@app.get("/auth/credentials", response_model=list[CredentialAdminView])
+def list_credentials_endpoint() -> list[CredentialAdminView]:
+    require_admin()
+    return [_credential_admin_view(credential) for credential in store.list_credentials()]
+
+
+@app.post("/auth/credentials/{credential_id}/revoke", response_model=CredentialAdminView)
+def revoke_credential_endpoint(credential_id: UUID) -> CredentialAdminView:
+    require_admin()
+    try:
+        credential = store.revoke_credential(credential_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown credential")
+    return _credential_admin_view(credential)
+
+
+# ---------------------------------------------------------------------------
+# Route access inventory (RBAC foundation).
+#
+# Every API route is classified. `permission_required` routes name the exact
+# permission enforced (a key of store.benchmark_permissions(), or the special
+# ADMIN_PERMISSION for identity/credential administration). `authenticated_write`
+# is an honest extension for authenticated mutations that do NOT yet carry a
+# granular permission — that incomplete coverage is why rbac-role-separation
+# remains a declared blocker; those routes are non-public and require auth in
+# client mode, but granular per-route permissions are future work.
+# ---------------------------------------------------------------------------
+ROUTE_ACCESS_CLASSIFICATIONS = {
+    "public",
+    "authenticated_read",
+    "authenticated_write",
+    "permission_required",
+    "system_internal",
+}
+ADMIN_PERMISSION = "__admin__"
+KNOWN_PERMISSIONS = {
+    "view_benchmarks",
+    "manage_benchmark_config",
+    "review_anomalies",
+    "dismiss_anomalies",
+    "run_diagnostics",
+    "approve_ai_content",
+    "issue_client_reports",
+    "export_evidence",
+    "edit_decision_records",
+    "view_audit_history",
+    "record_field_corrections",
+    "view_field_corrections",
+}
+
+ROUTE_ACCESS_POLICY: dict[tuple[str, str], dict[str, str]] = {
+    # --- public (no API key; framework or read-only status) ---
+    ("GET", "/health"): {"classification": "public"},
+    ("GET", "/docs"): {"classification": "public"},
+    ("GET", "/docs/oauth2-redirect"): {"classification": "public"},
+    ("GET", "/openapi.json"): {"classification": "public"},
+    ("GET", "/redoc"): {"classification": "public"},
+    ("GET", "/readiness/client-data"): {"classification": "public"},
+    ("GET", "/runtime/backends"): {"classification": "public"},
+    ("GET", "/local-ai/status"): {"classification": "public"},
+    ("GET", "/audit-logs/integrity"): {"classification": "public"},
+    # signed downloads are gated by their expiring signed token, not the API key
+    ("GET", "/signed/report-exports/{export_id}"): {"classification": "public"},
+    ("GET", "/signed/upload-files/{file_id}"): {"classification": "public"},
+    # --- authenticated reads (auth required; no granular permission) ---
+    ("GET", "/auth/session"): {"classification": "authenticated_read"},
+    ("GET", "/workspaces"): {"classification": "authenticated_read"},
+    ("GET", "/documents"): {"classification": "authenticated_read"},
+    ("GET", "/documents/{document_id}/chunks"): {"classification": "authenticated_read"},
+    ("GET", "/failures"): {"classification": "authenticated_read"},
+    ("GET", "/processing-jobs"): {"classification": "authenticated_read"},
+    ("GET", "/validation-tasks"): {"classification": "authenticated_read"},
+    ("GET", "/monday-reports"): {"classification": "authenticated_read"},
+    ("GET", "/uploads/{upload_id}/files"): {"classification": "authenticated_read"},
+    ("GET", "/dashboards/summary"): {"classification": "authenticated_read"},
+    ("GET", "/field-corrections/registry"): {"classification": "authenticated_read"},
+    ("GET", "/workspaces/{workspace_id}/report-draft"): {"classification": "authenticated_read"},
+    # audit-history viewing is authenticated; a granular view_audit_history gate
+    # is future route coverage (rbac-role-separation stays BLOCKED).
+    ("GET", "/audit-logs"): {"classification": "authenticated_read"},
+    # --- permission-gated (enforce a specific permission) ---
+    ("GET", "/benchmarking/config"): {"classification": "permission_required", "permission": "view_benchmarks"},
+    ("PATCH", "/benchmarking/values/{benchmark_id}"): {
+        "classification": "permission_required",
+        "permission": "manage_benchmark_config",
+    },
+    ("GET", "/workspaces/{workspace_id}/benchmarking"): {
+        "classification": "permission_required",
+        "permission": "view_benchmarks",
+    },
+    ("POST", "/workspaces/{workspace_id}/benchmarking/measurements"): {
+        "classification": "permission_required",
+        "permission": "review_anomalies",
+    },
+    ("PATCH", "/benchmarking/anomalies/{anomaly_id}/diagnostics/{action_id}/dismiss"): {
+        "classification": "permission_required",
+        "permission": "dismiss_anomalies",
+    },
+    ("POST", "/workspaces/{workspace_id}/field-corrections"): {
+        "classification": "permission_required",
+        "permission": "record_field_corrections",
+    },
+    ("GET", "/workspaces/{workspace_id}/field-corrections"): {
+        "classification": "permission_required",
+        "permission": "view_field_corrections",
+    },
+    ("POST", "/field-corrections/{correction_id}/revert"): {
+        "classification": "permission_required",
+        "permission": "record_field_corrections",
+    },
+    ("GET", "/auth/users"): {"classification": "permission_required", "permission": ADMIN_PERMISSION},
+    ("POST", "/auth/users"): {"classification": "permission_required", "permission": ADMIN_PERMISSION},
+    ("POST", "/auth/users/{user_id}/credentials"): {
+        "classification": "permission_required",
+        "permission": ADMIN_PERMISSION,
+    },
+    ("GET", "/auth/credentials"): {"classification": "permission_required", "permission": ADMIN_PERMISSION},
+    ("POST", "/auth/credentials/{credential_id}/revoke"): {
+        "classification": "permission_required",
+        "permission": ADMIN_PERMISSION,
+    },
+    # --- authenticated writes (auth required; granular permission pending) ---
+    ("POST", "/workspaces"): {"classification": "authenticated_write"},
+    ("POST", "/uploads"): {"classification": "authenticated_write"},
+    ("POST", "/uploads/direct"): {"classification": "authenticated_write"},
+    ("POST", "/uploads/{upload_id}/complete"): {"classification": "authenticated_write"},
+    ("POST", "/chat/messages"): {"classification": "authenticated_write"},
+    ("POST", "/monday-reports"): {"classification": "authenticated_write"},
+    ("POST", "/monday-reports/{report_id}/exports/{export_format}"): {"classification": "authenticated_write"},
+    ("POST", "/report-exports/{export_id}/signed-url"): {"classification": "authenticated_write"},
+    ("POST", "/upload-files/{file_id}/signed-url"): {"classification": "authenticated_write"},
+    ("POST", "/retention/run"): {"classification": "authenticated_write"},
+    ("PATCH", "/validation-tasks/{task_id}"): {"classification": "authenticated_write"},
+}
+
+# Mutations that must never be classified "public".
+_SENSITIVE_MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def audited_routes() -> list[tuple[str, str]]:
+    """Enumerate the app's real (method, path) routes, excluding HEAD/OPTIONS."""
+    seen: set[tuple[str, str]] = set()
+    for route in app.routes:
+        methods = getattr(route, "methods", None) or set()
+        path = getattr(route, "path", None)
+        if path is None:
+            continue
+        for method in methods:
+            if method in {"HEAD", "OPTIONS"}:
+                continue
+            seen.add((method, path))
+    return sorted(seen)
+
+
+def validate_route_access_policy() -> list[str]:
+    """Return a list of route-policy errors (empty when consistent)."""
+    errors: list[str] = []
+    routes = set(audited_routes())
+    for method, path in sorted(routes):
+        entry = ROUTE_ACCESS_POLICY.get((method, path))
+        if entry is None:
+            errors.append(f"route {method} {path} has no access classification")
+            continue
+        classification = entry.get("classification")
+        if classification not in ROUTE_ACCESS_CLASSIFICATIONS:
+            errors.append(f"route {method} {path} has unknown classification {classification!r}")
+            continue
+        if classification == "permission_required":
+            permission = entry.get("permission")
+            if not permission:
+                errors.append(f"permission_required route {method} {path} has no permission")
+            elif permission != ADMIN_PERMISSION and permission not in KNOWN_PERMISSIONS:
+                errors.append(f"route {method} {path} references unknown permission {permission!r}")
+        if classification == "public" and method in _SENSITIVE_MUTATION_METHODS:
+            errors.append(f"sensitive mutation {method} {path} must not be classified public")
+    # Every policy entry must correspond to a real route (no stale rows).
+    for method, path in ROUTE_ACCESS_POLICY:
+        if (method, path) not in routes:
+            errors.append(f"policy row {method} {path} does not match any route")
+    return errors
 
 
 @app.get("/workspaces", response_model=list[Workspace])

@@ -157,7 +157,7 @@ export const roadmapLanes: RoadmapLane[] = [
         status: "complete",
         gate: "audit:report-variants",
         evidence: "MR-SCHEMA-1 targets drive drafting; casing, timeline, survey stations, and hydraulics observations extract with provenance and explicit units, minimum-curvature geometry is review-gated, both trajectory visuals render segment-aware paths, and an auditable versioned field-level correction foundation (registry-gated, in-process-serialized, configured-actor context) records corrections without overwriting source lineage.",
-        next: "Close correction gaps with immutable-event history, verified per-user reviewer identity, and cross-process atomicity; build the Phase 06 local-AI extraction router validated against the promoted FORGE evaluation set; apply reviewed corrections into official JSON/formatted export provenance."
+        next: "The authenticated-identity foundation (per-user credentials, request-scoped actor, default-deny RBAC, admin provisioning/revocation, configured-tenant boundary) is delivered; close the remaining declared blockers — full tenant/workspace authorization, complete route-level RBAC, verified per-user reviewer identity, keyed audit integrity, and cross-process atomicity — then build the Phase 06 local-AI extraction router and apply reviewed corrections into official JSON/formatted export provenance."
       },
       {
         id: "item-ui-execution-board",

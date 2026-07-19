@@ -115,3 +115,18 @@ pnpm run package:client-approval
 ```
 
 The approval command writes `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.json`. A `BLOCKED` result is expected until every readiness check passes.
+
+## Authenticated identity (foundation)
+
+An authenticated-identity foundation (`docs/AUTHENTICATED_IDENTITY.md`,
+`audit:identity-rbac`) resolves opaque per-user credentials server-side to a
+request-scoped identity with default-deny RBAC on the existing roles, admin-only
+provisioning/revocation, and a configured-tenant boundary. In **demo/local
+mode** the shared key maps to a labelled `demo_bootstrap` administrator (existing
+clients keep working); in **client mode** a resolvable credential is required and
+the shared key is only a `demo_bootstrap` compatibility credential — never a
+per-user identity and never a superuser bypass. This foundation **closes no GA
+blocker**: `per-user-identity`, `rbac-role-separation`,
+`tenant-authorization-enforcement`, and `verified-reviewer-identity` remain
+declared blockers and `ga:readiness` stays `GA_BLOCKED` until resolved by
+separate approved pull requests.
