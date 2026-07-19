@@ -70,19 +70,24 @@ def evaluate_client_data_readiness(store: Any) -> ClientDataReadiness:
         strict_failure=False,
     )
 
-    demo_seed_present = any(log.action == "state.seed" for log in store.audit_logs)
+    # Detect demo identity via stable markers only. The former audit-action
+    # sentinel ("state.seed") is never emitted by the store, so it could never
+    # detect a demo seed; detection now relies on the reliable tenant/user
+    # identity markers. (The app does not seed demo DATA — fresh startup is
+    # neutral — so identity is the meaningful signal.)
     demo_identity_present = (
-        store.tenant.slug == "northstar"
+        store.tenant.slug in {"northstar", "demo", "demo-tenant"}
         or store.user.email.endswith("@monday-report.local")
+        or store.user.email.endswith("@example.test")
         or store.user.full_name.lower().startswith("demo ")
     )
     add(
         "demo_seed_removed",
         "Demo tenant and seed data",
-        not demo_seed_present and not demo_identity_present,
-        "Demo seed state or demo user identity is present."
-        if demo_seed_present or demo_identity_present
-        else "No demo seed marker or demo user identity detected.",
+        not demo_identity_present,
+        "Demo user/tenant identity markers are present."
+        if demo_identity_present
+        else "No demo tenant/user identity markers detected (stable-marker detection).",
         "Start client environments from a clean state path and provision the real tenant/user identity.",
     )
 

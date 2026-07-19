@@ -755,6 +755,30 @@ class ClientDataReadinessCheck(BaseModel):
     status: Literal["pass", "warn", "fail"]
     detail: str
     remediation: str
+    # Additive, optional GA-integrity metadata (legacy consumers ignore these).
+    disposition: Literal[
+        "PASS", "FAIL", "BLOCKED", "SKIPPED", "NOT_APPLICABLE", "REVIEW_REQUIRED"
+    ] | None = None
+    category: (
+        Literal[
+            "software",
+            "configuration",
+            "infrastructure",
+            "security_review",
+            "data_review_evidence",
+            "client_approval",
+        ]
+        | None
+    ) = None
+    severity: Literal["blocker", "high", "medium", "low"] | None = None
+    owner_type: (
+        Literal["engineering", "security", "platform", "operations", "data_review", "client_organization"]
+        | None
+    ) = None
+    policy_reference: str | None = None
+    evidence_reference: str | None = None
+    resolution_condition: str | None = None
+    applicability_justification: str | None = None
 
 
 class ClientDataReadiness(BaseModel):

@@ -106,6 +106,8 @@ Run strict GA readiness after starting the API and applying the client-mode envi
 pnpm run ga:readiness
 ```
 
+`ga:readiness` is a truthful, registry-backed gate (see `docs/GA_READINESS_INTEGRITY.md`). It emits one check per entry in `evals/ga/blocker_registry.v1.json`, each with an explicit disposition (`PASS`/`FAIL`/`BLOCKED`/`SKIPPED`/`NOT_APPLICABLE`/`REVIEW_REQUIRED`) mapped onto the legacy `pass`/`warn`/`fail` status. `SKIPPED`, missing evidence, and missing/empty command execution never count as pass; `--skip-commands` can never yield `GA_READY`; evidence is bound to a clean git commit/tree with a canonical `payload_sha256`. A known-but-unimplemented control (RBAC, keyed audit integrity, migration runner, CI, backup/restore, client approval, etc.) is a declared `BLOCKED`/`REVIEW_REQUIRED` entry, so blocker counts are truthful and the gate stays `GA_BLOCKED` even with PostgreSQL and Redis provisioned. No waiver, environment variable, static configured actor, or unsigned file can resolve a blocker in this version.
+
 Run the final client-data approval command after strict readiness is green:
 
 ```powershell

@@ -110,10 +110,10 @@ export const roadmapExecutionBoard: RoadmapExecutionCard[] = [
   {
     id: "exec-ga-proof",
     label: "GA proof",
-    value: "GA_READY",
-    detail: "Strict readiness remains the handoff gate before client data or pilot dispatch.",
+    value: "GA_BLOCKED",
+    detail: "The truthful registry-backed GA gate reports GA_BLOCKED with non-zero blockers across software, security, infrastructure, configuration, and client approval; PostgreSQL+Redis provisioning alone cannot yield GA_READY.",
     command: "pnpm run ga:readiness",
-    tone: "good"
+    tone: "warning"
   },
   {
     id: "exec-package",
@@ -260,8 +260,8 @@ export const roadmapLanes: RoadmapLane[] = [
         owner: "QA + product",
         status: "queued",
         gate: "ga:readiness",
-        evidence: "Strict GA readiness currently reports GA_READY with zero blockers in client mode.",
-        next: "Run a timed client package pilot using approved env and sanitized acceptance data."
+        evidence: "The registry-backed GA gate reports GA_BLOCKED with truthful non-zero blockers; a client dry run is gated until the registered software/security/governance blockers are resolved.",
+        next: "Resolve the registry-backed GA blockers in separate PRs, then run a timed client package pilot using approved env and sanitized acceptance data."
       },
       {
         id: "item-approval-ledger",
