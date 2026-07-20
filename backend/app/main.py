@@ -84,7 +84,7 @@ from .corrections_registry import (
 from .readiness import client_data_mode, evaluate_client_data_readiness
 from .runtime_backends import runtime_backend_status
 from .signed_urls import create_signed_token, signing_secret_configured, verify_signed_token
-from .store import store
+from .store import store, ReviewerNotVerified
 from .audit_keys import AuditIntegrityUnavailable, audit_key_provider
 from .tenant_authorization import owned_via_graph, owns, request_tenant_id
 
@@ -117,6 +117,15 @@ async def _audit_integrity_unavailable_handler(request: Request, exc: AuditInteg
     # key is unavailable (client mode). audit() fails BEFORE append/save, so nothing
     # was persisted. Return a stable service-unavailable error.
     return JSONResponse(status_code=503, content={"detail": "Audit integrity key is unavailable"})
+
+
+@app.exception_handler(ReviewerNotVerified)
+async def _reviewer_not_verified_handler(request: Request, exc: ReviewerNotVerified) -> JSONResponse:
+    # A reviewer-controlled outcome (field correction / validation) was attempted in
+    # client mode by a non-verified actor. The store fails closed BEFORE any outcome
+    # mutation or audit append. Return a stable authorization error; no reviewer
+    # detail is leaked.
+    return JSONResponse(status_code=403, content={"detail": "Verified reviewer required"})
 
 
 def _best_effort_audit(*args, **kwargs) -> None:

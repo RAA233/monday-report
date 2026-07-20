@@ -389,7 +389,7 @@ def main() -> int:
         ga_checks = {c["id"]: c for c in gar.evaluate_blockers(readiness_by_id, forge_report=None)}
         check("55 RBAC role-separation is evidence-driven PASS (complete route coverage)", ga_checks["ga_rbac_role_separation"]["disposition"] == "PASS")
         check("56 Tenant authorization remains blocked", ga_checks["ga_tenant_authorization"]["disposition"] == "BLOCKED")
-        check("57 Verified reviewer identity remains blocked", gar.is_blocking(ga_checks["ga_verified_reviewer_identity"]))
+        check("57 Verified reviewer identity is delivered (evidence-driven PASS)", ga_checks["ga_verified_reviewer_identity"]["disposition"] == "PASS")
         check("57b Per-user identity blocker remains declared (foundation, not closed)", ga_checks["ga_per_user_identity"]["disposition"] == "BLOCKED")
         status, ga_ready = gar.decide_ga(
             mode="client", parity_ok=not gar.check_registry_parity(list(ga_checks.values())),

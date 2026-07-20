@@ -784,3 +784,33 @@ HMAC-SHA256 foundation (`backend/app/audit_keys.py`, `docs/AUDIT_INTEGRITY.md`).
 | Command | Exit | Result |
 | --- | --- | --- |
 | `pnpm run audit:audit-keyed-integrity` | 0 | **58/58** — baseline forgeability + tail-truncation reproduced; HMAC seal/verify; public-SHA forgery + tampered field + wrong/unknown key + missing HMAC rejected; canonicalization stable/deterministic; legacy transition with no rewrite; rotation with retained keys; client fail-closed; atomicity + concurrency; no key leakage; keyed-integrity evidence-driven PASS-capable, tail-truncation BLOCKED, GA `GA_BLOCKED`. |
+
+### Verified reviewer attribution (branch `feat/verified-reviewer-attribution`)
+
+Attributes field-correction (record + revert) and validation outcomes to a
+**verified authenticated human reviewer** instead of the single configured actor
+(`docs/VERIFIED_REVIEWER_ATTRIBUTION.md`, closes AUDIT-001 for correction/validation).
+- **Verified reviewer**: `actor_source=authenticated` + active non-bootstrap user +
+  active credential + user/credential/identity bound to the request tenant +
+  permission-eligible (`record_field_corrections` / `resolve_validation` via
+  `has_permission`). All facts are server-derived; client-supplied
+  reviewer/tenant/email fields are ignored.
+- **Client fail-closed**: a `demo_bootstrap`/configured/system actor, inactive user,
+  revoked credential, cross-tenant, or unauthorized reviewer is rejected with
+  `ReviewerNotVerified` → **403** BEFORE any outcome mutation or audit append.
+- **Attribution**: `reviewer_*` (and distinct `revert_reviewer_*`) fields persist the
+  reviewer id, credential id, non-secret **fingerprint**, roles, actor source, and a
+  verify timestamp on the outcome; the **keyed** audit event's actor matches. No raw
+  token or credential hash is stored. Demo actions are labelled unverified.
+- **Compatibility**: additive fields; old snapshots load without reviewer fields (no
+  backfill); local JSON + Postgres JSONB preserve attribution.
+- **Readiness**: `ga_verified_reviewer_identity` is **evidence-driven PASS** (wiring
+  + schema + runtime accept/reject logic); **registry unchanged**;
+  `audit-keyed-integrity` PASS-capable, `audit-tail-truncation-detection` and the
+  persistence/transaction blockers stay **BLOCKED**; GA stays `GA_BLOCKED`. AI-content
+  approval and report issuance are outside this control's resolution condition
+  (documented as a future increment).
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `pnpm run audit:verified-reviewer` | 0 | **50/50** — verified reviewer records/reverts/validates with server-derived attribution + matching keyed audit; demo/system/configured/cross-tenant/revoked/disabled/unauthorized rejected before mutation; client-supplied reviewer/tenant/email ignored; no token/hash leakage; concurrency-distinct; old snapshot loads without backfill; JSON+JSONB preserve; evidence-driven PASS; HMAC/tenant/RBAC/registry/GA/FORGE/trajectory/benchmarking regressions intact. |

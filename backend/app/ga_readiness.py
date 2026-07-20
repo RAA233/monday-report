@@ -408,6 +408,93 @@ def _audit_keyed_integrity_probe() -> tuple[str, str]:
     )
 
 
+def _verified_reviewer_probe() -> tuple[str, str]:
+    """Evidence-driven evaluation of ``verified-reviewer-identity`` (AUDIT-001).
+
+    PASS-capable ONLY when correction (record + revert) and validation outcomes
+    enforce and persist a VERIFIED authenticated-human reviewer AND a runtime logic
+    check proves the verification accepts an eligible authenticated reviewer while
+    rejecting configured/system/bootstrap actors. Never PASS on field presence alone.
+    This probe builds NO store and performs NO file/state I/O (it binds the pure
+    verification method to a synthetic self)."""
+    try:
+        import inspect
+        from types import SimpleNamespace
+        from uuid import uuid4
+
+        from . import store as _store_mod
+        from .permissions import has_permission
+        from .schemas import AuthenticatedIdentity, FieldCorrection, Role, ValidationTask
+    except Exception as exc:  # pragma: no cover - defensive
+        return "BLOCKED", f"Verified reviewer identity could not be evaluated: {exc}"
+
+    reasons: list[str] = []
+    Store = _store_mod.LocalStateStore
+
+    # (1) Enforcement wiring: helpers exist and every reviewer-outcome method gates.
+    for meth in ("resolve_verified_reviewer", "_reviewer_verification", "_reviewer_attribution"):
+        if not hasattr(Store, meth):
+            reasons.append(f"store is missing {meth}")
+    for name in ("record_field_correction", "revert_field_correction", "update_validation_task"):
+        try:
+            src = inspect.getsource(getattr(Store, name))
+        except Exception:
+            src = ""
+        if "resolve_verified_reviewer" not in src:
+            reasons.append(f"{name} does not enforce the verified-reviewer gate")
+    if not hasattr(_store_mod, "ReviewerNotVerified"):
+        reasons.append("ReviewerNotVerified exception is missing")
+
+    # (2) Attribution schema: reviewer fields present on both outcome models.
+    for model, fields in (
+        (FieldCorrection, ("reviewer_user_id", "reviewer_verified_at", "reviewer_actor_source", "revert_reviewer_user_id")),
+        (ValidationTask, ("reviewer_user_id", "reviewer_verified_at", "reviewer_actor_source")),
+    ):
+        for field in fields:
+            if field not in model.model_fields:
+                reasons.append(f"{model.__name__} is missing reviewer field {field}")
+
+    # (3) Runtime logic: accept an eligible authenticated human; reject system/bootstrap.
+    try:
+        tid, uid, cid = uuid4(), uuid4(), uuid4()
+        fake = SimpleNamespace(
+            users={uid: SimpleNamespace(tenant_id=tid, account_status="active", is_bootstrap=False)},
+            api_credentials={cid: SimpleNamespace(status="active", tenant_id=tid, user_id=uid)},
+            tenant=SimpleNamespace(id=tid),
+        )
+        eligible = next((r for r in Role if has_permission([r], "record_field_corrections")), None)
+        if eligible is None:
+            reasons.append("no role grants record_field_corrections")
+        else:
+            base = dict(tenant_id=tid, email="r@x.y", display_name="R", authentication_source="api_token", credential_id=cid)
+            ok, _ = Store._reviewer_verification(
+                fake, AuthenticatedIdentity(user_id=uid, roles=[eligible], actor_source="authenticated", **base),
+                "record_field_corrections")
+            sys_ok, _ = Store._reviewer_verification(
+                fake, AuthenticatedIdentity(user_id=uid, roles=[eligible], actor_source="system", **base),
+                "record_field_corrections")
+            demo_ok, _ = Store._reviewer_verification(
+                fake, AuthenticatedIdentity(user_id=uid, roles=[eligible], actor_source="demo_bootstrap", **base),
+                "record_field_corrections")
+            if not ok:
+                reasons.append("eligible authenticated reviewer was not accepted")
+            if sys_ok or demo_ok:
+                reasons.append("system/bootstrap actor was incorrectly accepted as a verified reviewer")
+    except Exception as exc:
+        reasons.append(f"reviewer verification runtime check failed: {exc}")
+
+    if reasons:
+        return "BLOCKED", "Verified reviewer identity evidence incomplete: " + "; ".join(reasons) + "."
+    return (
+        "PASS",
+        "Correction (record + revert) and validation outcomes attribute a verified authenticated human: "
+        "reviewer identity is server-derived and permission-eligible, configured/system/bootstrap actors are "
+        "rejected in client mode before any mutation, reviewer attribution is persisted on the outcome and the "
+        "keyed audit event, and no credential material is exposed. AI-content approval and report issuance are "
+        "outside this control's resolution condition and are documented as a separate future increment.",
+    )
+
+
 def evaluate_blockers(
     readiness_by_id: dict[str, str],
     *,
@@ -443,6 +530,8 @@ def evaluate_blockers(
             disposition, detail = _tenant_authorization_probe()
         elif check_id == "ga_audit_keyed_integrity":
             disposition, detail = _audit_keyed_integrity_probe()
+        elif check_id == "ga_verified_reviewer_identity":
+            disposition, detail = _verified_reviewer_probe()
         elif check_id == "ga_parser_coverage_evidence":
             disposition, detail, evidence_reference = _forge_probe(forge_report)
         elif check_id == "ga_official_export_gate":

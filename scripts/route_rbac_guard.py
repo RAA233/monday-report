@@ -257,7 +257,7 @@ def main() -> int:
                 if _v is not None:
                     os.environ[_k] = _v
         check("67 Tenant authorization remains blocked", ga_checks["ga_tenant_authorization"]["disposition"] == "BLOCKED")
-        check("68 Verified reviewer identity remains blocked", gar.is_blocking(ga_checks["ga_verified_reviewer_identity"]))
+        check("68 Verified reviewer identity is delivered (evidence-driven PASS)", ga_checks["ga_verified_reviewer_identity"]["disposition"] == "PASS")
         check("69 Audit-integrity blockers remain blocked", ga_checks["ga_audit_keyed_integrity"]["disposition"] == "BLOCKED" and ga_checks["ga_audit_tail_truncation"]["disposition"] == "BLOCKED")
         check("69b RBAC role-separation is evidence-driven PASS (matches resolution condition)", ga_checks["ga_rbac_role_separation"]["disposition"] == "PASS")
         status_ga, ready_ga = gar.decide_ga(mode="client", parity_ok=not gar.check_registry_parity(list(ga_checks.values())), checks=list(ga_checks.values()), commands_skipped=False, commands_passed=True, worktree_clean=True)

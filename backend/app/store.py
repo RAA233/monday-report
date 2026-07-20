@@ -122,6 +122,16 @@ _NON_MUTATION_AUDIT_ACTIONS = frozenset({
     "upload.complete_duplicate_file",
     "benchmarking.workspace_missing_status",
 })
+
+
+class ReviewerNotVerified(Exception):
+    """Raised when a reviewer-controlled outcome (field correction / validation) is
+    attempted in CLIENT mode by an actor that is NOT a verified authenticated human
+    reviewer (bootstrap / configured / system actor, inactive user/credential,
+    cross-tenant, or lacking the required permission). Mapped to HTTP 403. Raised
+    BEFORE any outcome mutation or audit append (fail closed)."""
+
+
 INVALID_STORAGE_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
 UNSAFE_TEXT_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")
 RESERVED_STORAGE_NAMES = {
@@ -1204,10 +1214,16 @@ class LocalStateStore:
     def update_validation_task(self, task_id: UUID, payload: ValidationTaskUpdate) -> ValidationTask:
         self.require_audit_write_capability("validation_task.update")
         self.refresh()
+        # Verified-reviewer gate: fail closed in client mode before any mutation.
+        identity, verified = self.resolve_verified_reviewer(
+            "resolve_validation", "validation_task.update"
+        )
         task = self.validation_tasks[task_id]
         previous_status = task.status
         task.status = payload.status
         task.resolution_note = payload.resolution_note
+        for _k, _v in self._reviewer_attribution(identity, verified).items():
+            setattr(task, _k, _v)
 
         if task.target_type == "failure" and task.target_id in self.failures:
             self.failures[task.target_id].validation_status = payload.status
@@ -1222,6 +1238,8 @@ class LocalStateStore:
                 "from": previous_status.value,
                 "to": payload.status.value,
                 "resolution_note": payload.resolution_note,
+                "reviewer_verified": verified,
+                "reviewer_actor_source": identity.actor_source,
             },
         )
         return task
@@ -1252,8 +1270,12 @@ class LocalStateStore:
         self.require_audit_write_capability("field_correction.record")
         with self.field_correction_lock:
             self.refresh()
+            # Verified-reviewer gate (AUDIT-001): fail closed in client mode before
+            # any mutation if the actor is not a verified authenticated human.
+            identity, verified = self.resolve_verified_reviewer(
+                "record_field_corrections", "field_correction.record"
+            )
             prior = self._active_field_correction(workspace_id, payload.target_type, payload.field_key)
-            identity = self.current_identity()
             correction = FieldCorrection(
                 tenant_id=self.tenant.id,
                 workspace_id=workspace_id,
@@ -1268,6 +1290,7 @@ class LocalStateStore:
                 actor_source=identity.actor_source,
                 actor_credential_fingerprint=identity.credential_fingerprint,
                 supersedes_id=prior.id if prior else None,
+                **self._reviewer_attribution(identity, verified),
             )
             if prior is not None:
                 prior.status = "superseded"
@@ -1291,6 +1314,8 @@ class LocalStateStore:
                     "value_changed": correction.source_value != correction.corrected_value,
                     "reason_length": len(correction.correction_reason),
                     "supersedes": str(prior.id) if prior else None,
+                    "reviewer_verified": verified,
+                    "reviewer_actor_source": identity.actor_source,
                 },
             )
             return correction
@@ -1299,11 +1324,20 @@ class LocalStateStore:
         self.require_audit_write_capability("field_correction.revert")
         with self.field_correction_lock:
             self.refresh()
+            # Verified-reviewer gate: fail closed in client mode before any mutation
+            # (and before existence lookup, so a non-verified actor never learns
+            # whether the correction exists).
+            identity, verified = self.resolve_verified_reviewer(
+                "record_field_corrections", "field_correction.revert"
+            )
             correction = self.field_corrections[correction_id]
             if correction.status != "active":
                 raise ValueError("Only an active correction can be reverted.")
             correction.status = "reverted"
             correction.revert_reason = revert_reason
+            # Attribute the REVERTING reviewer, kept distinct from the recorder.
+            for _k, _v in self._reviewer_attribution(identity, verified, revert=True).items():
+                setattr(correction, _k, _v)
             self.audit(
                 "field_correction.revert",
                 "field_correction",
@@ -1313,6 +1347,8 @@ class LocalStateStore:
                     "target_type": correction.target_type,
                     "field_key": correction.field_key,
                     "revert_reason_length": len(revert_reason),
+                    "reviewer_verified": verified,
+                    "reviewer_actor_source": identity.actor_source,
                 },
             )
             return correction
@@ -6376,6 +6412,76 @@ class LocalStateStore:
             f"Audit integrity key is unavailable; refusing client-mode operation "
             f"'{operation}' before mutating business state."
         )
+
+    def _reviewer_verification(
+        self, identity: "AuthenticatedIdentity", permission: str
+    ) -> tuple[bool, str]:
+        """Return (verified, reason). A VERIFIED reviewer is a request-scoped
+        AUTHENTICATED human: actor_source == 'authenticated', an active non-bootstrap
+        user, an active credential, the user+credential+identity all bound to the
+        configured request tenant, and eligible for `permission` through the existing
+        permission policy. All facts are read from the SERVER-side identity/records —
+        never from client-supplied data."""
+        if identity.actor_source != "authenticated":
+            return False, f"actor '{identity.actor_source}' is not an authenticated reviewer"
+        user = self.users.get(identity.user_id)
+        if user is None or user.account_status != "active" or getattr(user, "is_bootstrap", False):
+            return False, "reviewer is not an active, non-bootstrap human user"
+        if user.tenant_id != self.tenant.id or identity.tenant_id != self.tenant.id:
+            return False, "reviewer is not bound to the request tenant"
+        credential = self.api_credentials.get(identity.credential_id) if identity.credential_id else None
+        if (
+            credential is None
+            or credential.status != "active"
+            or credential.tenant_id != self.tenant.id
+            or credential.user_id != identity.user_id
+        ):
+            return False, "reviewer credential is not active and bound to the reviewer/tenant"
+        from .permissions import has_permission
+
+        if not has_permission(identity.roles, permission):
+            return False, f"reviewer lacks permission '{permission}'"
+        return True, ""
+
+    def resolve_verified_reviewer(
+        self, permission: str, operation: str
+    ) -> tuple["AuthenticatedIdentity", bool]:
+        """Resolve the request-scoped identity for a reviewer-controlled outcome and
+        return (identity, verified). In CLIENT mode a non-verified actor is REJECTED
+        (raise ReviewerNotVerified) BEFORE any mutation. In demo/local mode the
+        bootstrap/configured actor is allowed for compatibility but returns
+        verified=False so the outcome is labelled unverified (never counted as
+        verified-human evidence)."""
+        identity = self.current_identity()
+        verified, reason = self._reviewer_verification(identity, permission)
+        if self._configured_client_data_mode() == "client" and not verified:
+            raise ReviewerNotVerified(f"{operation}: {reason}")
+        return identity, verified
+
+    def _reviewer_attribution(
+        self, identity: "AuthenticatedIdentity", verified: bool, *, revert: bool = False
+    ) -> dict:
+        """Non-secret reviewer attribution copied from the SERVER identity. Only the
+        credential fingerprint (non-secret) is stored — never a raw token or hash.
+        reviewer_verified_at is set only when verified. `revert=True` emits the
+        revert_reviewer_* field names."""
+        stamp = datetime.now(timezone.utc) if verified else None
+        if revert:
+            return {
+                "revert_reviewer_user_id": identity.user_id,
+                "revert_reviewer_credential_fingerprint": identity.credential_fingerprint,
+                "revert_reviewer_roles": list(identity.roles),
+                "revert_reviewer_actor_source": identity.actor_source,
+                "revert_reviewer_verified_at": stamp,
+            }
+        return {
+            "reviewer_user_id": identity.user_id,
+            "reviewer_credential_id": identity.credential_id,
+            "reviewer_credential_fingerprint": identity.credential_fingerprint,
+            "reviewer_roles": list(identity.roles),
+            "reviewer_actor_source": identity.actor_source,
+            "reviewer_verified_at": stamp,
+        }
 
     def audit(
         self,

@@ -411,6 +411,13 @@ export interface ApiValidationTask {
   priority: "low" | "medium" | "high" | "critical";
   status: "open" | "validated" | "rejected" | "conflict";
   resolution_note?: string | null;
+  // Verified-reviewer attribution (AUDIT-001), server-derived (see ApiFieldCorrection).
+  reviewer_user_id?: string | null;
+  reviewer_credential_id?: string | null;
+  reviewer_credential_fingerprint?: string | null;
+  reviewer_roles?: string[];
+  reviewer_actor_source?: "configured" | "authenticated" | "demo_bootstrap" | "system" | null;
+  reviewer_verified_at?: string | null;
   created_at: string;
 }
 
@@ -440,6 +447,19 @@ export interface ApiFieldCorrection {
   supersedes_id?: string | null;
   superseded_by_id?: string | null;
   revert_reason?: string | null;
+  // Verified-reviewer attribution (AUDIT-001), server-derived. reviewer_verified_at
+  // is set only for a verified authenticated human; a demo action leaves it null.
+  reviewer_user_id?: string | null;
+  reviewer_credential_id?: string | null;
+  reviewer_credential_fingerprint?: string | null;
+  reviewer_roles?: string[];
+  reviewer_actor_source?: "configured" | "authenticated" | "demo_bootstrap" | "system" | null;
+  reviewer_verified_at?: string | null;
+  revert_reviewer_user_id?: string | null;
+  revert_reviewer_credential_fingerprint?: string | null;
+  revert_reviewer_roles?: string[];
+  revert_reviewer_actor_source?: "configured" | "authenticated" | "demo_bootstrap" | "system" | null;
+  revert_reviewer_verified_at?: string | null;
   created_at: string;
 }
 

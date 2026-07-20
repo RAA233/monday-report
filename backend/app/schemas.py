@@ -468,6 +468,16 @@ class ValidationTask(BaseModel):
     priority: Literal["low", "medium", "high", "critical"] = "medium"
     status: ValidationStatus = ValidationStatus.OPEN
     resolution_note: str | None = None
+    # Verified-reviewer attribution (AUDIT-001): the authenticated human who last
+    # resolved/updated this task, copied server-side (never client-supplied).
+    # reviewer_verified_at is set ONLY when the reviewer passed verification
+    # (see FieldCorrection); a demo-bootstrap action is labelled but left unverified.
+    reviewer_user_id: UUID | None = None
+    reviewer_credential_id: UUID | None = None
+    reviewer_credential_fingerprint: str | None = None
+    reviewer_roles: list[Role] = Field(default_factory=list)
+    reviewer_actor_source: Literal["configured", "authenticated", "demo_bootstrap", "system"] | None = None
+    reviewer_verified_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -529,6 +539,23 @@ class FieldCorrection(BaseModel):
     supersedes_id: UUID | None = None
     superseded_by_id: UUID | None = None
     revert_reason: str | None = None
+    # Verified-reviewer attribution (AUDIT-001): the request-scoped authenticated
+    # human who RECORDED this correction, copied server-side (never client-supplied).
+    # reviewer_verified_at is set ONLY when the reviewer passed verification
+    # (authenticated + active non-bootstrap user + active credential + tenant-bound +
+    # permission-eligible); a demo-bootstrap action is labelled but left unverified.
+    reviewer_user_id: UUID | None = None
+    reviewer_credential_id: UUID | None = None
+    reviewer_credential_fingerprint: str | None = None
+    reviewer_roles: list[Role] = Field(default_factory=list)
+    reviewer_actor_source: Literal["configured", "authenticated", "demo_bootstrap", "system"] | None = None
+    reviewer_verified_at: datetime | None = None
+    # The reviewer who REVERTED (distinct from the recorder), set on revert.
+    revert_reviewer_user_id: UUID | None = None
+    revert_reviewer_credential_fingerprint: str | None = None
+    revert_reviewer_roles: list[Role] = Field(default_factory=list)
+    revert_reviewer_actor_source: Literal["configured", "authenticated", "demo_bootstrap", "system"] | None = None
+    revert_reviewer_verified_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 

@@ -129,7 +129,11 @@ per-user identity and never a superuser bypass. This foundation **closes no GA
 blocker**: `per-user-identity`, `rbac-role-separation`,
 `tenant-authorization-enforcement`, and `verified-reviewer-identity` remain
 declared blockers and `ga:readiness` stays `GA_BLOCKED` until resolved by
-separate approved pull requests.
+separate approved pull requests. (`verified-reviewer-identity` is since
+**delivered for correction/validation outcomes** — server-derived,
+permission-eligible reviewer with client fail-closed; evidence-driven
+`ga_verified_reviewer_identity` — see `docs/VERIFIED_REVIEWER_ATTRIBUTION.md`;
+GA stays `GA_BLOCKED` on the remaining controls.)
 
 ## Route-level RBAC (enforcement)
 

@@ -365,8 +365,8 @@ def main() -> int:
         check("65 tenant-authorization-enforcement remains BLOCKED", ta_check["disposition"] == "BLOCKED")
         check("66 tenant-authorization detail is evidence-driven (API-layer implemented, RLS pending)",
               "API-layer" in ta_check["detail"] and "RLS" in ta_check["detail"])
-        check("67 verified-reviewer + audit-integrity blockers stay BLOCKED",
-              gar.is_blocking(ga_checks["ga_verified_reviewer_identity"]) and ga_checks["ga_audit_keyed_integrity"]["disposition"] == "BLOCKED")
+        check("67 verified-reviewer delivered (PASS); audit-keyed-integrity stays BLOCKED without a key",
+              ga_checks["ga_verified_reviewer_identity"]["disposition"] == "PASS" and ga_checks["ga_audit_keyed_integrity"]["disposition"] == "BLOCKED")
         check("68 RBAC role-separation still evidence-driven PASS (no route regression)", ga_checks["ga_rbac_role_separation"]["disposition"] == "PASS")
         check("69 route policy remains fully enforced (RBAC intact)", m.route_policy_fully_enforced() is True)
         status_ga, ready_ga = gar.decide_ga(mode="client", parity_ok=not gar.check_registry_parity(list(ga_checks.values())),
