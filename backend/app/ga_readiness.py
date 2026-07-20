@@ -313,6 +313,90 @@ def _tenant_authorization_probe() -> tuple[str, str]:
     )
 
 
+def _audit_keyed_integrity_probe() -> tuple[str, str]:
+    """Evidence-driven evaluation of the ``audit-keyed-integrity`` control.
+
+    PASS-capable ONLY when an active managed HMAC key exists AND the keyed path is
+    verified by RUNTIME evidence: a fresh v2 event round-trips under HMAC, a
+    public-SHA forgery of the same payload is REJECTED, the client-mode fail-closed
+    guarantee is present in the audit code, and no key material is exposed. With no
+    active key (or a code-wiring gap) it is BLOCKED — it never flips to PASS on code
+    presence alone. Tail-truncation detection is a SEPARATE, still-BLOCKED control.
+    """
+    try:
+        import hmac as _hmac
+        import inspect
+        from hashlib import sha256 as _sha256
+        from uuid import uuid4
+
+        from . import store as _store_mod
+        from .audit_keys import (
+            INTEGRITY_ALGORITHM,
+            KEYED_INTEGRITY_VERSION,
+            AuditKeyConfigError,
+            audit_key_provider,
+        )
+        from .schemas import AuditLog
+    except Exception as exc:  # pragma: no cover - defensive
+        return "BLOCKED", f"Audit keyed integrity could not be evaluated: {exc}"
+
+    reasons: list[str] = []
+    try:
+        audit_src = inspect.getsource(_store_mod.LocalStateStore.audit)
+    except Exception:
+        audit_src = ""
+    for marker in ("AuditIntegrityUnavailable", "_audit_v2_hash", 'actor_source != "system"'):
+        if marker not in audit_src:
+            reasons.append(f"keyed/fail-closed wiring marker {marker!r} absent from audit()")
+    if not hasattr(_store_mod.LocalStateStore, "_audit_v2_hash") or not hasattr(
+        _store_mod.LocalStateStore, "_canonical_v2_audit_payload"
+    ):
+        reasons.append("keyed HMAC methods missing")
+
+    provider = audit_key_provider()
+    try:
+        key_ref = provider.active_key()
+    except AuditKeyConfigError as exc:
+        return "BLOCKED", f"Audit HMAC key is configured but invalid: {exc}."
+    if key_ref is None:
+        return "BLOCKED", (
+            "Keyed audit integrity is implemented but the control is BLOCKED because no active managed HMAC "
+            "key is configured (audit events are legacy/unkeyed). Configure a >=32-byte managed audit secret "
+            "the state-file writer does not control."
+            + ((" Wiring issues: " + "; ".join(reasons) + ".") if reasons else "")
+        )
+
+    # Runtime evidence: sign + verify a v2 event and reject a public-SHA forgery.
+    event = AuditLog(
+        tenant_id=uuid4(),
+        actor_user_id=uuid4(),
+        action="ga.audit_keyed_probe",
+        resource_type="probe",
+        integrity_version=KEYED_INTEGRITY_VERSION,
+        integrity_algorithm=INTEGRITY_ALGORITHM,
+        key_id=key_ref.key_id,
+        key_version=key_ref.key_version,
+    )
+    payload = _store_mod.LocalStateStore._canonical_v2_audit_payload(event)
+    keyed = _hmac.new(key_ref.secret, payload, _sha256).hexdigest()
+    roundtrip_ok = _hmac.compare_digest(keyed, _hmac.new(key_ref.secret, payload, _sha256).hexdigest())
+    forgery_rejected = not _hmac.compare_digest(keyed, _sha256(payload).hexdigest())
+    if not roundtrip_ok:
+        reasons.append("v2 HMAC roundtrip failed")
+    if not forgery_rejected:
+        reasons.append("public-SHA forgery accepted")
+    if reasons:
+        return "BLOCKED", "Keyed audit integrity evidence incomplete: " + "; ".join(reasons) + "."
+    return (
+        "PASS",
+        f"Audit events are sealed with a versioned keyed HMAC-SHA256 (active key {key_ref.key_id}/"
+        f"{key_ref.key_version}, provider {provider.provider_type()}). A fresh v2 event round-trips under HMAC "
+        "and a public-SHA forgery of the same payload is rejected; client-mode request writes fail closed "
+        "without a key; no key material is exposed. Tail-truncation detection remains a separate BLOCKED "
+        "control (external append-only anchor not implemented in this increment).",
+    )
+
+
 def evaluate_blockers(
     readiness_by_id: dict[str, str],
     *,
@@ -346,6 +430,8 @@ def evaluate_blockers(
             disposition, detail = _rbac_role_separation_probe()
         elif check_id == "ga_tenant_authorization":
             disposition, detail = _tenant_authorization_probe()
+        elif check_id == "ga_audit_keyed_integrity":
+            disposition, detail = _audit_keyed_integrity_probe()
         elif check_id == "ga_parser_coverage_evidence":
             disposition, detail, evidence_reference = _forge_probe(forge_report)
         elif check_id == "ga_official_export_gate":

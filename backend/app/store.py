@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import mimetypes
@@ -22,6 +23,13 @@ from uuid import UUID, uuid4
 from xml.sax.saxutils import escape as xml_escape
 
 from .archive_limits import max_zip_entries, max_zip_uncompressed_bytes
+from .audit_keys import (
+    INTEGRITY_ALGORITHM,
+    KEYED_INTEGRITY_VERSION,
+    AuditIntegrityUnavailable,
+    AuditKeyConfigError,
+    audit_key_provider,
+)
 from .audit_safety import sanitize_audit_metadata
 from .auth import (
     api_key_configured,
@@ -89,6 +97,31 @@ from .schemas import (
 )
 from .trajectory import calculate_trajectory
 
+# Mirrors readiness.CLIENT_READY_VALUES (kept value-identical; store must not
+# import readiness — that module already imports store-dependent policy modules).
+_CLIENT_DATA_MODE_VALUES = {"1", "true", "yes", "client", "production", "prod", "real"}
+# Audit actions that accompany a REJECTION / denial / block / duplicate / config-only
+# response rather than a persisted business mutation. In client mode without a key
+# these are SKIPPED (never written unkeyed) rather than failed closed into a 503 —
+# only a business-mutation audit fails closed. (`upload.blocked` is intentionally
+# NOT here: it persists a blocked-upload record, so it fails closed.)
+_NON_MUTATION_AUDIT_ACTIONS = frozenset({
+    "permission_denied",
+    "tenant_denied",
+    "auth.admin_denied",
+    "authz.cross_tenant_denied",
+    "api.auth_blocked",
+    "client_data.operation_blocked",
+    "report_export.signed_url_blocked",
+    "upload_file.signed_url_blocked",
+    "report_export.download_blocked",
+    "upload_file.download_blocked",
+    "monday_report.export_blocked",
+    "upload.rejected",
+    "upload.complete_rejected",
+    "upload.complete_duplicate_file",
+    "benchmarking.workspace_missing_status",
+})
 INVALID_STORAGE_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
 UNSAFE_TEXT_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")
 RESERVED_STORAGE_NAMES = {
@@ -261,6 +294,11 @@ class LocalStateStore:
         # (Phase 04) — the local JSON snapshot is last-writer-wins across
         # processes.
         self.field_correction_lock = threading.RLock()
+        # Serializes audit append (read previous-hash -> build -> HMAC -> append ->
+        # save) so concurrent appends chain linearly and never fork the previous
+        # hash. Re-entrant; acquired after identity/field-correction locks (which
+        # call audit()), never before, so there is no lock-ordering deadlock.
+        self.audit_lock = threading.RLock()
         self.audit_logs: list[AuditLog] = []
 
         if self._state_exists():
@@ -6272,6 +6310,13 @@ class LocalStateStore:
 
         return chunks
 
+    @staticmethod
+    def _configured_client_data_mode() -> str:
+        """Mirror of readiness.client_data_mode() read directly from the environment
+        to avoid a store->readiness import cycle. Kept value-identical."""
+        raw = os.getenv("MONDAY_REPORT_CLIENT_DATA_MODE", "demo").strip().lower()
+        return "client" if raw in _CLIENT_DATA_MODE_VALUES else "demo"
+
     def audit(
         self,
         action: str,
@@ -6280,70 +6325,196 @@ class LocalStateStore:
         metadata: dict | None = None,
         save: bool = True,
     ) -> None:
-        identity = self.current_identity()
-        previous_hash = self._audit_chain_hash(self.audit_logs[-1]) if self.audit_logs else None
-        audit_log = AuditLog(
-            tenant_id=self.tenant.id,
-            actor_user_id=identity.user_id,
-            action=action,
-            resource_type=resource_type,
-            resource_id=resource_id,
-            metadata=sanitize_audit_metadata(metadata),
-            previous_hash=previous_hash,
-            actor_source=identity.actor_source,
-            actor_roles=list(identity.roles),
-            actor_credential_fingerprint=identity.credential_fingerprint,
-        )
-        # entry_hash payload is intentionally unchanged (actor_user_id is already
-        # sealed) so existing sealed chains still verify; keyed integrity remains
-        # a separate declared blocker.
-        audit_log.entry_hash = self._audit_event_hash(audit_log)
-        self.audit_logs.append(audit_log)
-        if save:
-            self.save()
+        """Append an audit event and (optionally) persist it.
+
+        Integrity: when an active HMAC key is available the event is sealed with a
+        versioned keyed HMAC (integrity_version=2, HMAC-SHA256). In demo/local mode
+        with NO key configured the event is written under clearly-labelled LEGACY
+        integrity (unkeyed SHA-256, integrity_version=None) — never presented as
+        keyed. In CLIENT mode a new unkeyed event is NEVER written: if the active
+        key is unavailable/invalid this raises AuditIntegrityUnavailable BEFORE
+        appending or saving, so neither the audit event nor any in-flight business
+        mutation is persisted (the caller's save() never runs). The whole
+        read-previous -> build -> HMAC -> append -> save sequence is serialized by
+        audit_lock so concurrent appends chain linearly.
+        """
+        with self.audit_lock:
+            identity = self.current_identity()
+            provider = audit_key_provider()
+            try:
+                key_ref = provider.active_key()
+            except AuditKeyConfigError:
+                # A configured-but-invalid key is treated as no key: fail closed in
+                # client mode; labelled legacy in demo — never silently keyed.
+                key_ref = None
+            if (
+                self._configured_client_data_mode() == "client"
+                and key_ref is None
+                and identity.actor_source != "system"
+            ):
+                if action in _NON_MUTATION_AUDIT_ACTIONS:
+                    # A rejection/denial/blocked/duplicate/config-only audit is not a
+                    # business mutation: without a key, skip it (never write an unkeyed
+                    # event) rather than fail the rejection response into a 503.
+                    return
+                # Fail closed for a REQUEST-scoped BUSINESS mutation BEFORE any
+                # append/save, so no unkeyed request event and no in-flight business
+                # mutation is persisted. System/bootstrap writes (actor_source ==
+                # "system") — which only run before any request and only when the
+                # configured key is absent (a not-ready misconfiguration) — fall back
+                # to labelled legacy integrity instead of crashing startup; readiness
+                # reports the missing key as BLOCKED.
+                raise AuditIntegrityUnavailable(
+                    "Audit HMAC key is unavailable; refusing to write an unkeyed audit event in client mode."
+                )
+            previous_hash = self._audit_chain_hash(self.audit_logs[-1]) if self.audit_logs else None
+            common = dict(
+                tenant_id=self.tenant.id,
+                actor_user_id=identity.user_id,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                metadata=sanitize_audit_metadata(metadata),
+                previous_hash=previous_hash,
+                actor_source=identity.actor_source,
+                actor_roles=list(identity.roles),
+                actor_credential_fingerprint=identity.credential_fingerprint,
+            )
+            if key_ref is not None:
+                # v2 keyed event. The integrity envelope fields are part of the
+                # signed payload, so they are set before computing the HMAC.
+                audit_log = AuditLog(
+                    **common,
+                    integrity_version=KEYED_INTEGRITY_VERSION,
+                    integrity_algorithm=INTEGRITY_ALGORITHM,
+                    key_id=key_ref.key_id,
+                    key_version=key_ref.key_version,
+                )
+                audit_log.entry_hash = self._audit_v2_hash(audit_log, key_ref.secret)
+            else:
+                # Legacy (unkeyed) event, labelled by the absence of integrity_version.
+                audit_log = AuditLog(**common)
+                audit_log.entry_hash = self._audit_event_hash(audit_log)
+            self.audit_logs.append(audit_log)
+            if save:
+                try:
+                    self.save()
+                except Exception:
+                    # Snapshot write failed: roll back the in-memory append so
+                    # business and audit state do not silently diverge, and re-raise
+                    # rather than claim the event was recorded.
+                    self.audit_logs.pop()
+                    raise
 
     def audit_integrity_status(self) -> AuditIntegrityStatus:
         self.refresh()
-        total_events = len(self.audit_logs)
-        hashed_events = 0
-        legacy_events = 0
+        provider = audit_key_provider()
+        active_meta = provider.active_metadata()
+        events = self.audit_logs
+        total_events = len(events)
+        hashed_events = 0          # events carrying an entry_hash (backward-compat)
+        pre_seal_events = 0        # events with NO entry_hash (backward-compat "legacy")
+        keyed_event_count = 0      # integrity_version == 2
         broken_events = 0
+        key_unavailable = False
+        unknown_key_versions: set[str] = set()
+        first_broken_event_id: str | None = None
         previous_chain_hash: str | None = None
 
-        for event in self.audit_logs:
-            expected_hash = self._audit_event_hash(event)
-            if event.entry_hash:
+        for event in events:
+            broken = event.previous_hash != previous_chain_hash
+            if event.integrity_version == KEYED_INTEGRITY_VERSION:
+                keyed_event_count += 1
+                if not event.entry_hash:
+                    broken = True
+                    previous_chain_hash = None
+                else:
+                    hashed_events += 1
+                    key_ref = None
+                    if event.key_id is not None and event.key_version is not None:
+                        try:
+                            key_ref = provider.key_for(event.key_id, event.key_version)
+                        except AuditKeyConfigError:
+                            key_ref = None
+                    if key_ref is None:
+                        # Cannot verify: the recorded key id/version is unavailable.
+                        unknown_key_versions.add(f"{event.key_id}:{event.key_version}")
+                        key_unavailable = True
+                    elif not hmac.compare_digest(event.entry_hash, self._audit_v2_hash(event, key_ref.secret)):
+                        broken = True
+                    previous_chain_hash = event.entry_hash
+            elif event.integrity_version is not None:
+                # Unknown/unsupported integrity version -> cannot be verified; fail
+                # closed rather than fall back to legacy verification.
+                keyed_event_count += 1
+                if event.entry_hash:
+                    hashed_events += 1
+                broken = True
+                previous_chain_hash = event.entry_hash
+            elif event.entry_hash:
                 hashed_events += 1
-                if event.entry_hash != expected_hash:
-                    broken_events += 1
-                if event.previous_hash != previous_chain_hash:
-                    broken_events += 1
+                if not hmac.compare_digest(event.entry_hash, self._audit_event_hash(event)):
+                    broken = True
                 previous_chain_hash = event.entry_hash
             else:
-                legacy_events += 1
-                previous_chain_hash = expected_hash
+                pre_seal_events += 1
+                previous_chain_hash = self._audit_event_hash(event)
+            if broken:
+                broken_events += 1
+                if first_broken_event_id is None:
+                    first_broken_event_id = str(event.id)
 
+        legacy_event_count = total_events - keyed_event_count
+
+        # Precise keyed distinction — never overclaims keying.
+        if total_events == 0:
+            integrity_state = "empty"
+        elif broken_events:
+            integrity_state = "broken"
+        elif key_unavailable:
+            integrity_state = "key_unavailable"
+        elif keyed_event_count and legacy_event_count:
+            integrity_state = "mixed_valid"
+        elif keyed_event_count:
+            integrity_state = "keyed_valid"
+        else:
+            integrity_state = "legacy_valid"
+
+        # Backward-compatible `status` (chain-intact semantics; "sealed" is NOT a
+        # keying claim). Existing consumers still see empty/sealed/legacy/broken.
         if total_events == 0:
             status = "empty"
-            detail = "No audit events are recorded."
-        elif broken_events:
+        elif broken_events or key_unavailable:
             status = "broken"
-            detail = f"{broken_events} audit integrity issue(s) detected."
-        elif legacy_events:
+        elif pre_seal_events:
             status = "legacy"
-            detail = f"{legacy_events} legacy audit event(s) predate hash-chain sealing."
         else:
             status = "sealed"
-            detail = "All audit events are hash-chain sealed."
+
+        detail = {
+            "empty": "No audit events are recorded.",
+            "legacy_valid": f"Hash chain intact; {legacy_event_count} legacy (unkeyed SHA-256) event(s), 0 keyed.",
+            "mixed_valid": f"Hash chain intact; {legacy_event_count} legacy + {keyed_event_count} keyed (HMAC-SHA256) event(s).",
+            "keyed_valid": f"Hash chain intact; all {keyed_event_count} event(s) are keyed (HMAC-SHA256).",
+            "key_unavailable": f"{len(unknown_key_versions)} keyed event(s) cannot be verified: key id/version unavailable.",
+            "broken": f"{broken_events} audit integrity issue(s) detected.",
+        }[integrity_state]
 
         return AuditIntegrityStatus(
             status=status,  # type: ignore[arg-type]
             total_events=total_events,
             hashed_events=hashed_events,
-            legacy_events=legacy_events,
+            legacy_events=pre_seal_events,
             broken_events=broken_events,
             latest_hash=previous_chain_hash,
             detail=detail,
+            integrity_state=integrity_state,  # type: ignore[arg-type]
+            legacy_event_count=legacy_event_count,
+            keyed_event_count=keyed_event_count,
+            active_key_id=active_meta["key_id"] if active_meta else None,
+            active_key_version=active_meta["key_version"] if active_meta else None,
+            unknown_key_versions=sorted(unknown_key_versions),
+            first_broken_event_id=first_broken_event_id,
         )
 
     def _audit_chain_hash(self, event: AuditLog) -> str:
@@ -6364,6 +6535,41 @@ class LocalStateStore:
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
         return sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _canonical_v2_audit_payload(event: AuditLog) -> bytes:
+        """Canonical v2 signed payload (UTF-8, sorted keys, compact separators,
+        explicit nulls). Includes every security-relevant field: the integrity
+        envelope (version/algorithm/key id/version), event id, timestamp, tenant,
+        actor identity + source + roles, action, resource type/id, redacted
+        metadata, and the previous hash (which carries chain linkage/position).
+        Deterministic and byte-identical across repeated canonicalization; carries
+        no machine-specific paths (audit metadata is already redacted)."""
+        payload = {
+            "action": event.action,
+            "actor_roles": [role.value for role in event.actor_roles],
+            "actor_source": event.actor_source,
+            "actor_user_id": str(event.actor_user_id),
+            "created_at": event.created_at.isoformat(),
+            "id": str(event.id),
+            "integrity_algorithm": event.integrity_algorithm,
+            "integrity_version": event.integrity_version,
+            "key_id": event.key_id,
+            "key_version": event.key_version,
+            "metadata": event.metadata,
+            "previous_hash": event.previous_hash,
+            "resource_id": str(event.resource_id) if event.resource_id else None,
+            "resource_type": event.resource_type,
+            "tenant_id": str(event.tenant_id),
+        }
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+        ).encode("utf-8")
+
+    def _audit_v2_hash(self, event: AuditLog, secret: bytes) -> str:
+        """Keyed HMAC-SHA256 over the canonical v2 payload. Verification recomputes
+        this with the key selected by the event's recorded key id/version."""
+        return hmac.new(secret, self._canonical_v2_audit_payload(event), sha256).hexdigest()
 
     @staticmethod
     def _dump_map(items: dict[UUID, object]) -> list[dict]:

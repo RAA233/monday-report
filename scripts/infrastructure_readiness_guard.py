@@ -112,6 +112,10 @@ def main() -> int:
 def configure_guard_env(tmp_root: Path, ollama_url: str) -> None:
     os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
     os.environ["MONDAY_REPORT_API_KEY"] = CLIENT_API_KEY
+    # Client mode seals audit events with a keyed HMAC (a real client deployment
+    # always configures one) so the blocked-operation audit and its inactive-adapter
+    # metadata are written keyed rather than skipped for lack of a key.
+    os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY"] = "infra-readiness-guard-audit-hmac-key-0123456789ab"
     os.environ["MONDAY_REPORT_SIGNING_SECRET"] = "infra-readiness-secret-0123456789abcdef"
     os.environ["MONDAY_REPORT_MAX_UPLOAD_BYTES"] = "104857600"
     os.environ["MONDAY_REPORT_MAX_ZIP_ENTRIES"] = "200"

@@ -79,6 +79,9 @@ def main() -> int:
         # ------------------------------------------------------------------
         os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
         os.environ["MONDAY_REPORT_API_KEY"] = SHARED_KEY
+        # Client mode now requires an audit HMAC key: a request business mutation
+        # without one fails closed (503). Provide one so identity provisioning works.
+        os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY"] = "identity-guard-audit-hmac-key-0123456789abcdef"
 
         # 1. Valid per-user token succeeds.
         r = client.get("/auth/session", headers=hdr(eng_token))

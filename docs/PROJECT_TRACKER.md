@@ -753,3 +753,34 @@ in `tenant_authorization_guard.py`:
 | `pnpm run audit:all` | 0 | Full guard battery green on an isolated stack, incl. FORGE **65/65**, trajectory **38/38**, Benchmarking **23/23**, route-RBAC **103/103**, identity-RBAC **73/73**, and the new tenant guard **71/71**. |
 | `$env:CI='true'; pnpm run build` | 0 | `tsc` (strict, `noEmit`) + `vite build` clean. |
 | `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — 25 blockers; `tenant-authorization-enforcement` stays BLOCKED via the evidence-driven probe (API-layer done; Postgres RLS pending). |
+
+### Versioned HMAC audit integrity (branch `feat/versioned-audit-hmac`)
+
+Replaces the forgeable unkeyed SHA-256 audit chain with a versioned keyed
+HMAC-SHA256 foundation (`backend/app/audit_keys.py`, `docs/AUDIT_INTEGRITY.md`).
+- **Envelope**: v2 events (`integrity_version=2`, HMAC-SHA256) sign a canonical,
+  redacted payload (sorted-key UTF-8, explicit nulls, deterministic) over the
+  event id, timestamp, actor (id/source/roles), tenant, action, resource, metadata,
+  and previous hash.
+- **Key provider**: env-injected active key (≥32 bytes) + retained
+  verification-only versions for rotation; verification selects each event's
+  recorded key id/version; short/malformed/duplicate keys are rejected; only
+  non-secret metadata (id/version/fingerprint) is exposed — key material is never
+  persisted, logged, or placed in evidence.
+- **Legacy transition**: historical events are never re-signed; the first v2 event
+  chains to the legacy head; mixed chains verify honestly (`integrity_state` =
+  `legacy_valid`/`mixed_valid`/`keyed_valid`/`key_unavailable`/`broken`); no startup
+  or read-route rewrite. The backward-compatible `status` field is preserved.
+- **Client fail-closed**: a request-scoped write without a valid key raises
+  `AuditIntegrityUnavailable` → **503** before any append/save (no unkeyed event, no
+  partial business mutation); demo/system writes fall back to labelled legacy.
+- **Atomicity**: `audit_lock` serializes read-previous→HMAC→append→save; a snapshot
+  failure rolls back the append and re-raises. In-process only; cross-process
+  persistence locking stays a declared blocker.
+- **No external anchor**: tail truncation remains undetectable and
+  `audit-tail-truncation-detection` stays **BLOCKED**; `audit-keyed-integrity` is
+  evidence-driven PASS-capable; **registry unchanged**; GA stays `GA_BLOCKED`.
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `pnpm run audit:audit-keyed-integrity` | 0 | **58/58** — baseline forgeability + tail-truncation reproduced; HMAC seal/verify; public-SHA forgery + tampered field + wrong/unknown key + missing HMAC rejected; canonicalization stable/deterministic; legacy transition with no rewrite; rotation with retained keys; client fail-closed; atomicity + concurrency; no key leakage; keyed-integrity evidence-driven PASS-capable, tail-truncation BLOCKED, GA `GA_BLOCKED`. |

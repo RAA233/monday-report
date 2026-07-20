@@ -31,6 +31,17 @@ def check(name: str, ok: bool, detail: object = "") -> None:
 def _configure(tmp: Path) -> None:
     os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "demo"
     os.environ.pop("MONDAY_REPORT_API_KEY", None)
+    # Evaluate the GA gate WITHOUT an ambient audit HMAC key so
+    # ga_audit_keyed_integrity stays at its BLOCKED default, independent of the
+    # caller's environment (the isolated verify stack sets a key). This guard's
+    # client-mode paths only exercise auth rejections, which never require a key.
+    for _k in (
+        "MONDAY_REPORT_AUDIT_HMAC_KEY",
+        "MONDAY_REPORT_AUDIT_HMAC_KEY_ID",
+        "MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION",
+        "MONDAY_REPORT_AUDIT_HMAC_RETAINED_KEYS",
+    ):
+        os.environ.pop(_k, None)
     os.environ["MONDAY_REPORT_TENANT_SLUG"] = "route-rbac-guard"
     os.environ["MONDAY_REPORT_TENANT_NAME"] = "Route RBAC Guard"
     os.environ["MONDAY_REPORT_USER_EMAIL"] = "bootstrap@route-rbac.local"
