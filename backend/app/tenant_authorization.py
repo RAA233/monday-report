@@ -14,9 +14,13 @@ Design invariants
   It is never silently promoted to system or all-tenant access — ``request_tenant_id``
   returns ``None`` and every caller denies. (The route permission gate already denies
   a missing identity before ownership is checked; this is defense-in-depth.)
-- Worker/CLI/system operations that legitimately run outside a request use an
-  EXPLICIT :class:`SystemTenantContext` naming the configured tenant and an operation
-  label, so non-request tenant access is intentional and auditable — never implicit.
+- Worker/CLI/system operations that legitimately run outside a request obtain an
+  EXPLICIT system tenant context: :func:`system_tenant_context` returns a
+  :class:`SystemTenantContext` naming the configured tenant and requiring an
+  operation label, so a non-request tenant access is intentional and auditable —
+  never implicit. (The store additionally derives an explicit ``actor_source="system"``
+  actor for request-less audit writes; request handlers never take that path — see
+  ``_request_tenant_id`` in ``main.py``, which denies when no request identity is set.)
 - This is the API-layer ownership boundary only. It is NOT multi-tenant storage,
   workspace membership/ACLs, normalized persistence, or Postgres RLS — those remain
   declared GA blockers (see ``docs/TENANT_AUTHORIZATION.md`` and
@@ -77,6 +81,43 @@ def tenant_visible(items: Iterable[Any], tenant_id: UUID | None) -> list[Any]:
     if tenant_id is None:
         return []
     return [item for item in items if owns(item, tenant_id)]
+
+
+# Parent-linkage attributes that participate in the resource -> parent -> tenant
+# ownership graph. When a resource carries one of these links, the linked parent
+# MUST resolve to a parent owned by the SAME request tenant; a missing or foreign
+# parent — a broken or contradictory chain — fails closed. This is what makes a
+# record whose OWN tenant_id matches the request but whose parent belongs to
+# another tenant NOT owned: a single matching field can never override the chain.
+OWNERSHIP_PARENT_LINKS: tuple[str, ...] = (
+    "workspace_id",
+    "upload_id",
+    "file_id",
+    "document_id",
+    "report_id",
+    "measurement_id",
+)
+
+
+def owned_via_graph(resource: Any, tenant_id: UUID | None, resolve_parent) -> bool:
+    """True iff the resource's own ``tenant_id`` AND every present parent link
+    resolve to ``tenant_id``.
+
+    ``resolve_parent(attr, parent_id)`` returns the parent resource for a linkage
+    attribute, or ``None`` when it cannot be resolved. A missing parent (``None``)
+    or a parent owned by a different tenant fails closed, so a record whose direct
+    tenant field contradicts its parent chain is never accepted merely because the
+    direct field matches. Default-deny throughout (see :func:`owns`).
+    """
+    if not owns(resource, tenant_id):
+        return False
+    for attr in OWNERSHIP_PARENT_LINKS:
+        parent_id = getattr(resource, attr, None)
+        if parent_id is None:
+            continue
+        if not owns(resolve_parent(attr, parent_id), tenant_id):
+            return False
+    return True
 
 
 @dataclass(frozen=True)

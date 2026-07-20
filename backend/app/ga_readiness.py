@@ -282,13 +282,20 @@ def _tenant_authorization_probe() -> tuple[str, str]:
         return "BLOCKED", f"Tenant authorization could not be evaluated: {exc}"
 
     reasons: list[str] = []
-    for fn in ("request_tenant_id", "resource_tenant_id", "owns", "tenant_visible", "system_tenant_context"):
+    for fn in ("request_tenant_id", "resource_tenant_id", "owns", "tenant_visible", "owned_via_graph", "system_tenant_context"):
         if not callable(getattr(_ta, fn, None)):
             reasons.append(f"tenant_authorization.{fn} missing")
-    source = _main._main_source()
-    for marker in ("_tenant_owned(", "_tenant_items(", "request_tenant_id", "_audit_cross_tenant_denied("):
-        if marker not in source:
-            reasons.append(f"API-layer enforcement marker {marker!r} absent from route layer")
+    # Machine-readable parity (not mere substring presence): every resource-scoped
+    # route proves a tenant-ownership dependency, AND the permission route policy is
+    # fully enforced so permission precedes ownership.
+    try:
+        if not _main.tenant_ownership_fully_enforced():
+            detail = "; ".join(_main.tenant_ownership_enforcement_errors()[:3])
+            reasons.append(f"tenant-ownership parity incomplete: {detail}")
+        if not _main.route_policy_fully_enforced():
+            reasons.append("permission route policy not fully enforced")
+    except Exception as exc:  # pragma: no cover - defensive
+        reasons.append(f"parity evaluation failed: {exc}")
 
     if reasons:
         # Even the API-layer half is not fully wired; still BLOCKED.
@@ -296,9 +303,10 @@ def _tenant_authorization_probe() -> tuple[str, str]:
     return (
         "BLOCKED",
         "API-layer per-request tenant ownership enforcement is implemented and verified: every "
-        "resource route compares resource.tenant_id to the authenticated request tenant, cross-tenant "
-        "access is an existence-hiding 404, list/aggregate reads are tenant-filtered, and signed "
-        "capabilities bind the owning tenant (behavior proven by scripts/tenant_authorization_guard.py). "
+        "resource-scoped route proves a tenant-ownership dependency (tenant_ownership_fully_enforced), "
+        "the ownership graph fails closed on a contradictory resource->parent->tenant chain, cross-tenant "
+        "access is an existence-hiding 404, list/aggregate reads are tenant-filtered before counting, and "
+        "signed capabilities bind the owning tenant (behavior proven by scripts/tenant_authorization_guard.py). "
         "The control remains BLOCKED because its resolution ALSO requires Postgres RLS active over the "
         "normalized multi-tenant store, which is not implemented: the process serves one configured tenant "
         "via the local JSON snapshot and RLS is inactive.",

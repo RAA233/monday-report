@@ -354,6 +354,155 @@ def main() -> int:
         check("70 GA remains GA_BLOCKED", status_ga == "GA_BLOCKED" and ready_ga is False)
         check("70b No stale request identity after the guard run", get_current_identity() is None)
 
+        # =====================================================================
+        # 72-90: PR #13 review corrections — ownership graph (contradictory
+        #  parent/child fail-closed), tenant-ownership parity, report/aggregate
+        #  scoping, legacy signed-token rejection, stamping, context isolation,
+        #  benchmarking-config leak fix, old-snapshot no-write.
+        # =====================================================================
+        import hashlib as _hashlib
+        import threading as _threading
+        from backend.app.identity import (
+            set_current_identity as _set_id,
+            reset_current_identity as _reset_id,
+        )
+        from backend.app.store import LocalStateStore as _LocalStateStore
+
+        # Contradictory records: direct tenant_id matches the request tenant, but the
+        # PARENT chain points at tenant B (must fail closed, not be accepted).
+        contra_report = MondayReport(tenant_id=tenant_a, workspace_id=wb.id,
+                                     period_start=date(2026, 1, 1), period_end=date(2026, 1, 2),
+                                     report_json={"x": 1})
+        store.monday_reports[contra_report.id] = contra_report
+        contra_export = _ReportExport(tenant_id=tenant_a, report_id=repb.id, format="json",
+                                      storage_uri="export://x/y.json", sha256="2" * 64, byte_size=3)
+        store.report_exports[contra_export.id] = contra_export
+        contra_file = UploadFileRecord(tenant_id=tenant_b, upload_id=up_a.id, original_path="c.txt",
+                                       storage_uri="object://x/c.txt", sha256="3" * 64, mime_type="text/plain",
+                                       byte_size=4, status=ProcessingStatus.COMPLETE, malware_status="clean")
+        store.files[contra_file.id] = contra_file
+        contra_chunk_id = uuid.uuid4()
+        store.document_chunks[contra_chunk_id] = DocumentChunk(
+            tenant_id=tenant_b, workspace_id=wa.id, upload_id=up_a.id, file_id=file_a.id,
+            document_id=doc_a.id, ordinal=9, text="CONTRA-CHUNK", locator_type="page")
+        contra_failure = FailureRecord(tenant_id=tenant_b, workspace_id=wa.id, event_type="x",
+                                       severity="High", summary="CONTRA-FAILURE", confidence=0.5, npt_hours=3.0)
+        store.failures[contra_failure.id] = contra_failure
+        store.save()
+
+        check("72 ownership graph: direct match + FOREIGN parent -> not owned",
+              ta.owned_via_graph(contra_report, tenant_a, lambda a, i: store.workspaces.get(i)) is False)
+        check("73 contradictory monday-report (foreign workspace) export -> 404",
+              status_of("POST", f"/monday-reports/{contra_report.id}/exports/json", admin_tok) == 404)
+        check("74 contradictory report-export (foreign report) signed-url -> 404",
+              status_of("POST", f"/report-exports/{contra_export.id}/signed-url", admin_tok) == 404)
+        _files = client.get(f"/uploads/{up_a.id}/files", headers=hdr(admin_tok)).json()
+        check("75 foreign-stamped child file excluded from owned upload's file list",
+              all(str(f["id"]) != str(contra_file.id) for f in _files))
+        _chunks = client.get(f"/documents/{doc_a.id}/chunks", headers=hdr(admin_tok)).json()
+        check("76 foreign-stamped child chunk excluded from owned document's chunks",
+              "CONTRA-CHUNK" not in json.dumps(_chunks))
+        _draft = client.get(f"/workspaces/{wa.id}/report-draft", headers=hdr(admin_tok)).json()
+        check("77 contradictory foreign failure excluded from report-draft input",
+              "CONTRA-FAILURE" not in json.dumps(_draft))
+        _mr = client.post("/monday-reports", headers=hdr(admin_tok),
+                          json={"workspace_id": str(wa.id), "period_start": "2026-01-01", "period_end": "2026-01-02"}).json()
+        check("78 contradictory foreign failure excluded from generated-report input",
+              "CONTRA-FAILURE" not in json.dumps(_mr))
+        _sum = client.get(f"/dashboards/summary?workspace_id={wa.id}", headers=hdr(admin_tok)).json()
+        check("79 dashboard summary excludes contradictory foreign failure NPT", _sum["total_npt_hours"] < 3.0)
+        _own_bench = client.get(f"/workspaces/{wa.id}/benchmarking", headers=hdr(admin_tok)).json()
+        check("80 own-workspace benchmarking status excludes foreign approved benchmark value (G fix)",
+              "Foreign B" not in json.dumps(_own_bench))
+        check("81 tenant_ownership_fully_enforced() is True (per-route parity)", m.tenant_ownership_fully_enforced() is True)
+        _saved_to = dict(m.TENANT_OWNERSHIP_ROUTES)
+        m.TENANT_OWNERSHIP_ROUTES[("GET", "/health")] = "filter"
+        check("82 parity FAILS when a resource route lacks a tenant-ownership dependency",
+              m.tenant_ownership_fully_enforced() is False and any("/health" in e for e in m.tenant_ownership_enforcement_errors()))
+        m.TENANT_OWNERSHIP_ROUTES.clear(); m.TENANT_OWNERSHIP_ROUTES.update(_saved_to)
+        # Legacy signed token WITHOUT a tenant binding is never served: in demo mode
+        # the download-side tenant-binding gate returns 404; in client mode it is also
+        # rejected (the readiness gate returns 423 before the binding is even reached).
+        _legacy, _ = create_signed_token(exp_a.id, "report_export_download")
+        _demo_dl = client.get(f"/signed/report-exports/{exp_a.id}?token={_legacy}").status_code
+        os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
+        os.environ["MONDAY_REPORT_API_KEY"] = "tenant-authz-guard-client-key-0123456789"
+        try:
+            _client_dl = client.get(f"/signed/report-exports/{exp_a.id}?token={_legacy}").status_code
+        finally:
+            os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "demo"
+            os.environ.pop("MONDAY_REPORT_API_KEY", None)
+        check("83 legacy signed token (no tenant binding) rejected: demo 404 (tenant-binding) + client not served",
+              _demo_dl == 404 and _client_dl != 200)
+        up_new, file_new, _ = store.create_uploaded_file(wa.id, "n.txt", "text/plain", "files", b"stamp-test")
+        check("84 child creation copies the parent/request tenant server-side",
+              up_new.tenant_id == tenant_a and file_new.tenant_id == tenant_a)
+        _cr = client.post("/uploads", headers=hdr(admin_tok),
+                          json={"workspace_id": str(wa.id), "file_name": "b.txt", "byte_size": 3, "mime_type": "text/plain", "source_type": "files"}).json()
+        check("85 client body cannot set child tenant (response stamped request tenant)",
+              _cr["upload"]["tenant_id"] == str(tenant_a) and _cr["file"]["tenant_id"] == str(tenant_a))
+        # HTTP: a protected request with NO credential in client mode is denied (401),
+        # never served under an implicit system tenant.
+        os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
+        os.environ["MONDAY_REPORT_API_KEY"] = "tenant-authz-guard-client-key-0123456789"
+        try:
+            check("86 missing identity (client mode) -> 401, never implicit system tenant",
+                  client.get("/workspaces").status_code == 401)
+        finally:
+            os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "demo"
+            os.environ.pop("MONDAY_REPORT_API_KEY", None)
+        # System/request context resets after an exception (ContextVar).
+        _tok_ex = _set_id(fake)
+        try:
+            raise RuntimeError("boom")
+        except RuntimeError:
+            _reset_id(_tok_ex)
+        check("87 identity context resets after an exception", get_current_identity() is None)
+        # Concurrent request contexts stay isolated per thread.
+        _seen: dict[str, object] = {}
+
+        def _ctx_probe(label, ident):
+            _t = _set_id(ident)
+            try:
+                _seen[label] = ta.request_tenant_id()
+            finally:
+                _reset_id(_t)
+
+        _tha = _threading.Thread(target=_ctx_probe, args=("A", fake))
+        _thb = _threading.Thread(target=_ctx_probe, args=("B", other))
+        _tha.start(); _thb.start(); _tha.join(); _thb.join()
+        check("88 concurrent request/system contexts stay isolated",
+              _seen.get("A") == tenant_a and _seen.get("B") == tenant_b and get_current_identity() is None)
+        # A genuine cross-tenant probe of an EXISTING foreign workspace's benchmarking
+        # is audited as cross_tenant_denied (consistent with the rest of the surface).
+        store.refresh(); _before_ct = len(store.audit_logs)
+        client.get(f"/workspaces/{wb.id}/benchmarking", headers=hdr(admin_tok))
+        store.refresh()
+        _cts = [e for e in store.audit_logs[_before_ct:]
+                if e.action == "authz.cross_tenant_denied" and str(e.resource_id) == str(wb.id)]
+        check("89 foreign-but-existing benchmarking workspace audited as cross_tenant_denied", len(_cts) >= 1)
+        # Old snapshot (additive identity fields stripped) loads, tenant fields
+        # preserved, and NO tenant-field backfill is written to disk.
+        _statep = Path(os.environ["MONDAY_REPORT_STATE_PATH"])
+        _old = json.loads(_statep.read_text(encoding="utf-8"))
+        _old["user"].pop("account_status", None); _old["user"].pop("is_bootstrap", None)
+        for _al in _old.get("audit_logs", []):
+            _al.pop("actor_source", None); _al.pop("actor_roles", None); _al.pop("actor_credential_fingerprint", None)
+        _oldpath = tmp / "old_state.json"
+        _oldpath.write_text(json.dumps(_old, indent=2), encoding="utf-8")
+        _before_hash = _hashlib.sha256(_oldpath.read_bytes()).hexdigest()
+        os.environ["MONDAY_REPORT_STATE_PATH"] = str(_oldpath)
+        try:
+            _s2 = _LocalStateStore()
+            _after_hash = _hashlib.sha256(_oldpath.read_bytes()).hexdigest()
+            check("90 old snapshot loads; tenant_id preserved; no tenant-field backfill written",
+                  _before_hash == _after_hash
+                  and _s2.workspaces[wa.id].tenant_id == tenant_a
+                  and _s2.workspaces[wb.id].tenant_id == tenant_b
+                  and _s2.user.account_status == "active")
+        finally:
+            os.environ["MONDAY_REPORT_STATE_PATH"] = str(_statep)
+
     failed = [c for c in checks if not c["ok"]]
     for c in checks:
         print(f"{'PASS' if c['ok'] else 'FAIL'}: {c['name']} - {c['detail']}")

@@ -1474,7 +1474,7 @@ class LocalStateStore:
         benchmark_values = [
             item
             for item in self.benchmark_values.values()
-            if item.approval_status == "approved"
+            if item.approval_status == "approved" and item.tenant_id == self.tenant.id
         ]
         comparisons = self._benchmark_comparisons(workspace_id)
         active_anomalies = [
@@ -1509,7 +1509,9 @@ class LocalStateStore:
             historical_anomalies=historical_anomalies,
             benchmark_values=benchmark_values,
             anomaly_rules=[
-                item for item in self.anomaly_rules.values() if item.approval_status == "approved"
+                item
+                for item in self.anomaly_rules.values()
+                if item.approval_status == "approved" and item.tenant_id == self.tenant.id
             ],
             seven_day_trend=normalized_trend,
             likely_operational_contributors=self._likely_operational_contributors(active_anomalies, comparisons),
@@ -1526,7 +1528,9 @@ class LocalStateStore:
             metric_benchmarks = [
                 item
                 for item in self.benchmark_values.values()
-                if item.metric == metric and item.approval_status == "approved"
+                if item.metric == metric
+                and item.approval_status == "approved"
+                and item.tenant_id == self.tenant.id
             ]
             if not metric_benchmarks:
                 rows.append(
@@ -1603,6 +1607,7 @@ class LocalStateStore:
                 if rule.metric == benchmark.metric
                 and rule.severity == "Critical"
                 and rule.approval_status == "approved"
+                and rule.tenant_id == self.tenant.id
             ),
             None,
         )
@@ -1626,7 +1631,11 @@ class LocalStateStore:
         moc_reference: str | None = None,
     ) -> None:
         for rule in self.anomaly_rules.values():
-            if rule.metric != measurement.metric or rule.approval_status != "approved":
+            if (
+                rule.metric != measurement.metric
+                or rule.approval_status != "approved"
+                or rule.tenant_id != self.tenant.id
+            ):
                 continue
             threshold = self._threshold_for_rule(rule)
             benchmark = self._benchmark_by_name(rule.benchmark_name, rule.metric)
@@ -1742,6 +1751,7 @@ class LocalStateStore:
                 if item.benchmark_name == benchmark_name
                 and item.metric == metric
                 and item.approval_status == "approved"
+                and item.tenant_id == self.tenant.id
             ),
             None,
         )
@@ -1811,7 +1821,7 @@ class LocalStateStore:
         references.extend(
             f"{item.benchmark_name} {item.dataset_version} ({item.data_source})"
             for item in self.benchmark_values.values()
-            if item.approval_status == "approved"
+            if item.approval_status == "approved" and item.tenant_id == self.tenant.id
         )
         return references
 
@@ -1872,8 +1882,13 @@ class LocalStateStore:
 
     def create_monday_report(self, payload) -> MondayReport:
         self.refresh()
+        # Generated-report input is tenant-scoped: only the configured tenant's
+        # failures/documents for the workspace feed the report (fail closed on a
+        # contradictory foreign record that carries this workspace_id).
         failures = [
-            failure for failure in self.failures.values() if failure.workspace_id == payload.workspace_id
+            failure
+            for failure in self.failures.values()
+            if failure.workspace_id == payload.workspace_id and failure.tenant_id == self.tenant.id
         ]
         open_tasks = self._open_validation_tasks_for_workspace(payload.workspace_id)
         total_npt = sum(failure.npt_hours for failure in failures)
@@ -1882,7 +1897,7 @@ class LocalStateStore:
         parsed_documents = [
             document
             for document in self.parsed_documents.values()
-            if document.workspace_id == payload.workspace_id
+            if document.workspace_id == payload.workspace_id and document.tenant_id == self.tenant.id
         ]
         citation_count = sum(len(failure.citations) for failure in failures)
         validated_count = sum(1 for failure in failures if failure.validation_status == ValidationStatus.VALIDATED)
@@ -2442,12 +2457,12 @@ class LocalStateStore:
         failure_ids = {
             failure.id
             for failure in self.failures.values()
-            if failure.workspace_id == workspace_id
+            if failure.workspace_id == workspace_id and failure.tenant_id == self.tenant.id
         }
         anomaly_ids = {
             anomaly.id
             for anomaly in self.anomaly_events.values()
-            if anomaly.workspace_id == workspace_id
+            if anomaly.workspace_id == workspace_id and anomaly.tenant_id == self.tenant.id
         }
         return [
             task
@@ -2457,6 +2472,7 @@ class LocalStateStore:
                 or (task.target_type == "anomaly_event" and task.target_id in anomaly_ids)
             )
             and task.status == ValidationStatus.OPEN
+            and task.tenant_id == self.tenant.id
         ]
 
     def export_path_from_uri(self, storage_uri: str) -> Path | None:
