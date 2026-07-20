@@ -301,15 +301,25 @@ class LocalStateStore:
         self.audit_lock = threading.RLock()
         self.audit_logs: list[AuditLog] = []
 
+        # MC5: in CLIENT mode without a valid active audit key, start in an explicit
+        # diagnostic/read-only state — do NOT seed, initialize benchmarking defaults,
+        # reset the bootstrap, append any audit event, or write the snapshot (no
+        # partial mutable initialization). Any existing state is loaded READ-ONLY.
+        # Readiness reports the missing/invalid key as BLOCKED and every protected
+        # request / worker / CLI mutation fails closed before touching state.
+        client_diagnostic_only = (
+            self._configured_client_data_mode() == "client"
+            and not self._active_audit_key_available()
+        )
         if self._state_exists():
             self.refresh()
-            if self._contains_demo_seed():
+            if not client_diagnostic_only and self._contains_demo_seed():
                 self._reset_clean_bootstrap()
                 self.save()
-        else:
+        elif not client_diagnostic_only:
             self._seed()
             self.save()
-        if self._ensure_benchmarking_defaults():
+        if not client_diagnostic_only and self._ensure_benchmarking_defaults():
             self.save()
         # NOTE: the demo bootstrap identity is derived in memory (see
         # demo_bootstrap_identity); it is intentionally NOT persisted on import,
@@ -466,6 +476,7 @@ class LocalStateStore:
         )
 
     def create_user(self, email: str, full_name: str, roles: list[Role]) -> User:
+        self.require_audit_write_capability("user.create")
         with self.identity_lock:
             self.refresh()
             normalized = [Role(role) for role in roles]
@@ -492,6 +503,7 @@ class LocalStateStore:
             return user
 
     def set_user_status(self, user_id: UUID, account_status: str) -> User:
+        self.require_audit_write_capability("user.status")
         with self.identity_lock:
             self.refresh()
             user = self.users.get(user_id)
@@ -515,6 +527,7 @@ class LocalStateStore:
         """Provision a per-user credential. Returns the stored record and the
         RAW token, which is returned to the caller exactly once and never
         persisted, logged, or audited."""
+        self.require_audit_write_capability("credential.create")
         with self.identity_lock:
             self.refresh()
             user = self.users.get(user_id)
@@ -541,6 +554,7 @@ class LocalStateStore:
             return credential, raw_token
 
     def revoke_credential(self, credential_id: UUID) -> StoredApiCredential:
+        self.require_audit_write_capability("credential.revoke")
         with self.identity_lock:
             self.refresh()
             credential = self.api_credentials.get(credential_id)
@@ -769,6 +783,7 @@ class LocalStateStore:
         return changed
 
     def create_workspace(self, payload: WorkspaceCreate) -> Workspace:
+        self.require_audit_write_capability("workspace.create")
         self.refresh()
         workspace = Workspace(tenant_id=self.tenant.id, **payload.model_dump())
         self.workspaces[workspace.id] = workspace
@@ -776,6 +791,7 @@ class LocalStateStore:
         return workspace
 
     def create_upload(self, payload: UploadCreate) -> tuple[Upload, UploadFileRecord, str]:
+        self.require_audit_write_capability("upload.create")
         self.refresh()
         upload = Upload(
             tenant_id=self.tenant.id,
@@ -810,6 +826,7 @@ class LocalStateStore:
         refresh: bool = True,
         save: bool = True,
     ) -> tuple[Upload, UploadFileRecord, str]:
+        self.require_audit_write_capability("upload.create")
         if refresh:
             self.refresh()
         upload = Upload(
@@ -873,6 +890,7 @@ class LocalStateStore:
         return upload, file_record, f"local-storage://{file_record.id}"
 
     def complete_upload(self, upload_id: UUID, file_ids: list[UUID], *, refresh: bool = True) -> Upload:
+        self.require_audit_write_capability("upload.complete")
         if refresh:
             self.refresh()
         upload = self.uploads[upload_id]
@@ -982,6 +1000,9 @@ class LocalStateStore:
         return upload
 
     def process_queued_jobs(self, upload_id: UUID | None = None, max_jobs: int | None = None) -> int:
+        # Worker entry point: fail closed BEFORE any job/file/document/failure
+        # mutation when a client-mode deployment has no valid audit key.
+        self.require_audit_write_capability("worker.process_jobs")
         self.refresh()
         processed = 0
         processed_upload_ids: set[UUID] = set()
@@ -1181,6 +1202,7 @@ class LocalStateStore:
         ]
 
     def update_validation_task(self, task_id: UUID, payload: ValidationTaskUpdate) -> ValidationTask:
+        self.require_audit_write_capability("validation_task.update")
         self.refresh()
         task = self.validation_tasks[task_id]
         previous_status = task.status
@@ -1227,6 +1249,7 @@ class LocalStateStore:
     def record_field_correction(
         self, workspace_id: UUID, payload: FieldCorrectionCreate
     ) -> FieldCorrection:
+        self.require_audit_write_capability("field_correction.record")
         with self.field_correction_lock:
             self.refresh()
             prior = self._active_field_correction(workspace_id, payload.target_type, payload.field_key)
@@ -1273,6 +1296,7 @@ class LocalStateStore:
             return correction
 
     def revert_field_correction(self, correction_id: UUID, revert_reason: str) -> FieldCorrection:
+        self.require_audit_write_capability("field_correction.revert")
         with self.field_correction_lock:
             self.refresh()
             correction = self.field_corrections[correction_id]
@@ -1363,6 +1387,7 @@ class LocalStateStore:
         return has_permission(source.roles, permission)
 
     def update_benchmark_value(self, benchmark_id: UUID, payload: BenchmarkValueUpdate) -> BenchmarkValue:
+        self.require_audit_write_capability("benchmark_value.update")
         self.refresh()
         benchmark = self.benchmark_values[benchmark_id]
         previous = benchmark.model_dump(mode="json")
@@ -1396,6 +1421,7 @@ class LocalStateStore:
         workspace_id: UUID,
         payload: BenchmarkMeasurementCreate,
     ) -> BenchmarkingStatus:
+        self.require_audit_write_capability("benchmark_measurement.record")
         self.refresh()
         if workspace_id not in self.workspaces:
             raise KeyError("workspace_not_found")
@@ -1457,6 +1483,7 @@ class LocalStateStore:
         action_id: UUID,
         reason: str,
     ) -> AnomalyEvent:
+        self.require_audit_write_capability("diagnostic_action.dismiss")
         self.refresh()
         if anomaly_id not in self.anomaly_events:
             raise KeyError("anomaly_not_found")
@@ -1919,6 +1946,7 @@ class LocalStateStore:
         return statements
 
     def create_monday_report(self, payload) -> MondayReport:
+        self.require_audit_write_capability("monday_report.create")
         self.refresh()
         # Generated-report input is tenant-scoped: only the configured tenant's
         # failures/documents for the workspace feed the report (fail closed on a
@@ -2313,6 +2341,9 @@ class LocalStateStore:
         return self._open_validation_tasks_for_workspace(report.workspace_id)
 
     def run_retention(self, retention_days: int, apply: bool = False) -> RetentionRunResult:
+        # apply=False is a read-only dry-run; only a real apply mutates + audits.
+        if apply:
+            self.require_audit_write_capability("retention.run")
         self.refresh()
         cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
         expired_upload_ids = {
@@ -2424,6 +2455,7 @@ class LocalStateStore:
             current = current.parent
 
     def export_monday_report(self, report_id: UUID, export_format: str) -> ReportExport:
+        self.require_audit_write_capability("monday_report.export")
         self.refresh()
         report = self.monday_reports[report_id]
         existing_export = self._existing_report_export(report.id, export_format)
@@ -6317,6 +6349,34 @@ class LocalStateStore:
         raw = os.getenv("MONDAY_REPORT_CLIENT_DATA_MODE", "demo").strip().lower()
         return "client" if raw in _CLIENT_DATA_MODE_VALUES else "demo"
 
+    @staticmethod
+    def _active_audit_key_available() -> bool:
+        """True iff a valid active HMAC key is configured (mode-agnostic). A
+        configured-but-invalid key counts as unavailable."""
+        try:
+            return audit_key_provider().active_key() is not None
+        except AuditKeyConfigError:
+            return False
+
+    def require_audit_write_capability(self, operation: str) -> None:
+        """Central mutation-writability preflight (MC2). In CLIENT mode a valid
+        active HMAC key MUST exist BEFORE any business-state mutation, audit append,
+        or snapshot save — for EVERY actor (request, system, worker, CLI, startup).
+        This raises AuditIntegrityUnavailable BEFORE the caller mutates in-memory
+        state, so a keyless client-mode operation leaves no orphan business record,
+        no audit event, and no snapshot write. Demo/local mode is unaffected
+        (documented legacy-before-keying compatibility). This preflight guards the
+        no-key path; it does NOT provide save-failure or cross-thread/cross-process
+        transactional rollback (see docs/AUDIT_INTEGRITY.md)."""
+        if self._configured_client_data_mode() != "client":
+            return
+        if self._active_audit_key_available():
+            return
+        raise AuditIntegrityUnavailable(
+            f"Audit integrity key is unavailable; refusing client-mode operation "
+            f"'{operation}' before mutating business state."
+        )
+
     def audit(
         self,
         action: str,
@@ -6331,12 +6391,16 @@ class LocalStateStore:
         versioned keyed HMAC (integrity_version=2, HMAC-SHA256). In demo/local mode
         with NO key configured the event is written under clearly-labelled LEGACY
         integrity (unkeyed SHA-256, integrity_version=None) — never presented as
-        keyed. In CLIENT mode a new unkeyed event is NEVER written: if the active
-        key is unavailable/invalid this raises AuditIntegrityUnavailable BEFORE
-        appending or saving, so neither the audit event nor any in-flight business
-        mutation is persisted (the caller's save() never runs). The whole
-        read-previous -> build -> HMAC -> append -> save sequence is serialized by
-        audit_lock so concurrent appends chain linearly.
+        keyed. In CLIENT mode a new unkeyed event is NEVER written, for ANY actor
+        (request, system, worker, CLI, startup): if the active key is
+        unavailable/invalid a business-mutation audit raises AuditIntegrityUnavailable
+        BEFORE appending or saving, and a rejection/denial audit is skipped (never
+        written unkeyed). Business mutations preflight the key BEFORE touching state
+        (require_audit_write_capability), so this raise is a backstop, not the first
+        line of defence. Forward-only keying (MC3): once ANY keyed v2 event exists
+        the chain can never accept a new legacy event. The whole read-previous ->
+        build -> HMAC -> append -> save sequence is serialized by audit_lock so
+        concurrent appends chain linearly.
         """
         with self.audit_lock:
             identity = self.current_identity()
@@ -6347,23 +6411,16 @@ class LocalStateStore:
                 # A configured-but-invalid key is treated as no key: fail closed in
                 # client mode; labelled legacy in demo — never silently keyed.
                 key_ref = None
-            if (
-                self._configured_client_data_mode() == "client"
-                and key_ref is None
-                and identity.actor_source != "system"
-            ):
+            if self._configured_client_data_mode() == "client" and key_ref is None:
                 if action in _NON_MUTATION_AUDIT_ACTIONS:
                     # A rejection/denial/blocked/duplicate/config-only audit is not a
                     # business mutation: without a key, skip it (never write an unkeyed
                     # event) rather than fail the rejection response into a 503.
                     return
-                # Fail closed for a REQUEST-scoped BUSINESS mutation BEFORE any
-                # append/save, so no unkeyed request event and no in-flight business
-                # mutation is persisted. System/bootstrap writes (actor_source ==
-                # "system") — which only run before any request and only when the
-                # configured key is absent (a not-ready misconfiguration) — fall back
-                # to labelled legacy integrity instead of crashing startup; readiness
-                # reports the missing key as BLOCKED.
+                # Fail closed for ANY actor's BUSINESS mutation BEFORE any append/save,
+                # so no unkeyed event and no in-flight business mutation is persisted.
+                # Worker/CLI/startup callers preflight the key before mutating state;
+                # this is the audit-layer backstop.
                 raise AuditIntegrityUnavailable(
                     "Audit HMAC key is unavailable; refusing to write an unkeyed audit event in client mode."
                 )
@@ -6392,6 +6449,17 @@ class LocalStateStore:
                 )
                 audit_log.entry_hash = self._audit_v2_hash(audit_log, key_ref.secret)
             else:
+                # Forward-only keying (MC3): once ANY keyed v2 event exists in the
+                # chain, every later event MUST be keyed. Refuse to append an unkeyed
+                # event behind a keyed suffix — this covers demo-mode key-disappearance
+                # (client mode already fails closed above / at the mutation preflight).
+                if any(
+                    e.integrity_version == KEYED_INTEGRITY_VERSION for e in self.audit_logs
+                ):
+                    raise AuditIntegrityUnavailable(
+                        "Refusing to append an unkeyed audit event behind a keyed suffix; "
+                        "the active HMAC key is required once keying has begun."
+                    )
                 # Legacy (unkeyed) event, labelled by the absence of integrity_version.
                 audit_log = AuditLog(**common)
                 audit_log.entry_hash = self._audit_event_hash(audit_log)
@@ -6420,10 +6488,12 @@ class LocalStateStore:
         unknown_key_versions: set[str] = set()
         first_broken_event_id: str | None = None
         previous_chain_hash: str | None = None
+        keyed_suffix_started = False   # MC3: once True, any later legacy event is broken
 
         for event in events:
             broken = event.previous_hash != previous_chain_hash
             if event.integrity_version == KEYED_INTEGRITY_VERSION:
+                keyed_suffix_started = True
                 keyed_event_count += 1
                 if not event.entry_hash:
                     broken = True
@@ -6453,10 +6523,17 @@ class LocalStateStore:
                 previous_chain_hash = event.entry_hash
             elif event.entry_hash:
                 hashed_events += 1
+                # MC3: a legacy (unkeyed) event AFTER the keyed suffix begins violates
+                # the forward-only-keying invariant (legacy* keyed+) -> broken.
+                if keyed_suffix_started:
+                    broken = True
                 if not hmac.compare_digest(event.entry_hash, self._audit_event_hash(event)):
                     broken = True
                 previous_chain_hash = event.entry_hash
             else:
+                # pre-seal legacy event (no entry_hash). Also forbidden after keying.
+                if keyed_suffix_started:
+                    broken = True
                 pre_seal_events += 1
                 previous_chain_hash = self._audit_event_hash(event)
             if broken:

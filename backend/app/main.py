@@ -139,6 +139,13 @@ def _best_effort_audit(*args, **kwargs) -> None:
 CLIENT_AUTH_EXEMPT_PATHS = {
     "/health",
 }
+# MC1: the ONLY requests that stay available in client mode without a valid active
+# audit key. Minimal health/liveness + CORS preflight. Everything else (protected
+# reads, mutations, denials, docs, readiness detail, and signed downloads) fails
+# closed with a stable 503 before any auth/routing/business/audit.
+CLIENT_NO_KEY_PUBLIC_PATHS = {
+    "/health",
+}
 # Interactive API documentation is public in demo/local mode but is disabled
 # (404) in client mode unless the request resolves to an administrator.
 DOCS_PATHS = {"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
@@ -146,6 +153,22 @@ DOCS_PATHS = {"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
 
 @app.middleware("http")
 async def enforce_client_api_key(request: Request, call_next):
+    # MC1: in client mode, EVERY non-public request requires a valid active audit
+    # key. Without one, fail closed with a stable 503 BEFORE authentication,
+    # authorization, routing, or any business/audit attempt — so no denial or legacy
+    # audit event is written, no protected data is disclosed, and signed-capability
+    # issuance/redemption is blocked. Only the narrow public allow-list (minimal
+    # health/liveness + CORS preflight) remains available without a key.
+    if (
+        client_data_mode() == "client"
+        and not _client_no_key_public(request)
+        and not store._active_audit_key_available()
+    ):
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Audit integrity key is unavailable"},
+        )
+
     if _client_auth_exempt(request):
         return await call_next(request)
 
@@ -211,6 +234,16 @@ def _client_auth_exempt(request: Request) -> bool:
     if request.url.path in CLIENT_AUTH_EXEMPT_PATHS:
         return True
     return request.method == "GET" and request.url.path.startswith("/signed/")
+
+
+def _client_no_key_public(request: Request) -> bool:
+    """Narrow allow-list that remains available in client mode even without a valid
+    active audit key: CORS preflight + minimal health/liveness only. Every other
+    request — protected reads, mutations, denials, docs, readiness detail, and
+    signed-capability issuance/redemption — fails closed with a stable 503 (MC1)."""
+    if request.method == "OPTIONS":
+        return True
+    return request.url.path in CLIENT_NO_KEY_PUBLIC_PATHS
 
 
 @app.get("/health")

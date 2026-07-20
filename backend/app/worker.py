@@ -35,5 +35,16 @@ def _worker_max_jobs() -> int | None:
 
 
 if __name__ == "__main__":
-    result = run_once()
+    import sys
+
+    from .audit_keys import AuditIntegrityUnavailable
+
+    try:
+        result = run_once()
+    except AuditIntegrityUnavailable as exc:
+        # Client-mode fail-closed (MC1/MC2): no valid active audit key, so the worker
+        # refuses to process any job BEFORE mutating state. The message carries no key
+        # material. Exit non-zero so an operator/scheduler sees the failure.
+        print(f"Worker refused to run: {exc}")
+        sys.exit(1)
     print(f"Processed {result['processed']} Monday Report job(s).")

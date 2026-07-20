@@ -38,17 +38,15 @@ def check(name: str, ok: bool, detail: object = "") -> None:
 def _configure(tmp: Path) -> None:
     os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "demo"
     os.environ.pop("MONDAY_REPORT_API_KEY", None)
-    # Evaluate the GA gate WITHOUT an ambient audit HMAC key so
-    # ga_audit_keyed_integrity stays at its BLOCKED default, independent of the
-    # caller's environment (the isolated verify stack sets a key). This guard's
-    # client-mode paths only exercise auth rejections, which never require a key.
-    for _k in (
-        "MONDAY_REPORT_AUDIT_HMAC_KEY",
-        "MONDAY_REPORT_AUDIT_HMAC_KEY_ID",
-        "MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION",
-        "MONDAY_REPORT_AUDIT_HMAC_RETAINED_KEYS",
-    ):
-        os.environ.pop(_k, None)
+    # Run with a valid active audit key so keyed integrity is active throughout and
+    # the client-mode identity checks (which now fail closed without a key) can
+    # exercise the real 401 auth path. The ga_audit_keyed_integrity probe's BLOCKED
+    # default is asserted with the key TEMPORARILY cleared around its evaluation, so
+    # the chain stays consistently keyed (no legacy-after-keyed).
+    os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY"] = "tenant-authz-guard-audit-hmac-key-0123456ab"
+    os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY_ID"] = "tenant-authz"
+    os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION"] = "1"
+    os.environ.pop("MONDAY_REPORT_AUDIT_HMAC_RETAINED_KEYS", None)
     os.environ["MONDAY_REPORT_TENANT_SLUG"] = "tenant-authz-guard"
     os.environ["MONDAY_REPORT_TENANT_NAME"] = "Tenant Authz Guard"
     os.environ["MONDAY_REPORT_USER_EMAIL"] = "bootstrap@tenant-authz.local"
@@ -350,8 +348,19 @@ def main() -> int:
         # =========================================================================
         # 65-70: readiness / GA disposition (blocker stays BLOCKED, GA_BLOCKED)
         # =========================================================================
-        readiness_by_id = {c.id: c.status for c in evaluate_client_data_readiness(store).checks}
-        ga_checks = {c["id"]: c for c in gar.evaluate_blockers(readiness_by_id, forge_report=None)}
+        # Evaluate GA blockers with the audit key TEMPORARILY cleared so the
+        # (env-based) ga_audit_keyed_integrity probe reports its BLOCKED default;
+        # the store's keyed chain is left untouched (read-only evaluation).
+        _saved_ak = {k: os.environ.pop(k, None) for k in (
+            "MONDAY_REPORT_AUDIT_HMAC_KEY", "MONDAY_REPORT_AUDIT_HMAC_KEY_ID",
+            "MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION")}
+        try:
+            readiness_by_id = {c.id: c.status for c in evaluate_client_data_readiness(store).checks}
+            ga_checks = {c["id"]: c for c in gar.evaluate_blockers(readiness_by_id, forge_report=None)}
+        finally:
+            for _k, _v in _saved_ak.items():
+                if _v is not None:
+                    os.environ[_k] = _v
         ta_check = ga_checks["ga_tenant_authorization"]
         check("65 tenant-authorization-enforcement remains BLOCKED", ta_check["disposition"] == "BLOCKED")
         check("66 tenant-authorization detail is evidence-driven (API-layer implemented, RLS pending)",

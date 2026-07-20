@@ -345,9 +345,20 @@ def _audit_keyed_integrity_probe() -> tuple[str, str]:
         audit_src = inspect.getsource(_store_mod.LocalStateStore.audit)
     except Exception:
         audit_src = ""
-    for marker in ("AuditIntegrityUnavailable", "_audit_v2_hash", 'actor_source != "system"'):
+    for marker in ("AuditIntegrityUnavailable", "_audit_v2_hash"):
         if marker not in audit_src:
             reasons.append(f"keyed/fail-closed wiring marker {marker!r} absent from audit()")
+    # The client-mode fail-closed must apply to EVERY actor: the former
+    # system-actor carve-out must be gone from audit(), and the central
+    # mutation-writability preflight must exist so business mutations fail closed
+    # BEFORE touching state.
+    if 'actor_source != "system"' in audit_src:
+        reasons.append(
+            "system-actor carve-out still present in audit(); client mode must "
+            "fail closed for all actors (worker/CLI/startup/denial)"
+        )
+    if not hasattr(_store_mod.LocalStateStore, "require_audit_write_capability"):
+        reasons.append("central mutation-writability preflight (require_audit_write_capability) missing")
     if not hasattr(_store_mod.LocalStateStore, "_audit_v2_hash") or not hasattr(
         _store_mod.LocalStateStore, "_canonical_v2_audit_payload"
     ):

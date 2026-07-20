@@ -554,8 +554,8 @@ export const testGates: TestGate[] = [
     id: "gate-audit-integrity",
     name: "Audit integrity",
     status: "pass",
-    command: "pnpm run audit:integrity",
-    lastResult: "Fresh ledgers are hash-chain sealed, and tampered audit metadata is detected as broken."
+    command: "pnpm run audit:audit-keyed-integrity",
+    lastResult: "New events are sealed with a versioned keyed HMAC-SHA256; legacy events are labelled unkeyed and never shown as keyed; a legacy event after keying, or tampered metadata, verifies as broken."
   },
   {
     id: "gate-audit-redaction",
