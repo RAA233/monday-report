@@ -24,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = ROOT / "evals" / "ga" / "blocker_registry.v1.json"
+MIGRATION_EVIDENCE_PATH = ROOT / "output" / "migrations" / "migration-evidence.v1.json"
 
 CATEGORIES = {
     "software",
@@ -599,6 +600,111 @@ def _verified_reviewer_probe() -> tuple[str, str]:
     )
 
 
+def _load_migration_evidence() -> tuple[dict | None, str]:
+    if not MIGRATION_EVIDENCE_PATH.exists():
+        return None, "no migration evidence artifact (output/migrations/migration-evidence.v1.json)"
+    try:
+        payload = json.loads(MIGRATION_EVIDENCE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return None, f"migration evidence unreadable: {exc.__class__.__name__}"
+    if not isinstance(payload, dict):
+        return None, "migration evidence malformed"
+    return payload, "loaded"
+
+
+def _migration_evidence_valid() -> tuple[bool, list[str], dict | None]:
+    """Shared gate for both migration probes.
+
+    The committed evidence must be a REAL-PostgreSQL passing run, integrity-verified,
+    bound to the CURRENT migration bytes, and captured from a clean worktree. Absent
+    or stale or non-passing evidence keeps the controls BLOCKED — code presence never
+    flips them. This is the evidence-driven equivalent of the reviewer/audit probes.
+    """
+    payload, reason = _load_migration_evidence()
+    if payload is None:
+        return False, [reason], None
+    reasons: list[str] = []
+    if payload.get("status") != "passed":
+        reasons.append(
+            f"evidence status is {payload.get('status')!r}, not 'passed' (no real-PostgreSQL execution)"
+        )
+    if not verify_evidence_hash(payload):
+        reasons.append("evidence payload_sha256 does not verify (tampered or malformed)")
+    if not payload.get("worktree_clean"):
+        reasons.append("evidence was not captured from a clean worktree")
+    if not payload.get("postgres_server_version"):
+        reasons.append("evidence carries no PostgreSQL server version (no real database ran)")
+    try:
+        import backend.app.migrations as _mig
+
+        current = _mig.migration_set_sha256(_mig.discover_migrations())
+    except Exception as exc:  # noqa: BLE001
+        reasons.append(f"could not recompute migration set: {exc.__class__.__name__}")
+        current = None
+    if current is not None and payload.get("migration_set_sha256") != current:
+        reasons.append("evidence is stale: the migration set changed after the evidence was generated")
+    return (not reasons), reasons, payload
+
+
+def _migration_runner_probe() -> tuple[str, str]:
+    """Resolution condition (registry): a runner with a schema_migrations/version
+    table applies db/migrations/ deterministically and idempotently. PASS-capable
+    ONLY with committed real-PostgreSQL evidence proving deterministic order,
+    metadata, advisory lock, per-migration transactions, idempotent rerun,
+    checksum-drift refusal, and failure rollback."""
+    ok, reasons, payload = _migration_evidence_valid()
+    if not ok:
+        return "BLOCKED", "Migration runner not proven: " + "; ".join(reasons)
+    needed = [
+        "fresh_apply_result",
+        "rerun_result",
+        "partial_upgrade_result",
+        "concurrency_result",
+        "rollback_result",
+        "checksum_drift_result",
+    ]
+    missing = [key for key in needed if not payload.get(key)]
+    if missing:
+        return "BLOCKED", "Migration runner evidence incomplete (missing: " + ", ".join(missing) + ")."
+    return (
+        "PASS",
+        "A deterministic, idempotent migration runner applies db/migrations/ under a "
+        "session-level advisory lock with per-migration transactions, tracked by a "
+        "schema_migrations version table; committed real-PostgreSQL evidence proves fresh "
+        "apply, idempotent rerun, partial upgrades, failure rollback, concurrency "
+        "serialization, and checksum-drift refusal.",
+    )
+
+
+def _migration_validity_probe() -> tuple[str, str]:
+    """Resolution condition (registry): all committed migrations reference only
+    tables/columns created by earlier migrations; FK targets exist. PASS-capable
+    ONLY when the complete sequence applies on real PostgreSQL and supported partial
+    upgrades pass, corroborated by the supplemental static validator."""
+    ok, reasons, payload = _migration_evidence_valid()
+    if not ok:
+        return "BLOCKED", "Migration validity not proven: " + "; ".join(reasons)
+    fresh = payload.get("fresh_apply_result") or {}
+    if not fresh.get("ok"):
+        return "BLOCKED", "Migration validity evidence shows the fresh apply did not succeed."
+    if not payload.get("partial_upgrade_result"):
+        return "BLOCKED", "Migration validity evidence lacks supported partial-upgrade results."
+    try:
+        import backend.app.migrations as _mig
+
+        static = _mig.validate_migration_set(_mig.discover_migrations())
+    except Exception as exc:  # noqa: BLE001
+        return "BLOCKED", f"Supplemental static validation could not run: {exc.__class__.__name__}."
+    if not static.ok:
+        return "BLOCKED", "Static validation still reports broken FK dependencies: " + str(static.broken_references)
+    return (
+        "PASS",
+        "The complete migration sequence applies cleanly on real PostgreSQL and supported "
+        "partial upgrades succeed; every committed migration references only tables created "
+        "by earlier migrations (FK targets exist), corroborated by the supplemental static validator.",
+    )
+
+
 def evaluate_blockers(
     readiness_by_id: dict[str, str],
     *,
@@ -636,6 +742,10 @@ def evaluate_blockers(
             disposition, detail = _audit_keyed_integrity_probe()
         elif check_id == "ga_verified_reviewer_identity":
             disposition, detail = _verified_reviewer_probe()
+        elif check_id == "ga_migration_runner":
+            disposition, detail = _migration_runner_probe()
+        elif check_id == "ga_migration_validity":
+            disposition, detail = _migration_validity_probe()
         elif check_id == "ga_parser_coverage_evidence":
             disposition, detail, evidence_reference = _forge_probe(forge_report)
         elif check_id == "ga_official_export_gate":

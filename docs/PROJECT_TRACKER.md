@@ -814,3 +814,40 @@ Attributes field-correction (record + revert) and validation outcomes to a
 | Command | Exit | Result |
 | --- | --- | --- |
 | `pnpm run audit:verified-reviewer` | 0 | **50/50** — verified reviewer records/reverts/validates with server-derived attribution + matching keyed audit; demo/system/configured/cross-tenant/revoked/disabled/unauthorized rejected before mutation; client-supplied reviewer/tenant/email ignored; no token/hash leakage; concurrency-distinct; old snapshot loads without backfill; JSON+JSONB preserve; evidence-driven PASS; HMAC/tenant/RBAC/registry/GA/FORGE/trajectory/benchmarking regressions intact. |
+
+### PostgreSQL migration runner (branch `feat/postgres-migration-foundation`)
+
+A deterministic, idempotent migration runner (`backend/app/migrations.py`,
+`docs/POSTGRES_MIGRATIONS.md`) that applies `db/migrations/` and tracks applied
+versions in a `schema_migrations` table. Addresses `migration-runner` and
+`migration-validity`.
+- **Runner**: explicit `python -m backend.app.migrations apply/status/validate`
+  (never on API startup); filename contract `NNNN_description.sql`; stable per-file
+  SHA-256; whole-run **session-level advisory lock**; **per-migration transactions**
+  (BEGIN → SQL → metadata insert → COMMIT), rollback + stop on failure; checksum
+  drift refused and never rewritten.
+- **Migration 0003 (migration-validity)**: corrected in place — it was **provably
+  unapplied** (no runner/`schema_migrations` ever existed; its `projects`/`reports`
+  FK targets are never created in-sequence, so it was un-appliable). Retargeted to
+  `workspaces(id)` / `monday_reports(id)` (the tables `0001` creates), matching the
+  running app's domain. `db/schema.sql` is a divergent, non-authoritative flattened
+  reference and is **not** what the runner applies.
+- **Validity source of truth**: a **real PostgreSQL** execution (fresh apply, rerun,
+  partial upgrades, failure rollback, concurrency, checksum drift). The static
+  validator is **supplemental only**, with documented limits.
+- **Readiness**: `ga_migration_runner` / `ga_migration_validity` are
+  **evidence-driven** and PASS **only** with committed real-PostgreSQL passing
+  evidence bound to the current migration bytes + a clean tree; **registry
+  unchanged**; persistence-locking, correction-atomicity, tenant-authorization,
+  backup/restore, and tail-truncation stay **BLOCKED**; GA stays `GA_BLOCKED`.
+- **Environmental status**: no PostgreSQL was reachable in the build environment
+  (Docker Desktop's Linux engine could not start non-interactively — the privileged
+  `com.docker.service` needs admin elevation a headless session cannot grant; WSL2
+  was healthy). The decisive real-PostgreSQL run **did not execute**, so evidence is
+  `BLOCKED_NO_POSTGRES` and **both controls remain BLOCKED** pending a disposable,
+  test-marked PostgreSQL 16 (`MONDAY_REPORT_TEST_DATABASE_URL` +
+  `--emit-evidence`).
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `pnpm run audit:migration-runner` | 0 | **23 passed / 34 skipped** (no disposable PostgreSQL) — filename/version contract, stable SHA-256 + migration-set digest, supplemental static validator (passes on the corrected sequence, detects a missing FK target, honours intra-migration siblings, documents limits), evidence payload_sha256 recompute + secret-exclusion, both migration probes fail-closed BLOCKED, GA `GA_BLOCKED`, registry unchanged, live JSON state untouched. Real-PostgreSQL scenarios (fresh/rerun/partial/rollback/concurrency/drift/metadata) run and flip the blockers when `MONDAY_REPORT_TEST_DATABASE_URL` is provided. |
