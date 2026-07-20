@@ -100,6 +100,7 @@ def main() -> int:
         # precondition) AND rejects the shared key for auth, so also authenticate
         # with a per-user admin credential.
         os.environ["MONDAY_REPORT_API_KEY"] = "golden-fixture-guard-client-key-0123456789"
+        os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY"] = "golden-fixture-guard-audit-hmac-key-0123ab"
         from backend.app.store import store
         from backend.app.schemas import Role
 

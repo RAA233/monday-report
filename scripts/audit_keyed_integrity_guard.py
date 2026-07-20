@@ -381,6 +381,168 @@ def main() -> int:
     check("57 benchmarking 23/23 covered by audit:all (benchmarking_guard)", True)
     check("58 no recommendation/source mutation from audit ops", len(sGA.anomaly_events) == 0 and len(sGA.benchmark_measurements) == 0)
 
+    # ================= Corrections MC1-MC5 (59-86) =================
+    from fastapi.testclient import TestClient
+
+    # ---- MC1: client-mode edge preflight (all non-public -> 503; no event) ----
+    sEdge, smEdge, pEdge = fresh_store("client", None)   # client mode, NO key
+    import backend.app.main as mEdge
+    importlib.reload(mEdge)
+    edge = TestClient(mEdge.app)
+    n_before = len(smEdge.store.audit_logs)
+    check("59 client no-key: minimal health remains available", edge.get("/health").status_code == 200)
+    r_get = edge.get("/workspaces", headers={"X-Monday-Report-Key": "whatever"})
+    check("60 client no-key: protected GET -> 503", r_get.status_code == 503)
+    check("61 client no-key: protected POST -> 503",
+          edge.post("/workspaces", json={"name": "X"}, headers={"X-Monday-Report-Key": "whatever"}).status_code == 503)
+    check("62 client no-key: invalid credential -> 503 (not 401)",
+          edge.get("/workspaces", headers={"X-Monday-Report-Key": "invalid-token"}).status_code == 503)
+    check("63 client no-key: signed-capability redemption -> 503",
+          edge.get(f"/signed/report-exports/{uuid.uuid4()}?token=x").status_code == 503)
+    smEdge.store.refresh()
+    check("64 client no-key: no denial/legacy audit event appended", len(smEdge.store.audit_logs) == n_before)
+    _body = r_get.json()
+    check("65 client no-key: 503 discloses no protected data",
+          _body.get("detail") == "Audit integrity key is unavailable" and "workspace" not in json.dumps(_body).lower())
+
+    # ---- MC3: forward-only keying (legacy* keyed+) ----
+    sK, smK, pK = fresh_store("demo", None)   # demo, no key -> legacy allowed
+    sK.audit("leg.0", "tenant", sK.tenant.id, {})
+    sK.audit("leg.1", "tenant", sK.tenant.id, {})
+    check("66 demo legacy-only before keying succeeds (legacy_valid)",
+          sK.audit_integrity_status().integrity_state == "legacy_valid")
+    legacy_head = sK._audit_chain_hash(sK.audit_logs[-1])
+    os.environ.update({"MONDAY_REPORT_AUDIT_HMAC_KEY": KEY, "MONDAY_REPORT_AUDIT_HMAC_KEY_ID": "k1",
+                       "MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION": "1"})
+    sK.audit("key.0", "tenant", sK.tenant.id, {})
+    check("67 first keyed event references the legacy head",
+          sK.audit_logs[-1].previous_hash == legacy_head and sK.audit_logs[-1].integrity_version == 2)
+    sK.audit("key.1", "tenant", sK.tenant.id, {})
+    check("68 further keyed events succeed (mixed_valid)",
+          sK.audit_integrity_status().integrity_state == "mixed_valid")
+    for k in _KEY_ENVS:
+        os.environ.pop(k, None)
+    _raised = False
+    try:
+        sK.audit("leg.after", "tenant", sK.tenant.id, {})
+    except AuditIntegrityUnavailable:
+        _raised = True
+    check("69 key removal prevents a later legacy append (no legacy-after-keyed)",
+          _raised and sK.audit_logs[-1].action == "key.1")
+    # injected legacy-after-keyed chain verifies as broken
+    sInj, smInj, pInj = fresh_store("demo", KEY, "k1", 1)
+    sInj.audit("k.a", "tenant", sInj.tenant.id, {})
+    sInj.audit("k.b", "tenant", sInj.tenant.id, {})
+    _prev = sInj._audit_chain_hash(sInj.audit_logs[-1])
+    _forged = AuditLog(tenant_id=sInj.tenant.id, actor_user_id=sInj.audit_logs[-1].actor_user_id,
+                       action="leg.forged", resource_type="tenant", resource_id=sInj.tenant.id,
+                       metadata={}, previous_hash=_prev, actor_source="system", actor_roles=[])
+    _forged.entry_hash = sInj._audit_event_hash(_forged)
+    sInj.audit_logs.append(_forged)
+    sInj.save(); sInj.refresh()
+    _stInj = sInj.audit_integrity_status()
+    check("70 injected legacy-after-keyed verifies as broken", _stInj.integrity_state == "broken" and _stInj.broken_events >= 1)
+    check("71 broken legacy-after-keyed is NOT legacy_valid/mixed_valid/sealed",
+          _stInj.integrity_state not in ("legacy_valid", "mixed_valid") and _stInj.status == "broken")
+
+    # ---- MC5: client no-key startup is diagnostic-only (no partial init) ----
+    sDiag, smDiag, pDiag = fresh_store("client", None)
+    check("72 client no-key startup: no audit events", len(sDiag.audit_logs) == 0)
+    check("73 client no-key startup: no seed records", len(sDiag.workspaces) == 0)
+    check("74 client no-key startup: no snapshot written", not (pDiag / "state.json").exists())
+    check("75 client no-key startup: no benchmarking defaults", len(sDiag.benchmark_values) == 0)
+
+    # ---- MC2: mutation preflight fails closed BEFORE touching state ----
+    sPre, smPre, pPre = fresh_store("client", None)
+    _rh = False
+    try:
+        sPre.require_audit_write_capability("probe")
+    except AuditIntegrityUnavailable:
+        _rh = True
+    check("76 client no-key: central preflight raises", _rh)
+    _ru = False
+    try:
+        sPre.create_user("blocked@x.y", "Blocked", [Role.ADMIN])
+    except AuditIntegrityUnavailable:
+        _ru = True
+    check("77 client no-key: create_user fails closed before mutating users", _ru and len(sPre.users) == 0)
+    _rw = False
+    try:
+        sPre.process_queued_jobs()
+    except AuditIntegrityUnavailable:
+        _rw = True
+    check("78 client no-key: worker fails closed before mutation", _rw)
+    check("79 client no-key: no audit event / snapshot after blocked mutations",
+          len(sPre.audit_logs) == 0 and not (pPre / "state.json").exists())
+
+    # ---- concurrency (10 threads), retry-no-dup, HMAC-failure ----
+    sC, smC, pC = fresh_store("demo", KEY, "k1", 1)
+    startC = len(sC.audit_logs)
+
+    def _wk(i):
+        sC.audit(f"C.{i}", "tenant", sC.tenant.id, {"i": i})
+
+    ths = [threading.Thread(target=_wk, args=(i,)) for i in range(10)]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join()
+    sC.refresh()
+    stC = sC.audit_integrity_status()
+    check("80 ten concurrent appends preserve count", len(sC.audit_logs) == startC + 10)
+    _prevs = [e.previous_hash for e in sC.audit_logs[startC:]]
+    check("81 ten concurrent appends: unique correct linkage",
+          stC.broken_events == 0 and len(set(_prevs)) == len(_prevs))
+    sR, smR, pR = fresh_store("demo", KEY, "k1", 1)
+    startR = len(sR.audit_logs)
+    _orig_save = sR.save
+
+    def _boom():
+        raise IOError("disk full")
+
+    sR.save = _boom
+    _rr = False
+    try:
+        sR.audit("R.once", "tenant", sR.tenant.id, {})
+    except IOError:
+        _rr = True
+    sR.save = _orig_save
+    sR.audit("R.once", "tenant", sR.tenant.id, {})  # retry succeeds
+    check("82 retry after save failure does not duplicate",
+          _rr and sum(1 for e in sR.audit_logs if e.action == "R.once") == 1 and len(sR.audit_logs) == startR + 1)
+    sH, smH, pH = fresh_store("demo", KEY, "k1", 1)
+    startH = len(sH.audit_logs)
+
+    def _boom_hmac(ev, secret):
+        raise ValueError("hmac boom")
+
+    sH._audit_v2_hash = _boom_hmac
+    _rHm = False
+    try:
+        sH.audit("H.x", "tenant", sH.tenant.id, {})
+    except ValueError:
+        _rHm = True
+    check("83 HMAC-compute failure leaves no partial event", _rHm and len(sH.audit_logs) == startH)
+
+    # ---- status is linkage-only; integrity_state is the authority (MC4) ----
+    sL, smL, pL = fresh_store("demo", None)
+    sL.audit("L.0", "tenant", sL.tenant.id, {})
+    stL = sL.audit_integrity_status()
+    check("84 legacy chain: status='sealed' is linkage-only; integrity_state='legacy_valid'; 0 keyed",
+          stL.status == "sealed" and stL.integrity_state == "legacy_valid" and stL.keyed_event_count == 0)
+    sM2, smM2, pM2 = fresh_store("demo", None)
+    sM2.audit("m.leg", "tenant", sM2.tenant.id, {})
+    os.environ.update({"MONDAY_REPORT_AUDIT_HMAC_KEY": KEY, "MONDAY_REPORT_AUDIT_HMAC_KEY_ID": "k1",
+                       "MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION": "1"})
+    sM2.audit("m.key", "tenant", sM2.tenant.id, {})
+    stM2 = sM2.audit_integrity_status()
+    check("85 mixed chain: integrity_state='mixed_valid' (not fully keyed) though status='sealed'",
+          stM2.integrity_state == "mixed_valid" and stM2.status == "sealed"
+          and stM2.keyed_event_count == 1 and stM2.legacy_event_count >= 1)
+    check("86 no key material in status evidence", KEY not in json.dumps(stM2.model_dump(mode="json")))
+    for k in _KEY_ENVS:
+        os.environ.pop(k, None)
+
     failed = [c for c in checks if not c["ok"]]
     for c in checks:
         print(f"{'PASS' if c['ok'] else 'FAIL'}: {c['name']} - {c['detail']}")

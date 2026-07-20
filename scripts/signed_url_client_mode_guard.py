@@ -120,6 +120,7 @@ def main() -> int:
 def configure_client_mode(tmp_root: Path) -> None:
     os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
     os.environ["MONDAY_REPORT_API_KEY"] = CLIENT_API_KEY
+    os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY"] = "signed-url-guard-audit-hmac-key-0123456789ab"
     os.environ.pop("MONDAY_REPORT_SIGNING_SECRET", None)
     os.environ["MONDAY_REPORT_DISABLE_DEMO_SEED"] = "true"
     os.environ["MONDAY_REPORT_TENANT_NAME"] = "Signed URL Guard Tenant"

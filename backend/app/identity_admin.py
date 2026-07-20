@@ -185,4 +185,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from .audit_keys import AuditIntegrityUnavailable
+
+    try:
+        sys.exit(main())
+    except AuditIntegrityUnavailable as exc:
+        # Client-mode fail-closed (MC1/MC2): no valid active audit key, so the CLI
+        # refuses to provision/revoke BEFORE mutating identity state. No key
+        # material is included in the message.
+        print(f"ABORT: {exc}", file=sys.stderr)
+        sys.exit(1)

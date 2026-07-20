@@ -138,6 +138,9 @@ def main() -> int:
 
 def configure_guard_env(tmp_root: Path) -> None:
     os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
+    # Client mode requires a valid active audit key (all mutations/audits fail
+    # closed without one). A real client deployment always configures one.
+    os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY"] = "api-auth-guard-audit-hmac-key-0123456789ab"
     os.environ.pop("MONDAY_REPORT_API_KEY", None)
     os.environ["MONDAY_REPORT_DISABLE_DEMO_SEED"] = "true"
     os.environ["MONDAY_REPORT_TENANT_NAME"] = "API Auth Guard Tenant"

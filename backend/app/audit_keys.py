@@ -188,5 +188,17 @@ _provider: AuditKeyProvider = EnvAuditKeyProvider()
 
 
 def audit_key_provider() -> AuditKeyProvider:
-    """The process-wide audit key provider (environment-backed)."""
+    """The process-wide audit key provider (environment-backed).
+
+    Consistency model (per-append snapshot): the environment is read on every
+    ``active_key()`` / ``key_for()`` call, and ``store.audit()`` resolves the active
+    key EXACTLY ONCE per event under ``audit_lock`` — so a single audit event is
+    always sealed under one key id/version and can never be split across a rotation.
+    A rotation (changing the ``MONDAY_REPORT_AUDIT_HMAC_*`` variables) takes effect
+    deterministically at the NEXT event boundary; the previous version, if retained
+    for verification, keeps verifying older events. There is no per-PROCESS snapshot:
+    a multi-event logical operation may span a rotation, which is acceptable because
+    each event self-describes its key and this store does not provide multi-event
+    transactional atomicity (see docs/AUDIT_INTEGRITY.md — persistence/transaction
+    blockers remain unresolved)."""
     return _provider

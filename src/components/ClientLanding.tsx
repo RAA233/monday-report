@@ -372,7 +372,7 @@ function ReportProof({
       <div className="mono-gate-grid">
         <ReportMeta label="Validation" value="Closed" />
         <ReportMeta label="Export" value="PDF/XLSX" />
-        <ReportMeta label="Audit" value="Sealed" />
+        <ReportMeta label="Audit" value="Keyed HMAC" />
       </div>
     </article>
   );

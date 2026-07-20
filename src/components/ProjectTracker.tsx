@@ -291,12 +291,14 @@ export function ProjectTracker(): JSX.Element {
           </div>
           {auditIntegrity && (
             <div className="job-health-strip" aria-label="Audit integrity health">
-              <span>audit: {auditIntegrity.status}</span>
-              <span>{auditIntegrity.hashed_events} sealed</span>
-              <span>{auditIntegrity.legacy_events} legacy</span>
+              {/* integrity_state is the display authority (MC4); the backward-compat
+                  `status` field is a linkage-only result and is never shown as keyed. */}
+              <span>integrity: {integrityStateLabel(auditIntegrity.integrity_state)}</span>
+              <span>{auditIntegrity.keyed_event_count ?? 0} keyed</span>
+              <span>{auditIntegrity.legacy_event_count ?? auditIntegrity.legacy_events} legacy</span>
               <span>{auditIntegrity.broken_events} broken</span>
-              <Badge tone={auditIntegrityTone(auditIntegrity.status)}>
-                {auditIntegrity.status}
+              <Badge tone={integrityStateTone(auditIntegrity.integrity_state)}>
+                {integrityStateLabel(auditIntegrity.integrity_state)}
               </Badge>
             </div>
           )}
@@ -428,17 +430,43 @@ function readinessTone(status: ApiClientDataReadinessCheck["status"]): "good" | 
   return "warning";
 }
 
-function auditIntegrityTone(status: ApiAuditIntegrityStatus["status"]): "good" | "warning" | "danger" | "info" {
-  if (status === "sealed") {
-    return "good";
+// integrity_state is the display authority (MC4). Only keyed_valid is positive;
+// a legacy/mixed chain is never shown as fully keyed or "secure".
+function integrityStateTone(
+  state: ApiAuditIntegrityStatus["integrity_state"],
+): "neutral" | "good" | "warning" | "danger" | "info" {
+  switch (state) {
+    case "keyed_valid":
+      return "good";
+    case "mixed_valid":
+      return "info";
+    case "legacy_valid":
+      return "warning";
+    case "key_unavailable":
+    case "broken":
+      return "danger";
+    default:
+      return "neutral"; // empty / unknown
   }
-  if (status === "broken") {
-    return "danger";
+}
+
+function integrityStateLabel(state: ApiAuditIntegrityStatus["integrity_state"]): string {
+  switch (state) {
+    case "keyed_valid":
+      return "keyed (HMAC)";
+    case "mixed_valid":
+      return "mixed — keyed suffix, unkeyed history";
+    case "legacy_valid":
+      return "legacy — unkeyed";
+    case "key_unavailable":
+      return "key unavailable";
+    case "broken":
+      return "broken";
+    case "empty":
+      return "empty";
+    default:
+      return "unknown";
   }
-  if (status === "legacy") {
-    return "warning";
-  }
-  return "info";
 }
 
 function runtimeLabel(runtime: ApiLocalAiStatus["runtime"]): string {

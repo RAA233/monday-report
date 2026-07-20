@@ -139,6 +139,7 @@ def main() -> int:
         # precondition) AND rejects the shared key for auth, so also authenticate
         # with a per-user admin credential.
         os.environ["MONDAY_REPORT_API_KEY"] = "parser-eval-guard-client-key-0123456789"
+        os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY"] = "parser-eval-guard-audit-hmac-key-0123456ab"
         from backend.app.schemas import Role
 
         _admin = store.create_user("parser-eval-admin@example.test", "Parser Eval Admin", [Role.ADMIN])
