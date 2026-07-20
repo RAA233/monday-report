@@ -1450,7 +1450,7 @@ class LocalStateStore:
         measurements = [
             item
             for item in self.benchmark_measurements.values()
-            if item.workspace_id == workspace_id
+            if item.workspace_id == workspace_id and item.tenant_id == self.tenant.id
         ]
         current = self._latest_measurement(workspace_id, FEET_DRILLED_PER_DAY)
         trend_measurements = sorted(
@@ -1480,12 +1480,12 @@ class LocalStateStore:
         active_anomalies = [
             item
             for item in self.anomaly_events.values()
-            if item.workspace_id == workspace_id and item.status == "active"
+            if item.workspace_id == workspace_id and item.tenant_id == self.tenant.id and item.status == "active"
         ]
         historical_anomalies = [
             item
             for item in self.anomaly_events.values()
-            if item.workspace_id == workspace_id and item.status != "active"
+            if item.workspace_id == workspace_id and item.tenant_id == self.tenant.id and item.status != "active"
         ]
         diagnostic_actions = [
             action
@@ -1750,7 +1750,7 @@ class LocalStateStore:
         measurements = [
             item
             for item in self.benchmark_measurements.values()
-            if item.workspace_id == workspace_id and item.metric == metric
+            if item.workspace_id == workspace_id and item.tenant_id == self.tenant.id and item.metric == metric
         ]
         if not measurements:
             return None
@@ -1802,7 +1802,7 @@ class LocalStateStore:
         measurements = [
             item
             for item in self.benchmark_measurements.values()
-            if item.workspace_id == workspace_id
+            if item.workspace_id == workspace_id and item.tenant_id == self.tenant.id
         ]
         references = [
             f"{item.source_type}:{item.source_identifier} ({item.metric}, {item.data_timestamp.isoformat()})"

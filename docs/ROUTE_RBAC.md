@@ -225,3 +225,12 @@ blockers stay BLOCKED and GA stays `GA_BLOCKED`.
 Multi-tenant resource authorization (a caller with a permission is still not
 scoped to *their* tenant's resources here), verified reviewer workflow, keyed
 audit integrity, and any persistence redesign. These remain declared blockers.
+
+> **Update:** a later increment adds **API-layer tenant resource authorization**
+> on top of route RBAC — after the permission gate, every resource route now
+> compares the looked-up resource's `tenant_id` to the request tenant and hides
+> cross-tenant resources behind an existence-hiding 404. See
+> [`TENANT_AUTHORIZATION.md`](TENANT_AUTHORIZATION.md). Multi-tenant **storage**,
+> normalized persistence, and **Postgres RLS** remain out of scope, so
+> `tenant-authorization-enforcement` stays a declared blocker and GA stays
+> `GA_BLOCKED`.
