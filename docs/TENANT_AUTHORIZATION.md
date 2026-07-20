@@ -44,21 +44,35 @@ The order for every resource route is:
 2. **permission** (`require_permission` / `require_benchmark_permission`) — a
    missing/disabled identity or a role lacking the permission is denied **403**
    *before any resource lookup*, so no unauthorized caller can probe existence,
-3. **lookup + tenant ownership** — `_tenant_owned(resource, …)` returns the
-   resource only if it belongs to the request tenant; a resource that is missing
-   **or** owned by another tenant raises the **same 404 with the same body**
-   (existence-hiding: a caller can never distinguish "does not exist" from
-   "exists in another tenant"),
+3. **lookup + tenant ownership graph** — `_tenant_owned(resource, …)` returns the
+   resource only if it is owned by the request tenant **through the full ownership
+   graph** (`tenant_authorization.owned_via_graph`): the resource's own `tenant_id`
+   AND every present parent link (`workspace_id`/`upload_id`/`file_id`/
+   `document_id`/`report_id`/`measurement_id`) must resolve to the request tenant.
+   A record whose direct `tenant_id` matches but whose parent chain points at
+   another tenant — a contradictory or broken chain — **fails closed**, never
+   accepted because one field matches. A resource that is missing **or** not owned
+   raises the **same 404 with the same body** (existence-hiding: a caller can never
+   distinguish "does not exist" from "exists in another tenant"),
 4. **operation**.
 
 List, aggregate, and dashboard reads are tenant-filtered with `_tenant_items()`
-(`/workspaces`, `/documents`, `/failures`, `/processing-jobs`,
+(also graph-aware, so a contradictory child is excluded, not just a foreign-stamped
+row): `/workspaces`, `/documents`, `/failures`, `/processing-jobs`,
 `/validation-tasks`, `/monday-reports`, `/audit-logs`, `/benchmarking/config`,
-`/dashboards/summary`, and the chat evidence set), so no list surfaces another
-tenant's rows and no aggregate counts them. The benchmarking status builder in
-`backend/app/store.py` is tenant-scoped for the same reason, so a foreign
-`workspace_id` on the configuration-only path surfaces none of another tenant's
-measurements or anomalies.
+`/dashboards/summary`, the chat evidence set, and the report-draft /
+generated-report inputs — filtering happens **before** any count/sum/extrema, so
+no list surfaces another tenant's rows and no aggregate counts them. The
+benchmarking status builder in `backend/app/store.py` is fully tenant-scoped
+(measurements, anomaly events, **approved benchmark values and rules**, comparisons,
+Gordon/Noble extrema, and source references), so a foreign `workspace_id` on the
+configuration-only path — and a foreign approved benchmark value in the shared
+store — surfaces none of another tenant's data.
+
+A per-route **parity** function, `main.tenant_ownership_fully_enforced()` (mirroring
+`route_policy_fully_enforced()` for the permission layer), statically proves that
+every resource-scoped route invokes a tenant-ownership dependency; the readiness
+probe consumes it as machine-readable evidence.
 
 Server-side stamping is unchanged and already correct: every create path stamps
 `tenant_id=self.tenant.id`. Because all `tenant_id` fields already existed on the
@@ -96,21 +110,30 @@ The GA blocker `tenant-authorization-enforcement`
 layer **and** Postgres RLS active over the normalized store. This increment
 delivers the API-layer half only; the RLS-backed normalized multi-tenant store is
 out of scope. The evidence-driven `_tenant_authorization_probe()` in
-`backend/app/ga_readiness.py` inspects the actual route/authorization code, confirms
-the API-layer enforcement is wired, and reports BLOCKED with that context — it
-never flips to PASS on the API-layer evidence alone, and the registry is not
-weakened.
+`backend/app/ga_readiness.py` inspects the actual route/authorization code, requires
+`tenant_ownership_fully_enforced()` and `route_policy_fully_enforced()` (machine-
+readable per-route parity, not mere substring presence), confirms the API-layer
+enforcement is wired, and reports BLOCKED with that context — it never flips to PASS
+on the API-layer evidence alone, and the registry is not weakened.
 
 ## Verification
 
 `scripts/tenant_authorization_guard.py` (`pnpm run audit:tenant-authorization`,
 also chained into `audit:all`) stands up the app with injected foreign tenant-B
-fixtures and proves: the module's default-deny ownership logic; cross-tenant single-
+fixtures and proves, across **90** behavioral vectors: the module's default-deny
+ownership logic; the ownership graph fails closed on a contradictory
+resource→parent→tenant chain and on a divergent child stamp; cross-tenant single-
 resource access is an existence-hiding 404 across every route family while same-
-tenant access succeeds; list/aggregate reads exclude foreign rows; signed
-capabilities bind the tenant at issuance and redemption; cross-tenant denials are
-audited with request-tenant context and no foreign detail; and the increment
-closes no other GA blocker (route-level RBAC intact, GA still GA_BLOCKED).
+tenant access succeeds; list/aggregate/dashboard/report-draft/generated-report reads
+exclude foreign **and contradictory** rows before counting; the benchmarking status
+excludes a foreign approved benchmark value; per-route tenant-ownership parity holds
+(and fails when a resource route drops its dependency); signed capabilities bind the
+tenant at issuance and redemption and a legacy unbound token is rejected; child
+creation copies the parent tenant and a client body cannot override it; the request
+identity context is isolated per request and resets after an exception; cross-tenant
+denials are audited with request-tenant context and no foreign detail; an old
+snapshot loads with no tenant-field backfill written; and the increment closes no
+other GA blocker (route-level RBAC intact, GA still GA_BLOCKED).
 
 ## Explicitly out of scope (still declared blockers)
 

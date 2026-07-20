@@ -85,7 +85,7 @@ from .readiness import client_data_mode, evaluate_client_data_readiness
 from .runtime_backends import runtime_backend_status
 from .signed_urls import create_signed_token, signing_secret_configured, verify_signed_token
 from .store import store
-from .tenant_authorization import owns, request_tenant_id, tenant_visible
+from .tenant_authorization import owned_via_graph, owns, request_tenant_id
 
 app = FastAPI(
     title="Monday Report API",
@@ -338,25 +338,58 @@ def _audit_cross_tenant_denied(resource_type: str, resource_id: UUID | None) -> 
     )
 
 
-def _tenant_owned(resource, resource_type: str, resource_id: UUID, detail: str):
-    """Return the resource iff it belongs to the request tenant.
+# Resource -> parent collection map for the ownership graph. A resource that
+# carries one of these parent links is owned only when the linked parent exists in
+# the SAME request tenant (see tenant_authorization.owned_via_graph). This is the
+# store-backed resolver; the ownership logic itself lives in the authority module.
+_OWNERSHIP_COLLECTIONS = {
+    "workspace_id": lambda: store.workspaces,
+    "upload_id": lambda: store.uploads,
+    "file_id": lambda: store.files,
+    "document_id": lambda: store.parsed_documents,
+    "report_id": lambda: store.monday_reports,
+    "measurement_id": lambda: store.benchmark_measurements,
+}
 
-    A missing resource OR a cross-tenant resource both raise the SAME 404 with the
-    SAME detail (existence-hiding). A genuine cross-tenant hit (resource exists but
-    is owned by another tenant) is audited with request-tenant context; a plain
-    missing resource keeps the prior no-audit behavior."""
+
+def _resolve_parent(attr: str, parent_id):
+    getter = _OWNERSHIP_COLLECTIONS.get(attr)
+    return getter().get(parent_id) if getter is not None else None
+
+
+def _owned(resource, tenant_id) -> bool:
+    """Full ownership-graph check: the resource's own tenant_id AND every present
+    parent link (workspace/upload/file/document/report/measurement) must resolve to
+    the request tenant. A contradictory or broken parent chain fails closed, so a
+    record is never accepted just because its direct tenant field happens to match."""
+    return owned_via_graph(resource, tenant_id, _resolve_parent)
+
+
+def _tenant_owned(resource, resource_type: str, resource_id: UUID, detail: str):
+    """Return the resource iff it belongs to the request tenant by the full
+    ownership graph.
+
+    A missing resource, a cross-tenant resource, OR a resource whose parent chain
+    contradicts its direct tenant_id all raise the SAME 404 with the SAME detail
+    (existence-hiding). A genuine not-owned hit on an existing resource is audited
+    with request-tenant context; a plain missing resource keeps the prior no-audit
+    behavior."""
     tenant_id = _request_tenant_id()
     if resource is None:
         raise HTTPException(status_code=404, detail=detail)
-    if not owns(resource, tenant_id):
+    if not _owned(resource, tenant_id):
         _audit_cross_tenant_denied(resource_type, resource_id)
         raise HTTPException(status_code=404, detail=detail)
     return resource
 
 
 def _tenant_items(items) -> list:
-    """Filter a resource iterable to the request tenant (list/aggregate scoping)."""
-    return tenant_visible(items, _request_tenant_id())
+    """Filter a resource iterable to the request tenant by the full ownership graph
+    (list/aggregate scoping): each item's own tenant_id AND its parent chain must
+    resolve to the request tenant, so a contradictory child is excluded, not just
+    a foreign-stamped row."""
+    tenant_id = _request_tenant_id()
+    return [item for item in items if _owned(item, tenant_id)]
 
 
 def require_admin() -> AuthenticatedIdentity:
@@ -702,6 +735,85 @@ def route_policy_fully_enforced() -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Per-route tenant-ownership PARITY.
+#
+# Every route that reads/mutates a specific tenant-ownable resource (by path-param
+# id, a resource-bearing body, or a per-tenant list/aggregate) MUST invoke a
+# tenant-ownership dependency in its handler. Routes NOT listed are public,
+# tenant-global config/status (readiness/runtime/local-ai/retention/audit-integrity/
+# benchmarking-config/field-corrections-registry), server-stamped creates with no
+# foreign lookup (POST /workspaces), identity administration (admin-gated,
+# configured-tenant only), or signed-capability downloads (tenant bound in the
+# token and re-checked at redemption). This mirrors route_policy_fully_enforced()
+# for the permission layer and gives the readiness probe machine-readable evidence.
+# ---------------------------------------------------------------------------
+TENANT_OWNERSHIP_ROUTES: dict[tuple[str, str], str] = {
+    ("GET", "/workspaces"): "filter",
+    ("GET", "/documents"): "filter",
+    ("GET", "/failures"): "filter",
+    ("GET", "/processing-jobs"): "filter",
+    ("GET", "/validation-tasks"): "filter",
+    ("GET", "/monday-reports"): "filter",
+    ("GET", "/audit-logs"): "filter",
+    ("GET", "/dashboards/summary"): "filter",
+    ("GET", "/uploads/{upload_id}/files"): "owned",
+    ("GET", "/documents/{document_id}/chunks"): "owned",
+    ("GET", "/workspaces/{workspace_id}/report-draft"): "owned",
+    ("POST", "/uploads"): "owned",
+    ("POST", "/uploads/direct"): "owned",
+    ("POST", "/uploads/{upload_id}/complete"): "owned",
+    ("POST", "/chat/messages"): "owned",
+    ("POST", "/monday-reports"): "owned",
+    ("POST", "/monday-reports/{report_id}/exports/{export_format}"): "owned",
+    ("POST", "/report-exports/{export_id}/signed-url"): "owned",
+    ("POST", "/upload-files/{file_id}/signed-url"): "owned",
+    ("PATCH", "/validation-tasks/{task_id}"): "owned",
+    ("PATCH", "/benchmarking/values/{benchmark_id}"): "owned",
+    ("GET", "/workspaces/{workspace_id}/benchmarking"): "owned",
+    ("POST", "/workspaces/{workspace_id}/benchmarking/measurements"): "owned",
+    ("PATCH", "/benchmarking/anomalies/{anomaly_id}/diagnostics/{action_id}/dismiss"): "owned",
+    ("POST", "/workspaces/{workspace_id}/field-corrections"): "owned",
+    ("GET", "/workspaces/{workspace_id}/field-corrections"): "owned",
+    ("POST", "/field-corrections/{correction_id}/revert"): "owned",
+}
+_TENANT_DEP_MARKERS = ("_tenant_owned(", "_tenant_items(", "_owned(", "owns(")
+
+
+def _handler_segments(source: str) -> dict[tuple[str, str], str]:
+    """Map (METHOD, path) -> the handler's source text, by scanning @app decorators
+    (tolerant of multi-line decorators). A segment runs to the next decorator."""
+    matches = list(re.finditer(r'@app\.(get|post|patch|put|delete)\(\s*"([^"]+)"', source))
+    segments: dict[tuple[str, str], str] = {}
+    for index, match in enumerate(matches):
+        key = (match.group(1).upper(), match.group(2))
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        segments[key] = source[match.start():end]
+    return segments
+
+
+def tenant_ownership_enforcement_errors() -> list[str]:
+    """Return the list of tenant-ownership parity violations: a resource-scoped
+    route whose handler invokes NO tenant-ownership dependency, or a stale entry."""
+    source = _main_source()
+    segments = _handler_segments(source)
+    routes = set(audited_routes())
+    errors: list[str] = []
+    for (method, path) in sorted(TENANT_OWNERSHIP_ROUTES):
+        if (method, path) not in routes:
+            errors.append(f"tenant-ownership route {method} {path} does not match any route")
+            continue
+        body = segments.get((method, path), "")
+        if not any(marker in body for marker in _TENANT_DEP_MARKERS):
+            errors.append(f"resource route {method} {path} lacks a tenant-ownership dependency")
+    return errors
+
+
+def tenant_ownership_fully_enforced() -> bool:
+    """True iff every resource-scoped route proves a tenant-ownership dependency."""
+    return not tenant_ownership_enforcement_errors()
+
+
 @app.get("/workspaces", response_model=list[Workspace])
 def list_workspaces() -> list[Workspace]:
     require_permission("view_workspaces")
@@ -821,8 +933,10 @@ def list_upload_files(upload_id: UUID) -> list[UploadFileRecord]:
     require_permission("view_source_documents")
     _tenant_owned(store.uploads.get(upload_id), "upload", upload_id, "Upload not found")
     require_client_data_ready("upload.files.list", "upload", upload_id)
-    # The upload is confirmed tenant-owned; its files inherit the same tenant.
-    return [file for file in store.files.values() if file.upload_id == upload_id]
+    # The upload is tenant-owned; each returned file must ALSO carry the request
+    # tenant's stamp (fail closed on a divergent child, do not trust FK inheritance).
+    tenant_id = _request_tenant_id()
+    return [file for file in store.files.values() if file.upload_id == upload_id and owns(file, tenant_id)]
 
 
 @app.get("/processing-jobs", response_model=list[ProcessingJob])
@@ -858,8 +972,13 @@ def list_document_chunks(document_id: UUID) -> list[DocumentChunk]:
     require_permission("view_source_documents")
     _tenant_owned(store.parsed_documents.get(document_id), "parsed_document", document_id, "Document not found")
     require_client_data_ready("documents.chunks.list", "parsed_document", document_id)
-    # The document is confirmed tenant-owned; its chunks inherit the same tenant.
-    chunks = [chunk for chunk in store.document_chunks.values() if chunk.document_id == document_id]
+    # The document is tenant-owned; each returned chunk must ALSO carry the request
+    # tenant's stamp (fail closed on a divergent child, do not trust FK inheritance).
+    tenant_id = _request_tenant_id()
+    chunks = [
+        chunk for chunk in store.document_chunks.values()
+        if chunk.document_id == document_id and owns(chunk, tenant_id)
+    ]
     return sorted(chunks, key=lambda item: item.ordinal)
 
 
@@ -1028,7 +1147,15 @@ def workspace_benchmarking(workspace_id: UUID) -> BenchmarkingStatus:
     # workspace-specific data. The benchmarking status builder is tenant-scoped in
     # the store, so a foreign workspace_id surfaces none of another tenant's
     # measurements or anomalies.
-    if not owns(store.workspaces.get(workspace_id), _request_tenant_id()):
+    tenant_id = _request_tenant_id()
+    workspace = store.workspaces.get(workspace_id)
+    if not _owned(workspace, tenant_id):
+        # Missing and cross-tenant are treated identically to the CALLER (config-only
+        # 200, existence-hiding). A genuine cross-tenant probe against an EXISTING but
+        # foreign workspace is additionally recorded as authz.cross_tenant_denied,
+        # consistent with the rest of the surface; a truly-missing workspace writes none.
+        if workspace is not None:
+            _audit_cross_tenant_denied("workspace", workspace_id)
         require_client_data_ready("benchmarking.status", "workspace", workspace_id)
         store.audit(
             "benchmarking.workspace_missing_status",
@@ -1270,18 +1397,22 @@ def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     require_client_data_ready("report_draft.generate", "workspace", workspace_id)
 
     workspace = store.workspaces[workspace_id]
+    # Report-draft input is tenant-scoped: the workspace is owned, and every record
+    # fed into the draft must ALSO carry the request tenant's stamp (fail closed on a
+    # contradictory foreign record that happens to carry this workspace_id).
+    tenant_id = _request_tenant_id()
     documents = sorted(
-        [document for document in store.parsed_documents.values() if document.workspace_id == workspace_id],
+        [document for document in store.parsed_documents.values() if document.workspace_id == workspace_id and owns(document, tenant_id)],
         key=lambda item: item.created_at,
         reverse=True,
     )
     chunks = sorted(
-        [chunk for chunk in store.document_chunks.values() if chunk.workspace_id == workspace_id and chunk.text.strip()],
+        [chunk for chunk in store.document_chunks.values() if chunk.workspace_id == workspace_id and owns(chunk, tenant_id) and chunk.text.strip()],
         key=lambda item: item.created_at,
         reverse=True,
     )
     failures = sorted(
-        [failure for failure in store.failures.values() if failure.workspace_id == workspace_id],
+        [failure for failure in store.failures.values() if failure.workspace_id == workspace_id and owns(failure, tenant_id)],
         key=lambda item: (
             {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}.get(item.severity, 0),
             item.npt_hours,

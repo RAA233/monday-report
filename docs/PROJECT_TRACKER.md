@@ -727,7 +727,29 @@ no startup backfill. Behavior is proven by `scripts/tenant_authorization_guard.p
 
 | Command | Exit | Result |
 | --- | --- | --- |
-| `pnpm run audit:tenant-authorization` | 0 | **71/71** — module default-deny; cross-tenant single-resource access is existence-hiding 404 across every route family (same-tenant succeeds); lists/aggregates/audit-log/chat exclude foreign rows; signed capabilities bind the owning tenant at issuance + redemption; cross-tenant denial audited with request-tenant context and no foreign detail; `tenant-authorization-enforcement` BLOCKED, RBAC intact, GA `GA_BLOCKED`. |
+| `pnpm run audit:tenant-authorization` | 0 | **90/90** — module default-deny; ownership graph fails closed on a contradictory resource→parent→tenant chain and a divergent child stamp; cross-tenant single-resource access is existence-hiding 404 across every route family (same-tenant succeeds); lists/aggregates/dashboard/report-draft/generated-report exclude foreign+contradictory rows before counting; benchmarking status excludes a foreign approved benchmark value; per-route tenant-ownership parity holds (and fails when a resource route drops its dependency); signed capabilities bind the tenant at issuance + redemption and a legacy unbound token is rejected; child creation copies the parent tenant; identity context isolated + resets after exception; cross-tenant denial audited with request-tenant context and no foreign detail; old snapshot loads with no backfill; `tenant-authorization-enforcement` BLOCKED, RBAC intact, GA `GA_BLOCKED`. |
+
+### PR #13 review corrections (before merge)
+
+Applied after an adversarial multi-dimension review of the branch, each behavior-proven
+in `tenant_authorization_guard.py`:
+- **Ownership graph, fail-closed** (Part E/M): `_tenant_owned`/`_tenant_items` now verify
+  the full resource→parent→tenant chain (`tenant_authorization.owned_via_graph`), so a
+  record whose direct `tenant_id` matches the request but whose parent belongs to another
+  tenant is rejected; `list_upload_files`/`list_document_chunks` verify each child's own
+  stamp instead of trusting FK inheritance.
+- **Benchmarking aggregate leak** (Part G, HIGH): `_build_benchmarking_status` and its
+  helpers (`_benchmark_comparisons`, `_benchmark_by_name`, `_comparison_status`,
+  `_evaluate_anomaly_rules`, `_benchmark_source_references`) now tenant-scope
+  **benchmark_values and anomaly_rules**, not just measurements/anomaly events — a foreign
+  tenant's *approved* benchmark config no longer surfaces in a tenant's own status.
+- **Report input scoping** (Part G): `report_draft` and `create_monday_report` +
+  `_open_validation_tasks_for_workspace` tenant-scope their per-workspace aggregations.
+- **Per-route parity guard** (Part F): `tenant_ownership_fully_enforced()` proves every
+  resource-scoped route invokes a tenant-ownership dependency; the readiness probe consumes
+  it as machine-readable evidence (no longer a global substring test).
+- **Audit consistency** (Part J): a genuine cross-tenant probe of an existing foreign
+  workspace on the benchmarking route is now recorded as `authz.cross_tenant_denied`.
 | `pnpm run audit:all` | 0 | Full guard battery green on an isolated stack, incl. FORGE **65/65**, trajectory **38/38**, Benchmarking **23/23**, route-RBAC **103/103**, identity-RBAC **73/73**, and the new tenant guard **71/71**. |
 | `$env:CI='true'; pnpm run build` | 0 | `tsc` (strict, `noEmit`) + `vite build` clean. |
 | `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — 25 blockers; `tenant-authorization-enforcement` stays BLOCKED via the evidence-driven probe (API-layer done; Postgres RLS pending). |
