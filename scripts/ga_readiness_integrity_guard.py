@@ -85,6 +85,16 @@ def run_guard(*args: str, extra_env: dict | None = None) -> subprocess.Completed
 
 
 def main() -> int:
+    # Deterministic GA-gate-logic tests: evaluate blockers WITHOUT an ambient audit
+    # HMAC key so ga_audit_keyed_integrity is BLOCKED (its default disposition),
+    # independent of the caller's environment (the isolated verify stack sets a key).
+    for _k in (
+        "MONDAY_REPORT_AUDIT_HMAC_KEY",
+        "MONDAY_REPORT_AUDIT_HMAC_KEY_ID",
+        "MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION",
+        "MONDAY_REPORT_AUDIT_HMAC_RETAINED_KEYS",
+    ):
+        os.environ.pop(_k, None)
     checks: list[dict[str, object]] = []
     registry = load_registry()
 

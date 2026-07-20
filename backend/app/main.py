@@ -85,6 +85,7 @@ from .readiness import client_data_mode, evaluate_client_data_readiness
 from .runtime_backends import runtime_backend_status
 from .signed_urls import create_signed_token, signing_secret_configured, verify_signed_token
 from .store import store
+from .audit_keys import AuditIntegrityUnavailable, audit_key_provider
 from .tenant_authorization import owned_via_graph, owns, request_tenant_id
 
 app = FastAPI(
@@ -108,6 +109,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(AuditIntegrityUnavailable)
+async def _audit_integrity_unavailable_handler(request: Request, exc: AuditIntegrityUnavailable) -> JSONResponse:
+    # A protected mutation could not seal its audit event because the active HMAC
+    # key is unavailable (client mode). audit() fails BEFORE append/save, so nothing
+    # was persisted. Return a stable service-unavailable error.
+    return JSONResponse(status_code=503, content={"detail": "Audit integrity key is unavailable"})
+
+
+def _best_effort_audit(*args, **kwargs) -> None:
+    """Write an audit event but never turn an already-rejected auth response into a
+    500 if the audit HMAC key is unavailable. Used only on middleware auth-rejection
+    paths; it still never writes an unkeyed event in client mode (audit() fails
+    closed and this swallows only that failure)."""
+    try:
+        store.audit(*args, **kwargs)
+    except AuditIntegrityUnavailable:
+        pass
 
 
 # Genuinely public, unauthenticated surfaces. Only minimal liveness is exempt.
@@ -134,7 +154,7 @@ async def enforce_client_api_key(request: Request, call_next):
 
     if mode == "client":
         if not api_key_configured():
-            store.audit(
+            _best_effort_audit(
                 "api.auth_blocked",
                 "api",
                 None,
@@ -152,7 +172,7 @@ async def enforce_client_api_key(request: Request, call_next):
         # never trusted.
         identity = store.resolve_request_identity(supplied_key, allow_shared_key_bootstrap=False)
         if identity is None:
-            store.audit(
+            _best_effort_audit(
                 "api.auth_blocked",
                 "api",
                 None,
@@ -243,7 +263,7 @@ def require_client_data_ready(operation: str, resource_type: str, resource_id: U
         return
     blocking_checks = [check.id for check in readiness.checks if check.status == "fail"]
     warning_checks = [check.id for check in readiness.checks if check.status == "warn"]
-    store.audit(
+    _best_effort_audit(
         "client_data.operation_blocked",
         resource_type,
         resource_id,
@@ -268,7 +288,10 @@ def _active_request_identity() -> AuthenticatedIdentity | None:
 
 def _audit_permission_denied(action: str, permission: str, identity: AuthenticatedIdentity | None) -> None:
     method, path = get_request_context() or (None, None)
-    store.audit(
+    # Best-effort: a permission denial is a REJECTION (no business mutation), so an
+    # unavailable audit key must not turn a 403 into a 503 — and no unkeyed event is
+    # written. Fail-closed applies to business mutations, not rejection audits.
+    _best_effort_audit(
         action,
         "tenant",
         store.tenant.id,
@@ -330,7 +353,7 @@ def _audit_cross_tenant_denied(resource_type: str, resource_id: UUID | None) -> 
     detail); only the caller-supplied resource id, resource type, and the request
     method/route are recorded. The audit tenant_id/actor is the request's own."""
     method, path = get_request_context() or (None, None)
-    store.audit(
+    _best_effort_audit(
         "authz.cross_tenant_denied",
         resource_type,
         resource_id,
@@ -396,7 +419,7 @@ def require_admin() -> AuthenticatedIdentity:
     """Administrator-only gate for identity/credential provisioning."""
     identity = _active_request_identity()
     if identity is None or Role.ADMIN not in identity.roles:
-        store.audit(
+        _best_effort_audit(
             "auth.admin_denied",
             "tenant",
             store.tenant.id,

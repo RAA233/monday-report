@@ -165,3 +165,16 @@ tenant. The `tenant-authorization-enforcement` GA control stays **BLOCKED** with
 evidence-driven probe (the API-layer half is implemented; its resolution also
 requires **Postgres RLS** over the normalized store, which is out of scope), so
 `ga:readiness` stays `GA_BLOCKED` and the blocker registry is not weakened.
+
+## Audit-chain integrity (versioned HMAC)
+
+A versioned, keyed HMAC-SHA256 audit foundation (`docs/AUDIT_INTEGRITY.md`,
+`audit:audit-keyed-integrity`) replaces the forgeable unkeyed SHA-256 chain: v2
+events are sealed with a managed key (id + version, rotation-aware), verification
+selects each event's recorded key, legacy events are never re-signed or presented
+as keyed, and in **client mode a request write fails closed (503) without a valid
+key** and never writes an unkeyed event. `audit-keyed-integrity` becomes
+PASS-capable only on runtime evidence (a v2 event round-trips under HMAC and a
+public-SHA forgery of the same payload is rejected). This increment adds **no
+external anchor**, so `audit-tail-truncation-detection` stays **BLOCKED**,
+`ga:readiness` stays `GA_BLOCKED`, and the blocker registry is unchanged.

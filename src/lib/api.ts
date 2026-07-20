@@ -321,9 +321,19 @@ export interface ApiAuditLog {
   created_at: string;
   previous_hash?: string | null;
   entry_hash?: string | null;
+  // Additive keyed-integrity envelope: a v2 event sets integrity_version=2 and
+  // records the HMAC algorithm + key id/version; legacy (unkeyed SHA-256) events
+  // leave these null. Legacy consumers ignore them.
+  integrity_version?: number | null;
+  integrity_algorithm?: string | null;
+  key_id?: string | null;
+  key_version?: number | null;
 }
 
 export interface ApiAuditIntegrityStatus {
+  // `status` is additive-preserved: "sealed" means the hash chain is intact
+  // (keyed OR legacy) — NOT a claim of keying. The keyed distinction lives in
+  // `integrity_state` and the counts below.
   status: "empty" | "sealed" | "legacy" | "broken";
   total_events: number;
   hashed_events: number;
@@ -331,6 +341,22 @@ export interface ApiAuditIntegrityStatus {
   broken_events: number;
   latest_hash?: string | null;
   detail: string;
+  // Additive versioned-integrity view (legacy consumers ignore these).
+  // legacy_valid/mixed_valid are NOT fully keyed.
+  integrity_state?:
+    | "empty"
+    | "legacy_valid"
+    | "mixed_valid"
+    | "keyed_valid"
+    | "broken"
+    | "key_unavailable"
+    | null;
+  legacy_event_count?: number;
+  keyed_event_count?: number;
+  active_key_id?: string | null;
+  active_key_version?: number | null;
+  unknown_key_versions?: string[];
+  first_broken_event_id?: string | null;
 }
 
 export interface ApiProcessingJob {

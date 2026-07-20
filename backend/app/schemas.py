@@ -970,15 +970,24 @@ class AuditLog(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     previous_hash: str | None = None
     entry_hash: str | None = None
-    # Additive actor provenance (default None/[] for old snapshots). These are
-    # NOT part of the entry_hash payload, so existing sealed chains still verify;
-    # keyed/sealed audit integrity remains a separate declared blocker.
+    # Additive actor provenance (default None/[] for old snapshots).
     actor_source: str | None = None
     actor_roles: list[Role] = Field(default_factory=list)
     actor_credential_fingerprint: str | None = None
+    # Additive versioned-integrity envelope (default None for legacy/v1 events).
+    # A v2 event sets integrity_version=2 and records the HMAC algorithm + the key
+    # id/version used to seal it; verification selects the key by these fields.
+    # Legacy events keep integrity_version=None and remain unkeyed SHA-256.
+    integrity_version: int | None = None
+    integrity_algorithm: str | None = None
+    key_id: str | None = None
+    key_version: int | None = None
 
 
 class AuditIntegrityStatus(BaseModel):
+    # `status` is preserved additively for existing consumers: "sealed" means the
+    # hash chain is intact (keyed OR legacy) — it is NOT a claim of keying. The
+    # keyed distinction lives in `integrity_state` and the counts below.
     status: Literal["empty", "sealed", "legacy", "broken"]
     total_events: int
     hashed_events: int
@@ -986,3 +995,15 @@ class AuditIntegrityStatus(BaseModel):
     broken_events: int
     latest_hash: str | None = None
     detail: str
+    # Additive versioned-integrity view (legacy consumers ignore these).
+    # `integrity_state`: empty | legacy_valid | mixed_valid | keyed_valid | broken |
+    # key_unavailable. legacy_valid/mixed_valid are NOT fully keyed.
+    integrity_state: (
+        Literal["empty", "legacy_valid", "mixed_valid", "keyed_valid", "broken", "key_unavailable"] | None
+    ) = None
+    legacy_event_count: int = 0
+    keyed_event_count: int = 0
+    active_key_id: str | None = None
+    active_key_version: int | None = None
+    unknown_key_versions: list[str] = Field(default_factory=list)
+    first_broken_event_id: str | None = None
