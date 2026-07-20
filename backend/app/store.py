@@ -132,6 +132,17 @@ class ReviewerNotVerified(Exception):
     BEFORE any outcome mutation or audit append (fail closed)."""
 
 
+# Validation-task statuses that constitute a TERMINAL human review OUTCOME and so
+# require a verified reviewer (AUDIT-001 / Part D). A transition to OPEN
+# (reopen / pending) is an ADMINISTRATIVE update: it is NOT reviewer-gated and must
+# NOT create verified-reviewer evidence.
+_TERMINAL_REVIEW_OUTCOMES = frozenset({
+    ValidationStatus.VALIDATED,
+    ValidationStatus.REJECTED,
+    ValidationStatus.CONFLICT,
+})
+
+
 INVALID_STORAGE_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
 UNSAFE_TEXT_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")
 RESERVED_STORAGE_NAMES = {
@@ -1214,16 +1225,34 @@ class LocalStateStore:
     def update_validation_task(self, task_id: UUID, payload: ValidationTaskUpdate) -> ValidationTask:
         self.require_audit_write_capability("validation_task.update")
         self.refresh()
-        # Verified-reviewer gate: fail closed in client mode before any mutation.
-        identity, verified = self.resolve_verified_reviewer(
-            "resolve_validation", "validation_task.update"
-        )
+        # A verified reviewer is required ONLY for a TERMINAL review OUTCOME
+        # (validated/rejected/conflict — a human review decision). An ADMINISTRATIVE
+        # transition to OPEN (reopen/pending) is not reviewer-gated and must not
+        # create false verified-reviewer evidence (AUDIT-001 / Part D).
+        is_review_outcome = payload.status in _TERMINAL_REVIEW_OUTCOMES
+        if is_review_outcome:
+            identity, verified = self.resolve_verified_reviewer(
+                "resolve_validation", "validation_task.update"
+            )
+        else:
+            identity, verified = self.current_identity(), False
         task = self.validation_tasks[task_id]
         previous_status = task.status
         task.status = payload.status
         task.resolution_note = payload.resolution_note
-        for _k, _v in self._reviewer_attribution(identity, verified).items():
-            setattr(task, _k, _v)
+        if is_review_outcome:
+            for _k, _v in self._reviewer_attribution(identity, verified).items():
+                setattr(task, _k, _v)
+        else:
+            # Administrative update: clear outcome reviewer attribution so a reopened /
+            # pending task never claims a verified reviewer (the actor is still recorded
+            # in the audit event below).
+            task.reviewer_user_id = None
+            task.reviewer_credential_id = None
+            task.reviewer_credential_fingerprint = None
+            task.reviewer_roles = []
+            task.reviewer_actor_source = None
+            task.reviewer_verified_at = None
 
         if task.target_type == "failure" and task.target_id in self.failures:
             self.failures[task.target_id].validation_status = payload.status
@@ -1238,6 +1267,7 @@ class LocalStateStore:
                 "from": previous_status.value,
                 "to": payload.status.value,
                 "resolution_note": payload.resolution_note,
+                "review_outcome": is_review_outcome,
                 "reviewer_verified": verified,
                 "reviewer_actor_source": identity.actor_source,
             },
@@ -6482,6 +6512,56 @@ class LocalStateStore:
             "reviewer_actor_source": identity.actor_source,
             "reviewer_verified_at": stamp,
         }
+
+    def verify_reviewer_attribution_consistency(self) -> list[str]:
+        """Behavioral verifier (NOT 'by construction'): for every reviewer-attributed
+        outcome, re-read the persisted outcome AND the matching KEYED audit event and
+        confirm they agree on reviewer user id, actor source, roles, credential
+        fingerprint, and tenant, and that the audit event is keyed and records the
+        reviewer verification. Returns a list of inconsistency descriptions (empty ==
+        consistent). Administrative/unverified outcomes (reviewer_user_id is None) have
+        nothing to reconcile and are skipped."""
+        issues: list[str] = []
+        latest: dict[tuple[str, str], "AuditLog"] = {}
+        for event in self.audit_logs:
+            latest[(event.action, str(event.resource_id))] = event
+
+        def _reconcile(kind, rid, user_id, source, roles, fingerprint, tenant, action):
+            if user_id is None:
+                return
+            event = latest.get((action, str(rid)))
+            if event is None:
+                issues.append(f"{kind} {rid}: no matching audit event for {action}")
+                return
+            if event.integrity_version != KEYED_INTEGRITY_VERSION:
+                issues.append(f"{kind} {rid}: matching audit event is not keyed")
+            if event.actor_user_id != user_id:
+                issues.append(f"{kind} {rid}: reviewer/audit actor_user_id mismatch")
+            if event.actor_source != source:
+                issues.append(f"{kind} {rid}: reviewer/audit actor_source mismatch")
+            if list(event.actor_roles) != list(roles):
+                issues.append(f"{kind} {rid}: reviewer/audit roles mismatch")
+            if event.actor_credential_fingerprint != fingerprint:
+                issues.append(f"{kind} {rid}: reviewer/audit credential fingerprint mismatch")
+            if event.tenant_id != tenant:
+                issues.append(f"{kind} {rid}: reviewer/audit tenant mismatch")
+            if event.metadata.get("reviewer_verified") is not True:
+                issues.append(f"{kind} {rid}: audit metadata missing reviewer verification")
+
+        for correction in self.field_corrections.values():
+            _reconcile("correction", correction.id, correction.reviewer_user_id,
+                       correction.reviewer_actor_source, correction.reviewer_roles,
+                       correction.reviewer_credential_fingerprint, correction.tenant_id,
+                       "field_correction.record")
+            if correction.revert_reviewer_user_id is not None:
+                event = latest.get(("field_correction.revert", str(correction.id)))
+                if event is None or event.actor_user_id != correction.revert_reviewer_user_id:
+                    issues.append(f"correction {correction.id}: revert reviewer/audit actor mismatch")
+        for task in self.validation_tasks.values():
+            _reconcile("validation", task.id, task.reviewer_user_id, task.reviewer_actor_source,
+                       task.reviewer_roles, task.reviewer_credential_fingerprint, task.tenant_id,
+                       "validation_task.update")
+        return issues
 
     def audit(
         self,

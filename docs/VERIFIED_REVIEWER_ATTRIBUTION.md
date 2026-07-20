@@ -49,10 +49,16 @@ The **reverting** reviewer is kept **distinct** from the original recorder. The
 source-derived value and lineage are never mutated — a correction remains a
 versioned overlay (see `docs/FIELD_CORRECTIONS.md`).
 
-## Validation attribution
+## Validation attribution — terminal outcomes only
 
-`update_validation_task` copies the same `reviewer_*` fields onto the
-`ValidationTask` outcome.
+A verified reviewer is required, and `reviewer_*` attribution is recorded, **only for
+a TERMINAL review OUTCOME** — a transition to `validated`, `rejected`, or `conflict`
+(a human review decision; `update_validation_task` is a human-only route, and
+`conflict` is never system-generated). A transition to `open` (**reopen / pending**)
+is an **administrative** update: it is **not** reviewer-gated and **clears** the
+outcome reviewer fields so a reopened task never claims a verified reviewer — an
+administrative update cannot create false reviewer evidence. The audit event records
+`review_outcome` (true/false) and the acting actor either way.
 
 ## Audit / HMAC relationship
 
@@ -97,16 +103,34 @@ consistency remain unresolved (`persistence-locking-transactions`,
 `correction-cross-process-atomicity`). The audit chain read→append→save stays
 serialized under `audit_lock`, and concurrent reviewer identities remain distinct.
 
+## Attribution consistency verifier
+
+`store.verify_reviewer_attribution_consistency()` re-reads every reviewer-attributed
+outcome **and** its matching keyed audit event and confirms they agree on reviewer
+user id, actor source, roles, credential fingerprint, and tenant, that the audit
+event is keyed, and that it records the reviewer verification — returning any
+mismatches. It is exercised by the behavioral guard (and by the readiness probe), so
+consistency is **verified behaviorally**, not asserted "by construction."
+
 ## Readiness behavior
 
-`ga_verified_reviewer_identity` is **evidence-driven**: PASS-capable only when the
-enforcement is wired on record + revert + validation, the `reviewer_*` schema fields
-exist, and a runtime logic check proves the verification accepts an eligible
-authenticated reviewer while rejecting configured/system/bootstrap actors. It never
-PASSes on field presence alone. The registry is **unchanged**; `audit-keyed-integrity`
-stays PASS-capable with a key, `audit-tail-truncation-detection` stays **BLOCKED**,
-`tenant-authorization-enforcement` stays **BLOCKED** (normalized RLS pending), and
-**GA stays `GA_BLOCKED`**.
+`ga_verified_reviewer_identity` is **evidence-driven**, and the **decisive** PASS
+condition is a **real behavioral run** (`_verified_reviewer_behavioral_evidence`) on
+a throwaway, fully isolated client-mode store (tempdir state, env restored, never
+touches live state): an eligible authenticated reviewer records a correction whose
+verified attribution matches the keyed audit actor; a second reviewer reverts
+(reverter distinct); a terminal validation outcome attributes the reviewer; an
+administrative reopen creates no verified evidence; a system actor is rejected before
+mutation; the consistency verifier is clean; and no credential material leaks.
+Source-string wiring + schema-field checks are **supporting parity only** — they can
+**never** make the control PASS without the behavioral evidence; when the behavioral
+contract cannot be exercised, the control stays **BLOCKED**. The full HTTP client-mode
+route stack (auth → permission → tenant → reviewer → store → keyed audit, with only
+the client-readiness gate bypassed) is proven by `audit:verified-reviewer`. The
+registry is **unchanged**; `audit-keyed-integrity` stays PASS-capable with a key,
+`audit-tail-truncation-detection` stays **BLOCKED**, `tenant-authorization-enforcement`
+stays **BLOCKED** (normalized RLS pending), the persistence/transaction blockers stay
+**BLOCKED**, and **GA stays `GA_BLOCKED`**.
 
 ## Remaining gaps (uncovered workflows)
 

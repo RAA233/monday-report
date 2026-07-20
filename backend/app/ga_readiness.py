@@ -408,31 +408,164 @@ def _audit_keyed_integrity_probe() -> tuple[str, str]:
     )
 
 
+_verified_reviewer_evidence_cache: tuple[bool, list[str]] | None = None
+
+
+def _verified_reviewer_behavioral_evidence() -> tuple[bool, list[str]]:
+    """Invoke the REAL reviewer contract on a throwaway, fully ISOLATED client-mode
+    store (tempdir STATE_PATH; env saved and restored; never touches live state) and
+    return (ok, reasons). Exercised end to end: an eligible authenticated reviewer
+    records a correction whose verified attribution matches the KEYED audit actor; a
+    second reviewer reverts (reverter kept distinct); a TERMINAL validation outcome
+    attributes the reviewer; an ADMINISTRATIVE reopen creates NO verified evidence; a
+    system actor is rejected before mutation; the outcome/audit consistency verifier
+    is clean; and no credential token/hash leaks. Cached per process."""
+    global _verified_reviewer_evidence_cache
+    if _verified_reviewer_evidence_cache is not None:
+        return _verified_reviewer_evidence_cache
+    import json as _json
+    import os as _os
+    import shutil as _shutil
+    import tempfile as _tempfile
+    from uuid import uuid4
+
+    reasons: list[str] = []
+    _ENV = (
+        "MONDAY_REPORT_CLIENT_DATA_MODE", "MONDAY_REPORT_STATE_PATH", "MONDAY_REPORT_STORAGE_ROOT",
+        "MONDAY_REPORT_EXPORT_ROOT", "MONDAY_REPORT_TENANT_SLUG", "MONDAY_REPORT_TENANT_NAME",
+        "MONDAY_REPORT_USER_EMAIL", "MONDAY_REPORT_API_KEY", "MONDAY_REPORT_AUDIT_HMAC_KEY",
+        "MONDAY_REPORT_AUDIT_HMAC_KEY_ID", "MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION",
+        "MONDAY_REPORT_AUDIT_HMAC_RETAINED_KEYS",
+    )
+    saved = {k: _os.environ.get(k) for k in _ENV}
+    tmp = _tempfile.mkdtemp(prefix="ga-reviewer-evidence-")
+    try:
+        _os.environ.update({
+            "MONDAY_REPORT_CLIENT_DATA_MODE": "client",
+            "MONDAY_REPORT_STATE_PATH": _os.path.join(tmp, "state.json"),
+            "MONDAY_REPORT_STORAGE_ROOT": _os.path.join(tmp, "storage"),
+            "MONDAY_REPORT_EXPORT_ROOT": _os.path.join(tmp, "exports"),
+            "MONDAY_REPORT_TENANT_SLUG": "ga-reviewer-evidence",
+            "MONDAY_REPORT_TENANT_NAME": "GA Reviewer Evidence",
+            "MONDAY_REPORT_USER_EMAIL": "bootstrap@ga-reviewer-evidence.local",
+            "MONDAY_REPORT_AUDIT_HMAC_KEY": "ga-reviewer-evidence-audit-hmac-key-0123456",
+            "MONDAY_REPORT_AUDIT_HMAC_KEY_ID": "ga-reviewer-evidence",
+            "MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION": "1",
+        })
+        _os.environ.pop("MONDAY_REPORT_API_KEY", None)
+        _os.environ.pop("MONDAY_REPORT_AUDIT_HMAC_RETAINED_KEYS", None)
+        from . import store as _sm
+        from .identity import reset_current_identity, set_current_identity
+        from .permissions import has_permission
+        from .schemas import (
+            AuthenticatedIdentity, FieldCorrectionCreate, Role, ValidationStatus,
+            ValidationTask, ValidationTaskUpdate, WorkspaceCreate,
+        )
+
+        role = next((r for r in Role if has_permission([r], "record_field_corrections")
+                     and has_permission([r], "resolve_validation")), None)
+        if role is None:
+            reasons.append("no role grants record_field_corrections + resolve_validation")
+        else:
+            S = _sm.LocalStateStore()  # fully isolated instance (NOT the singleton)
+
+            def _ident(user, cred):
+                return AuthenticatedIdentity(
+                    user_id=user.id, tenant_id=S.tenant.id, email=user.email, display_name=user.full_name,
+                    roles=list(user.roles), authentication_source="api_token",
+                    credential_id=cred.credential_id, credential_fingerprint=cred.token_fingerprint,
+                    actor_source="authenticated")
+
+            ua = S.create_user("a@rev.evidence", "Rev A", [role]); ca, tok_a = S.create_credential(ua.id)
+            ub = S.create_user("b@rev.evidence", "Rev B", [role]); cb, tok_b = S.create_credential(ub.id)
+            _t = set_current_identity(_ident(ua, ca))
+            try:
+                ws = S.create_workspace(WorkspaceCreate(name="Evidence WS"))
+                corr = S.record_field_correction(ws.id, FieldCorrectionCreate(
+                    target_type="failure", field_key="severity", corrected_value="high",
+                    correction_reason="reviewer evidence correction record"))
+            finally:
+                reset_current_identity(_t)
+            rec = S.audit_logs[-1]
+            if not (corr.reviewer_user_id == ua.id == rec.actor_user_id and corr.reviewer_verified_at is not None
+                    and corr.reviewer_actor_source == "authenticated" and rec.integrity_version == 2):
+                reasons.append("record: verified attribution / keyed-audit consistency failed")
+            _t = set_current_identity(_ident(ub, cb))
+            try:
+                rev = S.revert_field_correction(corr.id, "reviewer evidence revert")
+            finally:
+                reset_current_identity(_t)
+            if not (rev.revert_reviewer_user_id == ub.id and rev.reviewer_user_id == ua.id
+                    and rev.revert_reviewer_user_id != rev.reviewer_user_id):
+                reasons.append("revert: reverter not distinct from recorder")
+            vt = ValidationTask(tenant_id=S.tenant.id, target_type="failure", target_id=uuid4(),
+                                reason="r", status=ValidationStatus.OPEN)
+            S.validation_tasks[vt.id] = vt; S.save()
+            _t = set_current_identity(_ident(ua, ca))
+            try:
+                vt_out = S.update_validation_task(vt.id, ValidationTaskUpdate(status=ValidationStatus.VALIDATED))
+            finally:
+                reset_current_identity(_t)
+            if not (vt_out.reviewer_user_id == ua.id and vt_out.reviewer_verified_at is not None):
+                reasons.append("validation terminal outcome: reviewer not attributed")
+            # Administrative reopen (no request identity) -> allowed, no verified evidence.
+            S.update_validation_task(vt.id, ValidationTaskUpdate(status=ValidationStatus.OPEN))
+            if S.validation_tasks[vt.id].reviewer_verified_at is not None:
+                reasons.append("administrative reopen created false verified-reviewer evidence")
+            # A system actor (no request identity) is rejected for a terminal outcome.
+            vt3 = ValidationTask(tenant_id=S.tenant.id, target_type="failure", target_id=uuid4(),
+                                 reason="r", status=ValidationStatus.OPEN)
+            S.validation_tasks[vt3.id] = vt3
+            try:
+                S.update_validation_task(vt3.id, ValidationTaskUpdate(status=ValidationStatus.VALIDATED))
+                reasons.append("system actor was NOT rejected for a terminal validation outcome")
+            except _sm.ReviewerNotVerified:
+                pass
+            issues = S.verify_reviewer_attribution_consistency()
+            if issues:
+                reasons.append("outcome/audit consistency failed: " + "; ".join(issues[:2]))
+            blob = _json.dumps(
+                [c.model_dump(mode="json") for c in S.field_corrections.values()]
+                + [t.model_dump(mode="json") for t in S.validation_tasks.values()]
+                + [e.model_dump(mode="json") for e in S.audit_logs])
+            if tok_a in blob or tok_b in blob or S.api_credentials[ca.credential_id].token_hash in blob:
+                reasons.append("credential token/hash leaked into outcome/audit")
+    except Exception as exc:  # pragma: no cover - defensive
+        reasons.append(f"behavioral evidence run failed: {exc}")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
+        _shutil.rmtree(tmp, ignore_errors=True)
+    _verified_reviewer_evidence_cache = (not reasons, reasons)
+    return _verified_reviewer_evidence_cache
+
+
 def _verified_reviewer_probe() -> tuple[str, str]:
     """Evidence-driven evaluation of ``verified-reviewer-identity`` (AUDIT-001).
 
-    PASS-capable ONLY when correction (record + revert) and validation outcomes
-    enforce and persist a VERIFIED authenticated-human reviewer AND a runtime logic
-    check proves the verification accepts an eligible authenticated reviewer while
-    rejecting configured/system/bootstrap actors. Never PASS on field presence alone.
-    This probe builds NO store and performs NO file/state I/O (it binds the pure
-    verification method to a synthetic self)."""
+    The DECISIVE PASS condition is a REAL behavioral run
+    (``_verified_reviewer_behavioral_evidence``) on an isolated client-mode store:
+    record + revert + terminal-validation with verified attribution matching the keyed
+    audit event, an administrative reopen that creates no verified evidence, a rejected
+    system actor, a clean outcome/audit consistency verifier, and no credential leak.
+    Source-string wiring + schema-field checks are only SUPPORTING parity — they can
+    never make it PASS without the behavioral evidence. When the behavioral contract
+    cannot be exercised, the control stays BLOCKED."""
     try:
         import inspect
-        from types import SimpleNamespace
-        from uuid import uuid4
 
         from . import store as _store_mod
-        from .permissions import has_permission
-        from .schemas import AuthenticatedIdentity, FieldCorrection, Role, ValidationTask
+        from .schemas import FieldCorrection, ValidationTask
     except Exception as exc:  # pragma: no cover - defensive
         return "BLOCKED", f"Verified reviewer identity could not be evaluated: {exc}"
 
     reasons: list[str] = []
     Store = _store_mod.LocalStateStore
-
-    # (1) Enforcement wiring: helpers exist and every reviewer-outcome method gates.
-    for meth in ("resolve_verified_reviewer", "_reviewer_verification", "_reviewer_attribution"):
+    for meth in ("resolve_verified_reviewer", "_reviewer_verification", "_reviewer_attribution",
+                 "verify_reviewer_attribution_consistency"):
         if not hasattr(Store, meth):
             reasons.append(f"store is missing {meth}")
     for name in ("record_field_correction", "revert_field_correction", "update_validation_task"):
@@ -442,56 +575,27 @@ def _verified_reviewer_probe() -> tuple[str, str]:
             src = ""
         if "resolve_verified_reviewer" not in src:
             reasons.append(f"{name} does not enforce the verified-reviewer gate")
-    if not hasattr(_store_mod, "ReviewerNotVerified"):
-        reasons.append("ReviewerNotVerified exception is missing")
-
-    # (2) Attribution schema: reviewer fields present on both outcome models.
     for model, fields in (
-        (FieldCorrection, ("reviewer_user_id", "reviewer_verified_at", "reviewer_actor_source", "revert_reviewer_user_id")),
-        (ValidationTask, ("reviewer_user_id", "reviewer_verified_at", "reviewer_actor_source")),
+        (FieldCorrection, ("reviewer_user_id", "reviewer_verified_at", "revert_reviewer_user_id")),
+        (ValidationTask, ("reviewer_user_id", "reviewer_verified_at")),
     ):
         for field in fields:
             if field not in model.model_fields:
                 reasons.append(f"{model.__name__} is missing reviewer field {field}")
 
-    # (3) Runtime logic: accept an eligible authenticated human; reject system/bootstrap.
-    try:
-        tid, uid, cid = uuid4(), uuid4(), uuid4()
-        fake = SimpleNamespace(
-            users={uid: SimpleNamespace(tenant_id=tid, account_status="active", is_bootstrap=False)},
-            api_credentials={cid: SimpleNamespace(status="active", tenant_id=tid, user_id=uid)},
-            tenant=SimpleNamespace(id=tid),
-        )
-        eligible = next((r for r in Role if has_permission([r], "record_field_corrections")), None)
-        if eligible is None:
-            reasons.append("no role grants record_field_corrections")
-        else:
-            base = dict(tenant_id=tid, email="r@x.y", display_name="R", authentication_source="api_token", credential_id=cid)
-            ok, _ = Store._reviewer_verification(
-                fake, AuthenticatedIdentity(user_id=uid, roles=[eligible], actor_source="authenticated", **base),
-                "record_field_corrections")
-            sys_ok, _ = Store._reviewer_verification(
-                fake, AuthenticatedIdentity(user_id=uid, roles=[eligible], actor_source="system", **base),
-                "record_field_corrections")
-            demo_ok, _ = Store._reviewer_verification(
-                fake, AuthenticatedIdentity(user_id=uid, roles=[eligible], actor_source="demo_bootstrap", **base),
-                "record_field_corrections")
-            if not ok:
-                reasons.append("eligible authenticated reviewer was not accepted")
-            if sys_ok or demo_ok:
-                reasons.append("system/bootstrap actor was incorrectly accepted as a verified reviewer")
-    except Exception as exc:
-        reasons.append(f"reviewer verification runtime check failed: {exc}")
-
-    if reasons:
-        return "BLOCKED", "Verified reviewer identity evidence incomplete: " + "; ".join(reasons) + "."
+    ok, behavioral = _verified_reviewer_behavioral_evidence()
+    reasons.extend(behavioral)
+    if reasons or not ok:
+        return "BLOCKED", "Verified reviewer identity evidence incomplete: " + "; ".join(
+            reasons or ["behavioral evidence unavailable"]) + "."
     return (
         "PASS",
-        "Correction (record + revert) and validation outcomes attribute a verified authenticated human: "
-        "reviewer identity is server-derived and permission-eligible, configured/system/bootstrap actors are "
-        "rejected in client mode before any mutation, reviewer attribution is persisted on the outcome and the "
-        "keyed audit event, and no credential material is exposed. AI-content approval and report issuance are "
-        "outside this control's resolution condition and are documented as a separate future increment.",
+        "Behavioral evidence (isolated client-mode store): an eligible authenticated reviewer records a correction "
+        "with verified attribution matching the keyed audit actor; a second reviewer reverts (reverter distinct); a "
+        "terminal validation outcome attributes the reviewer; an administrative reopen creates no verified evidence; a "
+        "system actor is rejected before mutation; the outcome/audit consistency verifier is clean; no credential "
+        "material leaks. AI-content approval and report issuance are outside this control's resolution condition "
+        "(a separate future increment).",
     )
 
 
