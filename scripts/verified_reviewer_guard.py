@@ -264,7 +264,7 @@ def main() -> int:
     # 38-39: readiness is evidence-driven and requires all reviewer workflows wired
     import backend.app.ga_readiness as gar
     disp, detail = gar._verified_reviewer_probe()
-    check("38 verified-reviewer blocker is evidence-driven PASS", disp == "PASS" and "server-derived" in detail)
+    check("38 verified-reviewer blocker is evidence-driven PASS (behavioral)", disp == "PASS" and "Behavioral evidence" in detail)
     import inspect as _inspect
     from backend.app.store import LocalStateStore as _LS
     all_gated = all("resolve_verified_reviewer" in _inspect.getsource(getattr(_LS, m))
@@ -348,6 +348,139 @@ def main() -> int:
           hc.post(f"/field-corrections/{uuid.uuid4()}/revert", json={"revert_reason": "x"}, headers=hdr).status_code == 404)
     check("29 nonexistent validation task hidden",
           hc.patch(f"/validation-tasks/{uuid.uuid4()}", json={"status": "validated"}, headers=hdr).status_code in (404, 405, 422))
+
+    # ===== Real CLIENT-MODE route stack (Part F): ONLY require_client_data_ready is
+    # bypassed (monkeypatched to a no-op). Authentication, route permission, tenant
+    # authorization, reviewer verification, store, and keyed audit remain the REAL
+    # production code — no production readiness logic is modified. =====
+    smc, _ = fresh_store("client", KEY)
+    cs = smc.store
+    os.environ["MONDAY_REPORT_API_KEY"] = "verified-reviewer-client-key-0123456789"
+    rvA = cs.create_user("rva@rev.test", "RV A", [Role.ADMIN]); crA, ctokA = cs.create_credential(rvA.id)
+    rvB = cs.create_user("rvb@rev.test", "RV B", [Role.VALIDATOR]); crB, ctokB = cs.create_credential(rvB.id)
+    rvE = cs.create_user("rve@rev.test", "RV E", [Role.ENGINEER]); crE, ctokE = cs.create_credential(rvE.id)
+    _t = set_current_identity(ident(cs, rvA, crA)); cws = cs.create_workspace(WorkspaceCreate(name="Client WS")); reset_current_identity(_t)
+    cvt = ValidationTask(tenant_id=cs.tenant.id, target_type="failure", target_id=uuid.uuid4(), reason="r", status=ValidationStatus.OPEN)
+    cs.validation_tasks[cvt.id] = cvt; cs.save()
+    import backend.app.main as cm
+    importlib.reload(cm)
+    from fastapi.testclient import TestClient
+    _orig_ready = cm.require_client_data_ready
+    cm.require_client_data_ready = lambda *a, **k: None  # bypass ONLY the client-readiness gate
+    try:
+        cc = TestClient(cm.app)
+        hA = {"X-Monday-Report-Key": ctokA}; hB = {"X-Monday-Report-Key": ctokB}; hE = {"X-Monday-Report-Key": ctokE}
+        cbody = {"target_type": "report_field", "field_key": "report_no", "source_value": "R-1",
+                 "corrected_value": "R-2", "correction_reason": "real client-mode correction record"}
+        r_rec = cc.post(f"/workspaces/{cws.id}/field-corrections", json=cbody, headers=hA)
+        cs.refresh()
+        rec_id = r_rec.json().get("id") if r_rec.status_code in (200, 201) else None
+        rec_corr = cs.field_corrections.get(uuid.UUID(rec_id)) if rec_id else None
+        check("51 REAL client-mode correction record route succeeds (verified attribution)",
+              r_rec.status_code in (200, 201) and rec_corr is not None
+              and rec_corr.reviewer_user_id == rvA.id and rec_corr.reviewer_verified_at is not None)
+        r_rev = cc.post(f"/field-corrections/{rec_id}/revert", json={"revert_reason": "real client-mode revert"}, headers=hB)
+        cs.refresh(); rec_corr = cs.field_corrections.get(uuid.UUID(rec_id))
+        check("52b REAL client-mode correction revert route succeeds (reverter distinct)",
+              r_rev.status_code in (200, 201) and rec_corr.revert_reviewer_user_id == rvB.id and rec_corr.reviewer_user_id == rvA.id)
+        r_val = cc.patch(f"/validation-tasks/{cvt.id}", json={"status": "validated", "resolution_note": "ok"}, headers=hB)
+        cs.refresh(); cvt2 = cs.validation_tasks.get(cvt.id)
+        check("53b REAL client-mode validation terminal outcome route attributes reviewer",
+              r_val.status_code in (200, 201) and cvt2.reviewer_user_id == rvB.id and cvt2.reviewer_verified_at is not None)
+        rec_audit = [e for e in cs.audit_logs if e.action == "field_correction.record" and str(e.resource_id) == rec_id]
+        check("54b client-mode success path produces HMAC-keyed audit with matching actor",
+              bool(rec_audit) and rec_audit[-1].integrity_version == 2 and rec_audit[-1].actor_user_id == rvA.id)
+        cvtE = ValidationTask(tenant_id=cs.tenant.id, target_type="failure", target_id=uuid.uuid4(), reason="r", status=ValidationStatus.OPEN)
+        cs.validation_tasks[cvtE.id] = cvtE; cs.save()
+        check("55b REAL client-mode insufficient-permission reviewer -> 403",
+              cc.patch(f"/validation-tasks/{cvtE.id}", json={"status": "validated"}, headers=hE).status_code == 403)
+        _rc, _rctok = cs.create_credential(rvA.id); cs.revoke_credential(_rc.credential_id)
+        check("56b REAL client-mode revoked credential -> 401",
+              cc.post(f"/workspaces/{cws.id}/field-corrections", json=cbody, headers={"X-Monday-Report-Key": _rctok}).status_code == 401)
+        check("57b REAL client-mode nonexistent correction hidden -> 404",
+              cc.post(f"/field-corrections/{uuid.uuid4()}/revert", json={"revert_reason": "x"}, headers=hA).status_code == 404)
+    finally:
+        cm.require_client_data_ready = _orig_ready
+
+    # Part G: attribution/audit consistency verifier + mismatch detection
+    check("58 consistency verifier clean after real client-mode outcomes", cs.verify_reviewer_attribution_consistency() == [])
+    _tc = next(iter(cs.field_corrections.values()))
+    _o1 = _tc.reviewer_user_id; _tc.reviewer_user_id = uuid.uuid4()
+    check("59 mismatched outcome/audit reviewer detected", any("actor_user_id" in i for i in cs.verify_reviewer_attribution_consistency()))
+    _tc.reviewer_user_id = _o1
+    _o2 = _tc.tenant_id; _tc.tenant_id = uuid.uuid4()
+    check("60 mismatched tenant detected", any("tenant" in i for i in cs.verify_reviewer_attribution_consistency()))
+    _tc.tenant_id = _o2
+    _o3 = _tc.reviewer_credential_fingerprint; _tc.reviewer_credential_fingerprint = "corrupt-fp"
+    check("61 mismatched credential fingerprint detected", any("fingerprint" in i for i in cs.verify_reviewer_attribution_consistency()))
+    _tc.reviewer_credential_fingerprint = _o3
+    check("62 consistency clean again after restore", cs.verify_reviewer_attribution_consistency() == [])
+
+    # Part D: administrative validation update is NOT review; creates no false evidence
+    admt = ValidationTask(tenant_id=cs.tenant.id, target_type="failure", target_id=uuid.uuid4(), reason="r", status=ValidationStatus.OPEN)
+    cs.validation_tasks[admt.id] = admt; cs.save()
+    _t = set_current_identity(ident(cs, rvA, crA))
+    try:
+        cs.update_validation_task(admt.id, ValidationTaskUpdate(status=ValidationStatus.VALIDATED))
+    finally:
+        reset_current_identity(_t)
+    reopened = cs.update_validation_task(admt.id, ValidationTaskUpdate(status=ValidationStatus.OPEN))  # no identity -> system
+    check("63 administrative reopen is not reviewer-gated (allowed for a non-verified actor)", reopened.status == ValidationStatus.OPEN)
+    check("64 administrative update creates NO false verified-reviewer evidence",
+          reopened.reviewer_verified_at is None and reopened.reviewer_user_id is None)
+    _rej = False
+    try:
+        cs.update_validation_task(admt.id, ValidationTaskUpdate(status=ValidationStatus.VALIDATED))  # terminal, no identity
+    except Exception as _e:
+        _rej = type(_e).__name__ == "ReviewerNotVerified"
+    check("65 terminal validation outcome by system actor rejected in client mode", _rej)
+
+    # Part H: repeated revert stable; save/reload preserves both reviewers
+    _t = set_current_identity(ident(cs, rvA, crA))
+    _rr = None
+    try:
+        cs.revert_field_correction(uuid.UUID(rec_id), "second revert")
+        _rr = "no-error"
+    except Exception as _e:
+        _rr = type(_e).__name__
+    finally:
+        reset_current_identity(_t)
+    check("66 repeated revert has stable behavior (already-reverted rejected)", _rr in ("ValueError", "KeyError"))
+    cs.save()
+    _raw = json.loads(open(os.environ["MONDAY_REPORT_STATE_PATH"], encoding="utf-8").read())
+    _rp = next((c for c in _raw.get("field_corrections", []) if c["id"] == rec_id), None)
+    check("67 save/reload preserves recorder + reverter reviewer identities",
+          _rp is not None and _rp["reviewer_user_id"] == str(rvA.id) and _rp["revert_reviewer_user_id"] == str(rvB.id))
+
+    # concurrency: two client-mode reviewers keep distinct attribution
+    cres: dict[str, object] = {}
+
+    def cwork(name, u, c):
+        def run():
+            x = cs.record_field_correction(cws.id, FieldCorrectionCreate(
+                target_type="failure", field_key=f"cc-{name}", corrected_value="v",
+                correction_reason="concurrent client-mode correction"))
+            cres[name] = x.reviewer_user_id
+        as_reviewer(cs, ident(cs, u, c), run)
+
+    ct1 = threading.Thread(target=cwork, args=("A", rvA, crA))
+    ct2 = threading.Thread(target=cwork, args=("B", rvB, crB))
+    ct1.start(); ct2.start(); ct1.join(); ct2.join()
+    check("68 concurrent client-mode reviewers preserve distinct attribution",
+          cres.get("A") == rvA.id and cres.get("B") == rvB.id and cres["A"] != cres["B"])
+
+    # Part J: readiness is decisive-behavioral (not source markers) + privacy
+    import backend.app.ga_readiness as gar3
+    ok_beh, reasons_beh = gar3._verified_reviewer_behavioral_evidence()
+    check("69 decisive behavioral evidence passes (record+revert+validation+consistency+reject)", ok_beh and not reasons_beh)
+    disp3, detail3 = gar3._verified_reviewer_probe()
+    check("70 verified-reviewer readiness is evidence-driven PASS via behavioral run",
+          disp3 == "PASS" and "Behavioral evidence" in detail3)
+    check("71 GA readiness detail leaks no reviewer email / raw token / audit key",
+          "@rev.evidence" not in detail3 and "ga-reviewer-evidence-audit-hmac-key" not in detail3 and "@rev.test" not in detail3)
+    for k in _KEY_ENVS:
+        os.environ.pop(k, None)
+    os.environ.pop("MONDAY_REPORT_API_KEY", None)
 
     failed = [c for c in checks if not c["ok"]]
     for c in checks:
