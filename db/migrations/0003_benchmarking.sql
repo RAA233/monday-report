@@ -57,7 +57,7 @@ create table if not exists benchmark_values (
 create table if not exists benchmark_measurements (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references tenants(id),
-  project_id uuid references projects(id),
+  workspace_id uuid references workspaces(id),
   metric text not null,
   value numeric(14,4) not null,
   unit text not null,
@@ -87,7 +87,7 @@ create table if not exists anomaly_rules (
 create table if not exists anomaly_events (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references tenants(id),
-  project_id uuid references projects(id),
+  workspace_id uuid references workspaces(id),
   measurement_id uuid references benchmark_measurements(id),
   rule_id uuid references anomaly_rules(id),
   metric text not null,
@@ -120,7 +120,7 @@ create table if not exists diagnostic_actions (
 create table if not exists key_decisions (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references tenants(id),
-  project_id uuid references projects(id),
+  workspace_id uuid references workspaces(id),
   decision_timestamp timestamptz not null,
   decision_type text not null,
   title text not null,
@@ -151,7 +151,7 @@ create table if not exists decision_impacts (
 create table if not exists report_approvals (
   id uuid primary key default gen_random_uuid(),
   tenant_id uuid not null references tenants(id),
-  report_id uuid references reports(id),
+  report_id uuid references monday_reports(id),
   approval_state text not null,
   approved_by uuid references users(id),
   reason text,
@@ -171,6 +171,6 @@ alter table decision_impacts enable row level security;
 alter table report_approvals enable row level security;
 
 create index if not exists idx_benchmark_values_tenant_metric on benchmark_values (tenant_id, benchmark_name, metric_id);
-create index if not exists idx_measurements_tenant_project_metric on benchmark_measurements (tenant_id, project_id, metric, data_timestamp desc);
+create index if not exists idx_measurements_tenant_workspace_metric on benchmark_measurements (tenant_id, workspace_id, metric, data_timestamp desc);
 create index if not exists idx_anomaly_events_tenant_status on anomaly_events (tenant_id, status, severity, created_at desc);
-create index if not exists idx_key_decisions_tenant_project_time on key_decisions (tenant_id, project_id, decision_timestamp desc);
+create index if not exists idx_key_decisions_tenant_workspace_time on key_decisions (tenant_id, workspace_id, decision_timestamp desc);

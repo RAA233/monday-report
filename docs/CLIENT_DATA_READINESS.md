@@ -182,3 +182,21 @@ PASS-capable only on runtime evidence (a v2 event round-trips under HMAC and a
 public-SHA forgery of the same payload is rejected). This increment adds **no
 external anchor**, so `audit-tail-truncation-detection` stays **BLOCKED**,
 `ga:readiness` stays `GA_BLOCKED`, and the blocker registry is unchanged.
+
+## Database migrations (migration-runner, migration-validity)
+
+A deterministic, idempotent migration runner (`backend/app/migrations.py`,
+`docs/POSTGRES_MIGRATIONS.md`, `audit:migration-runner`) applies `db/migrations/`
+under a session-level advisory lock with per-migration transactions, tracking
+applied versions in a `schema_migrations` table; it is an explicit operator
+command, never run on API startup. Migration `0003` — provably unapplied — was
+corrected so its foreign keys target the tables the sequence actually creates
+(`workspaces`/`monday_reports`, not the divergent `schema.sql` names
+`projects`/`reports`). `ga_migration_runner` and `ga_migration_validity` are
+**evidence-driven** and PASS **only** with committed **real-PostgreSQL** passing
+evidence bound to the current migration bytes and a clean tree. No PostgreSQL was
+reachable in the build environment (Docker Desktop's engine could not start
+non-interactively without administrator elevation), so the evidence is
+`BLOCKED_NO_POSTGRES` and **both controls remain BLOCKED**; normalized
+persistence, active RLS, transaction/atomicity, and backup/restore stay BLOCKED
+and `ga:readiness` stays `GA_BLOCKED`. The blocker registry is unchanged.
