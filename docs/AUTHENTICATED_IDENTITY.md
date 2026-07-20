@@ -172,6 +172,10 @@ already sealed), so existing sealed chains still verify — **keyed/tamper-evide
 audit integrity remains a separate declared blocker**. The presence of an
 authenticated actor alone does **not** resolve `verified-reviewer-identity`:
 review-role eligibility and review-workflow coverage remain separately required.
+This is now **delivered for correction/validation outcomes** — see
+`docs/VERIFIED_REVIEWER_ATTRIBUTION.md` (`audit:verified-reviewer`);
+`ga_verified_reviewer_identity` is evidence-driven **PASS** while the other
+blockers keep `ga:readiness` at `GA_BLOCKED`.
 
 ## Credential provisioning and revocation
 

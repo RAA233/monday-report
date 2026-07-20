@@ -5,6 +5,11 @@ This increment replaces the forgeable, unkeyed SHA-256 audit chain with a
 it adds keyed signing + verification + rotation, but it deliberately does **not**
 add an external audit anchor and does **not** detect tail truncation.
 
+> Reviewer-controlled outcomes (field correction / validation) additionally carry
+> **verified reviewer attribution** whose keyed-audit actor matches the outcome
+> reviewer — see `docs/VERIFIED_REVIEWER_ATTRIBUTION.md`. This inherits the threat
+> model here (authenticity of recorded keyed events); it adds no non-repudiation.
+
 ## Threat model
 
 **Protects against** (with a configured, managed audit secret):
