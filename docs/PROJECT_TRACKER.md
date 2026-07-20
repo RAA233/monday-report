@@ -693,3 +693,41 @@ Corrections applied before merge, each behavior-proven in `route_rbac_guard.py`:
 | `pnpm run audit:route-rbac` | 0 | **103/103** — policy structure/parity, role→permission matrix, every-mutation denial for roles lacking the permission, privileged-read denial, signed-capability (resource-bound/expiring/GET-only, **token-verified-first, no existence oracle, no audit write**), permission-before-lookup ordering (unauthorized same-403 vs authorized-404), minimal public `/health` + **gated detailed readiness** (401/403/200, no path leak), client-mode docs hidden, redacted denial audit, evidence-driven `rbac-role-separation` **PASS**, and regression that tenant/reviewer/audit-integrity blockers stay BLOCKED and GA stays `GA_BLOCKED`. |
 | `pnpm run audit:identity-rbac` | 0 | 73/73 — updated: `rbac-role-separation` now evidence-driven PASS. |
 | `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — 25 blockers remain (rbac resolved; software 14→13). |
+
+### Tenant resource authorization — API-layer IDOR fix (branch `feat/tenant-resource-authorization`)
+
+Built on the merged identity + route-RBAC foundation, this bounded increment closes an
+API-layer **IDOR** gap: every entity already carried `tenant_id` and every request already
+resolved one, but no handler compared them, so any authenticated caller could reach another
+tenant's resource by UUID. Now, after the permission gate, every resource route compares the
+looked-up resource's `tenant_id` to the request tenant
+(`backend/app/tenant_authorization.py`, `docs/TENANT_AUTHORIZATION.md`).
+- **Authority**: `request_tenant_id()` reads the tenant only from the server-side identity
+  (never a system/all-tenant fallback; a missing identity denies); `owns()`/`tenant_visible()`
+  are default-deny; an explicit `system_tenant_context(operation)` covers worker/CLI access.
+  No route accepts a client-supplied tenant.
+- **Enforcement**: `auth → permission (403, before lookup) → lookup + tenant ownership
+  (existence-hiding 404 for a missing *or* cross-tenant resource) → operation`. Lists,
+  aggregates, dashboard, audit log, and chat evidence are tenant-filtered; the benchmarking
+  status builder is tenant-scoped in the store.
+- **Signed capabilities** bind the owning tenant at issuance (a caller cannot mint a token for
+  another tenant's resource) and re-check it at redemption, after the existing
+  token-verified-first ordering.
+- **Denial audit**: a genuine cross-tenant hit writes `authz.cross_tenant_denied` with the
+  request's tenant/actor and no foreign detail; a truly-missing resource writes none.
+- **Readiness**: `tenant-authorization-enforcement` stays **BLOCKED** via an evidence-driven
+  probe (API-layer half implemented; resolution also requires **Postgres RLS** over the
+  normalized store, out of scope). The **blocker registry is unchanged**; GA stays
+  `GA_BLOCKED`. **Out of scope**: multi-tenant storage, workspace membership/ACLs, normalized
+  persistence, and RLS activation.
+
+Additive schema fields were unnecessary (every entity already carried `tenant_id`); there is
+no startup backfill. Behavior is proven by `scripts/tenant_authorization_guard.py`
+(`pnpm run audit:tenant-authorization`, **71/71**), chained into `audit:all`.
+
+| Command | Exit | Result |
+| --- | --- | --- |
+| `pnpm run audit:tenant-authorization` | 0 | **71/71** — module default-deny; cross-tenant single-resource access is existence-hiding 404 across every route family (same-tenant succeeds); lists/aggregates/audit-log/chat exclude foreign rows; signed capabilities bind the owning tenant at issuance + redemption; cross-tenant denial audited with request-tenant context and no foreign detail; `tenant-authorization-enforcement` BLOCKED, RBAC intact, GA `GA_BLOCKED`. |
+| `pnpm run audit:all` | 0 | Full guard battery green on an isolated stack, incl. FORGE **65/65**, trajectory **38/38**, Benchmarking **23/23**, route-RBAC **103/103**, identity-RBAC **73/73**, and the new tenant guard **71/71**. |
+| `$env:CI='true'; pnpm run build` | 0 | `tsc` (strict, `noEmit`) + `vite build` clean. |
+| `pnpm run ga:readiness` | 1 | **`GA_BLOCKED`** — 25 blockers; `tenant-authorization-enforcement` stays BLOCKED via the evidence-driven probe (API-layer done; Postgres RLS pending). |

@@ -85,6 +85,7 @@ from .readiness import client_data_mode, evaluate_client_data_readiness
 from .runtime_backends import runtime_backend_status
 from .signed_urls import create_signed_token, signing_secret_configured, verify_signed_token
 from .store import store
+from .tenant_authorization import owns, request_tenant_id, tenant_visible
 
 app = FastAPI(
     title="Monday Report API",
@@ -296,6 +297,66 @@ def require_benchmark_permission(permission: str) -> None:
     if identity is None or not store.has_permission(permission, identity):
         _audit_permission_denied("benchmark.permission_denied", permission, identity)
         raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
+
+
+# ---------------------------------------------------------------------------
+# Per-request tenant + workspace resource-ownership enforcement.
+#
+# The route permission gate (require_permission / require_benchmark_permission)
+# runs FIRST and denies a missing/disabled identity or a role lacking the
+# permission (403) before any resource is looked up — so no unauthorized caller
+# can distinguish existence. AFTER the permission gate, a resource lookup is
+# additionally gated on tenant ownership: a resource that exists but belongs to
+# another tenant is treated EXACTLY like a missing resource (existence-hiding
+# 404), so a cross-tenant caller can never tell "does not exist" from "exists in
+# another tenant". The request tenant is resolved solely from the server-side
+# identity; client-supplied tenant input is never trusted (no route accepts one).
+# ---------------------------------------------------------------------------
+def _request_tenant_id() -> UUID:
+    """The request identity's tenant. The route permission gate has already denied
+    a missing/disabled identity, so an active tenant is normally present; as
+    defense-in-depth an unresolved tenant DENIES (403) — a missing identity must
+    never be silently promoted to system/all-tenant access."""
+    tenant_id = request_tenant_id()
+    if tenant_id is None:
+        _audit_permission_denied("tenant_denied", "__tenant__", _active_request_identity())
+        raise HTTPException(status_code=403, detail="No tenant context for request")
+    return tenant_id
+
+
+def _audit_cross_tenant_denied(resource_type: str, resource_id: UUID | None) -> None:
+    """Record a cross-tenant access denial with the REQUEST tenant context only.
+    The foreign owner's tenant is never disclosed in the metadata (no cross-tenant
+    detail); only the caller-supplied resource id, resource type, and the request
+    method/route are recorded. The audit tenant_id/actor is the request's own."""
+    method, path = get_request_context() or (None, None)
+    store.audit(
+        "authz.cross_tenant_denied",
+        resource_type,
+        resource_id,
+        {"method": method, "route": path, "reason": "resource_not_in_request_tenant"},
+    )
+
+
+def _tenant_owned(resource, resource_type: str, resource_id: UUID, detail: str):
+    """Return the resource iff it belongs to the request tenant.
+
+    A missing resource OR a cross-tenant resource both raise the SAME 404 with the
+    SAME detail (existence-hiding). A genuine cross-tenant hit (resource exists but
+    is owned by another tenant) is audited with request-tenant context; a plain
+    missing resource keeps the prior no-audit behavior."""
+    tenant_id = _request_tenant_id()
+    if resource is None:
+        raise HTTPException(status_code=404, detail=detail)
+    if not owns(resource, tenant_id):
+        _audit_cross_tenant_denied(resource_type, resource_id)
+        raise HTTPException(status_code=404, detail=detail)
+    return resource
+
+
+def _tenant_items(items) -> list:
+    """Filter a resource iterable to the request tenant (list/aggregate scoping)."""
+    return tenant_visible(items, _request_tenant_id())
 
 
 def require_admin() -> AuthenticatedIdentity:
@@ -645,7 +706,7 @@ def route_policy_fully_enforced() -> bool:
 def list_workspaces() -> list[Workspace]:
     require_permission("view_workspaces")
     store.refresh()
-    return list(store.workspaces.values())
+    return _tenant_items(store.workspaces.values())
 
 
 @app.post("/workspaces", response_model=Workspace, status_code=status.HTTP_201_CREATED)
@@ -659,8 +720,7 @@ def create_upload(payload: UploadCreate) -> UploadCreateResponse:
     store.refresh()
     require_permission("manage_uploads")
     require_client_data_ready("upload.create", "workspace", payload.workspace_id)
-    if payload.workspace_id not in store.workspaces:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    _tenant_owned(store.workspaces.get(payload.workspace_id), "workspace", payload.workspace_id, "Workspace not found")
     if upload_too_large(payload.byte_size):
         store.audit(
             "upload.rejected",
@@ -692,8 +752,7 @@ async def create_direct_upload(
         require_client_data_ready("upload.direct", "workspace", workspace_id)
     else:
         store.refresh()
-    if workspace_id not in store.workspaces:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    _tenant_owned(store.workspaces.get(workspace_id), "workspace", workspace_id, "Workspace not found")
 
     original_name = file_name or file.filename or "upload.bin"
     content = await file.read()
@@ -734,8 +793,7 @@ async def create_direct_upload(
 def complete_upload(upload_id: UUID, payload: UploadCompleteRequest) -> dict[str, str]:
     store.refresh()
     require_permission("manage_uploads")
-    if upload_id not in store.uploads:
-        raise HTTPException(status_code=404, detail="Upload not found")
+    _tenant_owned(store.uploads.get(upload_id), "upload", upload_id, "Upload not found")
     require_client_data_ready("upload.complete", "upload", upload_id)
     for file_id in payload.file_ids:
         if file_id not in store.files:
@@ -761,9 +819,9 @@ def complete_upload(upload_id: UUID, payload: UploadCompleteRequest) -> dict[str
 def list_upload_files(upload_id: UUID) -> list[UploadFileRecord]:
     store.refresh()
     require_permission("view_source_documents")
-    if upload_id not in store.uploads:
-        raise HTTPException(status_code=404, detail="Upload not found")
+    _tenant_owned(store.uploads.get(upload_id), "upload", upload_id, "Upload not found")
     require_client_data_ready("upload.files.list", "upload", upload_id)
+    # The upload is confirmed tenant-owned; its files inherit the same tenant.
     return [file for file in store.files.values() if file.upload_id == upload_id]
 
 
@@ -775,7 +833,7 @@ def list_processing_jobs(
     store.refresh()
     require_permission("view_processing_status")
     require_client_data_ready("processing_jobs.list", "processing_job", None)
-    jobs = list(store.jobs.values())
+    jobs = _tenant_items(store.jobs.values())
     if upload_id:
         jobs = [job for job in jobs if job.upload_id == upload_id]
     if status_filter:
@@ -788,7 +846,7 @@ def list_documents(workspace_id: UUID | None = None) -> list[ParsedDocument]:
     store.refresh()
     require_permission("view_source_documents")
     require_client_data_ready("documents.list", "workspace", workspace_id)
-    documents = list(store.parsed_documents.values())
+    documents = _tenant_items(store.parsed_documents.values())
     if workspace_id:
         documents = [document for document in documents if document.workspace_id == workspace_id]
     return documents
@@ -798,9 +856,9 @@ def list_documents(workspace_id: UUID | None = None) -> list[ParsedDocument]:
 def list_document_chunks(document_id: UUID) -> list[DocumentChunk]:
     store.refresh()
     require_permission("view_source_documents")
-    if document_id not in store.parsed_documents:
-        raise HTTPException(status_code=404, detail="Document not found")
+    _tenant_owned(store.parsed_documents.get(document_id), "parsed_document", document_id, "Document not found")
     require_client_data_ready("documents.chunks.list", "parsed_document", document_id)
+    # The document is confirmed tenant-owned; its chunks inherit the same tenant.
     chunks = [chunk for chunk in store.document_chunks.values() if chunk.document_id == document_id]
     return sorted(chunks, key=lambda item: item.ordinal)
 
@@ -810,7 +868,7 @@ def list_audit_logs(limit: int = 50) -> list[AuditLog]:
     require_permission("view_audit_history")
     store.refresh()
     bounded_limit = min(max(limit, 1), 200)
-    return list(reversed(store.audit_logs))[:bounded_limit]
+    return list(reversed(_tenant_items(store.audit_logs)))[:bounded_limit]
 
 
 @app.get("/audit-logs/integrity", response_model=AuditIntegrityStatus)
@@ -832,15 +890,14 @@ def list_validation_tasks() -> list[ValidationTask]:
     store.refresh()
     require_permission("view_validation_queue")
     require_client_data_ready("validation_tasks.list", "validation_task", None)
-    return list(store.validation_tasks.values())
+    return _tenant_items(store.validation_tasks.values())
 
 
 @app.patch("/validation-tasks/{task_id}", response_model=ValidationTask)
 def update_validation_task(task_id: UUID, payload: ValidationTaskUpdate) -> ValidationTask:
     store.refresh()
     require_permission("resolve_validation")
-    if task_id not in store.validation_tasks:
-        raise HTTPException(status_code=404, detail="Validation task not found")
+    _tenant_owned(store.validation_tasks.get(task_id), "validation_task", task_id, "Validation task not found")
     require_client_data_ready("validation_task.update", "validation_task", task_id)
     return store.update_validation_task(task_id, payload)
 
@@ -859,8 +916,7 @@ def create_field_correction(workspace_id: UUID, payload: FieldCorrectionCreate) 
         # Authorization first: an unauthorized caller must get 403 whether or not
         # the workspace exists (no existence/readiness disclosure).
         require_permission("record_field_corrections")
-        if workspace_id not in store.workspaces:
-            raise HTTPException(status_code=404, detail="Workspace not found")
+        _tenant_owned(store.workspaces.get(workspace_id), "workspace", workspace_id, "Workspace not found")
         require_client_data_ready("field_correction.record", "workspace", workspace_id)
         # Only a registered correctable field may be corrected; unknown or
         # sensitive fields (audit/identity/tenant/recommendation/Benchmarking/
@@ -889,8 +945,7 @@ def list_field_corrections(workspace_id: UUID, active_only: bool = False) -> lis
     # Authorization first: an unauthorized caller must get 403 whether or not the
     # workspace exists (no existence/readiness disclosure).
     require_permission("view_field_corrections")
-    if workspace_id not in store.workspaces:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    _tenant_owned(store.workspaces.get(workspace_id), "workspace", workspace_id, "Workspace not found")
     require_client_data_ready("field_correction.list", "workspace", workspace_id)
     return store.list_field_corrections(workspace_id, active_only=active_only)
 
@@ -902,8 +957,7 @@ def revert_field_correction(correction_id: UUID, payload: FieldCorrectionRevert)
         # Authorization first: an unauthorized caller must get 403 whether or not
         # the correction exists (no existence/readiness disclosure).
         require_permission("record_field_corrections")
-        if correction_id not in store.field_corrections:
-            raise HTTPException(status_code=404, detail="Field correction not found")
+        _tenant_owned(store.field_corrections.get(correction_id), "field_correction", correction_id, "Field correction not found")
         require_client_data_ready("field_correction.revert", "field_correction", correction_id)
         try:
             return store.revert_field_correction(correction_id, payload.revert_reason)
@@ -916,7 +970,7 @@ def dashboard_summary(workspace_id: UUID | None = None) -> DashboardSummary:
     store.refresh()
     require_permission("view_reports")
     require_client_data_ready("dashboard.summary", "workspace", workspace_id)
-    failures = list(store.failures.values())
+    failures = _tenant_items(store.failures.values())
     if workspace_id:
         failures = [failure for failure in failures if failure.workspace_id == workspace_id]
     confidences = [failure.confidence for failure in failures]
@@ -924,7 +978,7 @@ def dashboard_summary(workspace_id: UUID | None = None) -> DashboardSummary:
         total_failures=len(failures),
         total_npt_hours=sum(failure.npt_hours for failure in failures),
         validation_backlog=len(
-            [task for task in store.validation_tasks.values() if task.status.value == "open"]
+            [task for task in _tenant_items(store.validation_tasks.values()) if task.status.value == "open"]
         ),
         high_or_critical_failures=len(
             [failure for failure in failures if failure.severity in {"High", "Critical"}]
@@ -938,7 +992,7 @@ def list_failures(workspace_id: UUID | None = None) -> list[FailureRecord]:
     store.refresh()
     require_permission("view_source_documents")
     require_client_data_ready("failures.list", "workspace", workspace_id)
-    failures = list(store.failures.values())
+    failures = _tenant_items(store.failures.values())
     if workspace_id:
         failures = [failure for failure in failures if failure.workspace_id == workspace_id]
     return failures
@@ -949,8 +1003,8 @@ def benchmarking_config() -> BenchmarkConfigResponse:
     store.refresh()
     require_benchmark_permission("view_benchmarks")
     return BenchmarkConfigResponse(
-        benchmark_values=list(store.benchmark_values.values()),
-        anomaly_rules=list(store.anomaly_rules.values()),
+        benchmark_values=_tenant_items(store.benchmark_values.values()),
+        anomaly_rules=_tenant_items(store.anomaly_rules.values()),
         permissions=store.benchmark_permissions(),
     )
 
@@ -959,8 +1013,7 @@ def benchmarking_config() -> BenchmarkConfigResponse:
 def update_benchmark_value(benchmark_id: UUID, payload: BenchmarkValueUpdate) -> BenchmarkValue:
     store.refresh()
     require_benchmark_permission("manage_benchmark_config")
-    if benchmark_id not in store.benchmark_values:
-        raise HTTPException(status_code=404, detail="Benchmark value not found")
+    _tenant_owned(store.benchmark_values.get(benchmark_id), "benchmark_value", benchmark_id, "Benchmark value not found")
     return store.update_benchmark_value(benchmark_id, payload)
 
 
@@ -970,7 +1023,12 @@ def workspace_benchmarking(workspace_id: UUID) -> BenchmarkingStatus:
     # Authorization first: never disclose workspace existence or readiness state
     # to an unauthorized caller.
     require_benchmark_permission("view_benchmarks")
-    if workspace_id not in store.workspaces:
+    # Tenant-ownership gate: a workspace that is missing OR owned by another tenant
+    # is treated identically (existence-hiding) — configuration-only status with no
+    # workspace-specific data. The benchmarking status builder is tenant-scoped in
+    # the store, so a foreign workspace_id surfaces none of another tenant's
+    # measurements or anomalies.
+    if not owns(store.workspaces.get(workspace_id), _request_tenant_id()):
         require_client_data_ready("benchmarking.status", "workspace", workspace_id)
         store.audit(
             "benchmarking.workspace_missing_status",
@@ -993,8 +1051,7 @@ def create_benchmark_measurement(
 ) -> BenchmarkingStatus:
     store.refresh()
     require_benchmark_permission("review_anomalies")
-    if workspace_id not in store.workspaces:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    _tenant_owned(store.workspaces.get(workspace_id), "workspace", workspace_id, "Workspace not found")
     require_client_data_ready("benchmarking.measurement.create", "workspace", workspace_id)
     try:
         return store.record_benchmark_measurement(workspace_id, payload)
@@ -1011,6 +1068,7 @@ def dismiss_benchmark_diagnostic(
     require_benchmark_permission("dismiss_anomalies")
     if not payload.reason.strip():
         raise HTTPException(status_code=422, detail="Dismissal reason is required")
+    _tenant_owned(store.anomaly_events.get(anomaly_id), "anomaly_event", anomaly_id, "anomaly_not_found")
     try:
         return store.dismiss_diagnostic_action(anomaly_id, action_id, payload.reason)
     except KeyError as exc:
@@ -1208,8 +1266,7 @@ def report_draft_profile_note(profiles: list[dict[str, object]]) -> str | None:
 def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     store.refresh()
     require_permission("view_reports")
-    if workspace_id not in store.workspaces:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    _tenant_owned(store.workspaces.get(workspace_id), "workspace", workspace_id, "Workspace not found")
     require_client_data_ready("report_draft.generate", "workspace", workspace_id)
 
     workspace = store.workspaces[workspace_id]
@@ -1428,11 +1485,16 @@ def chat(payload: ChatRequest) -> ChatResponse:
     store.refresh()
     require_permission("generate_reports")
     require_client_data_ready("chat.message", "workspace", payload.workspace_id)
+    # Tenant-scope every collection the chat answer is derived from: a workspace_id
+    # belonging to another tenant surfaces none of that tenant's failures/documents.
+    tenant_id = _request_tenant_id()
     failures = [
-        failure for failure in store.failures.values() if failure.workspace_id == payload.workspace_id
+        failure for failure in store.failures.values()
+        if failure.workspace_id == payload.workspace_id and owns(failure, tenant_id)
     ]
     documents = [
-        document for document in store.parsed_documents.values() if document.workspace_id == payload.workspace_id
+        document for document in store.parsed_documents.values()
+        if document.workspace_id == payload.workspace_id and owns(document, tenant_id)
     ]
     chunk_count = sum(document.chunk_count for document in documents)
     normalized = payload.content.lower()
@@ -1615,8 +1677,7 @@ def chat(payload: ChatRequest) -> ChatResponse:
 def create_monday_report(payload: MondayReportCreate) -> MondayReport:
     store.refresh()
     require_permission("generate_reports")
-    if payload.workspace_id not in store.workspaces:
-        raise HTTPException(status_code=404, detail="Workspace not found")
+    _tenant_owned(store.workspaces.get(payload.workspace_id), "workspace", payload.workspace_id, "Workspace not found")
     require_client_data_ready("monday_report.create", "workspace", payload.workspace_id)
     return store.create_monday_report(payload)
 
@@ -1626,7 +1687,7 @@ def list_monday_reports(workspace_id: UUID | None = None) -> list[MondayReport]:
     store.refresh()
     require_permission("view_reports")
     require_client_data_ready("monday_reports.list", "workspace", workspace_id)
-    reports = list(store.monday_reports.values())
+    reports = _tenant_items(store.monday_reports.values())
     if workspace_id:
         reports = [report for report in reports if report.workspace_id == workspace_id]
     return reports
@@ -1640,8 +1701,7 @@ def export_monday_report(
 ) -> ReportExport:
     store.refresh()
     require_permission("issue_client_reports")
-    if report_id not in store.monday_reports:
-        raise HTTPException(status_code=404, detail="Monday Report not found")
+    _tenant_owned(store.monday_reports.get(report_id), "monday_report", report_id, "Monday Report not found")
     require_client_data_ready("monday_report.export", "monday_report", report_id)
     open_tasks = store.report_open_validation_tasks(report_id)
     if open_tasks and (not allow_unresolved_validation or client_data_mode() == "client"):
@@ -1685,8 +1745,7 @@ def export_monday_report(
 def create_report_export_signed_url(export_id: UUID, request: Request) -> SignedUrlResponse:
     store.refresh()
     require_permission("export_evidence")
-    if export_id not in store.report_exports:
-        raise HTTPException(status_code=404, detail="Report export not found")
+    report_export = _tenant_owned(store.report_exports.get(export_id), "report_export", export_id, "Report export not found")
     if client_data_mode() == "client" and not signing_secret_configured():
         store.audit(
             "report_export.signed_url_blocked",
@@ -1697,10 +1756,11 @@ def create_report_export_signed_url(export_id: UUID, request: Request) -> Signed
         raise HTTPException(status_code=409, detail="Signing secret is required in client data mode")
     require_client_data_ready("report_export.signed_url", "report_export", export_id)
 
-    token, expires_at = create_signed_token(export_id, "report_export_download")
+    token, expires_at = create_signed_token(
+        export_id, "report_export_download", tenant_id=report_export.tenant_id
+    )
     path = f"/signed/report-exports/{export_id}?token={token}"
     url = str(request.base_url).rstrip("/") + path
-    report_export = store.report_exports[export_id]
     store.audit(
         "report_export.signed_url",
         "report_export",
@@ -1736,6 +1796,10 @@ def download_report_export(export_id: UUID, token: str) -> Response:
     require_client_data_ready("report_export.download", "report_export", export_id)
 
     report_export = store.report_exports[export_id]
+    # Tenant capability binding: the token must bind THIS resource's tenant. A token
+    # minted for another tenant's export cannot redeem this one (existence-hiding 404).
+    if not verify_signed_token(token, export_id, "report_export_download", tenant_id=report_export.tenant_id):
+        raise HTTPException(status_code=404, detail="Report export not found")
     export_path = store.export_path_from_uri(report_export.storage_uri)
     if export_path is None or not export_path.exists():
         raise HTTPException(status_code=404, detail="Export artifact not found")
@@ -1772,8 +1836,7 @@ def download_report_export(export_id: UUID, token: str) -> Response:
 def create_upload_file_signed_url(file_id: UUID, request: Request) -> SignedUrlResponse:
     store.refresh()
     require_permission("export_evidence")
-    if file_id not in store.files:
-        raise HTTPException(status_code=404, detail="Upload file not found")
+    file_record = _tenant_owned(store.files.get(file_id), "file", file_id, "Upload file not found")
     if client_data_mode() == "client" and not signing_secret_configured():
         store.audit(
             "upload_file.signed_url_blocked",
@@ -1783,11 +1846,10 @@ def create_upload_file_signed_url(file_id: UUID, request: Request) -> SignedUrlR
         )
         raise HTTPException(status_code=409, detail="Signing secret is required in client data mode")
     require_client_data_ready("upload_file.signed_url", "upload_file", file_id)
-    file_record = store.files[file_id]
     if file_record.malware_status == "blocked" or not file_record.storage_uri.startswith("object://"):
         raise HTTPException(status_code=409, detail="Upload file is not downloadable")
 
-    token, expires_at = create_signed_token(file_id, "upload_file_download")
+    token, expires_at = create_signed_token(file_id, "upload_file_download", tenant_id=file_record.tenant_id)
     path = f"/signed/upload-files/{file_id}?token={token}"
     url = str(request.base_url).rstrip("/") + path
     store.audit(
@@ -1825,6 +1887,10 @@ def download_upload_file(file_id: UUID, token: str) -> Response:
     require_client_data_ready("upload_file.download", "upload_file", file_id)
 
     file_record = store.files[file_id]
+    # Tenant capability binding: the token must bind THIS resource's tenant. A token
+    # minted for another tenant's file cannot redeem this one (existence-hiding 404).
+    if not verify_signed_token(token, file_id, "upload_file_download", tenant_id=file_record.tenant_id):
+        raise HTTPException(status_code=404, detail="Upload file not found")
     if file_record.malware_status == "blocked" or not file_record.storage_uri.startswith("object://"):
         raise HTTPException(status_code=409, detail="Upload file is not downloadable")
     file_path = store.file_path_from_uri(file_record.storage_uri)

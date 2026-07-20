@@ -147,9 +147,14 @@ route-level RBAC is **not** complete. `audit:identity-rbac` enforces all of this
 
 ## Tenant boundary (this increment)
 
-Full multi-tenant resource authorization remains a later increment. This slice
-enforces the existing **configured-tenant boundary**: a credential is valid only
-when `credential.tenant_id == user.tenant_id == configured runtime tenant_id`. A
+API-layer tenant resource authorization is delivered by a later increment
+(`docs/TENANT_AUTHORIZATION.md`): once an identity is resolved, every resource
+route compares the looked-up resource's `tenant_id` to the request tenant and
+hides cross-tenant resources behind an existence-hiding 404. Full multi-tenant
+**storage** and **Postgres RLS** remain out of scope and a declared blocker. This
+slice enforces the existing **configured-tenant boundary** at authentication: a
+credential is valid only when
+`credential.tenant_id == user.tenant_id == configured runtime tenant_id`. A
 credential for another tenant, a user for another tenant, a credential/user
 tenant mismatch, a missing tenant binding, or a client-supplied tenant override
 is rejected. **`tenant-authorization-enforcement` stays BLOCKED** — this is a

@@ -264,6 +264,47 @@ def _rbac_role_separation_probe() -> tuple[str, str]:
     )
 
 
+def _tenant_authorization_probe() -> tuple[str, str]:
+    """Evidence-driven evaluation of the ``tenant-authorization-enforcement`` control.
+
+    Resolution condition (registry): tenant is resolved from the authenticated
+    request AND enforced at the API layer WITH Postgres RLS active for the
+    normalized store. This probe inspects the ACTUAL route/authorization code as
+    evidence that the API-layer half is implemented, but the control stays BLOCKED
+    because the RLS-backed normalized multi-tenant store is NOT implemented in this
+    increment: the process serves one configured tenant via the local JSON snapshot
+    and RLS is inactive. It never flips to PASS on the API-layer evidence alone.
+    """
+    try:
+        from . import main as _main
+        from . import tenant_authorization as _ta
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return "BLOCKED", f"Tenant authorization could not be evaluated: {exc}"
+
+    reasons: list[str] = []
+    for fn in ("request_tenant_id", "resource_tenant_id", "owns", "tenant_visible", "system_tenant_context"):
+        if not callable(getattr(_ta, fn, None)):
+            reasons.append(f"tenant_authorization.{fn} missing")
+    source = _main._main_source()
+    for marker in ("_tenant_owned(", "_tenant_items(", "request_tenant_id", "_audit_cross_tenant_denied("):
+        if marker not in source:
+            reasons.append(f"API-layer enforcement marker {marker!r} absent from route layer")
+
+    if reasons:
+        # Even the API-layer half is not fully wired; still BLOCKED.
+        return "BLOCKED", "Tenant authorization enforcement incomplete: " + "; ".join(reasons) + "."
+    return (
+        "BLOCKED",
+        "API-layer per-request tenant ownership enforcement is implemented and verified: every "
+        "resource route compares resource.tenant_id to the authenticated request tenant, cross-tenant "
+        "access is an existence-hiding 404, list/aggregate reads are tenant-filtered, and signed "
+        "capabilities bind the owning tenant (behavior proven by scripts/tenant_authorization_guard.py). "
+        "The control remains BLOCKED because its resolution ALSO requires Postgres RLS active over the "
+        "normalized multi-tenant store, which is not implemented: the process serves one configured tenant "
+        "via the local JSON snapshot and RLS is inactive.",
+    )
+
+
 def evaluate_blockers(
     readiness_by_id: dict[str, str],
     *,
@@ -295,6 +336,8 @@ def evaluate_blockers(
             disposition, detail = _delegate(readiness_by_id, ("demo_seed_removed",))
         elif check_id == "ga_rbac_role_separation":
             disposition, detail = _rbac_role_separation_probe()
+        elif check_id == "ga_tenant_authorization":
+            disposition, detail = _tenant_authorization_probe()
         elif check_id == "ga_parser_coverage_evidence":
             disposition, detail, evidence_reference = _forge_probe(forge_report)
         elif check_id == "ga_official_export_gate":

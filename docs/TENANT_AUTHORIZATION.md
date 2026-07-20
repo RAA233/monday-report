@@ -1,0 +1,120 @@
+# Tenant resource authorization (API layer)
+
+This increment closes an API-layer **IDOR** gap: every entity already carried a
+`tenant_id` and the authenticated request already resolved a `tenant_id`, but no
+handler ever compared the two — so any authenticated caller could read or mutate a
+resource belonging to another tenant simply by knowing its UUID. This change makes
+the per-request tenant the enforced ownership boundary at the API layer.
+
+It is a **bounded** slice. It is NOT multi-tenant storage, workspace
+membership/ACLs, normalized Postgres persistence, or Postgres RLS. The process
+still serves one configured tenant via the local JSON snapshot; those larger
+controls remain declared GA blockers (see below).
+
+## The authority: `backend/app/tenant_authorization.py`
+
+A single, dependency-light module answers one question — *does this looked-up
+resource belong to the tenant of the authenticated request?*
+
+- `request_tenant_id()` — the request tenant, resolved **only** from the
+  server-side authenticated identity (`identity.tenant_id`). It returns `None`
+  when there is no active request identity and **never** falls back to a
+  configured/system/all-tenant id. Absence of identity resolves to absence of
+  access, never to system access.
+- `resource_tenant_id(resource)` / `owns(resource, tenant_id)` — default-deny
+  ownership predicate: a missing resource, an unknown request tenant, or a
+  resource with no stamped tenant all deny.
+- `tenant_visible(items, tenant_id)` — tenant filter for list/aggregate reads;
+  an unknown tenant yields an empty list, never the full cross-tenant set.
+- `SystemTenantContext` / `system_tenant_context(tenant_id, operation)` — an
+  **explicit** context for worker/CLI/system operations that run outside a
+  request. It requires an operation label, so a non-request tenant access is
+  intentional and auditable — never implicit. Request handlers never construct
+  it; they use `request_tenant_id()`.
+
+Client-supplied tenant input is never trusted: no route accepts a tenant
+identifier, and nothing in the authorization path reads a tenant from a request
+body, query string, or header.
+
+## Enforcement at the route layer (`backend/app/main.py`)
+
+The order for every resource route is:
+
+1. **authenticate** (middleware resolves the request identity),
+2. **permission** (`require_permission` / `require_benchmark_permission`) — a
+   missing/disabled identity or a role lacking the permission is denied **403**
+   *before any resource lookup*, so no unauthorized caller can probe existence,
+3. **lookup + tenant ownership** — `_tenant_owned(resource, …)` returns the
+   resource only if it belongs to the request tenant; a resource that is missing
+   **or** owned by another tenant raises the **same 404 with the same body**
+   (existence-hiding: a caller can never distinguish "does not exist" from
+   "exists in another tenant"),
+4. **operation**.
+
+List, aggregate, and dashboard reads are tenant-filtered with `_tenant_items()`
+(`/workspaces`, `/documents`, `/failures`, `/processing-jobs`,
+`/validation-tasks`, `/monday-reports`, `/audit-logs`, `/benchmarking/config`,
+`/dashboards/summary`, and the chat evidence set), so no list surfaces another
+tenant's rows and no aggregate counts them. The benchmarking status builder in
+`backend/app/store.py` is tenant-scoped for the same reason, so a foreign
+`workspace_id` on the configuration-only path surfaces none of another tenant's
+measurements or anomalies.
+
+Server-side stamping is unchanged and already correct: every create path stamps
+`tenant_id=self.tenant.id`. Because all `tenant_id` fields already existed on the
+schemas, this increment adds **no** schema field and performs **no** startup
+backfill.
+
+## Signed capabilities bind the tenant (`backend/app/signed_urls.py`)
+
+Signed download tokens now carry the owning `tenant_id` in the signed, tamper-
+evident payload:
+
+- **Issuance** (`/report-exports/{id}/signed-url`,
+  `/upload-files/{id}/signed-url`) is tenant-gated — a caller cannot mint a
+  capability for another tenant's resource (404) — and binds the request tenant
+  into the token.
+- **Redemption** (the public `/signed/...` routes) verifies the token signature,
+  resource, purpose, and expiry **first** (before any resource lookup or audit
+  side effect, preserving the existing no-oracle ordering), then re-checks the
+  token's bound tenant against the looked-up resource's own tenant. A token
+  minted for one tenant's resource can never redeem another tenant's resource.
+
+## Denial audit (tenant context, no leakage)
+
+A genuine cross-tenant access attempt (the resource exists but is owned by another
+tenant) writes an `authz.cross_tenant_denied` audit event stamped with the
+**request's** tenant and actor. The metadata records only the caller-supplied
+resource id/type and the request method/route — never the foreign owner's tenant
+or any other cross-tenant detail. A truly-missing resource writes no such event.
+
+## Readiness disposition (stays BLOCKED)
+
+The GA blocker `tenant-authorization-enforcement`
+(`evals/ga/blocker_registry.v1.json`) remains **BLOCKED** and GA remains
+**GA_BLOCKED**. Its resolution condition requires tenant enforcement at the API
+layer **and** Postgres RLS active over the normalized store. This increment
+delivers the API-layer half only; the RLS-backed normalized multi-tenant store is
+out of scope. The evidence-driven `_tenant_authorization_probe()` in
+`backend/app/ga_readiness.py` inspects the actual route/authorization code, confirms
+the API-layer enforcement is wired, and reports BLOCKED with that context — it
+never flips to PASS on the API-layer evidence alone, and the registry is not
+weakened.
+
+## Verification
+
+`scripts/tenant_authorization_guard.py` (`pnpm run audit:tenant-authorization`,
+also chained into `audit:all`) stands up the app with injected foreign tenant-B
+fixtures and proves: the module's default-deny ownership logic; cross-tenant single-
+resource access is an existence-hiding 404 across every route family while same-
+tenant access succeeds; list/aggregate reads exclude foreign rows; signed
+capabilities bind the tenant at issuance and redemption; cross-tenant denials are
+audited with request-tenant context and no foreign detail; and the increment
+closes no other GA blocker (route-level RBAC intact, GA still GA_BLOCKED).
+
+## Explicitly out of scope (still declared blockers)
+
+- Multi-tenant storage / a `tenants` collection (single configured tenant).
+- Workspace membership or per-resource ACLs beyond tenant ownership.
+- Normalized Postgres persistence and **Postgres RLS activation**.
+- Verified reviewer identity and keyed audit-chain integrity (separate blockers).

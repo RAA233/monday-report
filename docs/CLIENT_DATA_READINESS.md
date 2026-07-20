@@ -153,3 +153,15 @@ or keyed audit integrity. The `rbac-role-separation` GA control is now
 unchanged, only the evaluator probe became evidence-based); the separate per-user
 identity deployment, tenant-authorization, verified-reviewer, and audit-integrity
 controls remain BLOCKED, so `ga:readiness` stays `GA_BLOCKED`.
+
+## Tenant resource authorization (API layer)
+
+A further increment (`docs/TENANT_AUTHORIZATION.md`, `audit:tenant-authorization`)
+closes an API-layer IDOR gap: after the permission gate, every resource route
+compares the looked-up resource's `tenant_id` to the tenant resolved from the
+authenticated request, hiding cross-tenant resources behind an existence-hiding
+404; lists/aggregates are tenant-filtered; and signed capabilities bind the owning
+tenant. The `tenant-authorization-enforcement` GA control stays **BLOCKED** with an
+evidence-driven probe (the API-layer half is implemented; its resolution also
+requires **Postgres RLS** over the normalized store, which is out of scope), so
+`ga:readiness` stays `GA_BLOCKED` and the blocker registry is not weakened.
