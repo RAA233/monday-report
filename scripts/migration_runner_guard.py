@@ -296,13 +296,21 @@ def main() -> int:
     import backend.app.migrations as M
 
     migrations = M.discover_migrations()  # legacy sequence (db/migrations/, immutable)
+    # Expected versions are DERIVED from the discovered files, not hard-coded, so
+    # adding a forward migration cannot silently weaken the suite. The invariants
+    # below (contiguity, ordering, uniqueness, immutability) are asserted
+    # explicitly instead.
+    EXPECTED = [m.version for m in migrations]
+    EXPECTED_SET = set(EXPECTED)
     versions = [m.version for m in migrations]
     baseline = M.discover_migrations(M.BASELINE_DIR)  # corrected fresh-install baseline
     static_legacy = M.validate_migration_set(migrations)
     static_baseline = M.validate_migration_set(baseline)
 
     # ---- Group A: file/version contract (no PG) ----
-    record("01 discovers exactly the committed migration sequence", versions == [1, 2, 3], versions)
+    record("01 discovers a contiguous ordered sequence starting at 1",
+           versions == EXPECTED and versions == sorted(versions)
+           and versions == list(range(1, len(versions) + 1)) and len(versions) >= 4, versions)
     record("02 every filename matches NNNN_description.sql", all(M.FILENAME_RE.match(m.filename) for m in migrations),
            [m.filename for m in migrations])
     record("03 versions are unique", len(set(versions)) == len(versions), versions)
@@ -342,7 +350,7 @@ def main() -> int:
     # taken over and makes a faithful copy indistinguishable from checksum drift. That
     # defect silently broke the partial-history scenarios (34-37) on real PostgreSQL.
     with tempfile.TemporaryDirectory() as d:
-        faithful = copy_subset(Path(d) / "faithful", baseline, {1, 2, 3})
+        faithful = copy_subset(Path(d) / "faithful", baseline, EXPECTED_SET)
         copied = M.discover_migrations(faithful)
         copy_checksums_match = ([c.checksum_sha256 for c in copied]
                                 == [b.checksum_sha256 for b in baseline])
@@ -354,7 +362,7 @@ def main() -> int:
 
     # ---- Group B: static validator (no PG) ----
     record("10 corrected baseline (db/baseline/) static validator passes — fresh-install valid",
-           static_baseline.ok and not static_baseline.broken_references and [m.version for m in baseline] == [1, 2, 3],
+           static_baseline.ok and not static_baseline.broken_references and [m.version for m in baseline] == EXPECTED,
            {"ok": static_baseline.ok, "baseline_files": [m.filename for m in baseline]})
     with tempfile.TemporaryDirectory() as d:
         badref = write_dir(Path(d) / "badref", {
@@ -406,7 +414,7 @@ def main() -> int:
         reset_public_schema(url)
         res = M.apply_migrations(url, migrations_dir=BASE)
         record("14 schema_migrations created + baseline fresh apply ok",
-               res.ok and [a["version"] for a in res.applied] == [1, 2, 3], res.to_dict())
+               res.ok and [a["version"] for a in res.applied] == EXPECTED, res.to_dict())
         with _connect(url) as c:
             cols = [r[0] for r in c.execute(
                 "select column_name from information_schema.columns where table_name='schema_migrations' order by ordinal_position"
@@ -416,7 +424,7 @@ def main() -> int:
         rows = schema_migrations_rows(url)
         by_v = {r["version"]: r for r in rows}
         record("16 one metadata row per migration; checksum matches file",
-               len(rows) == 3 and all(by_v[m.version]["checksum_sha256"] == m.checksum_sha256 for m in baseline),
+               len(rows) == len(EXPECTED) and all(by_v[m.version]["checksum_sha256"] == m.checksum_sha256 for m in baseline),
                {"rows": len(rows)})
         record("17 runner_version recorded == RUNNER_VERSION",
                all(r["runner_version"] == M.RUNNER_VERSION for r in rows), M.RUNNER_VERSION)
@@ -426,7 +434,7 @@ def main() -> int:
 
         # checksum drift (Part F): mutate an applied migration on disk (temp copy) -> refuse
         with tempfile.TemporaryDirectory() as d:
-            drift_dir = copy_subset(Path(d) / "drift", baseline, {1, 2, 3})
+            drift_dir = copy_subset(Path(d) / "drift", baseline, EXPECTED_SET)
             p = drift_dir / migrations[0].filename
             p.write_text(migrations[0].sql + "\n-- drift\n", encoding="utf-8", newline="")
             drift_res = M.apply_migrations(url, migrations_dir=drift_dir)
@@ -473,32 +481,34 @@ def main() -> int:
 
         # ---- Group E: idempotent rerun (PG) ----
         rerun = M.apply_migrations(url, migrations_dir=BASE)
-        record("29 rerun is a no-op (0 applied, all skipped)", rerun.ok and not rerun.applied and set(rerun.skipped) == {1, 2, 3},
+        record("29 rerun is a no-op (0 applied, all skipped)", rerun.ok and not rerun.applied and set(rerun.skipped) == EXPECTED_SET,
                rerun.to_dict())
-        record("30 schema_migrations row count stable after rerun", len(schema_migrations_rows(url)) == 3, True)
+        record("30 schema_migrations row count stable after rerun",
+               len(schema_migrations_rows(url)) == len(EXPECTED), True)
         st = M.migration_status(url, migrations_dir=BASE)
-        record("31 status reports no pending after full apply", st["pending"] == [] and st["applied"] == [1, 2, 3], st["pending"])
+        record("31 status reports no pending after full apply", st["pending"] == [] and st["applied"] == EXPECTED, st["pending"])
         scenarios["rerun"] = {"ok": rerun.ok, "applied": rerun.applied, "skipped": rerun.skipped}
 
         # ---- Group F: partial upgrades (Part L) ----
         # empty -> full
         reset_public_schema(url)
         empty_full = M.apply_migrations(url, migrations_dir=BASE)
-        record("32 from EMPTY database -> reaches head", empty_full.ok and [a["version"] for a in empty_full.applied] == [1, 2, 3],
+        record("32 from EMPTY database -> reaches head", empty_full.ok and [a["version"] for a in empty_full.applied] == EXPECTED,
                True)
         # metadata-only (table exists, no rows)
         reset_public_schema(url)
         with _connect(url) as c:
             M._ensure_schema_migrations(c)
         meta_only = M.apply_migrations(url, migrations_dir=BASE)
-        record("33 from metadata-only -> applies all", meta_only.ok and [a["version"] for a in meta_only.applied] == [1, 2, 3], True)
+        record("33 from metadata-only -> applies all", meta_only.ok and [a["version"] for a in meta_only.applied] == EXPECTED, True)
         # first-1 applied -> continue
         reset_public_schema(url)
         with tempfile.TemporaryDirectory() as d:
             one = copy_subset(Path(d) / "one", baseline, {1})
             M.apply_migrations(url, migrations_dir=one)
             cont = M.apply_migrations(url, migrations_dir=BASE)  # full dir now applies 2,3
-        record("34 from first-1-applied -> applies 0002,0003", cont.ok and [a["version"] for a in cont.applied] == [2, 3] and cont.skipped == [1],
+        record("34 from first-1-applied -> applies every pending migration",
+               cont.ok and [a["version"] for a in cont.applied] == EXPECTED[1:] and cont.skipped == [1],
                cont.to_dict())
         # first-2 applied -> continue
         reset_public_schema(url)
@@ -506,9 +516,11 @@ def main() -> int:
             two = copy_subset(Path(d) / "two", baseline, {1, 2})
             M.apply_migrations(url, migrations_dir=two)
             cont2 = M.apply_migrations(url, migrations_dir=BASE)
-        record("35 from first-2-applied -> applies 0003", cont2.ok and [a["version"] for a in cont2.applied] == [3], cont2.to_dict())
+        record("35 from first-2-applied -> applies every pending migration",
+               cont2.ok and [a["version"] for a in cont2.applied] == EXPECTED[2:], cont2.to_dict())
         # interrupted-before-metadata: 0003 present on disk but not recorded -> applies 0003
-        record("36 interrupted-before-metadata state -> resumes at 0003", cont2.ok and cont2.skipped == [1, 2], cont2.skipped)
+        record("36 interrupted-before-metadata state -> resumes at the first pending version",
+               cont2.ok and cont2.skipped == EXPECTED[:2], cont2.skipped)
         # current (all applied) -> no-op
         current = M.apply_migrations(url, migrations_dir=BASE)
         record("37 current (all applied) -> no-op", current.ok and not current.applied, current.applied)
@@ -563,7 +575,8 @@ def main() -> int:
             t.join()
         both_ok = len(results) == 2 and all(r.ok for r in results) and not errors
         record("44 two concurrent apply runs both succeed (advisory lock serializes)", both_ok, {"errors": errors})
-        record("45 exactly one metadata row per version after concurrent runs", len(schema_migrations_rows(url)) == 3, True)
+        record("45 exactly one metadata row per version after concurrent runs",
+               len(schema_migrations_rows(url)) == len(EXPECTED), True)
         # Recompute the key from its DOCUMENTED derivation and confirm a SEPARATE
         # interpreter derives the same value. Comparing the attribute to itself
         # (`X == X`) proved nothing: a random key would still have passed.

@@ -6878,10 +6878,44 @@ class IdempotencyConflict(RuntimeError):
 
 # Transaction/lock implementation version. Evidence binds this so a probe can
 # never certify a run produced by different concurrency semantics.
-SNAPSHOT_TRANSACTION_VERSION = "1.0.0"
+SNAPSHOT_TRANSACTION_VERSION = "2.0.0"
 # Bounded wait for the row lock. A blocked writer fails as a controlled conflict
 # rather than hanging a request thread indefinitely.
 SNAPSHOT_LOCK_TIMEOUT_MS = 5000
+
+# The persisted unit is ONE GLOBAL application snapshot row. A process serves a
+# single configured tenant (MONDAY_REPORT_TENANT_SLUG), so the snapshot table
+# holds one row for it and every writer contends for that row.
+#
+#   PostgreSQL snapshot mode serializes ALL application writers.
+#
+# This is stated plainly because an earlier revision of this module derived a
+# per-tenant advisory key and described unrelated tenants as independent. That
+# was false in deployment: there is no tenant partitioning to be independent
+# across. Independent per-tenant concurrency requires normalized persistence,
+# which is exactly why that remains a separate unresolved control.
+SNAPSHOT_SCOPE = "global"
+SNAPSHOT_LOCK_NAMESPACE = "monday_report.global_snapshot.v2"
+
+# Every public method that durably mutates state. Each is wrapped at construction
+# so it enters the protected transaction automatically -- correctness must not
+# depend on a developer remembering to open one.
+MUTATING_STORE_METHODS = (
+    "complete_upload",
+    "create_credential",
+    "create_monday_report",
+    "create_upload",
+    "create_user",
+    "create_workspace",
+    "export_monday_report",
+    "process_queued_jobs",
+    "revert_field_correction",
+    "revoke_credential",
+    "run_retention",
+    "set_user_status",
+    "update_benchmark_value",
+    "update_validation_task",
+)
 
 
 class PostgresStateStore(LocalStateStore):
@@ -6925,20 +6959,56 @@ class PostgresStateStore(LocalStateStore):
         # Active transaction context, or None. Never shared between threads: a
         # transaction is scoped to the block that opened it.
         self._txn: dict[str, object] | None = None
-        self._ensure_repository_schema()
+        # save() is permitted without a transaction only while bootstrapping the
+        # very first snapshot; afterwards an unprotected write is a hard error.
+        self._bootstrapping = True
+        self._verify_repository_schema()
         super().__init__()
+        self._bootstrapping = False
+        self._install_mutation_boundary()
+
+    # ------------------------------------------------- transaction boundary --
+    def _install_mutation_boundary(self) -> None:
+        """Wrap every durable mutation so it enters the protected transaction.
+
+        Binding the wrapper at construction covers inherited domain methods
+        without editing them, and -- more importantly -- removes the requirement
+        that a caller remember to open a transaction. A nested call from inside
+        an outer mutation joins that transaction rather than opening a second
+        one, so a compound operation still commits exactly once.
+        """
+        for name in MUTATING_STORE_METHODS:
+            original = getattr(self, name, None)
+            if original is None or getattr(original, "_mr_wrapped", False):
+                continue
+            setattr(self, name, self._wrap_mutation(original))
+
+    def _wrap_mutation(self, method):
+        import functools
+
+        @functools.wraps(method)
+        def wrapper(*args, **kwargs):
+            if self._txn is not None:
+                # Join the outer transaction: one lock, one revision increment.
+                return method(*args, **kwargs)
+            with self.snapshot_transaction():
+                return method(*args, **kwargs)
+
+        wrapper._mr_wrapped = True  # type: ignore[attr-defined]
+        return wrapper
 
     # ---------------------------------------------------------------- locks --
     @classmethod
-    def _advisory_lock_key(cls, tenant_slug: str) -> int:
-        """Deterministic signed 64-bit advisory-lock key for a tenant.
+    def _advisory_lock_key(cls) -> int:
+        """Deterministic signed 64-bit advisory key for the GLOBAL snapshot.
 
-        Derived from a namespaced SHA-256 so it is stable across processes,
-        platforms and restarts, and cannot collide with the migration runner's
-        key (which uses a different namespace string). Distinct tenants take
-        distinct keys, so unrelated tenants never serialize against each other.
+        The persisted unit is one global snapshot row, so there is exactly one
+        lock. It is namespaced so it cannot collide with the migration runner's
+        key. Every writer in every process contends for this key: PostgreSQL
+        snapshot mode serializes all application writers, and no per-tenant
+        concurrency is claimed or provided.
         """
-        digest = sha256(f"monday_report.snapshot.v1:{tenant_slug}".encode("utf-8")).digest()
+        digest = sha256(SNAPSHOT_LOCK_NAMESPACE.encode("utf-8")).digest()
         return int.from_bytes(digest[:8], "big", signed=True)
 
     @contextmanager
@@ -6966,7 +7036,7 @@ class PostgresStateStore(LocalStateStore):
                                (f"{SNAPSHOT_LOCK_TIMEOUT_MS}ms",))
                 cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
                 # Lock BEFORE the mutable-state read. Covers the not-yet-existing row.
-                cursor.execute("select pg_advisory_xact_lock(%s)", (self._advisory_lock_key(self.tenant.slug),))
+                cursor.execute("select pg_advisory_xact_lock(%s)", (self._advisory_lock_key(),))
                 cursor.execute(
                     f"select payload, revision from {self.STATE_TABLE} where tenant_slug = %s for update",
                     (self.tenant.slug,),
@@ -7104,6 +7174,16 @@ class PostgresStateStore(LocalStateStore):
         # increment and one atomic state+audit commit.
         if self._txn is not None:
             return
+        if not self._bootstrapping:
+            # FAIL CLOSED. An unprotected write is the exact defect this class
+            # exists to remove: it reads on one connection and writes on another,
+            # so a concurrent writer's committed work is destroyed. There is no
+            # compatibility fallback in PostgreSQL mode.
+            raise SnapshotConflict(
+                "refusing an unprotected snapshot write: PostgreSQL mutations must run "
+                "inside snapshot_transaction()",
+                retryable=False,
+            )
 
         payload = self._postgres_safe_json(self._state_payload())
         with self._connect() as connection:
@@ -7133,56 +7213,46 @@ class PostgresStateStore(LocalStateStore):
             return {key: cls._postgres_safe_json(item) for key, item in value.items()}
         return value
 
-    def _ensure_repository_schema(self) -> None:
-        statements = [
-            f"""
-            create table if not exists {self.STATE_TABLE} (
-              tenant_slug text primary key,
-              tenant_id uuid not null,
-              payload jsonb not null,
-              created_at timestamptz not null default now(),
-              updated_at timestamptz not null default now()
-            )
-            """,
-            # Additive and idempotent so an existing deployment upgrades in place.
-            # revision is the compare-and-swap token: every committed mutation
-            # increments it exactly once, and a writer holding a stale value is
-            # rejected instead of overwriting newer state.
-            f"alter table {self.STATE_TABLE} add column if not exists revision bigint not null default 0",
-            f"""
-            create table if not exists {self.IDEMPOTENCY_TABLE} (
-              tenant_slug text not null,
-              operation_id text not null,
-              request_hash text,
-              result_metadata jsonb not null default '{{}}'::jsonb,
-              committed_revision bigint not null,
-              created_at timestamptz not null default now(),
-              primary key (tenant_slug, operation_id)
-            )
-            """,
-            f"alter table {self.IDEMPOTENCY_TABLE} enable row level security",
-            f"alter table {self.IDEMPOTENCY_TABLE} force row level security",
-            f"drop policy if exists tenant_isolation_{self.IDEMPOTENCY_TABLE} on {self.IDEMPOTENCY_TABLE}",
-            f"""
-            create policy tenant_isolation_{self.IDEMPOTENCY_TABLE}
-            on {self.IDEMPOTENCY_TABLE}
-            using (tenant_slug = current_setting('app.tenant_slug', true))
-            with check (tenant_slug = current_setting('app.tenant_slug', true))
-            """,
-            f"alter table {self.STATE_TABLE} enable row level security",
-            f"alter table {self.STATE_TABLE} force row level security",
-            f"drop policy if exists tenant_isolation_{self.STATE_TABLE} on {self.STATE_TABLE}",
-            f"""
-            create policy tenant_isolation_{self.STATE_TABLE}
-            on {self.STATE_TABLE}
-            using (tenant_slug = current_setting('app.tenant_slug', true))
-            with check (tenant_slug = current_setting('app.tenant_slug', true))
-            """,
-        ]
+    REQUIRED_MIGRATION = "0004_transactional_snapshot.sql"
+
+    def _verify_repository_schema(self) -> None:
+        """Verify migration-owned schema exists. NEVER create or alter it.
+
+        Ordinary API and worker startup must not mutate production schema. An
+        earlier revision issued additive DDL here, which meant simply starting
+        the process silently altered a production database. Startup now inspects
+        and fails with an actionable message instead.
+
+        The error names the migration to run and nothing else -- no DSN, host,
+        username or password.
+        """
+        required = {
+            self.STATE_TABLE: ("revision", "updated_at"),
+            self.IDEMPOTENCY_TABLE: ("operation_id", "request_hash", "committed_revision"),
+        }
+        missing: list[str] = []
         with self._connect() as connection:
             with connection.cursor() as cursor:
-                for statement in statements:
-                    cursor.execute(statement)
+                for table, columns in required.items():
+                    cursor.execute(
+                        "select column_name from information_schema.columns where table_name = %s",
+                        (table,),
+                    )
+                    present = {row[0] for row in cursor.fetchall()}
+                    if not present:
+                        missing.append(f"table {table}")
+                        continue
+                    for column in columns:
+                        if column not in present:
+                            missing.append(f"{table}.{column}")
+        if missing:
+            raise RuntimeError(
+                "PostgreSQL schema is not migrated for transactional snapshots "
+                f"(missing: {', '.join(sorted(missing))}). Apply migrations up to and "
+                f"including {self.REQUIRED_MIGRATION} with "
+                "'python -m backend.app.migrations apply --set baseline' before starting "
+                "in postgres repository mode."
+            )
 
     def _connect(self):
         import psycopg
