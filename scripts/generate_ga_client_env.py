@@ -38,6 +38,13 @@ def parse_args() -> argparse.Namespace:
 def build_env(base_dir: Path) -> str:
     api_key = secrets.token_urlsafe(32)
     signing_secret = secrets.token_urlsafe(48)
+    # Client mode fails CLOSED without a valid audit HMAC key: main.py refuses every
+    # non-public request while ``store._active_audit_key_available()`` is false, and
+    # store.audit() raises rather than append an unkeyed event. Omitting this key
+    # produced a "GA" env file in which no protected route could be served at all.
+    # ``_decode_secret`` accepts a raw string, so token_urlsafe(48) yields well over
+    # audit_keys.MIN_KEY_BYTES (32) bytes.
+    audit_hmac_key = secrets.token_urlsafe(48)
     lines = [
         "# Monday Report GA client-mode environment",
         "# Generated secrets are local to this machine. Do not commit this file.",
@@ -50,6 +57,15 @@ def build_env(base_dir: Path) -> str:
         f"MONDAY_REPORT_API_KEY={api_key}",
         f"VITE_MONDAY_REPORT_API_KEY={api_key}",
         f"MONDAY_REPORT_SIGNING_SECRET={signing_secret}",
+        "",
+        "# Keyed audit integrity (HMAC-SHA256). REQUIRED in client mode: without a",
+        "# valid active key every protected route fails closed and no audit event can",
+        "# be appended. Rotate by moving the current key into",
+        "# MONDAY_REPORT_AUDIT_HMAC_RETAINED_KEYS (verification-only) and issuing a new",
+        "# active key with an incremented version.",
+        f"MONDAY_REPORT_AUDIT_HMAC_KEY={audit_hmac_key}",
+        "MONDAY_REPORT_AUDIT_HMAC_KEY_ID=audit-primary",
+        "MONDAY_REPORT_AUDIT_HMAC_KEY_VERSION=1",
         "",
         f"MONDAY_REPORT_STATE_PATH={base_dir / 'state' / 'monday_report_state.json'}",
         f"MONDAY_REPORT_STORAGE_ROOT={base_dir / 'storage'}",
