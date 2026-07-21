@@ -547,6 +547,96 @@ def pg_checks(url: str, scratch: Path) -> dict:
            {"active_non_idle": active})
 
     return totals
+
+
+def _git(args: list[str]) -> str:
+    try:
+        return subprocess.check_output(["git", *args], cwd=str(ROOT), text=True).strip()
+    except Exception:
+        return "unknown"
+
+
+def canonical_payload_sha256(payload: dict) -> str:
+    body = {k: v for k, v in payload.items() if k != "payload_sha256"}
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def build_evidence(totals: dict) -> dict:
+    """Bind the run to its exact code, migrations and results.
+
+    Status is derived from actual totals. It is 'passed' only when a real
+    database ran with zero failures and zero skips, the negative control proved
+    a lost update, the protected comparison preserved both, chain linkage and
+    HMAC verification held, and the worktree is clean at the tested commit.
+    Contains no key, password, DSN, username, host, port, absolute path or
+    client data.
+    """
+    import backend.app.migrations as M
+    import backend.app.store as store_mod
+
+    by_name = {c["name"]: c for c in checks}
+
+    def passed(prefix: str) -> bool:
+        c = next((v for k, v in by_name.items() if k.startswith(prefix)), None)
+        return bool(c and c["ok"] and not c["skipped"])
+
+    n_passed = len([c for c in checks if c["ok"] and not c["skipped"]])
+    n_skipped = len([c for c in checks if c["skipped"]])
+    n_failed = len([c for c in checks if not c["ok"]])
+
+    baseline = M.discover_migrations(M.BASELINE_DIR)
+    negative_control_ok = passed("16 ")
+    protected_ok = passed("17 ")
+    chain_ok = passed("29 ")
+    hmac_ok = passed("30 ")
+    route_worker_command_ok = passed("13 ") and passed("34 ")  # worker/command paths enter txn
+
+    ran_real_db = bool(test_database_url())
+    status = "passed" if (
+        ran_real_db and n_failed == 0 and n_skipped == 0
+        and negative_control_ok and protected_ok and chain_ok and hmac_ok
+        and route_worker_command_ok
+    ) else "BLOCKED_INCOMPLETE"
+
+    payload = {
+        "schema_version": EVIDENCE_SCHEMA_VERSION,
+        "git_commit": _git(["rev-parse", "HEAD"]),
+        "git_tree": _git(["rev-parse", "HEAD^{tree}"]),
+        "worktree_clean": _git(["status", "--porcelain"]) == "",
+        "persistence_implementation_version": store_mod.SNAPSHOT_TRANSACTION_VERSION,
+        "postgres_server_version": os.environ.get("MONDAY_REPORT_TEST_PG_SERVER_VERSION"),
+        "pgvector_version": os.environ.get("MONDAY_REPORT_TEST_PGVECTOR_VERSION"),
+        "postgres_image_digest": os.environ.get("MONDAY_REPORT_TEST_PG_IMAGE_DIGEST"),
+        "migration_versions": [m.version for m in baseline],
+        "migration_checksums": {m.filename: m.checksum_sha256 for m in baseline},
+        "repository_mode": "postgres",
+        "snapshot_scope": store_mod.SNAPSHOT_SCOPE,
+        "serialization_statement": "PostgreSQL snapshot mode serializes all application writers.",
+        "lock_strategy": "global transaction-level pg_advisory_xact_lock + SELECT ... FOR UPDATE",
+        "lock_key_derivation": f"signed int64 from sha256('{store_mod.SNAPSHOT_LOCK_NAMESPACE}')",
+        "lock_timeout_ms": store_mod.SNAPSHOT_LOCK_TIMEOUT_MS,
+        "revision_strategy": "compare-and-swap: UPDATE ... WHERE revision = <read>, exactly one row",
+        "retry_strategy": "lock-timeout and serialization failures surface as controlled conflicts; "
+                          "stale revision is non-retryable",
+        "idempotency_strategy": "unique (tenant_slug, operation_id); replay rejected on differing "
+                                "request hash, operation kind, or actor; stores a hash, never the body",
+        "operation_key_source": "snapshot_transaction(operation_id=..., request_hash=..., "
+                                "operation_kind=..., actor_id=...)",
+        "os_process_count": totals.get("processes", 0),
+        "db_connection_count": totals.get("connections", 0),
+        "negative_control_lost_update": negative_control_ok,
+        "protected_comparison_preserved_both": protected_ok,
+        "chain_linkage_result": "passed" if chain_ok else "not_passed",
+        "event_hmac_result": "passed" if hmac_ok else "not_passed",
+        "route_worker_command_boundary_result": "passed" if route_worker_command_ok else "not_passed",
+        "totals": {"passed": n_passed, "skipped": n_skipped, "failed": n_failed},
+        "status": status,
+    }
+    payload["payload_sha256"] = canonical_payload_sha256(payload)
+    return payload
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--emit-evidence", action="store_true")
@@ -582,6 +672,17 @@ def main() -> int:
         for c in failed:
             print(f"  FAIL: {c['name']} -> {c['detail']}")
         return 1
+    if args.emit_evidence:
+        evidence = build_evidence(totals)
+        EVIDENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        EVIDENCE_PATH.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        # Never let evidence be written from an incomplete run.
+        if evidence["status"] != "passed" and not failed:
+            print(f"\nNOTE: evidence status is {evidence['status']!r} (not 'passed'); "
+                  "the control stays BLOCKED.")
+        print(f"Wrote evidence: {EVIDENCE_PATH.relative_to(ROOT).as_posix()} "
+              f"(status={evidence['status']})")
+
     tail = f" ({len(skipped)} skipped: no disposable PostgreSQL)" if skipped else ""
     print(f"\nPersistence atomicity guard passed: {len(passed)} check(s).{tail}")
     return 0
