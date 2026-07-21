@@ -39,11 +39,9 @@ def barrier(dsn: str, name: str, worker_id: str, participants: int, timeout: flo
     """Block until ``participants`` workers have reached ``name``."""
     import psycopg
 
+    # The parent creates the barrier table before spawning workers; creating it
+    # here would race two workers on concurrent DDL. Just register arrival.
     with psycopg.connect(dsn, autocommit=True) as conn:
-        conn.execute(
-            f"create table if not exists {BARRIER_TABLE} "
-            f"(name text not null, worker_id text not null, primary key (name, worker_id))"
-        )
         conn.execute(
             f"insert into {BARRIER_TABLE} (name, worker_id) values (%s, %s) on conflict do nothing",
             (name, worker_id),
@@ -82,6 +80,15 @@ def main() -> int:
     try:
         from backend.app.store import IdempotencyConflict, SnapshotConflict
 
+        # first_construction must race the CONSTRUCTOR itself, so it barriers
+        # before building. Every other scenario builds first.
+        if scenario == "first_construction":
+            barrier(dsn, "firstctor:ready", worker_id, cfg["participants"])
+            store = build_store(cfg)
+            out["committed"] = True
+            print(json.dumps(out))
+            return 0
+
         store = build_store(cfg)
 
         if scenario in {"concurrent_same_aggregate", "unrelated_tenants"}:
@@ -101,6 +108,40 @@ def main() -> int:
                 reason = exc.reason
             out["committed"] = committed
             out["conflict"] = reason
+
+        elif scenario == "legacy_negative_control":
+            # NEGATIVE CONTROL. Faithfully reproduces the historical
+            # last-writer-wins defect against a DEDICATED disposable test table --
+            # NOT current save()/CAS code, which no longer loses updates. Both
+            # processes read the same initial payload, barrier, then blind-upsert.
+            # Exactly one logical update must survive, or the guard's race test is
+            # not discriminating.
+            import psycopg
+            append = cfg["append_value"]
+            table = cfg["legacy_table"]
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                # read the shared initial payload (a JSON list) on this process's
+                # OWN connection, with no lock
+                row = conn.execute(
+                    f"select payload from {table} where snapshot_id = 'singleton'").fetchone()
+                current = list(row[0]) if row else []
+            barrier(dsn, "legneg:read", worker_id, cfg["participants"])
+            current.append(append)  # mutate in memory
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                from psycopg.types.json import Jsonb
+                # historical blind write: no lock, no revision, no CAS
+                conn.execute(
+                    f"insert into {table} (snapshot_id, payload) values ('singleton', %s) "
+                    f"on conflict (snapshot_id) do update set payload = excluded.payload",
+                    (Jsonb(current),))
+            out["committed"] = True
+
+        elif scenario == "protected_negative_comparison":
+            # Same logical workload through the PROTECTED path: both updates survive.
+            barrier(dsn, "protneg:ready", worker_id, cfg["participants"])
+            with store.snapshot_transaction():
+                store.create_workspace(_ws(f"prot-{worker_id}"))
+            out["committed"] = True
 
         elif scenario == "stale_revision":
             # Worker A opens a transaction and holds it; worker B commits first.
