@@ -81,10 +81,11 @@ from .corrections_registry import (
     correctable_field_catalog,
     validate_correction,
 )
+from . import idempotency
 from .readiness import client_data_mode, evaluate_client_data_readiness
 from .runtime_backends import runtime_backend_status
 from .signed_urls import create_signed_token, signing_secret_configured, verify_signed_token
-from .store import store, ReviewerNotVerified
+from .store import store, IdempotencyConflict, ReviewerNotVerified, SnapshotConflict
 from .audit_keys import AuditIntegrityUnavailable, audit_key_provider
 from .tenant_authorization import owned_via_graph, owns, request_tenant_id
 
@@ -126,6 +127,36 @@ async def _reviewer_not_verified_handler(request: Request, exc: ReviewerNotVerif
     # mutation or audit append. Return a stable authorization error; no reviewer
     # detail is leaked.
     return JSONResponse(status_code=403, content={"detail": "Verified reviewer required"})
+
+
+@app.exception_handler(idempotency.IdempotencyKeyError)
+async def _idempotency_key_error_handler(request: Request, exc: idempotency.IdempotencyKeyError) -> JSONResponse:
+    # A mutating route required an Idempotency-Key that was absent or malformed.
+    # The context is never published, so no mutation runs. The message describes the
+    # header contract only; it carries no request, actor or data detail.
+    return JSONResponse(status_code=400, content={"detail": exc.message})
+
+
+@app.exception_handler(IdempotencyConflict)
+async def _idempotency_conflict_handler(request: Request, exc: IdempotencyConflict) -> JSONResponse:
+    # An operation key was reused for a materially different request (different
+    # request body, operation kind, or actor). This is a conflict, not a replay:
+    # the store refuses to let one caller ride another's committed result. Nothing
+    # was mutated. Return a stable 409; leak no stored request or actor detail.
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "Idempotency-Key was already used for a different request"},
+    )
+
+
+@app.exception_handler(SnapshotConflict)
+async def _snapshot_conflict_handler(request: Request, exc: SnapshotConflict) -> JSONResponse:
+    # A durable mutation lost a compare-and-swap race or timed out on the snapshot
+    # lock. Nothing partial was committed (rollback discards both state and audit).
+    # Retryable conflicts (lock timeout, serialization) map to 503 so a client may
+    # retry; a definite stale-revision loss maps to 409. No DSN/driver detail leaks.
+    status_code = 503 if exc.retryable else 409
+    return JSONResponse(status_code=status_code, content={"detail": "Snapshot write conflict; please retry"})
 
 
 def _best_effort_audit(*args, **kwargs) -> None:
@@ -317,6 +348,50 @@ def require_client_data_ready(operation: str, resource_type: str, resource_id: U
         },
     )
     raise HTTPException(status_code=423, detail="Client data readiness checks are failing")
+
+
+def _establish_idempotency(
+    request: Request,
+    *,
+    operation_kind: str,
+    target_ids: dict[str, object],
+    body: object,
+) -> object:
+    """Publish a request-scoped idempotency context for the mutation about to run.
+
+    MUST be called only AFTER authentication, authorization, resource ownership
+    and request validation have all passed, so the operation key binds to a fully
+    accepted request and the canonical hash covers validated input only (never raw
+    bytes, credentials or timestamps). The persistence layer reads this context
+    and threads it into ``snapshot_transaction``.
+
+    The ``Idempotency-Key`` header is required when the active store enforces
+    transactional persistence (PostgreSQL); a missing or malformed key then fails
+    closed with HTTP 400 *before* any mutation. Under the local demo backend the
+    header is honoured when supplied and otherwise omitted, since that backend has
+    no commit boundary to replay against.
+
+    Returns a reset token (or ``None``). The caller MUST pass it to
+    :func:`_reset_idempotency` in a ``finally`` so the context never leaks to
+    another request.
+    """
+    header_values = list(request.headers.getlist(idempotency.HEADER_NAME))
+    if not header_values and not store.request_idempotency_required():
+        return None
+    actor = get_current_identity()
+    context = idempotency.build_context(
+        header_values=header_values,
+        operation_kind=operation_kind,
+        target_ids=target_ids,
+        body=body,
+        actor_id=actor.user_id if actor is not None else None,
+    )
+    return idempotency.set_context(context)
+
+
+def _reset_idempotency(token: object) -> None:
+    if token is not None:
+        idempotency.reset_context(token)  # type: ignore[arg-type]
 
 
 def _active_request_identity() -> AuthenticatedIdentity | None:
@@ -1078,12 +1153,23 @@ def list_validation_tasks() -> list[ValidationTask]:
 
 
 @app.patch("/validation-tasks/{task_id}", response_model=ValidationTask)
-def update_validation_task(task_id: UUID, payload: ValidationTaskUpdate) -> ValidationTask:
+def update_validation_task(task_id: UUID, payload: ValidationTaskUpdate, request: Request) -> ValidationTask:
     store.refresh()
     require_permission("resolve_validation")
     _tenant_owned(store.validation_tasks.get(task_id), "validation_task", task_id, "Validation task not found")
     require_client_data_ready("validation_task.update", "validation_task", task_id)
-    return store.update_validation_task(task_id, payload)
+    # Establish the idempotency context only after auth/ownership/readiness pass,
+    # so a rejected request never reserves the key.
+    token = _establish_idempotency(
+        request,
+        operation_kind="validation_task.update",
+        target_ids={"task_id": task_id},
+        body=payload,
+    )
+    try:
+        return store.update_validation_task(task_id, payload)
+    finally:
+        _reset_idempotency(token)
 
 
 @app.post(
@@ -1091,7 +1177,7 @@ def update_validation_task(task_id: UUID, payload: ValidationTaskUpdate) -> Vali
     response_model=FieldCorrection,
     status_code=status.HTTP_201_CREATED,
 )
-def create_field_correction(workspace_id: UUID, payload: FieldCorrectionCreate) -> FieldCorrection:
+def create_field_correction(workspace_id: UUID, payload: FieldCorrectionCreate, request: Request) -> FieldCorrection:
     # Hold the correction lock across the WHOLE handler so no concurrent
     # correction request's refresh() can clobber this in-flight append on the
     # shared store singleton (re-entrant with record_field_correction's lock).
@@ -1115,7 +1201,18 @@ def create_field_correction(workspace_id: UUID, payload: FieldCorrectionCreate) 
             )
         except CorrectionValidationError as exc:
             raise HTTPException(status_code=422, detail={"code": exc.code, "message": exc.message})
-        return store.record_field_correction(workspace_id, payload)
+        # Establish idempotency only after validation, so a rejected request never
+        # reserves the key.
+        token = _establish_idempotency(
+            request,
+            operation_kind="field_correction.record",
+            target_ids={"workspace_id": workspace_id},
+            body=payload,
+        )
+        try:
+            return store.record_field_correction(workspace_id, payload)
+        finally:
+            _reset_idempotency(token)
 
 
 @app.get("/field-corrections/registry")
@@ -1135,7 +1232,7 @@ def list_field_corrections(workspace_id: UUID, active_only: bool = False) -> lis
 
 
 @app.post("/field-corrections/{correction_id}/revert", response_model=FieldCorrection)
-def revert_field_correction(correction_id: UUID, payload: FieldCorrectionRevert) -> FieldCorrection:
+def revert_field_correction(correction_id: UUID, payload: FieldCorrectionRevert, request: Request) -> FieldCorrection:
     with store.field_correction_lock:
         store.refresh()
         # Authorization first: an unauthorized caller must get 403 whether or not
@@ -1143,10 +1240,20 @@ def revert_field_correction(correction_id: UUID, payload: FieldCorrectionRevert)
         require_permission("record_field_corrections")
         _tenant_owned(store.field_corrections.get(correction_id), "field_correction", correction_id, "Field correction not found")
         require_client_data_ready("field_correction.revert", "field_correction", correction_id)
+        token = _establish_idempotency(
+            request,
+            operation_kind="field_correction.revert",
+            target_ids={"correction_id": correction_id},
+            body=payload,
+        )
         try:
             return store.revert_field_correction(correction_id, payload.revert_reason)
         except ValueError as exc:
+            # A business rejection (e.g. already reverted) rolls back before commit,
+            # so the key is NOT reserved and the caller may correct and retry.
             raise HTTPException(status_code=409, detail=str(exc))
+        finally:
+            _reset_idempotency(token)
 
 
 @app.get("/dashboards/summary", response_model=DashboardSummary)

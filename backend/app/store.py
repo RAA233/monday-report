@@ -426,6 +426,18 @@ class LocalStateStore:
             self.user, actor_source="demo_bootstrap", authentication_source="shared_key_bootstrap"
         )
 
+    def request_idempotency_required(self) -> bool:
+        """Whether mutating routes must carry an ``Idempotency-Key``.
+
+        The local JSON backend has no transaction, no commit boundary and no
+        replay table, so a request key would gate a mutation without protecting
+        anything. The header is therefore honoured when a caller supplies one but
+        never required here. The transactional PostgreSQL adapter -- the backend
+        used for client/production readiness -- overrides this to require it, so a
+        lost or duplicated request cannot commit a second mutation.
+        """
+        return False
+
     def resolve_request_identity(
         self, token: str | None, *, allow_shared_key_bootstrap: bool
     ) -> AuthenticatedIdentity | None:
@@ -6965,6 +6977,18 @@ class PostgresStateStore(LocalStateStore):
     STATE_TABLE = "monday_report_state_snapshots"
     IDEMPOTENCY_TABLE = "monday_report_idempotency_records"
 
+    def request_idempotency_required(self) -> bool:
+        """Mutating routes MUST present an ``Idempotency-Key`` on this backend.
+
+        Every durable mutation runs through :meth:`snapshot_transaction`, which
+        can replay a committed operation instead of mutating twice -- but only if
+        the request supplies the operation key. Requiring the header closes the
+        route-level gap: a retried or duplicated HTTP request that lost its
+        response cannot commit a second correction/outcome, because the second
+        attempt replays the first's committed result under the same key.
+        """
+        return True
+
     def __init__(self, url: str) -> None:
         self.database_url = url
         # Active transaction context, or None. Never shared between threads: a
@@ -7037,16 +7061,72 @@ class PostgresStateStore(LocalStateStore):
                 continue
             setattr(self, name, self._wrap_mutation(original))
 
+    # Result-reconstruction registry: on an idempotent replay the mutation is NOT
+    # re-run; the committed entity is reread by (kind, id) under the current
+    # authenticated request instead.
+    def _idempotent_result_lookup(self, kind: str):
+        return {
+            "FieldCorrection": self.field_corrections,
+            "ValidationTask": self.validation_tasks,
+        }.get(kind)
+
+    def _reconstruct_idempotent_result(self, result: dict | None):
+        if not result:
+            return None
+        lookup = self._idempotent_result_lookup(str(result.get("result_kind")))
+        ident = result.get("result_identifier")
+        if lookup is None or not ident:
+            return None
+        try:
+            return lookup.get(UUID(str(ident)))
+        except (ValueError, KeyError):
+            return None
+
     def _wrap_mutation(self, method):
         import functools
+
+        from . import idempotency
 
         @functools.wraps(method)
         def wrapper(*args, **kwargs):
             if self._txn is not None:
                 # Join the outer transaction: one lock, one revision increment.
                 return method(*args, **kwargs)
-            with self.snapshot_transaction():
-                return method(*args, **kwargs)
+            idem = idempotency.current()
+            txn_kwargs: dict[str, object] = {}
+            if idem is not None:
+                txn_kwargs = {
+                    "operation_id": idem.operation_id,
+                    "request_hash": idem.request_hash,
+                    "operation_kind": idem.operation_kind,
+                    "actor_id": idem.actor_id,
+                }
+            with self.snapshot_transaction(**txn_kwargs) as ctx:  # type: ignore[arg-type]
+                if ctx["replayed"]:
+                    # Do NOT re-apply the mutation. Load committed state and return
+                    # the previously committed logical result, reread under the
+                    # current request's scope. A replay never triggers the
+                    # lost-response hook below, so a retry after a lost response
+                    # returns the committed result instead of a second failure.
+                    self.refresh()
+                    return self._reconstruct_idempotent_result(ctx.get("result"))
+                result = method(*args, **kwargs)
+                if idem is not None and result is not None and hasattr(result, "id"):
+                    # Record a minimal result reference for future replays -- never
+                    # the full response body.
+                    ctx["result"] = {
+                        "result_kind": type(result).__name__,
+                        "result_identifier": str(result.id),
+                    }
+            # Reached ONLY after a FRESH keyed mutation has committed (the replay
+            # path returned above; any pre-commit failure raised out of the
+            # transaction). This is the exact "committed but the caller has not yet
+            # been told" window. The test-only hook drops the response here so a
+            # same-key retry must replay rather than mutate again; it is inert in
+            # client/production deployments.
+            if idem is not None:
+                idempotency.simulate_lost_response(idem.operation_id)
+            return result
 
         wrapper._mr_wrapped = True  # type: ignore[attr-defined]
         return wrapper
