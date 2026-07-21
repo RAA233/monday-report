@@ -719,19 +719,25 @@ def _migration_validity_probe() -> tuple[str, str]:
     )
 
 
-PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v1.json"
+PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v2.json"
+PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v2"
 
 
 def _persistence_locking_probe() -> tuple[str, str]:
     """Evidence-driven, fail-closed probe for persistence-locking-transactions.
 
     PASS requires committed real-PostgreSQL evidence proving the transactional
-    snapshot boundary: a discriminating negative control, a preserving protected
-    comparison, separate chain-linkage and HMAC verification, route/worker/command
-    boundary proof, a clean worktree bound to the current commit and migration
-    set, PostgreSQL mode, and the global-scope disclosure. Anything absent, stale,
-    dirty, mismatched, failed, skipped, or claiming tenant-independent concurrency
-    keeps the control BLOCKED. This never inspects code presence.
+    snapshot boundary AND that route-level idempotency is genuinely reachable: a
+    discriminating negative control, a preserving protected comparison, separate
+    chain-linkage and HMAC verification, route/worker/command boundary proof, and
+    -- new in schema v2 -- real-HTTP route idempotency proven through routing and
+    auth (single-process suite, a concurrent two-client-process race, and an
+    uncertain-response retry that replays instead of double-committing). A clean
+    worktree bound to the current commit and migration set, PostgreSQL mode and
+    the global-scope disclosure are still required. Anything absent, stale, dirty,
+    mismatched, failed, skipped, produced under the old schema, or lacking the
+    route-idempotency proof keeps the control BLOCKED. This never inspects code
+    presence.
     """
     if not PERSISTENCE_EVIDENCE_PATH.exists():
         return "BLOCKED", "Persistence locking not proven: no atomicity evidence artifact."
@@ -743,6 +749,10 @@ def _persistence_locking_probe() -> tuple[str, str]:
         return "BLOCKED", "Persistence evidence malformed."
 
     reasons: list[str] = []
+    if payload.get("schema_version") != PERSISTENCE_EVIDENCE_SCHEMA:
+        reasons.append(
+            f"evidence schema is {payload.get('schema_version')!r}, not "
+            f"{PERSISTENCE_EVIDENCE_SCHEMA!r} (route-idempotency proof required)")
     if payload.get("status") != "passed":
         reasons.append(f"status is {payload.get('status')!r}, not 'passed'")
     stored = payload.get("payload_sha256")
@@ -773,6 +783,36 @@ def _persistence_locking_probe() -> tuple[str, str]:
     if totals.get("failed", 1) != 0 or totals.get("skipped", 1) != 0:
         reasons.append("evidence totals include failures or required skips")
 
+    # Route-level idempotency must be PROVEN through real HTTP, not merely
+    # implemented at the store. This is the specific gap the independent review
+    # flagged: without it the transactional replay is unreachable from a request.
+    for r in ("http_route_idempotency_result", "concurrent_http_idempotency_result",
+              "uncertain_response_result"):
+        if payload.get(r) != "passed":
+            reasons.append(f"{r} is not 'passed'")
+    route = payload.get("route_idempotency")
+    if not isinstance(route, dict):
+        reasons.append("evidence lacks the route_idempotency proof block")
+    else:
+        if not route.get("contract_version"):
+            reasons.append("route_idempotency omits its contract version")
+        if route.get("operation_key_header") != "Idempotency-Key":
+            reasons.append("route_idempotency does not use the Idempotency-Key header")
+        for r in ("http_route_result", "concurrent_http_result", "uncertain_response_result",
+                  "request_hash_canonicalization_result", "missing_key_result",
+                  "conflicting_reuse_result", "actor_and_operation_scope_result",
+                  "failed_attempt_reserves_no_key_result"):
+            if route.get(r) != "passed":
+                reasons.append(f"route_idempotency.{r} is not 'passed'")
+        scenarios = route.get("http_scenarios_passed")
+        total_scenarios = route.get("http_scenario_count")
+        if not isinstance(scenarios, int) or scenarios < 14 or scenarios != total_scenarios:
+            reasons.append("route_idempotency HTTP suite did not fully pass at least 14 scenarios")
+        if route.get("concurrent_http_client_count", 0) < 2:
+            reasons.append("route_idempotency concurrent proof used fewer than two client processes")
+        if route.get("concurrent_http_idempotency_rows") != 1 or route.get("concurrent_http_correction_delta") != 1:
+            reasons.append("route_idempotency concurrent proof did not commit exactly once")
+
     # Bind to the current commit, tree and migration set.
     current_commit = _git_rev("HEAD")
     current_tree = _git_rev("HEAD^{tree}")
@@ -797,8 +837,11 @@ def _persistence_locking_probe() -> tuple[str, str]:
         "Committed real-PostgreSQL evidence proves a transactional global-snapshot boundary: a "
         "discriminating negative control (legacy last-writer-wins loses an update) versus a "
         "protected path that preserves both, revision compare-and-swap, idempotent operations, and "
-        "state+audit committed atomically with verified chain linkage and HMAC. PostgreSQL snapshot "
-        "mode serializes all application writers; no tenant-independent concurrency is claimed.",
+        "state+audit committed atomically with verified chain linkage and HMAC. Route-level "
+        "idempotency is proven through real HTTP: a single-process scenario suite, a concurrent "
+        "two-client-process duplicate that commits exactly once, and an uncertain-response retry "
+        "that replays instead of double-committing. PostgreSQL snapshot mode serializes all "
+        "application writers; no tenant-independent concurrency is claimed.",
     )
 
 
