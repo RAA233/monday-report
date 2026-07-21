@@ -719,6 +719,97 @@ def _migration_validity_probe() -> tuple[str, str]:
     )
 
 
+PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v1.json"
+
+
+def _persistence_locking_probe() -> tuple[str, str]:
+    """Evidence-driven, fail-closed probe for persistence-locking-transactions.
+
+    PASS requires committed real-PostgreSQL evidence proving the transactional
+    snapshot boundary: a discriminating negative control, a preserving protected
+    comparison, separate chain-linkage and HMAC verification, route/worker/command
+    boundary proof, a clean worktree bound to the current commit and migration
+    set, PostgreSQL mode, and the global-scope disclosure. Anything absent, stale,
+    dirty, mismatched, failed, skipped, or claiming tenant-independent concurrency
+    keeps the control BLOCKED. This never inspects code presence.
+    """
+    if not PERSISTENCE_EVIDENCE_PATH.exists():
+        return "BLOCKED", "Persistence locking not proven: no atomicity evidence artifact."
+    try:
+        payload = json.loads(PERSISTENCE_EVIDENCE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return "BLOCKED", f"Persistence evidence unreadable: {exc.__class__.__name__}."
+    if not isinstance(payload, dict):
+        return "BLOCKED", "Persistence evidence malformed."
+
+    reasons: list[str] = []
+    if payload.get("status") != "passed":
+        reasons.append(f"status is {payload.get('status')!r}, not 'passed'")
+    stored = payload.get("payload_sha256")
+    if not stored:
+        reasons.append("no payload hash")
+    else:
+        recomputed = payload_sha256({k: v for k, v in payload.items() if k != "payload_sha256"})
+        if recomputed != stored:
+            reasons.append("payload hash does not verify (tampered or malformed)")
+    if not payload.get("worktree_clean"):
+        reasons.append("evidence was not captured from a clean worktree")
+    if payload.get("repository_mode") != "postgres":
+        reasons.append("evidence was not generated in PostgreSQL mode")
+    if not payload.get("postgres_server_version") or not payload.get("postgres_image_digest"):
+        reasons.append("evidence lacks a real PostgreSQL server version or image digest")
+    if payload.get("snapshot_scope") != "global":
+        reasons.append("evidence does not disclose the global snapshot scope")
+    statement = str(payload.get("serialization_statement", ""))
+    if "serializes all application writers" not in statement:
+        reasons.append("evidence omits the global-serialization disclosure")
+    for claim in ("negative_control_lost_update", "protected_comparison_preserved_both"):
+        if not payload.get(claim):
+            reasons.append(f"evidence missing discriminating result: {claim}")
+    for r in ("chain_linkage_result", "event_hmac_result", "route_worker_command_boundary_result"):
+        if payload.get(r) != "passed":
+            reasons.append(f"{r} is not 'passed'")
+    totals = payload.get("totals") or {}
+    if totals.get("failed", 1) != 0 or totals.get("skipped", 1) != 0:
+        reasons.append("evidence totals include failures or required skips")
+
+    # Bind to the current commit, tree and migration set.
+    current_commit = _git_rev("HEAD")
+    current_tree = _git_rev("HEAD^{tree}")
+    if current_commit != "unknown" and payload.get("git_commit") not in {current_commit, None}:
+        if payload.get("git_commit") != current_commit:
+            reasons.append("evidence is bound to a different commit")
+    if current_tree != "unknown" and payload.get("git_tree") != current_tree:
+        reasons.append("evidence is stale: the tree changed after it was generated")
+    try:
+        import backend.app.migrations as _mig
+        baseline_versions = [m.version for m in _mig.discover_migrations(_mig.BASELINE_DIR)]
+    except Exception as exc:  # noqa: BLE001
+        baseline_versions = None
+        reasons.append(f"could not recompute migration set: {exc.__class__.__name__}")
+    if baseline_versions is not None and payload.get("migration_versions") != baseline_versions:
+        reasons.append("evidence is bound to a different migration set")
+
+    if reasons:
+        return "BLOCKED", "Persistence locking not proven: " + "; ".join(reasons)
+    return (
+        "PASS",
+        "Committed real-PostgreSQL evidence proves a transactional global-snapshot boundary: a "
+        "discriminating negative control (legacy last-writer-wins loses an update) versus a "
+        "protected path that preserves both, revision compare-and-swap, idempotent operations, and "
+        "state+audit committed atomically with verified chain linkage and HMAC. PostgreSQL snapshot "
+        "mode serializes all application writers; no tenant-independent concurrency is claimed.",
+    )
+
+
+def _git_rev(ref: str) -> str:
+    import subprocess
+    try:
+        return subprocess.check_output(["git", "rev-parse", ref], cwd=str(ROOT), text=True).strip()
+    except Exception:
+        return "unknown"
+
+
 def evaluate_blockers(
     readiness_by_id: dict[str, str],
     *,
@@ -760,6 +851,8 @@ def evaluate_blockers(
             disposition, detail = _migration_runner_probe()
         elif check_id == "ga_migration_validity":
             disposition, detail = _migration_validity_probe()
+        elif check_id == "ga_persistence_locking":
+            disposition, detail = _persistence_locking_probe()
         elif check_id == "ga_parser_coverage_evidence":
             disposition, detail, evidence_reference = _forge_probe(forge_report)
         elif check_id == "ga_official_export_gate":
