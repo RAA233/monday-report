@@ -691,7 +691,10 @@ def main() -> int:
     by_id = {c["id"]: c for c in checks_out}
     ga_status, _ = G.decide_ga(mode="client", parity_ok=True, checks=checks_out,
                                commands_skipped=False, commands_passed=True, worktree_clean=True)
-    still_blocked = ["ga_persistence_locking", "ga_correction_cross_process_atomicity",
+    # ga_persistence_locking is now evidence-driven (its own guard/probe own it),
+    # so it is deliberately NOT asserted here -- with valid clean-head atomicity
+    # evidence present it legitimately PASSes. These remain unconditionally blocked.
+    still_blocked = ["ga_correction_cross_process_atomicity",
                      "ga_tenant_authorization", "ga_backup_restore_drill", "ga_audit_tail_truncation"]
     sb_ok = all(by_id.get(b, {}).get("disposition") == "BLOCKED" for b in still_blocked)
     record("53 GA remains GA_BLOCKED; adjacent blockers still BLOCKED", ga_status == "GA_BLOCKED" and sb_ok,
