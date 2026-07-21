@@ -44,10 +44,19 @@ for candidate in (ROOT, ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v1.json"
-EVIDENCE_SCHEMA_VERSION = "persistence-atomicity-evidence.v1"
+EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v2.json"
+EVIDENCE_SCHEMA_VERSION = "persistence-atomicity-evidence.v2"
+# The route-idempotency HTTP contract this run proves. Bound into the evidence so
+# a probe can reject a run produced under a different request contract.
+ROUTE_IDEMPOTENCY_CONTRACT_VERSION = "1.0.0"
+ROUTE_OPERATION_KEY_HEADER = "Idempotency-Key"
 
 checks: list[dict] = []
+# Populated by the HTTP route section of pg_checks; consumed by build_evidence to
+# classify proof by boundary (direct-helper vs real-HTTP vs concurrent-HTTP vs
+# uncertain-response) so a merely-internal proof can never masquerade as a
+# route-level one.
+ROUTE_PROOF: dict = {"suite": None, "concurrent": None, "lost_response": None}
 
 
 def record(name: str, ok: bool, detail: object = "", *, skipped: bool = False) -> None:
@@ -175,6 +184,53 @@ def fail_closed_checks() -> None:
     # File-backed store must not advertise a cross-process guarantee.
     record("12 file-backed store exposes no snapshot_transaction (claims no cross-process safety)",
            not hasattr(store_mod.LocalStateStore, "snapshot_transaction"), True)
+
+
+# --------------------------------------------------------------------------- #
+# 2b. Route idempotency: canonical request hashing + key validation (no database)
+# --------------------------------------------------------------------------- #
+def route_idempotency_unit_checks() -> None:
+    """The request boundary must hash deterministically and fail closed on bad keys.
+
+    These are pure-function properties of the request-hash and key-validation
+    contract, provable without a database. The real-HTTP behavioural proofs (that
+    the ROUTE actually establishes this context and the store consumes it) run
+    under PostgreSQL below.
+    """
+    import inspect
+
+    from backend.app import idempotency as idem
+
+    # Equivalent validated requests hash identically regardless of key ordering.
+    h1 = idem.canonical_request_hash("op.kind", {"a": "1", "b": "2"}, {"x": 1, "y": {"m": 2, "n": 3}})
+    h2 = idem.canonical_request_hash("op.kind", {"b": "2", "a": "1"}, {"y": {"n": 3, "m": 2}, "x": 1})
+    record("40 canonical request hash is independent of key/target ordering", h1 == h2, {"equal": h1 == h2})
+
+    # A materially different validated body yields a different hash.
+    h3 = idem.canonical_request_hash("op.kind", {"a": "1", "b": "2"}, {"x": 1, "y": {"m": 2, "n": 9}})
+    record("41 a different validated body yields a different request hash", h1 != h3, {"differ": h1 != h3})
+
+    # A different operation kind yields a different hash (a key can't cross ops).
+    h4 = idem.canonical_request_hash("other.kind", {"a": "1", "b": "2"}, {"x": 1, "y": {"m": 2, "n": 3}})
+    record("42 a different operation kind yields a different request hash", h1 != h4, {"differ": h1 != h4})
+
+    # The hash input is ONLY (operation kind, path targets, validated body): no
+    # credential, header or timestamp is a parameter, so none can enter the hash.
+    params = set(inspect.signature(idem.canonical_request_hash).parameters)
+    record("43 the request hash covers only operation kind, targets and body",
+           params == {"operation_kind", "target_ids", "body"}, {"params": sorted(params)})
+
+    # Missing / malformed keys fail closed with a controlled error, never a crash.
+    outcomes = {}
+    for label, values in (("absent", []), ("empty", ["   "]), ("short", ["abc"]),
+                          ("illegal", ["has space"]), ("conflict", ["aaaaaaaa", "bbbbbbbb"])):
+        try:
+            idem.validate_key(values)
+            outcomes[label] = "accepted"
+        except idem.IdempotencyKeyError:
+            outcomes[label] = "rejected"
+    record("44 malformed keys are rejected by a controlled IdempotencyKeyError",
+           all(v == "rejected" for v in outcomes.values()), outcomes)
 
 
 # --------------------------------------------------------------------------- #
@@ -546,6 +602,92 @@ def pg_checks(url: str, scratch: Path) -> dict:
     record("39 no connections leak after repeated rollback (all released)", active == 0,
            {"active_non_idle": active})
 
+    # -- 45-47: REAL HTTP route idempotency (through routing + auth) -----------
+    # The checks above prove the store PRIMITIVE (direct snapshot_transaction
+    # calls). These prove the ROUTE LAYER establishes the operation context from a
+    # real request and the store consumes it, which is the specific gap the
+    # independent review flagged. Every request below traverses FastAPI routing,
+    # the client-mode middleware, RBAC and validation into the PostgreSQL store.
+    http = ROOT / "scripts" / "persistence_atomicity_http.py"
+
+    def _http_json(args: list[str], timeout: int = 300) -> dict:
+        proc = subprocess.run([sys.executable, str(http), *args], cwd=str(ROOT),
+                              capture_output=True, text=True, timeout=timeout)
+        lines = [l for l in proc.stdout.splitlines() if l.startswith("{")]
+        return json.loads(lines[-1]) if lines else {"error": (proc.stderr or proc.stdout)[-300:]}
+
+    def _corr_for(slug: str, workspace_id: str) -> int:
+        with psycopg.connect(url, autocommit=True) as c:
+            r = c.execute(
+                "select count(*) from monday_report_state_snapshots snap, "
+                "jsonb_array_elements(snap.payload->'field_corrections') fc "
+                "where snap.tenant_slug=%s and fc->>'workspace_id'=%s", (slug, workspace_id)).fetchone()
+            return int(r[0]) if r else 0
+
+    # 45: single-process HTTP suite (14 scenarios: create/replay/missing-key/
+    #     malformed-key/conflict/distinct-key/failed-attempt/actor-binding/revert).
+    reset_and_migrate()
+    suite_cfg = env_for("http-suite")
+    suite = _http_json(["suite", json.dumps(suite_cfg)])
+    totals["processes"] += 1
+    totals["connections"] += 1
+    ROUTE_PROOF["suite"] = suite
+    suite_ok = bool(suite.get("all_passed")) and int(suite.get("total", 0)) >= 14
+    record("45 real-HTTP route idempotency suite passes every scenario through routing+auth",
+           suite_ok, {"passed": suite.get("passed"), "total": suite.get("total"),
+                      "failures": [r["name"] for r in suite.get("results", []) if not r["ok"]] or None})
+
+    # 46: two INDEPENDENT client processes POST the same key concurrently.
+    reset_and_migrate()
+    setup_cfg = env_for("http-setup")
+    setup = _http_json(["setup", json.dumps(setup_cfg)])
+    ws = setup.get("workspace_id")
+    op = f"httpdup-{uuid.uuid4().hex[:8]}"
+    slug = setup_cfg["tenant_slug"]
+    before = _corr_for(slug, ws) if ws else -1
+    procs = []
+    for wid in ("a", "b"):
+        c = env_for(f"http-conc-{wid}")
+        c.update({"workspace_id": ws, "operation_id": op})
+        procs.append(subprocess.Popen(
+            [sys.executable, str(http), "concurrent", wid, json.dumps(c)],
+            cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+    totals["processes"] += 2
+    totals["connections"] += 2
+    conc = []
+    for p in procs:
+        so, se = p.communicate(timeout=240)
+        lines = [l for l in so.splitlines() if l.startswith("{")]
+        conc.append(json.loads(lines[-1]) if lines else {"error": (se or so)[-200:]})
+    with psycopg.connect(url, autocommit=True) as c:
+        idem_rows = int(c.execute("select count(*) from monday_report_idempotency_records "
+                                  "where operation_id=%s", (op,)).fetchone()[0])
+    delta = _corr_for(slug, ws) - before if ws else -1
+    statuses = sorted(r.get("status") for r in conc)
+    entity_ids = {r.get("entity_id") for r in conc}
+    concurrent_ok = (idem_rows == 1 and delta == 1 and statuses == [201, 201]
+                     and len(entity_ids) == 1 and None not in entity_ids)
+    ROUTE_PROOF["concurrent"] = {"results": conc, "idempotency_rows": idem_rows,
+                                 "correction_delta": delta, "client_process_count": 2}
+    record("46 concurrent duplicate through two HTTP client processes commits exactly once",
+           concurrent_ok, {"statuses": statuses, "idempotency_rows": idem_rows,
+                           "correction_delta": delta, "same_entity": len(entity_ids) == 1})
+
+    # 47: uncertain response -- committed, response lost, same-key retry replays.
+    reset_and_migrate()
+    lost_cfg = env_for("http-lost")
+    lost = _http_json(["lost_response", json.dumps(lost_cfg)])
+    totals["processes"] += 1
+    totals["connections"] += 1
+    ROUTE_PROOF["lost_response"] = lost
+    record("47 real-HTTP uncertain response retries into a replay, never a second commit",
+           bool(lost.get("all_passed")),
+           {"passed": lost.get("passed"), "total": lost.get("total"),
+            "failures": [r["name"] for r in lost.get("results", []) if not r["ok"]] or None})
+
+    with psycopg.connect(url, autocommit=True) as c:
+        c.execute("drop table if exists mr_test_barrier")
+
     return totals
 
 
@@ -592,12 +734,71 @@ def build_evidence(totals: dict) -> dict:
     hmac_ok = passed("30 ")
     route_worker_command_ok = passed("13 ") and passed("34 ")  # worker/command paths enter txn
 
+    # Proof classification (Part K): distinguish where idempotency was PROVEN so an
+    # internal-only proof can never be read as a route-level one.
+    transaction_boundary_ok = all(passed(p) for p in ("19 ", "20 ", "21 ", "22 ", "23 "))
+    direct_helper_ok = all(passed(p) for p in ("24 ", "25 ", "26 ", "27 ", "28 "))
+    request_hash_canonicalization_ok = all(passed(p) for p in ("40 ", "41 ", "42 ", "43 "))
+    key_validation_ok = passed("44 ")
+    http_route_ok = passed("45 ")
+    concurrent_http_ok = passed("46 ")
+    uncertain_response_ok = passed("47 ")
+
+    # Individual HTTP-suite scenario outcomes, surfaced so a probe can require the
+    # specific route behaviours (missing-key, conflict, actor binding) by name.
+    suite = ROUTE_PROOF.get("suite") or {}
+    suite_by_prefix = {r["name"][:2]: bool(r["ok"]) for r in suite.get("results", [])}
+
+    def suite_ok(prefix: str) -> bool:
+        return suite_by_prefix.get(prefix, False)
+
+    missing_key_ok = suite_ok("04")
+    conflicting_reuse_ok = suite_ok("09") and suite_ok("10")
+    distinct_key_ok = suite_ok("11")
+    failed_attempt_no_reserve_ok = suite_ok("12")
+    actor_scope_ok = suite_ok("13")
+
     ran_real_db = bool(test_database_url())
     status = "passed" if (
         ran_real_db and n_failed == 0 and n_skipped == 0
         and negative_control_ok and protected_ok and chain_ok and hmac_ok
         and route_worker_command_ok
+        # Route-level idempotency must be PROVEN, not merely implemented: the HTTP
+        # suite, the concurrent-HTTP race and the uncertain-response retry all pass.
+        and request_hash_canonicalization_ok and key_validation_ok
+        and http_route_ok and concurrent_http_ok and uncertain_response_ok
+        and missing_key_ok and conflicting_reuse_ok and actor_scope_ok
+        and failed_attempt_no_reserve_ok
     ) else "BLOCKED_INCOMPLETE"
+
+    concurrent = ROUTE_PROOF.get("concurrent") or {}
+    route_idempotency = {
+        "contract_version": ROUTE_IDEMPOTENCY_CONTRACT_VERSION,
+        "operation_key_header": ROUTE_OPERATION_KEY_HEADER,
+        "required_route_count": 3,
+        "required_routes": ["field_correction.record", "field_correction.revert",
+                            "validation_task.update"],
+        # record + revert are proven behaviourally through HTTP; validation_task.update
+        # shares the identical _establish_idempotency wiring (statically wired,
+        # covered by the route-wiring inspection in the route-rbac/main tests).
+        "http_behaviourally_tested_routes": ["field_correction.record", "field_correction.revert"],
+        "http_scenario_count": int(suite.get("total", 0)),
+        "http_scenarios_passed": int(suite.get("passed", 0)),
+        "concurrent_http_client_count": int(concurrent.get("client_process_count", 0)),
+        "concurrent_http_idempotency_rows": concurrent.get("idempotency_rows"),
+        "concurrent_http_correction_delta": concurrent.get("correction_delta"),
+        "transaction_boundary_result": "passed" if transaction_boundary_ok else "not_passed",
+        "direct_helper_result": "passed" if direct_helper_ok else "not_passed",
+        "http_route_result": "passed" if http_route_ok else "not_passed",
+        "concurrent_http_result": "passed" if concurrent_http_ok else "not_passed",
+        "uncertain_response_result": "passed" if uncertain_response_ok else "not_passed",
+        "request_hash_canonicalization_result": "passed" if request_hash_canonicalization_ok else "not_passed",
+        "missing_key_result": "passed" if missing_key_ok else "not_passed",
+        "conflicting_reuse_result": "passed" if conflicting_reuse_ok else "not_passed",
+        "distinct_key_commits_result": "passed" if distinct_key_ok else "not_passed",
+        "failed_attempt_reserves_no_key_result": "passed" if failed_attempt_no_reserve_ok else "not_passed",
+        "actor_and_operation_scope_result": "passed" if actor_scope_ok else "not_passed",
+    }
 
     payload = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
@@ -621,7 +822,8 @@ def build_evidence(totals: dict) -> dict:
                           "stale revision is non-retryable",
         "idempotency_strategy": "unique (tenant_slug, operation_id); replay rejected on differing "
                                 "request hash, operation kind, or actor; stores a hash, never the body",
-        "operation_key_source": "snapshot_transaction(operation_id=..., request_hash=..., "
+        "operation_key_source": "route _establish_idempotency(Idempotency-Key) -> "
+                                "snapshot_transaction(operation_id=..., request_hash=..., "
                                 "operation_kind=..., actor_id=...)",
         "os_process_count": totals.get("processes", 0),
         "db_connection_count": totals.get("connections", 0),
@@ -630,6 +832,12 @@ def build_evidence(totals: dict) -> dict:
         "chain_linkage_result": "passed" if chain_ok else "not_passed",
         "event_hmac_result": "passed" if hmac_ok else "not_passed",
         "route_worker_command_boundary_result": "passed" if route_worker_command_ok else "not_passed",
+        # Top-level route-idempotency results (Part K/L): a probe can gate on these
+        # without parsing the nested block.
+        "http_route_idempotency_result": "passed" if http_route_ok else "not_passed",
+        "concurrent_http_idempotency_result": "passed" if concurrent_http_ok else "not_passed",
+        "uncertain_response_result": "passed" if uncertain_response_ok else "not_passed",
+        "route_idempotency": route_idempotency,
         "totals": {"passed": n_passed, "skipped": n_skipped, "failed": n_failed},
         "status": status,
     }
@@ -648,11 +856,12 @@ def main() -> int:
     manifest_checks()
     wrapping_checks()
     fail_closed_checks()
+    route_idempotency_unit_checks()
 
     url = test_database_url()
     totals = {"processes": 0, "connections": 0}
     if not url:
-        for n in range(13, 40):
+        for n in list(range(13, 40)) + [45, 46, 47]:
             skip(f"{n:02d} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         totals = pg_checks(url, scratch)
