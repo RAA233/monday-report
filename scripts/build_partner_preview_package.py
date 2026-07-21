@@ -178,6 +178,14 @@ $Python = Join-Path $Root ".runtime\venv\Scripts\python.exe"
 if (!(Test-Path $Python)) {
   throw "Runtime not installed. Run .\Start-MondayReport.ps1 first."
 }
+# This standalone partner preview intentionally serves the demo on 127.0.0.1:8000
+# (API) and :5173 (web) -- on a partner machine those are this package's OWN
+# servers, not a developer's live runtime. e2e_mvp.py fails closed on exactly
+# those ports, so declare the intent explicitly; the override is ignored under CI
+# and never excuses a PID collision.
+$env:MONDAY_REPORT_ALLOW_LIVE_TARGET = "1"
+$env:MONDAY_REPORT_API_BASE = "http://127.0.0.1:8000"
+$env:MONDAY_REPORT_WEB_BASE = "http://127.0.0.1:5173"
 & $Python scripts\e2e_mvp.py
 """,
     )

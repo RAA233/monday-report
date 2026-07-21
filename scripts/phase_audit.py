@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from urllib.parse import urlsplit
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -86,6 +87,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         print(f"Loaded GA environment file: {env_file}")
+
+    # Hard verification-isolation gate (Part E): fail closed BEFORE any request
+    # so a misconfigured run can never touch the live API/web/state.
+    from verification_isolation import (
+        VerificationIsolationError,
+        assert_isolated,
+        resolve_listen_pid,
+    )
+
+    try:
+        api_port = urlsplit(API_BASE).port
+        assert_isolated(
+            context="phase_audit",
+            api_base=API_BASE,
+            web_base=WEB_BASE,
+            live_api_pid=resolve_listen_pid(8000) if api_port and api_port != 8000 else None,
+            self_api_pid=resolve_listen_pid(api_port) if api_port and api_port != 8000 else None,
+        )
+    except VerificationIsolationError as exc:
+        print(f"FAIL: verification isolation - {exc}")
+        return 2
 
     checks = [
         check_required_files(),

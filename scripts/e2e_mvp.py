@@ -16,6 +16,14 @@ from phase_audit import API_BASE, ROOT, WEB_BASE, build_zip_fixture, create_test
 
 def main() -> int:
     checks: list[dict[str, object]] = []
+    # Hard verification-isolation gate (Part E): fail closed before any request.
+    from verification_isolation import VerificationIsolationError, assert_isolated
+
+    try:
+        assert_isolated(context="e2e_mvp", api_base=API_BASE, web_base=WEB_BASE)
+    except VerificationIsolationError as exc:
+        print(f"FAIL: verification isolation - {exc}")
+        return 2
     try:
         checks.extend(run_e2e())
     except urllib.error.HTTPError as exc:

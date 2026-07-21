@@ -7,10 +7,12 @@ whole-run session-level advisory lock with per-migration transactions.
 
 Scope and honest limitations
 -----------------------------
-* The runner applies ``db/migrations/*.sql`` — the executable migration
-  sequence. It does **not** apply ``db/schema.sql`` (a divergent, flattened
-  design reference that is *not* the authoritative sequence; see
-  ``docs/POSTGRES_MIGRATIONS.md``).
+* The runner applies a numbered ``.sql`` set chosen by ``--set``: ``legacy``
+  (``db/migrations/``, immutable; its ``0003`` references tables no earlier legacy
+  migration creates, so the legacy sequence is un-appliable and its validity stays
+  BLOCKED) or ``baseline`` (``db/baseline/``, the corrected fresh-install sequence).
+  It does **not** apply ``db/schema.sql`` (a divergent, flattened design reference
+  that is *not* the authoritative sequence; see ``docs/POSTGRES_MIGRATIONS.md``).
 * It is an **explicit** operator command (``python -m backend.app.migrations``);
   it is **never** run automatically on API startup.
 * The supplemental static validator (:func:`validate_migration_set`) is a narrow
@@ -39,6 +41,10 @@ from pathlib import Path
 # Repo root: backend/app/migrations.py -> parents[2] == repo root.
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS_DIR = ROOT / "db" / "migrations"
+# Corrected fresh-install baseline (db/baseline/) kept separate from the immutable
+# legacy sequence (db/migrations/). See docs/POSTGRES_MIGRATIONS.md.
+BASELINE_DIR = ROOT / "db" / "baseline"
+MIGRATION_SETS = {"legacy": MIGRATIONS_DIR, "baseline": BASELINE_DIR}
 
 # Runner contract version. Recorded in schema_migrations.runner_version and in
 # the evidence artifact. Bump on a behavioral change to the runner.
@@ -353,7 +359,16 @@ def apply_migrations(database_url: str, *, migrations_dir: Path | None = None) -
     """
     migrations = discover_migrations(migrations_dir)
     result = ApplyResult(ok=True)
-    conn = _connect(database_url)
+    # Connection establishment sits INSIDE the guarded region: a connect failure
+    # raises driver text carrying host, port and username, which previously
+    # escaped as an unredacted traceback because `_connect` was called before
+    # the try block.
+    try:
+        conn = _connect(database_url)
+    except Exception as exc:  # noqa: BLE001 - surface a redacted failure.
+        result.ok = False
+        result.error = {"version": None, "filename": None, "message": _redact(str(exc))}
+        return result
     lock_acquired = False
     try:
         result.server_version = _server_version(conn)
@@ -466,14 +481,42 @@ def migration_status(
 # Redaction (Part M/N): never surface DSNs, passwords, or absolute paths.
 # --------------------------------------------------------------------------- #
 _DSN_RE = re.compile(r"(postgres(?:ql)?://)[^ \t\n\"']*", re.IGNORECASE)
-_PASSWORD_RE = re.compile(r"(password=)[^ \t\n\"']*", re.IGNORECASE)
+# Every libpq keyword that can carry a credential or a network location.
+_KEYWORD_RE = re.compile(
+    r"\b(password|passfile|user|host|hostaddr|port|dbname)=[^ \t\n\"']*", re.IGNORECASE
+)
+# libpq reports the network location and the account as free-form PROSE, e.g.
+#   connection to server at "10.0.0.5", port 6543 failed: FATAL: ... for user "appuser"
+# Keyword-only redaction left all of that in the message.
+_LIBPQ_SERVER_RE = re.compile(
+    r"(connection to server(?: at)?\s*)\"[^\"]*\"(\s*,\s*port\s+\d+)?", re.IGNORECASE
+)
+_LIBPQ_USER_RE = re.compile(r"(\bfor user\s+)\"[^\"]*\"", re.IGNORECASE)
+# A real Windows path has ONE backslash after the drive letter. The previous
+# pattern required two, so no genuine Windows path was ever redacted.
+# Quoted paths first: a real Windows path often contains spaces
+# ("C:\Program Files\..."), which the unquoted pattern would truncate at the space
+# and leave the remainder visible.
+_QUOTED_WINPATH_RE = re.compile(r"\"[A-Za-z]:\\[^\"]*\"")
+_WINPATH_RE = re.compile(r"[A-Za-z]:\\[^ \t\n\"']*")
+_POSIXPATH_RE = re.compile(r"/[^ \t\n\"']{3,}")
 
 
 def _redact(message: str) -> str:
-    redacted = _DSN_RE.sub(r"\1<redacted>", message)
-    redacted = _PASSWORD_RE.sub(r"\1<redacted>", redacted)
-    # Strip anything that looks like an absolute path.
-    redacted = re.sub(r"[A-Za-z]:\\\\[^ \t\n\"']*|/[^ \t\n\"']{3,}", "<path>", redacted)
+    """Strip DSNs, credentials, network locations and absolute paths from an error.
+
+    Applied to every failure surfaced by this module — including failures to
+    establish the connection, whose driver text carries host, port and username.
+    """
+    # Substitute the WHOLE DSN with a slash-free token so the path rules below
+    # cannot chew into the placeholder.
+    redacted = _DSN_RE.sub("<redacted-dsn>", message)
+    redacted = _LIBPQ_SERVER_RE.sub(r"\1<redacted>", redacted)
+    redacted = _LIBPQ_USER_RE.sub(r"\1<redacted>", redacted)
+    redacted = _KEYWORD_RE.sub(lambda m: f"{m.group(1)}=<redacted>", redacted)
+    redacted = _QUOTED_WINPATH_RE.sub('"<path>"', redacted)
+    redacted = _WINPATH_RE.sub("<path>", redacted)
+    redacted = _POSIXPATH_RE.sub("<path>", redacted)
     return redacted
 
 
@@ -497,20 +540,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("command", choices=("apply", "status", "validate"))
     parser.add_argument(
+        "--set",
+        dest="migration_set",
+        choices=tuple(MIGRATION_SETS),
+        default="legacy",
+        help="Which migration set to operate on: 'legacy' (db/migrations/, immutable, "
+        "0003 un-appliable) or 'baseline' (db/baseline/, corrected fresh-install). Default: legacy.",
+    )
+    parser.add_argument(
         "--database-url",
         default=None,
         help="PostgreSQL DSN. Falls back to MONDAY_REPORT_MIGRATIONS_DATABASE_URL "
         "or DATABASE_URL. The value is never echoed.",
     )
     args = parser.parse_args(argv)
+    mig_dir = MIGRATION_SETS[args.migration_set]
 
     if args.command == "validate":
-        migrations = discover_migrations()
+        migrations = discover_migrations(mig_dir)
         static = validate_migration_set(migrations)
         print(
             json.dumps(
                 {
                     "command": "validate",
+                    "set": args.migration_set,
                     "migration_count": len(migrations),
                     "static_validation": static.to_dict(),
                     "note": "Static validation is supplemental; real PostgreSQL "
@@ -524,8 +577,8 @@ def main(argv: list[str] | None = None) -> int:
     database_url = _resolve_database_url(args.database_url)
 
     if args.command == "status":
-        report = migration_status(database_url)
-        print(json.dumps(report, indent=2))
+        report = migration_status(database_url, migrations_dir=mig_dir)
+        print(json.dumps({"set": args.migration_set, **report}, indent=2))
         return 0
 
     # apply
@@ -542,8 +595,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 2
-    result = apply_migrations(database_url)
-    print(json.dumps({"command": "apply", **result.to_dict()}, indent=2))
+    result = apply_migrations(database_url, migrations_dir=mig_dir)
+    print(json.dumps({"command": "apply", "set": args.migration_set, **result.to_dict()}, indent=2))
     return 0 if result.ok else 1
 
 

@@ -22,6 +22,18 @@ WEB_BASE = os.getenv("MONDAY_REPORT_WEB_BASE", "http://127.0.0.1:5173")
 
 
 def main() -> int:
+    # Hard verification-isolation gate: fail closed BEFORE any request, upload or
+    # worker launch. This guard uploads fixtures, issues signed URLs, downloads
+    # exports and spawns `backend.app.worker` with os.environ.copy(); without this
+    # it defaulted at the LIVE API (8000) / web (5173) and, with the persistence
+    # roots unset, wrote into the live .local_data.
+    from verification_isolation import VerificationIsolationError, assert_isolated
+
+    try:
+        assert_isolated(context="client_mode_function_guard", api_base=API_BASE, web_base=WEB_BASE)
+    except VerificationIsolationError as exc:
+        print(f"FAIL: verification isolation - {exc}")
+        return 2
     load_env_file(ENV_FILE)
     checks: list[dict[str, object]] = []
     try:
