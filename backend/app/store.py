@@ -12,7 +12,7 @@ import time
 import zipfile
 import zlib
 import xml.etree.ElementTree as ET
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import date, datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
@@ -6857,6 +6857,33 @@ class LocalStateStore:
         return parts or ["upload.bin"]
 
 
+class SnapshotConflict(RuntimeError):
+    """A mutation lost a compare-and-swap race and must not be silently retried.
+
+    Raised when the persisted revision advanced between this transaction's read
+    and its write, or when the row-level lock could not be acquired inside the
+    configured timeout. Carries no DSN, host, credential or driver internals --
+    callers surface a controlled conflict, never a raw database error.
+    """
+
+    def __init__(self, reason: str, *, retryable: bool) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.retryable = retryable
+
+
+class IdempotencyConflict(RuntimeError):
+    """The same operation id was replayed with a materially different request."""
+
+
+# Transaction/lock implementation version. Evidence binds this so a probe can
+# never certify a run produced by different concurrency semantics.
+SNAPSHOT_TRANSACTION_VERSION = "1.0.0"
+# Bounded wait for the row lock. A blocked writer fails as a controlled conflict
+# rather than hanging a request thread indefinitely.
+SNAPSHOT_LOCK_TIMEOUT_MS = 5000
+
+
 class PostgresStateStore(LocalStateStore):
     """PostgreSQL-backed MVP state repository with tenant-scoped RLS.
 
@@ -6865,15 +6892,179 @@ class PostgresStateStore(LocalStateStore):
     JSON file. This is the first active repository adapter for client-mode
     readiness and keeps the migration path small while normalized repositories
     continue to mature.
+
+    Concurrency contract
+    --------------------
+    Outside a transaction this adapter behaves as before. Inside
+    :meth:`snapshot_transaction` one logical mutation runs as a single database
+    transaction on a single connection:
+
+        BEGIN -> SET LOCAL lock_timeout -> advisory xact lock (tenant-derived)
+        -> SELECT ... FOR UPDATE (payload + revision) -> domain mutation and
+        audit append in memory -> UPDATE ... WHERE revision = <read revision>
+        -> COMMIT
+
+    The read and the write therefore share one transaction and one lock. That is
+    the specific defect this closes: previously ``refresh()`` read on one
+    connection and ``save()`` wrote on another, so two processes could both read
+    revision N and both write, and the later write silently destroyed the
+    earlier one. Because ``audit()`` persists through the same ``save()`` path,
+    the state mutation and its audit event now commit together or not at all.
+
+    The advisory lock is taken in addition to ``FOR UPDATE`` because a tenant's
+    row may not exist yet, and ``FOR UPDATE`` cannot lock an absent row -- two
+    processes bootstrapping the same tenant would otherwise race on insert.
     """
 
     repository_backend = POSTGRES_REPOSITORY_BACKEND
     STATE_TABLE = "monday_report_state_snapshots"
+    IDEMPOTENCY_TABLE = "monday_report_idempotency_records"
 
     def __init__(self, url: str) -> None:
         self.database_url = url
+        # Active transaction context, or None. Never shared between threads: a
+        # transaction is scoped to the block that opened it.
+        self._txn: dict[str, object] | None = None
         self._ensure_repository_schema()
         super().__init__()
+
+    # ---------------------------------------------------------------- locks --
+    @classmethod
+    def _advisory_lock_key(cls, tenant_slug: str) -> int:
+        """Deterministic signed 64-bit advisory-lock key for a tenant.
+
+        Derived from a namespaced SHA-256 so it is stable across processes,
+        platforms and restarts, and cannot collide with the migration runner's
+        key (which uses a different namespace string). Distinct tenants take
+        distinct keys, so unrelated tenants never serialize against each other.
+        """
+        digest = sha256(f"monday_report.snapshot.v1:{tenant_slug}".encode("utf-8")).digest()
+        return int.from_bytes(digest[:8], "big", signed=True)
+
+    @contextmanager
+    def snapshot_transaction(self, *, operation_id: str | None = None, request_hash: str | None = None):
+        """Run one logical mutation as a single locked, compare-and-swap transaction.
+
+        Yields a context dict. When ``operation_id`` is supplied and that
+        operation already committed, ``context["replayed"]`` is True and the
+        caller should return the recorded result without mutating again.
+        """
+        import psycopg
+
+        if self._txn is not None:
+            raise RuntimeError("snapshot_transaction is not re-entrant")
+
+        connection = psycopg.connect(self.database_url, connect_timeout=5)
+        connection.autocommit = False
+        context: dict[str, object] = {"replayed": False, "revision": 0, "result": None}
+        try:
+            with connection.cursor() as cursor:
+                # SET LOCAL is a utility statement and cannot take a bind
+                # parameter; set_config(..., is_local => true) is the parameterised
+                # equivalent and is still scoped to this transaction.
+                cursor.execute("select set_config('lock_timeout', %s, true)",
+                               (f"{SNAPSHOT_LOCK_TIMEOUT_MS}ms",))
+                cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
+                # Lock BEFORE the mutable-state read. Covers the not-yet-existing row.
+                cursor.execute("select pg_advisory_xact_lock(%s)", (self._advisory_lock_key(self.tenant.slug),))
+                cursor.execute(
+                    f"select payload, revision from {self.STATE_TABLE} where tenant_slug = %s for update",
+                    (self.tenant.slug,),
+                )
+                row = cursor.fetchone()
+                payload = None
+                revision = 0
+                if row is not None:
+                    payload = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
+                    revision = int(row[1])
+                context["revision"] = revision
+
+                if operation_id is not None:
+                    cursor.execute(
+                        f"select request_hash, result_metadata, committed_revision "
+                        f"from {self.IDEMPOTENCY_TABLE} where tenant_slug = %s and operation_id = %s",
+                        (self.tenant.slug, operation_id),
+                    )
+                    prior = cursor.fetchone()
+                    if prior is not None:
+                        if request_hash is not None and prior[0] != request_hash:
+                            raise IdempotencyConflict(
+                                "operation id replayed with a different request")
+                        context["replayed"] = True
+                        context["result"] = prior[1]
+                        context["revision"] = int(prior[2])
+
+            self._txn = {"connection": connection, "revision": revision, "payload": payload,
+                         "operation_id": operation_id, "request_hash": request_hash, "wrote": False}
+            # Load the transaction's snapshot into the in-memory domain model.
+            if payload is not None and not context["replayed"]:
+                self.refresh()
+            yield context
+
+            if not context["replayed"]:
+                self._commit_snapshot(context)
+            connection.commit()
+        except psycopg.errors.LockNotAvailable as exc:
+            connection.rollback()
+            raise SnapshotConflict("snapshot lock timeout", retryable=True) from exc
+        except psycopg.errors.SerializationFailure as exc:
+            connection.rollback()
+            raise SnapshotConflict("serialization failure", retryable=True) from exc
+        except BaseException:
+            # Any pre-commit failure -- domain error, audit construction, HMAC
+            # computation, write failure -- discards BOTH the mutation and its
+            # audit event, because neither was committed.
+            connection.rollback()
+            raise
+        finally:
+            self._txn = None
+            connection.close()
+
+    def _commit_snapshot(self, context: dict[str, object]) -> None:
+        """Write the mutated payload under compare-and-swap, inside the open transaction."""
+        from psycopg.types.json import Jsonb
+
+        txn = self._txn
+        assert txn is not None
+        connection = txn["connection"]
+        expected = int(txn["revision"])
+        payload = self._postgres_safe_json(self._state_payload())
+        with connection.cursor() as cursor:
+            cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
+            if txn["payload"] is None:
+                cursor.execute(
+                    f"insert into {self.STATE_TABLE} (tenant_slug, tenant_id, payload, revision) "
+                    f"values (%s, %s, %s, 1) on conflict (tenant_slug) do nothing",
+                    (self.tenant.slug, self.tenant.id, Jsonb(payload)),
+                )
+                if cursor.rowcount != 1:
+                    raise SnapshotConflict("tenant snapshot created concurrently", retryable=True)
+                new_revision = 1
+            else:
+                cursor.execute(
+                    f"update {self.STATE_TABLE} set payload = %s, tenant_id = %s, "
+                    f"revision = revision + 1, updated_at = now() "
+                    f"where tenant_slug = %s and revision = %s",
+                    (Jsonb(payload), self.tenant.id, self.tenant.slug, expected),
+                )
+                if cursor.rowcount != 1:
+                    # Someone else committed between our read and our write.
+                    raise SnapshotConflict("stale revision", retryable=False)
+                new_revision = expected + 1
+            context["revision"] = new_revision
+
+            operation_id = txn["operation_id"]
+            if operation_id is not None:
+                cursor.execute(
+                    f"insert into {self.IDEMPOTENCY_TABLE} "
+                    f"(tenant_slug, operation_id, request_hash, result_metadata, committed_revision) "
+                    f"values (%s, %s, %s, %s, %s) on conflict (tenant_slug, operation_id) do nothing",
+                    (self.tenant.slug, operation_id, txn["request_hash"],
+                     Jsonb(context.get("result") or {}), new_revision),
+                )
+                if cursor.rowcount != 1:
+                    raise SnapshotConflict("operation committed concurrently", retryable=False)
+        txn["wrote"] = True
 
     def _state_exists(self) -> bool:
         with self._connect() as connection:
@@ -6886,6 +7077,11 @@ class PostgresStateStore(LocalStateStore):
                 return cursor.fetchone() is not None
 
     def _read_state_payload(self) -> dict[str, object] | None:
+        # Inside a transaction the payload was already read under FOR UPDATE.
+        # Re-reading on a second connection would defeat the lock and reintroduce
+        # the lost-update race this class exists to close.
+        if self._txn is not None:
+            return self._txn["payload"]  # type: ignore[return-value]
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 self._set_tenant_scope(cursor)
@@ -6902,18 +7098,26 @@ class PostgresStateStore(LocalStateStore):
     def save(self) -> None:
         from psycopg.types.json import Jsonb
 
+        # Inside a transaction, defer: the single compare-and-swap write happens
+        # once at commit, so a domain method that calls save() several times (and
+        # audit(), which saves internally) still produces exactly one revision
+        # increment and one atomic state+audit commit.
+        if self._txn is not None:
+            return
+
         payload = self._postgres_safe_json(self._state_payload())
         with self._connect() as connection:
             with connection.cursor() as cursor:
                 self._set_tenant_scope(cursor)
                 cursor.execute(
                     f"""
-                    insert into {self.STATE_TABLE} (tenant_slug, tenant_id, payload)
-                    values (%s, %s, %s)
+                    insert into {self.STATE_TABLE} (tenant_slug, tenant_id, payload, revision)
+                    values (%s, %s, %s, 1)
                     on conflict (tenant_slug)
                     do update set
                       tenant_id = excluded.tenant_id,
                       payload = excluded.payload,
+                      revision = {self.STATE_TABLE}.revision + 1,
                       updated_at = now()
                     """,
                     (self.tenant.slug, self.tenant.id, Jsonb(payload)),
@@ -6939,6 +7143,31 @@ class PostgresStateStore(LocalStateStore):
               created_at timestamptz not null default now(),
               updated_at timestamptz not null default now()
             )
+            """,
+            # Additive and idempotent so an existing deployment upgrades in place.
+            # revision is the compare-and-swap token: every committed mutation
+            # increments it exactly once, and a writer holding a stale value is
+            # rejected instead of overwriting newer state.
+            f"alter table {self.STATE_TABLE} add column if not exists revision bigint not null default 0",
+            f"""
+            create table if not exists {self.IDEMPOTENCY_TABLE} (
+              tenant_slug text not null,
+              operation_id text not null,
+              request_hash text,
+              result_metadata jsonb not null default '{{}}'::jsonb,
+              committed_revision bigint not null,
+              created_at timestamptz not null default now(),
+              primary key (tenant_slug, operation_id)
+            )
+            """,
+            f"alter table {self.IDEMPOTENCY_TABLE} enable row level security",
+            f"alter table {self.IDEMPOTENCY_TABLE} force row level security",
+            f"drop policy if exists tenant_isolation_{self.IDEMPOTENCY_TABLE} on {self.IDEMPOTENCY_TABLE}",
+            f"""
+            create policy tenant_isolation_{self.IDEMPOTENCY_TABLE}
+            on {self.IDEMPOTENCY_TABLE}
+            using (tenant_slug = current_setting('app.tenant_slug', true))
+            with check (tenant_slug = current_setting('app.tenant_slug', true))
             """,
             f"alter table {self.STATE_TABLE} enable row level security",
             f"alter table {self.STATE_TABLE} force row level security",
