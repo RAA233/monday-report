@@ -1,0 +1,10 @@
+# Migration checksums are computed over RAW FILE BYTES (see
+# backend/app/migrations.py: discover_migrations -> hashlib.sha256(path.read_bytes())),
+# and those checksums are persisted in schema_migrations and compared on every
+# subsequent run. Line endings must therefore be byte-identical on every platform.
+#
+# Without this, core.autocrlf=true smudges LF -> CRLF on Windows checkout, so a
+# database migrated on Windows records different checksums than the same commit
+# checked out on Linux/CI/containers. The next run from the other platform sees
+# checksum drift on every applied migration and refuses to apply anything.
+*.sql text eol=lf

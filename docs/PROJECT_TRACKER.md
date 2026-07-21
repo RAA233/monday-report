@@ -826,28 +826,54 @@ versions in a `schema_migrations` table. Addresses `migration-runner` and
   SHA-256; whole-run **session-level advisory lock**; **per-migration transactions**
   (BEGIN → SQL → metadata insert → COMMIT), rollback + stop on failure; checksum
   drift refused and never rewritten.
-- **Migration 0003 (migration-validity)**: corrected in place — it was **provably
-  unapplied** (no runner/`schema_migrations` ever existed; its `projects`/`reports`
-  FK targets are never created in-sequence, so it was un-appliable). Retargeted to
-  `workspaces(id)` / `monday_reports(id)` (the tables `0001` creates), matching the
-  running app's domain. `db/schema.sql` is a divergent, non-authoritative flattened
-  reference and is **not** what the runner applies.
+- **Migration 0003 (migration-validity)**: **restored byte-for-byte** to its
+  original committed contents and kept **immutable**. History was investigated
+  (added in `f7b6635` after the only tag `ga-2026-07-13`; no runner/`schema_migrations`
+  ever existed; docs call the normalized tables a future "target") — strong evidence
+  it was never deployed, but **not authoritative proof** of an unpublished draft, so
+  it is not edited. The legacy sequence stays **un-appliable → validity BLOCKED**. A
+  separate corrected **fresh-install baseline** (`db/baseline/`, FK targets retargeted
+  to `workspaces`/`monday_reports`) applies cleanly (`--set baseline`). `db/schema.sql`
+  is a divergent, non-authoritative flattened reference and is **not** what the runner applies.
 - **Validity source of truth**: a **real PostgreSQL** execution (fresh apply, rerun,
   partial upgrades, failure rollback, concurrency, checksum drift). The static
   validator is **supplemental only**, with documented limits.
 - **Readiness**: `ga_migration_runner` / `ga_migration_validity` are
   **evidence-driven** and PASS **only** with committed real-PostgreSQL passing
-  evidence bound to the current migration bytes + a clean tree; **registry
-  unchanged**; persistence-locking, correction-atomicity, tenant-authorization,
-  backup/restore, and tail-truncation stay **BLOCKED**; GA stays `GA_BLOCKED`.
-- **Environmental status**: no PostgreSQL was reachable in the build environment
-  (Docker Desktop's Linux engine could not start non-interactively — the privileged
-  `com.docker.service` needs admin elevation a headless session cannot grant; WSL2
-  was healthy). The decisive real-PostgreSQL run **did not execute**, so evidence is
-  `BLOCKED_NO_POSTGRES` and **both controls remain BLOCKED** pending a disposable,
-  test-marked PostgreSQL 16 (`MONDAY_REPORT_TEST_DATABASE_URL` +
-  `--emit-evidence`).
+  evidence; `ga_migration_validity` **additionally** re-runs the static validator on
+  the immutable legacy set, so it stays BLOCKED while the committed legacy 0003 is
+  invalid (a passing baseline does not flip it). **Registry unchanged**;
+  persistence-locking, correction-atomicity, tenant-authorization, backup/restore,
+  and tail-truncation stay **BLOCKED**; GA stays `GA_BLOCKED`.
+- **Verification isolation** (`scripts/verification_isolation.py`,
+  `audit:verification-isolation`): a shared preflight fails closed before any
+  mutating integration command (`phase_audit`, `e2e`, UI/worker) can target the live
+  API (8000) / web (5173) / `.local_data` — closes the mis-isolation that let a prior
+  run touch the live demo.
+- **Environmental status**: the decisive real-PostgreSQL run **has executed**.
+  Docker Desktop was repaired by clearing two stale AF_UNIX runtime socket
+  directories (`%LOCALAPPDATA%\Docker\run`, `%LOCALAPPDATA%\docker-secrets-engine`)
+  — renamed, not deleted — after which the engine (29.6.2) started normally. The
+  guard ran against a disposable, test-marked **PostgreSQL 16.14**
+  (`pgvector/pgvector:pg16`) on a random loopback port: **64 passed / 0 skipped /
+  0 failed**. `0001` requires the `vector` extension, which stock `postgres:16`
+  does not ship — on that image the first migration fails and nothing applies.
+- **Migration-history correction**: `db/migrations/0003_benchmarking.sql` was
+  restored byte-exactly to its original committed blob (`857b54fd`, matching the
+  pre-PR history), undoing an edit to immutable history that the pushed PR head
+  contained. Its four broken FK references are preserved deliberately.
+- **Cross-platform determinism fix**: migration checksums are SHA-256 over raw
+  file bytes, but `core.autocrlf=true` smudged `LF` → `CRLF` on checkout, making
+  the recorded checksums platform-dependent (a Windows-migrated database would
+  report drift on Linux/CI and refuse to apply). `.gitattributes` now pins
+  `*.sql text eol=lf` and the working tree was renormalized.
+- **Disposition**: `ga_migration_runner` is PASS-capable from committed
+  real-PostgreSQL evidence; **`ga_migration_validity` remains BLOCKED** — the
+  legacy sequence fails on the real server at `0003` (`relation "projects" does
+  not exist`) and the probe independently re-runs the static validator over
+  `db/migrations/`. **GA remains `GA_BLOCKED`.**
 
 | Command | Exit | Result |
 | --- | --- | --- |
-| `pnpm run audit:migration-runner` | 0 | **23 passed / 34 skipped** (no disposable PostgreSQL) — filename/version contract, stable SHA-256 + migration-set digest, supplemental static validator (passes on the corrected sequence, detects a missing FK target, honours intra-migration siblings, documents limits), evidence payload_sha256 recompute + secret-exclusion, both migration probes fail-closed BLOCKED, GA `GA_BLOCKED`, registry unchanged, live JSON state untouched. Real-PostgreSQL scenarios (fresh/rerun/partial/rollback/concurrency/drift/metadata) run and flip the blockers when `MONDAY_REPORT_TEST_DATABASE_URL` is provided. |
+| `pnpm run audit:migration-runner` | 0 | **64 passed / 0 skipped / 0 failed** against real PostgreSQL 16.14 (`pgvector/pgvector:pg16`) — filename/version contract, stable SHA-256 + set digest, byte-for-byte harness copies (no newline translation), static validator (legacy DETECTS the immutable 0003 FK gap, baseline passes, negative + sibling + limitations), `schema_migrations` metadata, baseline fresh apply, idempotent rerun, supported partial upgrades, resume-after-interrupt, failure rollback with no orphan metadata row, concurrency serialized by the session advisory lock, checksum-drift refusal without rewriting the stored checksum, **legacy sequence FAILS at 0003** (`relation "projects" does not exist`), evidence payload_sha256 recompute + secret-exclusion, migration probes fail-closed, GA `GA_BLOCKED`, registry unchanged, live JSON state untouched. |
+| `pnpm run audit:verification-isolation` | 0 | **24/24** — missing/live-pointing state/**storage**/**export**/API/web abort (all three persistence roots, each of which defaults into the live `.local_data`); PID-collision aborts; manual override honored only outside CI, never for PID collision; CLI + `phase_audit`/`e2e`/`client_mode_function_guard` abort before any network or worker launch. |

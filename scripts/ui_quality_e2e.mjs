@@ -7,6 +7,20 @@ import { chromium } from "playwright";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const webBase = process.env.MONDAY_REPORT_WEB_BASE ?? "http://127.0.0.1:5173";
 const apiBase = process.env.MONDAY_REPORT_API_BASE ?? "http://127.0.0.1:8000";
+
+// Hard verification-isolation gate (Part E): fail closed BEFORE launching a
+// browser or hitting any endpoint, so a misconfigured test:ui run can never
+// touch the live web/API/state. Delegates to the single Python preflight.
+try {
+  execFileSync(
+    "python",
+    [path.join(root, "scripts", "verification_isolation.py"), "--context", "test-ui"],
+    { stdio: "inherit" },
+  );
+} catch {
+  console.error("FAIL: verification isolation - refusing to run test:ui against a non-isolated target.");
+  process.exit(2);
+}
 const screenshotDir = path.join(root, "output", "screenshots", "ui-quality");
 const manifestPath = path.join(root, "output", "qa", "ui_quality_e2e_manifest.json");
 const uploadFixturePath = path.join(root, "output", "qa", "ui_upload_fixture.txt");

@@ -54,24 +54,52 @@ def test_database_url() -> str | None:
     return os.environ.get("MONDAY_REPORT_TEST_DATABASE_URL")
 
 
-def _dbname(url: str) -> str:
-    return urlsplit(url).path.lstrip("/")
+def _parse_conninfo(url: str) -> dict:
+    """Structured parse of a DSN in EITHER supported libpq form.
 
+    psycopg accepts both the URL form (``postgresql://...``) and the keyword/value
+    form (``host=... dbname=... password=...``). ``urlsplit`` only understands the
+    former: given keyword/value input it returns ``hostname=None`` and puts the
+    ENTIRE string — password included — into ``.path``. Returns ``{}`` when the
+    form cannot be determined, so callers can fail closed.
+    """
+    try:
+        from psycopg.conninfo import conninfo_to_dict
 
-def _host(url: str) -> str:
-    return (urlsplit(url).hostname or "").lower()
+        return dict(conninfo_to_dict(url))
+    except Exception:
+        parts = urlsplit(url)
+        if parts.scheme in {"postgres", "postgresql"}:
+            return {"dbname": parts.path.lstrip("/"), "host": parts.hostname or ""}
+        return {}
 
 
 def preflight_disposable_db(url: str) -> tuple[bool, str]:
-    """Refuse to run destructive setup unless the target is an explicitly
-    test-marked database on a local host. Never returns the DSN/password."""
-    name = _dbname(url)
-    host = _host(url)
+    """Refuse destructive setup unless the target is an explicitly test-marked
+    database on a loopback host.
+
+    FAIL-CLOSED. An unparseable DSN, a missing database name, or an
+    indeterminate host is REFUSED rather than allowed — an empty host previously
+    satisfied the local-host check, which would have permitted
+    ``drop schema public cascade`` against a remote server.
+
+    The returned reason NEVER interpolates the DSN, password, host or username;
+    it is recorded in the guard's stdout JSON.
+    """
+    info = _parse_conninfo(url)
+    if not info:
+        return False, "connection string could not be parsed; refusing destructive setup"
+    name = str(info.get("dbname") or "")
+    host = str(info.get("host") or "").strip().lower()
+    if not name:
+        return False, "connection string carries no database name; refusing destructive setup"
     if "test" not in name.lower():
-        return False, f"database name {name!r} lacks a 'test' marker; refusing destructive setup"
-    if host not in {"localhost", "127.0.0.1", "::1", ""}:
-        return False, f"host {host!r} is not local; refusing to run against a shared/remote DB"
-    return True, f"disposable db ok (name={name}, host={host or 'local'})"
+        return False, "database name lacks a 'test' marker; refusing destructive setup"
+    if not host:
+        return False, "connection string carries no explicit host; refusing destructive setup"
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        return False, "target host is not loopback; refusing to run against a shared/remote DB"
+    return True, "disposable db ok (test-marked database name on a loopback host)"
 
 
 def pg_reachable(url: str) -> bool:
@@ -144,17 +172,25 @@ def schema_migrations_rows(url: str) -> list[dict]:
 # Helpers for temp migration subsets / mutations
 # --------------------------------------------------------------------------- #
 def copy_subset(dest: Path, migrations, versions: set[int]) -> Path:
+    """Copy a subset of migrations BYTE-FOR-BYTE.
+
+    ``newline=""`` is mandatory: checksums are computed over ``path.read_bytes()``
+    (see ``discover_migrations``), and Python's text mode would otherwise
+    translate ``\\n`` to ``\\r\\n`` on Windows. That silently changes the raw bytes
+    and therefore the SHA-256, making a faithful copy look like checksum drift.
+    """
     dest.mkdir(parents=True, exist_ok=True)
     for m in migrations:
         if m.version in versions:
-            (dest / m.filename).write_text(m.sql, encoding="utf-8")
+            (dest / m.filename).write_text(m.sql, encoding="utf-8", newline="")
     return dest
 
 
 def write_dir(dest: Path, files: dict[str, str]) -> Path:
+    """Write literal SQL files with no newline translation (see ``copy_subset``)."""
     dest.mkdir(parents=True, exist_ok=True)
     for name, sql in files.items():
-        (dest / name).write_text(sql, encoding="utf-8")
+        (dest / name).write_text(sql, encoding="utf-8", newline="")
     return dest
 
 
@@ -174,10 +210,18 @@ def canonical_payload_sha256(payload: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def build_evidence(pg_ran: bool, server_version: str | None, scenarios: dict, generated_at: str) -> dict:
+def build_evidence(pg_ran: bool, server_version: str | None, scenarios: dict, generated_at: str,
+                   totals: dict | None = None) -> dict:
     import backend.app.migrations as M
 
-    migrations = M.discover_migrations()
+    migrations = M.discover_migrations()  # immutable legacy sequence (the committed db/migrations/)
+    baseline = M.discover_migrations(M.BASELINE_DIR)  # corrected supported baseline
+    # Report what ACTUALLY applied on the real database, not the on-disk version list.
+    # The legacy sequence does NOT apply (0003 references tables that never existed), so
+    # claiming applied_versions == [1, 2, 3] would misrepresent the run.
+    fresh = scenarios.get("fresh_apply") or {}
+    legacy_result = scenarios.get("legacy_apply_result") or {}
+    baseline_applied = list(fresh.get("applied") or []) if pg_ran else []
     payload: dict = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -186,21 +230,51 @@ def build_evidence(pg_ran: bool, server_version: str | None, scenarios: dict, ge
         "worktree_clean": _git(["status", "--porcelain"]) == "",
         "runner_version": M.RUNNER_VERSION,
         "postgres_server_version": server_version,
+        "postgres_image_digest": os.environ.get("MONDAY_REPORT_TEST_PG_IMAGE_DIGEST") or None,
         "migration_set_sha256": M.migration_set_sha256(migrations),
+        "baseline_migration_set_sha256": M.migration_set_sha256(baseline),
         "migration_count": len(migrations),
-        "applied_versions": [m.version for m in migrations],
-        "skipped_versions": [],
+        "legacy_migration_versions": [m.version for m in migrations],
+        "legacy_apply_ok": bool(legacy_result.get("ok")) if pg_ran else None,
+        "legacy_failed_version": legacy_result.get("failed_version") if pg_ran else None,
+        "baseline_applied_versions": baseline_applied,
+        "check_totals": dict(totals or {}),
         "checksums": {m.filename: m.checksum_sha256 for m in migrations},
+        "baseline_checksums": {m.filename: m.checksum_sha256 for m in baseline},
+        "legacy_apply_result": scenarios.get("legacy_apply_result"),
         "fresh_apply_result": scenarios.get("fresh_apply"),
         "rerun_result": scenarios.get("rerun"),
         "partial_upgrade_result": scenarios.get("partial_upgrade"),
         "concurrency_result": scenarios.get("concurrency"),
         "rollback_result": scenarios.get("rollback"),
         "checksum_drift_result": scenarios.get("checksum_drift"),
-        "status": "passed" if pg_ran else "BLOCKED_NO_POSTGRES",
+        "status": _evidence_status(pg_ran, totals),
     }
     payload["payload_sha256"] = canonical_payload_sha256(payload)
     return payload
+
+
+def _evidence_status(pg_ran: bool, totals: dict | None) -> str:
+    """`passed` requires a real database AND a clean run.
+
+    Keying the status off database reachability alone let a run with FAILING
+    checks emit an artifact claiming `"passed"`. `ga_readiness` gates
+    `ga_migration_runner` on exactly this field, so that would have flipped the
+    blocker to PASS on a failed run. Any skip also disqualifies: partial coverage
+    is not proof.
+    """
+    if not pg_ran:
+        return "BLOCKED_NO_POSTGRES"
+    counts = dict(totals or {})
+    if not counts:
+        return "BLOCKED_TOTALS_UNKNOWN"
+    if counts.get("failed", 0):
+        return "BLOCKED_FAILING_CHECKS"
+    if counts.get("skipped", 0):
+        return "BLOCKED_SKIPPED_CHECKS"
+    if counts.get("passed", 0) <= 0:
+        return "BLOCKED_TOTALS_UNKNOWN"
+    return "passed"
 
 
 # --------------------------------------------------------------------------- #
@@ -221,8 +295,11 @@ def main() -> int:
 
     import backend.app.migrations as M
 
-    migrations = M.discover_migrations()
+    migrations = M.discover_migrations()  # legacy sequence (db/migrations/, immutable)
     versions = [m.version for m in migrations]
+    baseline = M.discover_migrations(M.BASELINE_DIR)  # corrected fresh-install baseline
+    static_legacy = M.validate_migration_set(migrations)
+    static_baseline = M.validate_migration_set(baseline)
 
     # ---- Group A: file/version contract (no PG) ----
     record("01 discovers exactly the committed migration sequence", versions == [1, 2, 3], versions)
@@ -241,9 +318,10 @@ def main() -> int:
     record("07 migration_set_sha256 stable + changes on any byte change",
            set_sha_1 == M.migration_set_sha256(migrations) and set_sha_1 != M.migration_set_sha256(mutated),
            set_sha_1[:12])
-    static_real = M.validate_migration_set(migrations)
-    record("08 0003 references only tables created by earlier migrations (Part D fix)",
-           static_real.ok and not static_real.broken_references, static_real.broken_references)
+    record("08 legacy static validator DETECTS 0003's broken FK targets (validity gap present, immutable)",
+           (not static_legacy.ok)
+           and {"projects", "reports"} <= {b["missing_target"] for b in static_legacy.broken_references},
+           static_legacy.broken_references)
     with tempfile.TemporaryDirectory() as d:
         bad = write_dir(Path(d) / "badname", {"1_x.sql": "select 1;"})
         try:
@@ -259,9 +337,25 @@ def main() -> int:
             dup_rejected = True
     record("09 bad filename + duplicate version are rejected", filename_rejected and dup_rejected,
            {"filename": filename_rejected, "dup": dup_rejected})
+    # Regression: the harness itself must reproduce migrations byte-for-byte. Text-mode
+    # writes translate \n -> \r\n on Windows, which changes the raw bytes the checksum is
+    # taken over and makes a faithful copy indistinguishable from checksum drift. That
+    # defect silently broke the partial-history scenarios (34-37) on real PostgreSQL.
+    with tempfile.TemporaryDirectory() as d:
+        faithful = copy_subset(Path(d) / "faithful", baseline, {1, 2, 3})
+        copied = M.discover_migrations(faithful)
+        copy_checksums_match = ([c.checksum_sha256 for c in copied]
+                                == [b.checksum_sha256 for b in baseline])
+        copy_bytes_identical = all((faithful / b.filename).read_bytes() == b.path.read_bytes()
+                                   for b in baseline)
+    record("09b guard harness copies migrations byte-for-byte (no newline translation)",
+           copy_checksums_match and copy_bytes_identical,
+           {"checksums_match": copy_checksums_match, "bytes_identical": copy_bytes_identical})
 
     # ---- Group B: static validator (no PG) ----
-    record("10 static validator passes on the real sequence", static_real.ok, static_real.ok)
+    record("10 corrected baseline (db/baseline/) static validator passes — fresh-install valid",
+           static_baseline.ok and not static_baseline.broken_references and [m.version for m in baseline] == [1, 2, 3],
+           {"ok": static_baseline.ok, "baseline_files": [m.filename for m in baseline]})
     with tempfile.TemporaryDirectory() as d:
         badref = write_dir(Path(d) / "badref", {
             "0001_base.sql": "create table tenants (id uuid primary key);",
@@ -271,8 +365,8 @@ def main() -> int:
     record("11 static validator DETECTS a missing FK target (negative)",
            (not neg.ok) and neg.broken_references and neg.broken_references[0]["missing_target"] == "projects",
            neg.broken_references)
-    record("12 static validator documents limitations + is supplemental", len(static_real.limitations) >= 2,
-           len(static_real.limitations))
+    record("12 static validator documents limitations + is supplemental", len(static_legacy.limitations) >= 2,
+           len(static_legacy.limitations))
     with tempfile.TemporaryDirectory() as d:
         sib = write_dir(Path(d) / "sib", {
             "0001_two.sql": "create table a (id uuid primary key);\ncreate table b (id uuid, a_id uuid references a(id));",
@@ -304,14 +398,15 @@ def main() -> int:
         for n in range(14, 48):
             skip(f"{n:02d} real-PostgreSQL scenario", safe_reason)
     else:
+        BASE = M.BASELINE_DIR  # corrected sequence used for the runner-mechanics + fresh-install proofs
         with _connect(url) as c:
             server_version = M._server_version(c)
 
-        # ---- Group C: metadata + immutability (PG) ----
+        # ---- Group C: metadata + immutability (baseline, PG) ----
         reset_public_schema(url)
-        res = M.apply_migrations(url)
-        record("14 schema_migrations created + fresh apply ok", res.ok and set(res.applied and [a["version"] for a in res.applied]) == {1, 2, 3},
-               res.to_dict())
+        res = M.apply_migrations(url, migrations_dir=BASE)
+        record("14 schema_migrations created + baseline fresh apply ok",
+               res.ok and [a["version"] for a in res.applied] == [1, 2, 3], res.to_dict())
         with _connect(url) as c:
             cols = [r[0] for r in c.execute(
                 "select column_name from information_schema.columns where table_name='schema_migrations' order by ordinal_position"
@@ -321,7 +416,7 @@ def main() -> int:
         rows = schema_migrations_rows(url)
         by_v = {r["version"]: r for r in rows}
         record("16 one metadata row per migration; checksum matches file",
-               len(rows) == 3 and all(by_v[m.version]["checksum_sha256"] == m.checksum_sha256 for m in migrations),
+               len(rows) == 3 and all(by_v[m.version]["checksum_sha256"] == m.checksum_sha256 for m in baseline),
                {"rows": len(rows)})
         record("17 runner_version recorded == RUNNER_VERSION",
                all(r["runner_version"] == M.RUNNER_VERSION for r in rows), M.RUNNER_VERSION)
@@ -331,9 +426,9 @@ def main() -> int:
 
         # checksum drift (Part F): mutate an applied migration on disk (temp copy) -> refuse
         with tempfile.TemporaryDirectory() as d:
-            drift_dir = copy_subset(Path(d) / "drift", migrations, {1, 2, 3})
+            drift_dir = copy_subset(Path(d) / "drift", baseline, {1, 2, 3})
             p = drift_dir / migrations[0].filename
-            p.write_text(migrations[0].sql + "\n-- drift\n", encoding="utf-8")
+            p.write_text(migrations[0].sql + "\n-- drift\n", encoding="utf-8", newline="")
             drift_res = M.apply_migrations(url, migrations_dir=drift_dir)
         record("19 checksum drift on an applied migration is refused (never rewritten)",
                (not drift_res.ok) and drift_res.drift, drift_res.drift)
@@ -344,31 +439,30 @@ def main() -> int:
         scenarios["checksum_drift"] = {"refused": (not drift_res.ok), "drift": drift_res.drift}
 
         # ---- Group D: fresh apply / validity (PG) ----
-        record("21 fresh full-sequence apply succeeds on real PostgreSQL (validity)", res.ok, res.server_version)
+        record("21 baseline fresh apply succeeds on real PostgreSQL (fresh-install validity)", res.ok, res.server_version)
         expected_tables = ["tenants", "workspaces", "monday_reports", "benchmark_measurements",
                            "anomaly_events", "key_decisions", "report_approvals", "monday_report_state_snapshots"]
         present = {t: table_exists(url, t) for t in expected_tables}
-        record("22 all expected tables exist after apply", all(present.values()), present)
+        record("22 all expected tables exist after baseline apply", all(present.values()), present)
         fk_meas = fk_target(url, "benchmark_measurements", "workspace_id")
         fk_appr = fk_target(url, "report_approvals", "report_id")
-        record("23 corrected FK targets exist on real PG (workspaces / monday_reports)",
+        record("23 corrected baseline FK targets exist on real PG (workspaces / monday_reports)",
                fk_meas == "workspaces" and fk_appr == "monday_reports", {"measurement": fk_meas, "approval": fk_appr})
         record("24 RLS enabled on tenant tables", rls_enabled(url, "workspaces") and rls_enabled(url, "benchmark_measurements"),
                True)
         record("25 real PostgreSQL server_version reported", bool(server_version), server_version)
-        # ORIGINAL broken 0003 (projects/reports) must FAIL on real PG
+        # The ACTUAL immutable LEGACY sequence (db/migrations/, original 0003) must FAIL on real PG,
+        # proving the validity gap is real and migration-validity genuinely stays BLOCKED.
         reset_public_schema(url)
-        with tempfile.TemporaryDirectory() as d:
-            broken = copy_subset(Path(d) / "broken", migrations, {1, 2})
-            (broken / "0003_broken.sql").write_text(
-                "create table bad_meas (id uuid primary key, project_id uuid references projects(id));",
-                encoding="utf-8")
-            broken_res = M.apply_migrations(url, migrations_dir=broken)
-        record("26 pre-fix names (references projects/reports) FAIL on real PG",
-               (not broken_res.ok) and broken_res.error is not None, broken_res.error)
-        # restore full apply for subsequent scenarios
+        legacy_res = M.apply_migrations(url, migrations_dir=M.MIGRATIONS_DIR)
+        record("26 immutable LEGACY sequence FAILS on real PG at 0003 (validity gap real -> BLOCKED)",
+               (not legacy_res.ok) and legacy_res.error and legacy_res.error.get("version") == 3
+               and not table_exists(url, "projects") and not table_exists(url, "reports"),
+               legacy_res.error)
+        scenarios["legacy_apply_result"] = {"ok": legacy_res.ok, "failed_version": legacy_res.error and legacy_res.error.get("version")}
+        # restore baseline apply for subsequent scenarios
         reset_public_schema(url)
-        res2 = M.apply_migrations(url)
+        res2 = M.apply_migrations(url, migrations_dir=BASE)
         record("27 document_chunks generated tsvector column exists", table_exists(url, "document_chunks"), True)
         with _connect(url) as c:
             gen = c.execute(
@@ -378,51 +472,51 @@ def main() -> int:
         scenarios["fresh_apply"] = {"ok": res2.ok, "applied": [a["version"] for a in res2.applied]}
 
         # ---- Group E: idempotent rerun (PG) ----
-        rerun = M.apply_migrations(url)
+        rerun = M.apply_migrations(url, migrations_dir=BASE)
         record("29 rerun is a no-op (0 applied, all skipped)", rerun.ok and not rerun.applied and set(rerun.skipped) == {1, 2, 3},
                rerun.to_dict())
         record("30 schema_migrations row count stable after rerun", len(schema_migrations_rows(url)) == 3, True)
-        st = M.migration_status(url)
+        st = M.migration_status(url, migrations_dir=BASE)
         record("31 status reports no pending after full apply", st["pending"] == [] and st["applied"] == [1, 2, 3], st["pending"])
         scenarios["rerun"] = {"ok": rerun.ok, "applied": rerun.applied, "skipped": rerun.skipped}
 
         # ---- Group F: partial upgrades (Part L) ----
         # empty -> full
         reset_public_schema(url)
-        empty_full = M.apply_migrations(url)
+        empty_full = M.apply_migrations(url, migrations_dir=BASE)
         record("32 from EMPTY database -> reaches head", empty_full.ok and [a["version"] for a in empty_full.applied] == [1, 2, 3],
                True)
         # metadata-only (table exists, no rows)
         reset_public_schema(url)
         with _connect(url) as c:
             M._ensure_schema_migrations(c)
-        meta_only = M.apply_migrations(url)
+        meta_only = M.apply_migrations(url, migrations_dir=BASE)
         record("33 from metadata-only -> applies all", meta_only.ok and [a["version"] for a in meta_only.applied] == [1, 2, 3], True)
         # first-1 applied -> continue
         reset_public_schema(url)
         with tempfile.TemporaryDirectory() as d:
-            one = copy_subset(Path(d) / "one", migrations, {1})
+            one = copy_subset(Path(d) / "one", baseline, {1})
             M.apply_migrations(url, migrations_dir=one)
-            cont = M.apply_migrations(url)  # full dir now applies 2,3
+            cont = M.apply_migrations(url, migrations_dir=BASE)  # full dir now applies 2,3
         record("34 from first-1-applied -> applies 0002,0003", cont.ok and [a["version"] for a in cont.applied] == [2, 3] and cont.skipped == [1],
                cont.to_dict())
         # first-2 applied -> continue
         reset_public_schema(url)
         with tempfile.TemporaryDirectory() as d:
-            two = copy_subset(Path(d) / "two", migrations, {1, 2})
+            two = copy_subset(Path(d) / "two", baseline, {1, 2})
             M.apply_migrations(url, migrations_dir=two)
-            cont2 = M.apply_migrations(url)
+            cont2 = M.apply_migrations(url, migrations_dir=BASE)
         record("35 from first-2-applied -> applies 0003", cont2.ok and [a["version"] for a in cont2.applied] == [3], cont2.to_dict())
         # interrupted-before-metadata: 0003 present on disk but not recorded -> applies 0003
         record("36 interrupted-before-metadata state -> resumes at 0003", cont2.ok and cont2.skipped == [1, 2], cont2.skipped)
         # current (all applied) -> no-op
-        current = M.apply_migrations(url)
+        current = M.apply_migrations(url, migrations_dir=BASE)
         record("37 current (all applied) -> no-op", current.ok and not current.applied, current.applied)
         # unknown deployed version recorded -> refuse (validity stays honest, Part L)
         with _connect(url) as c:
             c.execute("insert into schema_migrations (version, filename, checksum_sha256, execution_ms, runner_version) "
                      "values (9999, 'x.sql', 'deadbeef', 0, 'x')")
-        unknown = M.apply_migrations(url)
+        unknown = M.apply_migrations(url, migrations_dir=BASE)
         with _connect(url) as c:
             c.execute("delete from schema_migrations where version = 9999")
         record("38 unknown recorded version (not on disk) -> drift refusal", (not unknown.ok) and unknown.drift, unknown.drift)
@@ -432,7 +526,7 @@ def main() -> int:
         # ---- Group G: failure / rollback (PG) ----
         reset_public_schema(url)
         with tempfile.TemporaryDirectory() as d:
-            faildir = copy_subset(Path(d) / "fail", migrations, {1})
+            faildir = copy_subset(Path(d) / "fail", baseline, {1})
             (faildir / "0002_fails.sql").write_text(
                 "create table good_before (id uuid primary key);\n"
                 "create table bad_ref (id uuid primary key, x uuid references does_not_exist(id));",
@@ -458,7 +552,7 @@ def main() -> int:
 
         def worker():
             try:
-                results.append(M.apply_migrations(url))
+                results.append(M.apply_migrations(url, migrations_dir=BASE))
             except Exception as exc:  # noqa: BLE001
                 errors.append(M._redact(str(exc)))
 
@@ -470,9 +564,27 @@ def main() -> int:
         both_ok = len(results) == 2 and all(r.ok for r in results) and not errors
         record("44 two concurrent apply runs both succeed (advisory lock serializes)", both_ok, {"errors": errors})
         record("45 exactly one metadata row per version after concurrent runs", len(schema_migrations_rows(url)) == 3, True)
-        record("46 advisory-lock key is stable/deterministic",
-               M.ADVISORY_LOCK_KEY == M.ADVISORY_LOCK_KEY and isinstance(M.ADVISORY_LOCK_KEY, int), M.ADVISORY_LOCK_KEY)
-        after = M.apply_migrations(url)  # lock must be free
+        # Recompute the key from its DOCUMENTED derivation and confirm a SEPARATE
+        # interpreter derives the same value. Comparing the attribute to itself
+        # (`X == X`) proved nothing: a random key would still have passed.
+        expected_lock_key = int.from_bytes(
+            hashlib.sha256(b"monday_report.schema_migrations.v1").digest()[:8], "big", signed=True
+        )
+        other_proc = subprocess.run(
+            [sys.executable, "-c",
+             "import sys;sys.path.insert(0,r'" + str(ROOT) + "');"
+             "import backend.app.migrations as m;print(m.ADVISORY_LOCK_KEY)"],
+            capture_output=True, text=True, cwd=str(ROOT),
+        )
+        cross_proc_key = other_proc.stdout.strip()
+        record("46 advisory-lock key is deterministic (documented derivation, stable across processes)",
+               isinstance(M.ADVISORY_LOCK_KEY, int)
+               and M.ADVISORY_LOCK_KEY == expected_lock_key
+               and cross_proc_key == str(expected_lock_key)
+               and -(2 ** 63) <= M.ADVISORY_LOCK_KEY < 2 ** 63,
+               {"matches_derivation": M.ADVISORY_LOCK_KEY == expected_lock_key,
+                "cross_process_match": cross_proc_key == str(expected_lock_key)})
+        after = M.apply_migrations(url, migrations_dir=BASE)  # lock must be free
         record("47 advisory lock released after run (subsequent run proceeds)", after.ok and not after.applied, True)
         applied_once = sorted(v for r in results for v in [a["version"] for a in r.applied])
         scenarios["concurrency"] = {"both_ok": both_ok, "applied_union": applied_once}
@@ -483,13 +595,70 @@ def main() -> int:
     record("48 evidence payload_sha256 independently recomputes", synth["payload_sha256"] == canonical_payload_sha256(synth),
            synth["payload_sha256"][:12])
     required_keys = {"schema_version", "git_commit", "git_tree", "worktree_clean", "runner_version",
-                     "postgres_server_version", "migration_set_sha256", "migration_count", "checksums",
+                     "postgres_server_version", "postgres_image_digest", "migration_set_sha256",
+                     "baseline_migration_set_sha256", "migration_count", "checksums", "baseline_checksums",
+                     "legacy_migration_versions", "legacy_apply_ok", "baseline_applied_versions",
+                     "check_totals", "legacy_apply_result",
                      "fresh_apply_result", "rerun_result", "partial_upgrade_result", "concurrency_result",
                      "rollback_result", "checksum_drift_result", "status", "payload_sha256"}
     record("49 evidence has all required keys", required_keys.issubset(synth.keys()), sorted(required_keys - set(synth.keys())))
     ev_blob = json.dumps(synth).lower()
     record("50 evidence excludes secrets (no password/DSN/absolute path/username)",
            "password" not in ev_blob and "postgres://" not in ev_blob and ":\\" not in ev_blob, True)
+
+    # --- Fail-closed preflight (regression) ---------------------------------- #
+    # An empty/indeterminate host previously satisfied the local-host allow-set,
+    # and the raw DSN (password included) was interpolated into the recorded
+    # reason. Both libpq forms must be handled; unknown => REFUSE.
+    pf_vectors = [
+        ("host=db.prod.example.com dbname=mr_test password=hunter2 user=admin", False, "hunter2"),
+        ("host=db.prod.example.com dbname=mr_test user=admin", False, None),
+        ("postgresql://u:sekret@10.0.0.5:5432/mr_test", False, "sekret"),
+        ("dbname=mr_test password=hunter2", False, "hunter2"),          # no host -> refuse
+        ("postgresql://u:sekret@127.0.0.1:5432/prod_main", False, "sekret"),  # not test-marked
+        ("not a dsn at all", False, None),
+    ]
+    pf_ok, pf_leaks = True, []
+    for dsn, expected, secret in pf_vectors:
+        allowed, reason = preflight_disposable_db(dsn)
+        if allowed != expected:
+            pf_ok = False
+        if secret and secret in reason:
+            pf_leaks.append(secret)
+        if dsn in reason:
+            pf_leaks.append("full-dsn")
+    loop_ok, loop_reason = preflight_disposable_db("postgresql://u:s@127.0.0.1:5432/mr_test")
+    record("50b preflight fails closed on remote / hostless / unparseable / non-test DSNs (both libpq forms)",
+           pf_ok and loop_ok, {"vectors_fail_closed": pf_ok, "loopback_test_db_allowed": loop_ok})
+    record("50c preflight reason never echoes the DSN, password or host",
+           not pf_leaks and "127.0.0.1" not in loop_reason and "hunter2" not in loop_reason,
+           {"leaks": pf_leaks})
+    record("50d evidence status is 'passed' ONLY for a real DB with 0 failed and 0 skipped",
+           _evidence_status(False, {"passed": 9, "skipped": 0, "failed": 0}) == "BLOCKED_NO_POSTGRES"
+           and _evidence_status(True, {"passed": 9, "skipped": 0, "failed": 4}) != "passed"
+           and _evidence_status(True, {"passed": 9, "skipped": 3, "failed": 0}) != "passed"
+           and _evidence_status(True, None) != "passed"
+           and _evidence_status(True, {"passed": 0, "skipped": 0, "failed": 0}) != "passed"
+           and _evidence_status(True, {"passed": 9, "skipped": 0, "failed": 0}) == "passed",
+           {"failed_run_status": _evidence_status(True, {"passed": 9, "skipped": 0, "failed": 4})})
+
+    # 50e: _redact must strip credentials AND network location AND absolute paths.
+    # libpq reports host/port/user as free-form prose, and the Windows-path pattern
+    # previously required a doubled backslash so no real path was ever redacted.
+    redact_vectors = [
+        'connection to server at "10.0.0.5", port 6543 failed: FATAL: '
+        'password authentication failed for user "appuser"',
+        "connect failed for dbname=mr_test user=admin password=hunter2 host=prod.example.com port=5432",
+        'Could not open extension control file "C:\\Program Files\\PostgreSQL\\16\\share\\ext\\vector.control"',
+        "dsn postgresql://u:sekret@10.0.0.5:5432/db failed",
+    ]
+    forbidden = ("10.0.0.5", "6543", "appuser", "hunter2", "admin",
+                 "prod.example.com", "sekret", "Program Files")
+    redact_leaks = [t for v in redact_vectors for t in forbidden if t in M._redact(v)]
+    record("50e _redact strips DSN, password, host, port, user and absolute paths",
+           not redact_leaks, {"leaks": sorted(set(redact_leaks))})
+    record("50f _redact preserves the diagnostic cause (no over-redaction)",
+           'relation "projects" does not exist' in M._redact('relation "projects" does not exist'), True)
 
     import backend.app.ga_readiness as G
 
@@ -520,8 +689,26 @@ def main() -> int:
     record("54 runner is NOT wired into API startup (no import-time apply)",
            "apply_migrations" not in main_src,
            {"apply_migrations_in_main": "apply_migrations" in main_src})
-    # migrations.py imports without a live psycopg connection / DB
-    record("55 migrations module imports with no DB (lazy psycopg)", hasattr(M, "apply_migrations") and hasattr(M, "discover_migrations"), True)
+    # Prove laziness for real: import the module in a SUBPROCESS with psycopg
+    # masked out of sys.modules. Two hasattr() calls on an already-imported
+    # module proved nothing — they pass even with a module-scope import.
+    lazy_probe = subprocess.run(
+        [sys.executable, "-c",
+         "import sys;sys.path.insert(0,r'" + str(ROOT) + "');"
+         "import builtins;_real=builtins.__import__\n"
+         "def _blocked(name,*a,**k):\n"
+         "    if name=='psycopg' or name.startswith('psycopg.'): raise ImportError('psycopg masked')\n"
+         "    return _real(name,*a,**k)\n"
+         "builtins.__import__=_blocked\n"
+         "import backend.app.migrations as m\n"
+         "assert hasattr(m,'apply_migrations') and hasattr(m,'discover_migrations')\n"
+         "m.discover_migrations()\n"
+         "print('LAZY_OK')"],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    record("55 migrations module imports and discovers with psycopg UNAVAILABLE (lazy driver import)",
+           "LAZY_OK" in lazy_probe.stdout,
+           {"stdout": lazy_probe.stdout.strip()[-40:], "stderr": lazy_probe.stderr.strip()[-120:]})
     live_state = Path(os.environ.get("MONDAY_REPORT_STATE_PATH", ""))
     record("56 guard uses isolated state (live .local_data untouched)",
            ".local_data" not in str(live_state) and str(tmp_root) in str(live_state), str(live_state))
@@ -533,7 +720,15 @@ def main() -> int:
         if pg_on:
             from datetime import datetime, timezone
 
-            stamped = build_evidence(True, server_version, scenarios, datetime.now(timezone.utc).isoformat())
+            # Bind the artifact to the run totals so a skipped/failed run cannot be
+            # presented as a clean zero-skip proof.
+            emit_totals = {
+                "passed": len([c for c in checks if c["ok"] and not c["skipped"]]),
+                "skipped": len([c for c in checks if c["skipped"]]),
+                "failed": len([c for c in checks if not c["ok"]]),
+            }
+            stamped = build_evidence(True, server_version, scenarios,
+                                     datetime.now(timezone.utc).isoformat(), emit_totals)
         else:
             stamped = synth  # BLOCKED_NO_POSTGRES evidence
         EVIDENCE_PATH.parent.mkdir(parents=True, exist_ok=True)

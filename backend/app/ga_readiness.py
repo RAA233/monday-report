@@ -643,6 +643,20 @@ def _migration_evidence_valid() -> tuple[bool, list[str], dict | None]:
         current = None
     if current is not None and payload.get("migration_set_sha256") != current:
         reasons.append("evidence is stale: the migration set changed after the evidence was generated")
+    # The scenarios the evidence actually executes run against db/baseline/, so
+    # binding only the legacy hash left the exercised bytes unverified: the
+    # baseline could change freely without ever invalidating the evidence.
+    try:
+        import backend.app.migrations as _mig
+
+        baseline_current = _mig.migration_set_sha256(_mig.discover_migrations(_mig.BASELINE_DIR))
+    except Exception as exc:  # noqa: BLE001
+        reasons.append(f"could not recompute baseline migration set: {exc.__class__.__name__}")
+        baseline_current = None
+    if baseline_current is not None and payload.get("baseline_migration_set_sha256") != baseline_current:
+        reasons.append(
+            "evidence is stale: the baseline migration set changed after the evidence was generated"
+        )
     return (not reasons), reasons, payload
 
 

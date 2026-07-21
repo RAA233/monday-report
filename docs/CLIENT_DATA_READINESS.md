@@ -186,17 +186,29 @@ external anchor**, so `audit-tail-truncation-detection` stays **BLOCKED**,
 ## Database migrations (migration-runner, migration-validity)
 
 A deterministic, idempotent migration runner (`backend/app/migrations.py`,
-`docs/POSTGRES_MIGRATIONS.md`, `audit:migration-runner`) applies `db/migrations/`
-under a session-level advisory lock with per-migration transactions, tracking
-applied versions in a `schema_migrations` table; it is an explicit operator
-command, never run on API startup. Migration `0003` — provably unapplied — was
-corrected so its foreign keys target the tables the sequence actually creates
-(`workspaces`/`monday_reports`, not the divergent `schema.sql` names
-`projects`/`reports`). `ga_migration_runner` and `ga_migration_validity` are
-**evidence-driven** and PASS **only** with committed **real-PostgreSQL** passing
-evidence bound to the current migration bytes and a clean tree. No PostgreSQL was
-reachable in the build environment (Docker Desktop's engine could not start
-non-interactively without administrator elevation), so the evidence is
-`BLOCKED_NO_POSTGRES` and **both controls remain BLOCKED**; normalized
-persistence, active RLS, transaction/atomicity, and backup/restore stay BLOCKED
-and `ga:readiness` stays `GA_BLOCKED`. The blocker registry is unchanged.
+`docs/POSTGRES_MIGRATIONS.md`, `audit:migration-runner`) applies a numbered
+`.sql` set under a session-level advisory lock with per-migration transactions,
+tracking applied versions in a `schema_migrations` table; it is an explicit
+operator command (`--set legacy|baseline`), never run on API startup. Migration
+`0003` in the immutable legacy set (`db/migrations/`) references
+`projects(id)`/`reports(id)` that no earlier legacy migration creates; it is kept
+**byte-immutable** (its "unpublished draft" status cannot be *proven*), so the
+legacy sequence is **un-appliable** and its validity stays **BLOCKED**. A
+corrected fresh-install **baseline** (`db/baseline/`, FK targets retargeted to
+`workspaces`/`monday_reports`) applies cleanly. `ga_migration_runner` and
+`ga_migration_validity` are **evidence-driven** and PASS **only** with committed
+**real-PostgreSQL** passing evidence; `ga_migration_validity` additionally
+re-runs the static validator on the immutable legacy set, so it stays BLOCKED
+while the committed legacy 0003 is invalid. A decisive real-PostgreSQL run has
+now executed against a disposable **PostgreSQL 16.14** (`pgvector/pgvector:pg16`;
+`0001` needs the `vector` extension, absent from stock `postgres:16`) with **59
+passed / 0 skipped / 0 failed**, and the legacy sequence failed on the real
+server at `0003` (`relation "projects" does not exist`). So
+`ga_migration_runner` is PASS-capable from committed evidence, while
+**`ga_migration_validity` remains BLOCKED**; normalized persistence, active RLS,
+transaction/atomicity, and backup/restore stay BLOCKED and `ga:readiness` stays
+`GA_BLOCKED`. The blocker registry is
+unchanged. A shared verification-isolation preflight
+(`scripts/verification_isolation.py`, `audit:verification-isolation`) now fails
+closed before any mutating integration command (`phase_audit`, `e2e`, UI/worker)
+can target the live API (8000) / web (5173) / `.local_data`.
