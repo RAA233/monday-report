@@ -114,9 +114,13 @@ class _PgRepositoryBase:
         only so the slice's foreign keys are enforceable. Never deleted here.
         """
         with self._txn_connection().cursor() as cursor:
+            # Keep slug current on conflict too: the composite tenant FK
+            # (tenant_id, tenant_slug) -> tenants(id, slug) added in migration
+            # 0006 requires the anchor's slug to match the slug written on every
+            # normalized row, so a stale anchor slug must not linger.
             cursor.execute(
                 "insert into tenants (id, name, slug) values (%s, %s, %s) "
-                "on conflict (id) do update set name = excluded.name",
+                "on conflict (id) do update set name = excluded.name, slug = excluded.slug",
                 (self._tenant_id, self._store.tenant.name, self._tenant_slug),
             )
             if workspace_id is not None:
@@ -370,6 +374,23 @@ def prune_missing_rows(store) -> dict[str, int]:
                 (base._tenant_id, keep))
             deleted[table] = cursor.rowcount
     return deleted
+
+
+def count_tenant_rows(store) -> dict[str, int]:
+    """Count this tenant's rows in each normalized table (owning txn scope).
+
+    Used to VERIFY the demo-seed reset actually deleted the preserved tenant's
+    rows before reseeding. Runs on the transaction connection so it observes
+    the just-executed prune within the same protected transaction.
+    """
+    base = _PgRepositoryBase(store)
+    counts: dict[str, int] = {}
+    with base._txn_connection().cursor() as cursor:
+        for table in (REPORTS_TABLE, CORRECTIONS_TABLE, TASKS_TABLE, OUTCOMES_TABLE):
+            cursor.execute(
+                f"select count(*) from {table} where tenant_id = %s", (base._tenant_id,))
+            counts[table] = int(cursor.fetchone()[0])
+    return counts
 
 
 def normalized_drift_report(store) -> list[str]:

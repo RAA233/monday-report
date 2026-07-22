@@ -355,8 +355,25 @@ class LocalStateStore:
         return any(log.action == "state.seed" for log in self.audit_logs)
 
     def _reset_clean_bootstrap(self) -> None:
-        self.tenant = self._configured_tenant()
-        self.user = self._configured_user(self.tenant.id)
+        # PRESERVE the persisted tenant/user IDENTITY across the data reset.
+        #
+        # The previous implementation reassigned ``self.tenant`` to a freshly
+        # minted ``_configured_tenant()`` whose id is a random uuid4. That
+        # rotated the tenant id on every reset and produced two failures on the
+        # normalized (postgres) backend:
+        #   (a) ``_normalized_prune_missing`` deletes rows WHERE tenant_id =
+        #       self.tenant.id; under the new id it matched nothing, so the
+        #       real (pre-reset) rows survived and resurrected on the next
+        #       refresh; and
+        #   (b) the next anchored write re-created the tenant row under the new
+        #       id while the old row (same slug) still existed, colliding on the
+        #       unique tenant slug and aborting the transaction permanently.
+        #
+        # A reseed resets DATA, not identity: the tenant id and slug loaded from
+        # the persisted state are preserved verbatim. First-time initialization
+        # (no persisted state) establishes the identity once, in _seed(), under
+        # the protected bootstrap transaction. This is deliberately NOT a
+        # general tenant-identity redesign.
         self.workspaces.clear()
         self.uploads.clear()
         self.files.clear()
@@ -371,10 +388,19 @@ class LocalStateStore:
         self.users.clear()
         self.api_credentials.clear()
         self.audit_logs.clear()
-        self._seed()
-        # The wipe must also cover normalized-authority rows, or the "clean
-        # workspace" invariant silently breaks on the postgres backend.
+        # Delete this tenant's normalized rows under the PRESERVED id, now that
+        # the in-memory keep-lists are empty, BEFORE reseeding. Deletion is
+        # verified (postgres backend) so a broken prune fails the reset loudly
+        # rather than silently leaving rows to resurrect on refresh.
         self._normalized_prune_missing()
+        self._verify_normalized_reset()
+        self._seed()
+
+    def _verify_normalized_reset(self) -> None:
+        # No-op on snapshot-authority backends (save() persists the cleared
+        # dicts). PostgresStateStore overrides this to assert the normalized
+        # tables hold zero rows for the preserved tenant after the prune.
+        return None
 
     @staticmethod
     def _configured_tenant() -> Tenant:
@@ -1292,6 +1318,33 @@ class LocalStateStore:
         )
         return task
 
+    def _register_validation_task(self, task: "ValidationTask") -> None:
+        """Create a new protected validation task WITH a linked audit event.
+
+        Every new protected task row carries a stable ``validation_task.create``
+        audit reference: the event is constructed in the SAME transaction and its
+        id is threaded into the normalized persist hook, so the normalized row,
+        the audit event, and (on the postgres backend) the snapshot revision
+        commit or roll back together. Prior code passed ``audit_event=None`` at
+        all three task-creation sites, persisting rows with a NULL audit
+        reference and breaking the "every protected mutation emits an audit
+        event" invariant.
+        """
+        self.validation_tasks[task.id] = task
+        event = self.audit(
+            "validation_task.create",
+            "validation_task",
+            task.id,
+            {
+                "target_type": task.target_type,
+                "target_id": str(task.target_id),
+                "priority": task.priority,
+                "status": task.status.value,
+            },
+            save=False,
+        )
+        self._normalized_persist_validation_create(task, event)
+
     # ------------------------------------------------------------------
     # Normalized-persistence hooks (Phase 04 slice).
     #
@@ -1905,8 +1958,7 @@ class LocalStateStore:
                     ),
                     priority="critical",
                 )
-                self.validation_tasks[task.id] = task
-                self._normalized_persist_validation_create(task, None)
+                self._register_validation_task(task)
                 self.audit(
                     "risk_watchlist.add",
                     "anomaly_event",
@@ -3823,8 +3875,7 @@ class LocalStateStore:
             ),
             priority="medium",
         )
-        self.validation_tasks[task.id] = task
-        self._normalized_persist_validation_create(task, None)
+        self._register_validation_task(task)
         return {
             "ok": True,
             "result": "ocr_routed",
@@ -4045,8 +4096,7 @@ class LocalStateStore:
             reason="Extracted MWD signal-loss failure requires reviewer confirmation before Monday Report export.",
             priority="high",
         )
-        self.validation_tasks[task.id] = task
-        self._normalized_persist_validation_create(task, None)
+        self._register_validation_task(task)
         return {"failure_ids": [failure.id], "validation_task_ids": [task.id]}
 
     def _failure_exists_for_upload(self, upload_id: UUID, event_type: str) -> bool:
@@ -7051,7 +7101,14 @@ class PostgresStateStore(LocalStateStore):
     # payload carries them as EMPTY lists plus an explicit marker; nothing ever
     # dual-writes them into the snapshot.
     NORMALIZED_ENTITY_KEYS = ("monday_reports", "field_corrections", "validation_tasks")
-    NORMALIZED_AUTHORITY_VERSION = 1
+    NORMALIZED_AUTHORITY_VERSION = 2
+    # Marker sub-fields written by the import tool that record the point-in-time
+    # cutover (counts, id digests, import-batch audit reference). They are the
+    # frozen import-faithfulness evidence: the store PRESERVES them verbatim
+    # across mutations so ``normalized_import verify`` can compare them to live
+    # rows (and correctly report a stale marker once live rows drift).
+    NORMALIZED_PROVENANCE_KEYS = ("tenant_slug", "imported_counts", "id_digests",
+                                  "import_audit", "accounting", "pre_cutover_revision")
 
     def request_idempotency_required(self) -> bool:
         """The idempotency-gated routes MUST present an ``Idempotency-Key`` here.
@@ -7080,15 +7137,41 @@ class PostgresStateStore(LocalStateStore):
         payload = super()._state_payload()
         for key in self.NORMALIZED_ENTITY_KEYS:
             payload[key] = []
-        payload["normalized_authority"] = {
+        marker = {
             "version": self.NORMALIZED_AUTHORITY_VERSION,
             "entities": list(self.NORMALIZED_ENTITY_KEYS),
         }
+        # Carry forward the frozen import provenance (if this snapshot was cut
+        # over by the import tool) so it is never destroyed by an app mutation.
+        prior = ((self._txn or {}).get("payload") or {}).get("normalized_authority") \
+            if isinstance(self._txn, dict) else None
+        if isinstance(prior, dict):
+            for key in self.NORMALIZED_PROVENANCE_KEYS:
+                if key in prior:
+                    marker[key] = prior[key]
+        payload["normalized_authority"] = marker
         return payload
 
     def refresh(self) -> None:
-        super().refresh()
-        self._load_normalized_entities()
+        # OWNER path: the writer loading the locked snapshot into its OWN private
+        # working state at transaction start (or re-reading inside its own
+        # transaction). It already holds _txn_lock; no extra coordination.
+        if self._owns_txn():
+            super().refresh()
+            self._load_normalized_entities()
+            return
+        # NON-OWNER path (a read route / worker / bootstrap probe): must NOT
+        # rebind the shared projection while another thread holds an active
+        # protected transaction -- doing so would replace that writer's
+        # uncommitted working state and tear the transaction (the confirmed
+        # defect). Acquire the SAME in-process lock the writer holds for the
+        # whole transaction: this blocks until the writer has committed or
+        # rolled back and PUBLISHED, so this refresh always observes a coherent
+        # COMMITTED projection, never a half-applied one. RLock keeps a
+        # same-thread re-entrant refresh safe.
+        with self._txn_lock:
+            super().refresh()
+            self._load_normalized_entities()
 
     def _refuse_unimported_snapshot(self, payload: dict | None) -> None:
         """Fail closed on a snapshot holding migrated entities un-cut-over.
@@ -7121,9 +7204,16 @@ class PostgresStateStore(LocalStateStore):
         from .repositories import (PgFieldCorrectionRepository, PgReportRepository,
                                    PgValidationTaskRepository)
 
-        self.monday_reports = {r.id: r for r in PgReportRepository(self).load_all()}
-        self.field_corrections = {c.id: c for c in PgFieldCorrectionRepository(self).load_all()}
-        self.validation_tasks = {t.id: t for t in PgValidationTaskRepository(self).load_all()}
+        # Build the COMPLETE normalized projection off to the side, then publish
+        # by rebinding the three dicts in an uninterrupted burst (each rebind is
+        # atomic under the GIL) so no reader observes a partially-loaded
+        # projection (e.g. new reports against old corrections).
+        reports = {r.id: r for r in PgReportRepository(self).load_all()}
+        corrections = {c.id: c for c in PgFieldCorrectionRepository(self).load_all()}
+        tasks = {t.id: t for t in PgValidationTaskRepository(self).load_all()}
+        self.monday_reports = reports
+        self.field_corrections = corrections
+        self.validation_tasks = tasks
 
     def _txn_operation_id(self) -> str | None:
         return self._txn.get("operation_id") if self._owns_txn() else None
@@ -7184,6 +7274,22 @@ class PostgresStateStore(LocalStateStore):
         # demo-seed self-wipe drop entities from the dicts; the rows they were
         # loaded from must go with them or they resurrect on the next refresh.
         prune_missing_rows(self)
+
+    def _verify_normalized_reset(self) -> None:
+        from .repositories import count_tenant_rows
+
+        # After the demo-seed reset prunes under the PRESERVED tenant id, the
+        # normalized tables must hold zero rows for this tenant. A non-zero
+        # count means the prune ran under the wrong tenant (the historical
+        # id-rotation defect) or failed; fail the bootstrap transaction loudly
+        # rather than reseed on top of surviving rows that would resurrect.
+        remaining = count_tenant_rows(self)
+        total = sum(remaining.values())
+        if total:
+            raise RuntimeError(
+                "normalized reset left rows for the preserved tenant "
+                f"({remaining}); the prune did not target the reset tenant"
+            )
 
     def __init__(self, url: str) -> None:
         self.database_url = url
@@ -7319,23 +7425,37 @@ class PostgresStateStore(LocalStateStore):
                     "operation_kind": idem.operation_kind,
                     "actor_id": idem.actor_id,
                 }
-            with self.snapshot_transaction(**txn_kwargs) as ctx:  # type: ignore[arg-type]
-                if ctx["replayed"]:
-                    # Do NOT re-apply the mutation. Load committed state and return
-                    # the previously committed logical result, reread under the
-                    # current request's scope. A replay never triggers the
-                    # lost-response hook below, so a retry after a lost response
-                    # returns the committed result instead of a second failure.
+            try:
+                with self.snapshot_transaction(**txn_kwargs) as ctx:  # type: ignore[arg-type]
+                    if ctx["replayed"]:
+                        # Do NOT re-apply the mutation. Load committed state and return
+                        # the previously committed logical result, reread under the
+                        # current request's scope. A replay never triggers the
+                        # lost-response hook below, so a retry after a lost response
+                        # returns the committed result instead of a second failure.
+                        self.refresh()
+                        return self._reconstruct_idempotent_result(ctx.get("result"))
+                    result = method(*args, **kwargs)
+                    if idem is not None and result is not None and hasattr(result, "id"):
+                        # Record a minimal result reference for future replays -- never
+                        # the full response body.
+                        ctx["result"] = {
+                            "result_kind": type(result).__name__,
+                            "result_identifier": str(result.id),
+                        }
+            except BaseException:
+                # The DB transaction rolled back, but the domain method may have
+                # already applied in-memory mutations to the shared instance dicts
+                # before the failure. Discard that uncommitted in-memory state by
+                # reloading the committed projection, so a rolled-back mutation
+                # cannot leak into a subsequent read (the non-owner refresh
+                # serializes against any concurrent writer). Best-effort: a refresh
+                # failure must not mask the original error.
+                try:
                     self.refresh()
-                    return self._reconstruct_idempotent_result(ctx.get("result"))
-                result = method(*args, **kwargs)
-                if idem is not None and result is not None and hasattr(result, "id"):
-                    # Record a minimal result reference for future replays -- never
-                    # the full response body.
-                    ctx["result"] = {
-                        "result_kind": type(result).__name__,
-                        "result_identifier": str(result.id),
-                    }
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
             # Reached ONLY after a FRESH keyed mutation has committed (the replay
             # path returned above; any pre-commit failure raised out of the
             # transaction). This is the exact "committed but the caller has not yet
@@ -7611,7 +7731,7 @@ class PostgresStateStore(LocalStateStore):
             return {key: cls._postgres_safe_json(item) for key, item in value.items()}
         return value
 
-    REQUIRED_MIGRATION = "0005_normalized_corrections.sql"
+    REQUIRED_MIGRATION = "0006_normalized_lineage_integrity.sql"
 
     def _verify_repository_schema(self) -> None:
         """Verify migration-owned schema exists. NEVER create or alter it.
@@ -7634,6 +7754,9 @@ class PostgresStateStore(LocalStateStore):
             "monday_report_norm_validation_tasks": ("revision", "doc"),
             "monday_report_norm_validation_outcomes": ("task_revision", "outcome"),
         }
+        # A 0006-specific artifact: a 0005-only database must fail closed so it
+        # cannot run without the lineage/tenant integrity constraints.
+        required_indexes = ("norm_corrections_lineage_anchor_uidx", "norm_tasks_id_tenant_uidx")
         missing: list[str] = []
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -7649,6 +7772,11 @@ class PostgresStateStore(LocalStateStore):
                     for column in columns:
                         if column not in present:
                             missing.append(f"{table}.{column}")
+                for index_name in required_indexes:
+                    cursor.execute(
+                        "select 1 from pg_indexes where indexname = %s", (index_name,))
+                    if cursor.fetchone() is None:
+                        missing.append(f"index {index_name}")
         if missing:
             raise RuntimeError(
                 "PostgreSQL schema is not migrated for transactional snapshots "
