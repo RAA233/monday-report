@@ -721,8 +721,8 @@ def _migration_validity_probe() -> tuple[str, str]:
 
 PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v3.json"
 PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v3"
-NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v1.json"
-NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v1"
+NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v2.json"
+NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v2"
 
 
 def _correction_atomicity_probe() -> tuple[str, str]:
@@ -779,8 +779,9 @@ def _correction_atomicity_probe() -> tuple[str, str]:
         baseline_versions = [m.version for m in _mig.discover_migrations(_mig.BASELINE_DIR)]
         if payload.get("migration_versions") != baseline_versions:
             reasons.append("evidence is bound to a different migration set")
-        if 5 not in (payload.get("migration_versions") or []):
-            reasons.append("evidence does not include migration 0005")
+        for _needed in (5, 6):
+            if _needed not in (payload.get("migration_versions") or []):
+                reasons.append(f"evidence does not include migration 000{_needed}")
     except Exception as exc:  # noqa: BLE001
         reasons.append(f"could not recompute migration set: {exc.__class__.__name__}")
     entities = payload.get("normalized_entities") or []
@@ -791,7 +792,13 @@ def _correction_atomicity_probe() -> tuple[str, str]:
     if "WITHOUT normalized cross-process guarantees" not in str(payload.get("source_of_truth", "")):
         reasons.append("evidence does not disclaim file/memory modes")
     for field in ("route_groups_result", "concurrency_result", "import_result",
-                  "tenant_rls_result", "audit_chain_result", "hmac_result"):
+                  "tenant_rls_result", "audit_chain_result", "hmac_result",
+                  # independent-review corrections (defects 1-10):
+                  "supersession_import_result", "tenant_preserving_reset_result",
+                  "verify_count_comparison_result", "conflict_accounting_result",
+                  "migration_0006_result", "drift_coverage_result",
+                  "import_concurrency_result", "rls_runtime_role_result",
+                  "rollback_reload_result"):
         if payload.get(field) != "passed":
             reasons.append(f"{field} is not 'passed'")
     if payload.get("concurrency_scenario_total", 0) < 10:
