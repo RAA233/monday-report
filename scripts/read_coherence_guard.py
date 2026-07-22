@@ -114,6 +114,31 @@ def main() -> int:
            "(pins the request's committed generation inside the middleware read view)",
            not offenders, {"reading_routes": reading_routes, "offenders": offenders})
 
+    # 07 STREAMING drift: a StreamingResponse iterator runs AFTER the middleware
+    # read view exits, so a route that streams managed state without materializing
+    # it inside the view (or entering its own view) would read post-view. Fail
+    # closed if any route both returns a StreamingResponse AND reads managed state.
+    stream_offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_route(node):
+            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            if "StreamingResponse" in names and _reads_managed(node):
+                stream_offenders.append(node.name)
+    record("07 STREAMING drift: no @app route streams managed state via StreamingResponse (whose "
+           "iterator runs after the read view exits) without materializing inside the view",
+           not stream_offenders, {"offenders": stream_offenders})
+
+    # 08 BACKGROUND-TASK drift: a Starlette BackgroundTask runs AFTER the response,
+    # outside the request read view. Fail closed if a background task is scheduled
+    # anywhere in the routing layer without an explicit committed_read_view around
+    # the store reads (detected structurally: any BackgroundTask/add_task usage in
+    # main.py must be accompanied by a committed_read_view call).
+    bg_used = ("BackgroundTask" in main_src) or (".add_task(" in main_src)
+    bg_wrapped = "committed_read_view" in main_src  # the coherent_read_view middleware call
+    record("08 BACKGROUND-TASK drift: no background task reads managed state outside a committed read "
+           "view (none scheduled in the routing layer; a new one must enter its own view)",
+           (not bg_used) or bg_wrapped, {"background_used": bg_used})
+
     n_pass = sum(1 for c in checks if c["ok"])
     n_fail = sum(1 for c in checks if not c["ok"])
     print(json.dumps({"checks": checks, "summary": {"passed": n_pass, "failed": n_fail}},

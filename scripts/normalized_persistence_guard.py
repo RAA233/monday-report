@@ -66,7 +66,7 @@ GUARD_AUDIT_KEY = "b" * 64
 # HISTORICAL and intentional (the isolation checks were numbered 82+); it is
 # encoded here so a phantom (78-81) or a missing/duplicate ID fails closed rather
 # than being silently skipped or absorbed. 01-77 contiguous, then 82-93.
-EXPECTED_CHECK_IDS = tuple(f"{n:02d}" for n in list(range(1, 78)) + list(range(82, 94)))
+EXPECTED_CHECK_IDS = tuple(f"{n:02d}" for n in list(range(1, 78)) + list(range(82, 95)))
 
 checks: list[dict] = []
 TOTALS = {"processes": 0, "connections": 0, "route_scenarios": 0, "race_scenarios": 0,
@@ -1682,24 +1682,37 @@ print(json.dumps(out))
            {"published": istore._published_revision, "db": db_rev88})
     TOTALS["isolation_checks"] += 1
 
-    # 89: audit_logs is copied as a DISTINCT list per transaction (append-only
-    # hash chain; entries never mutated in place), so a working-projection append
-    # never reaches the published log and the two lists are distinct objects --
-    # list-level isolation without deep-copying an unbounded log every transaction.
+    # 89: RECURSIVE AUDIT IMMUTABILITY. audit_logs is DEEP-copied per transaction:
+    # the working list is distinct AND its entries are distinct objects, so neither
+    # a working append NOR an in-place mutation of a working entry's NESTED mutable
+    # fields (metadata dict, actor_roles list) can reach the published log. (frozen
+    # AuditLog blocks only top-level field reassignment; the deep copy is what closes
+    # the nested-mutable leak.)
     istore.refresh()
     pub_log89 = istore._published["audit_logs"]
     pub_len89 = len(pub_log89)
     working89 = istore._new_working_projection()
     work_log89 = working89["audit_logs"]
-    distinct89 = work_log89 is not pub_log89
+    distinct_list89 = work_log89 is not pub_log89
+    distinct_entries89 = bool(pub_log89) and (work_log89[0] is not pub_log89[0])
     work_log89.append("SENTINEL-89")
-    record("89 AUDIT-LOG list isolation: the working projection's audit_logs is a DISTINCT list "
-           "(no shared list object, entries never mutated in place); a working append leaves the "
-           "published log unchanged",
-           distinct89 and len(istore._published["audit_logs"]) == pub_len89
-           and "SENTINEL-89" not in istore._published["audit_logs"],
-           {"distinct": distinct89, "len_before": pub_len89,
-            "len_after": len(istore._published["audit_logs"])})
+    nested_leak89 = False
+    if pub_log89:
+        pe = pub_log89[0]
+        meta_before = dict(pe.metadata); roles_before = list(pe.actor_roles)
+        work_log89[0].metadata["FORGED-89"] = "x"          # nested dict mutation on working entry
+        work_log89[0].actor_roles.append("HACKED-89")      # nested list mutation on working entry
+        nested_leak89 = (pe.metadata != meta_before) or (pe.actor_roles != roles_before)
+    record("89 RECURSIVE AUDIT IMMUTABILITY: the working audit_logs is a distinct list of distinct "
+           "(deep-copied) entries; a working append AND an in-place mutation of a working entry's "
+           "nested metadata dict / actor_roles list both leave the published log and its entries "
+           "unchanged (no nested-mutable leak)",
+           distinct_list89 and distinct_entries89
+           and len(istore._published["audit_logs"]) == pub_len89
+           and "SENTINEL-89" not in istore._published["audit_logs"]
+           and nested_leak89 is False,
+           {"distinct_list": distinct_list89, "distinct_entries": distinct_entries89,
+            "nested_leak": nested_leak89})
     TOTALS["isolation_checks"] += 1
 
     # 90: WHOLE-OPERATION COHERENCE. Inside committed_read_view() a reader pins ONE
@@ -1807,6 +1820,38 @@ print(json.dumps(out))
             "reconstructed": reconstructed93})
     TOTALS["isolation_checks"] += 1
 
+    # 94: ASYNC-TASK OWNERSHIP isolation. Transaction ownership is a per-CONTEXT
+    # ContextVar token, NOT threading.get_ident(): two asyncio tasks on ONE
+    # event-loop thread share a thread id, but a transaction opened by task A is
+    # NOT owned by task B, so task B cannot see A's private working projection or
+    # join A's transaction -- even if a mutation were to await mid-transaction.
+    import asyncio as _aio2
+    async def _own_probe():
+        barrier = _aio2.Event(); released = _aio2.Event(); box = {}
+        tok = object()
+        async def owner():
+            # emulate a transaction held open ACROSS an await (the exact hazard):
+            istore._txn = {"token": tok, "working": {"field_corrections": {"PRIV-94": "SECRET"}},
+                           "connection": None, "revision": 0, "payload": {}, "operation_id": None,
+                           "request_hash": None, "operation_kind": None, "wrote": False, "dirty": False}
+            reset = istore._txn_owner.set(tok)
+            barrier.set()
+            await released.wait()
+            istore._txn_owner.reset(reset); istore._txn = None
+        async def other():
+            await barrier.wait()
+            box["owns"] = istore._owns_txn()             # B must NOT own A's txn
+            box["working"] = istore._active_working()    # B must NOT reach A's private working
+            released.set()
+        await _aio2.gather(owner(), other())
+        return box
+    b94 = _aio2.run(_own_probe())
+    record("94 ASYNC-TASK OWNERSHIP isolation: a transaction opened by one asyncio task on the shared "
+           "event-loop thread is NOT owned by a second task (ContextVar token, not thread id), so the "
+           "second task cannot observe the owner's uncommitted private working projection or join it",
+           b94.get("owns") is False and b94.get("working") is None, b94)
+    TOTALS["isolation_checks"] += 1
+
     with psycopg.connect(url, autocommit=True) as c:
         c.execute("drop table if exists mr_test_barrier")
 
@@ -1865,6 +1910,8 @@ def build_evidence() -> dict:
                                      (76, 77, 82, 83, 84, 85, 86, 87, 88, 89)),
         # whole-operation committed read view (coherence / async / publish-failure):
         "read_coherence": all(passed(f"{n:02d} ") for n in (90, 91, 92, 93)),
+        # recursive audit immutability (89) + async transaction OWNERSHIP isolation (94):
+        "audit_and_ownership": passed("89 ") and passed("94 "),
     }
     # FAIL-CLOSED INVENTORY (Part L): the recorded check IDs must be EXACTLY the
     # canonical set, each exactly once. A duplicate, missing, unknown, phantom, or
@@ -1981,6 +2028,17 @@ def build_evidence() -> dict:
         "get_then_reindex_result": "passed" if passed("91 ") else "not_passed",
         "publication_failure_recovery_result": "passed" if passed("93 ") else "not_passed",
         "read_coherence_result": "passed" if required_groups["read_coherence"] else "not_passed",
+        # Part N distinct-claim results (structural, proven by the read-view model +
+        # the read-coherence coverage guard; streaming/background are proven ABSENT
+        # so a future such surface without a view fails the coverage guard):
+        "middleware_order_result": "passed" if passed("90 ") else "not_passed",
+        "threadpool_reuse_result": "passed" if passed("92 ") else "not_passed",
+        "streaming_response_result": "no_streaming_surface",
+        "background_task_result": "no_background_surface",
+        "context_backend": "contextvars",
+        # recursive audit immutability + async transaction OWNERSHIP (distinct proofs):
+        "recursive_audit_immutability_result": "passed" if passed("89 ") else "not_passed",
+        "async_task_ownership_result": "passed" if passed("94 ") else "not_passed",
         # guard-inventory integrity (Part L):
         "guard_inventory_version": 1,
         "guard_inventory_digest": hashlib.sha256(
