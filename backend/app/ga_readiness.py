@@ -721,6 +721,99 @@ def _migration_validity_probe() -> tuple[str, str]:
 
 PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v3.json"
 PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v3"
+NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v1.json"
+NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v1"
+
+
+def _correction_atomicity_probe() -> tuple[str, str]:
+    """Evidence-driven, fail-closed probe for correction-cross-process-atomicity.
+
+    The registry condition: correction lineage integrity guaranteed across
+    processes via NORMALIZED PERSISTENCE with row/advisory locking or a
+    uniqueness constraint. PASS requires normalized-persistence evidence from a
+    real PostgreSQL run on the current clean tree proving: normalized tables
+    are the single write/read authority for the slice (snapshot excluded +
+    marker), the active-lineage uniqueness and one-terminal-outcome-per-revision
+    constraints hold under real cross-process races, routes operate through the
+    normalized repositories, state/audit/attribution/idempotency commit
+    atomically, the import lifecycle works, and forced RLS on the slice tables
+    is proven. File/memory modes never claim the guarantee (the evidence must
+    say so). Anything absent, stale, dirty, mismatched, failed, or skipped
+    keeps the control BLOCKED.
+    """
+    if not NORMALIZED_EVIDENCE_PATH.exists():
+        return "BLOCKED", "Correction atomicity not proven: no normalized-persistence evidence artifact."
+    try:
+        payload = json.loads(NORMALIZED_EVIDENCE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return "BLOCKED", f"Normalized-persistence evidence unreadable: {exc.__class__.__name__}."
+    if not isinstance(payload, dict):
+        return "BLOCKED", "Normalized-persistence evidence malformed."
+
+    reasons: list[str] = []
+    if payload.get("schema_version") != NORMALIZED_EVIDENCE_SCHEMA:
+        reasons.append(f"evidence schema is {payload.get('schema_version')!r}")
+    if payload.get("status") != "passed":
+        reasons.append(f"status is {payload.get('status')!r}, not 'passed'")
+    stored = payload.get("payload_sha256")
+    if not stored:
+        reasons.append("no payload hash")
+    else:
+        recomputed = payload_sha256({k: v for k, v in payload.items() if k != "payload_sha256"})
+        if recomputed != stored:
+            reasons.append("payload hash does not verify")
+    if not payload.get("worktree_clean"):
+        reasons.append("evidence was not captured from a clean worktree")
+    if payload.get("repository_mode") != "postgres":
+        reasons.append("evidence was not generated in PostgreSQL mode")
+    if not payload.get("postgres_server_version") or not payload.get("postgres_image_digest"):
+        reasons.append("evidence lacks a real PostgreSQL server version or image digest")
+    current_commit = _git_rev("HEAD")
+    current_tree = _git_rev("HEAD^{tree}")
+    if current_commit != "unknown" and payload.get("git_commit") != current_commit:
+        reasons.append("evidence is bound to a different commit")
+    if current_tree != "unknown" and payload.get("git_tree") != current_tree:
+        reasons.append("evidence is stale: the tree changed after it was generated")
+    try:
+        import backend.app.migrations as _mig
+        baseline_versions = [m.version for m in _mig.discover_migrations(_mig.BASELINE_DIR)]
+        if payload.get("migration_versions") != baseline_versions:
+            reasons.append("evidence is bound to a different migration set")
+        if 5 not in (payload.get("migration_versions") or []):
+            reasons.append("evidence does not include migration 0005")
+    except Exception as exc:  # noqa: BLE001
+        reasons.append(f"could not recompute migration set: {exc.__class__.__name__}")
+    entities = payload.get("normalized_entities") or []
+    if "field_corrections" not in entities or "validation_tasks" not in entities:
+        reasons.append("evidence does not declare the corrections/validation normalized authority")
+    if "single write and read authority" not in str(payload.get("source_of_truth", "")):
+        reasons.append("evidence lacks the single-source-of-truth declaration")
+    if "WITHOUT normalized cross-process guarantees" not in str(payload.get("source_of_truth", "")):
+        reasons.append("evidence does not disclaim file/memory modes")
+    for field in ("route_groups_result", "concurrency_result", "import_result",
+                  "tenant_rls_result", "audit_chain_result", "hmac_result"):
+        if payload.get(field) != "passed":
+            reasons.append(f"{field} is not 'passed'")
+    if payload.get("concurrency_scenario_total", 0) < 10:
+        reasons.append("fewer than ten cross-process concurrency scenarios were proven")
+    if payload.get("process_total", 0) < 10:
+        reasons.append("evidence used too few independent OS processes")
+    totals = payload.get("totals") or {}
+    if totals.get("failed", 1) != 0 or totals.get("skipped", 1) != 0:
+        reasons.append("evidence totals include failures or required skips")
+
+    if reasons:
+        return "BLOCKED", "Correction atomicity not proven: " + "; ".join(reasons)
+    return (
+        "PASS",
+        "Real-PostgreSQL evidence proves correction lineage integrity across processes via "
+        "normalized persistence: normalized tables are the single write/read authority for "
+        "corrections and validation outcomes, the active-lineage partial unique index and "
+        "UNIQUE(task_id, task_revision) hold under independent-process races with row locks and "
+        "revision CAS, routes operate through the normalized repositories, and state, audit, "
+        "reviewer attribution and idempotency commit atomically. File/memory modes explicitly "
+        "carry no such guarantee.",
+    )
 
 
 def _persistence_locking_probe() -> tuple[str, str]:
@@ -916,6 +1009,8 @@ def evaluate_blockers(
             disposition, detail = _migration_validity_probe()
         elif check_id == "ga_persistence_locking":
             disposition, detail = _persistence_locking_probe()
+        elif check_id == "ga_correction_cross_process_atomicity":
+            disposition, detail = _correction_atomicity_probe()
         elif check_id == "ga_parser_coverage_evidence":
             disposition, detail, evidence_reference = _forge_probe(forge_report)
         elif check_id == "ga_official_export_gate":
