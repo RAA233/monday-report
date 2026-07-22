@@ -44,8 +44,8 @@ for candidate in (ROOT, ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v2.json"
-EVIDENCE_SCHEMA_VERSION = "persistence-atomicity-evidence.v2"
+EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v3.json"
+EVIDENCE_SCHEMA_VERSION = "persistence-atomicity-evidence.v3"
 # The route-idempotency HTTP contract this run proves. Bound into the evidence so
 # a probe can reject a run produced under a different request contract.
 ROUTE_IDEMPOTENCY_CONTRACT_VERSION = "1.0.0"
@@ -56,7 +56,7 @@ checks: list[dict] = []
 # classify proof by boundary (direct-helper vs real-HTTP vs concurrent-HTTP vs
 # uncertain-response) so a merely-internal proof can never masquerade as a
 # route-level one.
-ROUTE_PROOF: dict = {"suite": None, "concurrent": None, "lost_response": None}
+ROUTE_PROOF: dict = {"suite": None, "concurrent": None, "lost_response": None, "validation": None}
 
 
 def record(name: str, ok: bool, detail: object = "", *, skipped: bool = False) -> None:
@@ -685,6 +685,20 @@ def pg_checks(url: str, scratch: Path) -> dict:
            {"passed": lost.get("passed"), "total": lost.get("total"),
             "failures": [r["name"] for r in lost.get("results", []) if not r["ok"]] or None})
 
+    # 48: the validation-task route proven per-transition (outcome / rejection /
+    #     administrative reopen) -- each a distinct semantic action on the shared
+    #     PATCH /validation-tasks/{id} route.
+    reset_and_migrate()
+    vcfg = env_for("http-validation")
+    vsuite = _http_json(["validation_suite", json.dumps(vcfg)])
+    totals["processes"] += 1
+    totals["connections"] += 1
+    ROUTE_PROOF["validation"] = vsuite
+    record("48 real-HTTP validation-task transitions (outcome/rejection/reopen) each proven separately",
+           bool(vsuite.get("all_passed")) and int(vsuite.get("total", 0)) >= 7,
+           {"passed": vsuite.get("passed"), "total": vsuite.get("total"),
+            "failures": [r["name"] for r in vsuite.get("results", []) if not r["ok"]] or None})
+
     with psycopg.connect(url, autocommit=True) as c:
         c.execute("drop table if exists mr_test_barrier")
 
@@ -758,6 +772,48 @@ def build_evidence(totals: dict) -> dict:
     failed_attempt_no_reserve_ok = suite_ok("12")
     actor_scope_ok = suite_ok("13")
 
+    # Validation-task per-transition proof (V1 validated / V2 rejected / V3 reopen
+    # / V4 cross-transition conflict / V5 missing-key / V6 distinct audit / V7 actor).
+    validation = ROUTE_PROOF.get("validation") or {}
+    v_by = {r["name"][:2]: bool(r["ok"]) for r in validation.get("results", [])}
+    validation_outcome_ok = v_by.get("V1", False)
+    validation_rejected_ok = v_by.get("V2", False)
+    validation_reopen_ok = v_by.get("V3", False)
+    validation_route_ok = passed("48 ") and bool(validation.get("all_passed"))
+
+    # Semantic-action coverage (Part B/H). The six required domain actions collapse
+    # onto three HTTP routes; approval/rejection are validation-task OUTCOMES, not
+    # correction operations. Each required action must be behaviourally proven.
+    semantic_actions = [
+        {"action": "correction creation", "route": "POST /workspaces/{id}/field-corrections",
+         "operation_kind": "field_correction.record",
+         "result": "passed" if (http_route_ok and suite_ok("01")) else "not_passed"},
+        {"action": "correction revert", "route": "POST /field-corrections/{id}/revert",
+         "operation_kind": "field_correction.revert",
+         "result": "passed" if (http_route_ok and suite_ok("14")) else "not_passed"},
+        {"action": "validation outcome", "route": "PATCH /validation-tasks/{id} (status=validated)",
+         "operation_kind": "validation_task.update",
+         "result": "passed" if validation_outcome_ok else "not_passed"},
+        # 'Correction approval' is not a corrections operation; the approval semantic
+        # is the validation VALIDATED outcome (same proof as validation outcome).
+        {"action": "correction approval (validation VALIDATED outcome)",
+         "route": "PATCH /validation-tasks/{id} (status=validated)",
+         "operation_kind": "validation_task.update",
+         "result": "passed" if validation_outcome_ok else "not_passed"},
+        # 'Correction rejection' is not a corrections operation; the rejection
+        # semantic is the validation REJECTED outcome.
+        {"action": "correction rejection (validation REJECTED outcome)",
+         "route": "PATCH /validation-tasks/{id} (status=rejected)",
+         "operation_kind": "validation_task.update",
+         "result": "passed" if validation_rejected_ok else "not_passed"},
+        {"action": "administrative reopening", "route": "PATCH /validation-tasks/{id} (status=open)",
+         "operation_kind": "validation_task.update",
+         "result": "passed" if validation_reopen_ok else "not_passed"},
+    ]
+    required_semantic_action_count = len(semantic_actions)
+    tested_semantic_action_count = sum(1 for a in semantic_actions if a["result"] == "passed")
+    semantic_actions_complete = tested_semantic_action_count == required_semantic_action_count
+
     ran_real_db = bool(test_database_url())
     status = "passed" if (
         ran_real_db and n_failed == 0 and n_skipped == 0
@@ -769,6 +825,10 @@ def build_evidence(totals: dict) -> dict:
         and http_route_ok and concurrent_http_ok and uncertain_response_ok
         and missing_key_ok and conflicting_reuse_ok and actor_scope_ok
         and failed_attempt_no_reserve_ok
+        # Every semantic action -- including each validation-task transition -- is
+        # behaviourally proven through HTTP; conflated or under-counted proof fails.
+        and validation_route_ok and validation_outcome_ok and validation_rejected_ok
+        and validation_reopen_ok and semantic_actions_complete
     ) else "BLOCKED_INCOMPLETE"
 
     concurrent = ROUTE_PROOF.get("concurrent") or {}
@@ -778,12 +838,18 @@ def build_evidence(totals: dict) -> dict:
         "required_route_count": 3,
         "required_routes": ["field_correction.record", "field_correction.revert",
                             "validation_task.update"],
-        # record + revert are proven behaviourally through HTTP; validation_task.update
-        # shares the identical _establish_idempotency wiring (statically wired,
-        # covered by the route-wiring inspection in the route-rbac/main tests).
-        "http_behaviourally_tested_routes": ["field_correction.record", "field_correction.revert"],
+        # All three reviewer-mutation routes are now proven BEHAVIOURALLY through
+        # real HTTP (field corrections record+revert; validation-task per transition).
+        "http_behaviourally_tested_routes": ["field_correction.record", "field_correction.revert",
+                                             "validation_task.update"],
+        "tested_route_count": 3,
+        "required_semantic_action_count": required_semantic_action_count,
+        "tested_semantic_action_count": tested_semantic_action_count,
+        "semantic_actions": semantic_actions,
         "http_scenario_count": int(suite.get("total", 0)),
         "http_scenarios_passed": int(suite.get("passed", 0)),
+        "validation_scenario_count": int(validation.get("total", 0)),
+        "validation_scenarios_passed": int(validation.get("passed", 0)),
         "concurrent_http_client_count": int(concurrent.get("client_process_count", 0)),
         "concurrent_http_idempotency_rows": concurrent.get("idempotency_rows"),
         "concurrent_http_correction_delta": concurrent.get("correction_delta"),
@@ -792,6 +858,10 @@ def build_evidence(totals: dict) -> dict:
         "http_route_result": "passed" if http_route_ok else "not_passed",
         "concurrent_http_result": "passed" if concurrent_http_ok else "not_passed",
         "uncertain_response_result": "passed" if uncertain_response_ok else "not_passed",
+        "validation_route_result": "passed" if validation_route_ok else "not_passed",
+        "validation_outcome_result": "passed" if validation_outcome_ok else "not_passed",
+        "validation_rejection_result": "passed" if validation_rejected_ok else "not_passed",
+        "validation_reopen_result": "passed" if validation_reopen_ok else "not_passed",
         "request_hash_canonicalization_result": "passed" if request_hash_canonicalization_ok else "not_passed",
         "missing_key_result": "passed" if missing_key_ok else "not_passed",
         "conflicting_reuse_result": "passed" if conflicting_reuse_ok else "not_passed",
@@ -837,6 +907,8 @@ def build_evidence(totals: dict) -> dict:
         "http_route_idempotency_result": "passed" if http_route_ok else "not_passed",
         "concurrent_http_idempotency_result": "passed" if concurrent_http_ok else "not_passed",
         "uncertain_response_result": "passed" if uncertain_response_ok else "not_passed",
+        "validation_route_idempotency_result": "passed" if validation_route_ok else "not_passed",
+        "semantic_action_coverage_complete": semantic_actions_complete,
         "route_idempotency": route_idempotency,
         "totals": {"passed": n_passed, "skipped": n_skipped, "failed": n_failed},
         "status": status,
@@ -861,7 +933,7 @@ def main() -> int:
     url = test_database_url()
     totals = {"processes": 0, "connections": 0}
     if not url:
-        for n in list(range(13, 40)) + [45, 46, 47]:
+        for n in list(range(13, 40)) + [45, 46, 47, 48]:
             skip(f"{n:02d} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         totals = pg_checks(url, scratch)
