@@ -721,8 +721,8 @@ def _migration_validity_probe() -> tuple[str, str]:
 
 PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v3.json"
 PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v3"
-NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v3.json"
-NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v3"
+NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v4.json"
+NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v4"
 
 
 def _correction_atomicity_probe() -> tuple[str, str]:
@@ -768,12 +768,7 @@ def _correction_atomicity_probe() -> tuple[str, str]:
         reasons.append("evidence was not generated in PostgreSQL mode")
     if not payload.get("postgres_server_version") or not payload.get("postgres_image_digest"):
         reasons.append("evidence lacks a real PostgreSQL server version or image digest")
-    current_commit = _git_rev("HEAD")
-    current_tree = _git_rev("HEAD^{tree}")
-    if current_commit != "unknown" and payload.get("git_commit") != current_commit:
-        reasons.append("evidence is bound to a different commit")
-    if current_tree != "unknown" and payload.get("git_tree") != current_tree:
-        reasons.append("evidence is stale: the tree changed after it was generated")
+    reasons.extend(_commit_binding_reasons(payload))
     try:
         import backend.app.migrations as _mig
         baseline_versions = [m.version for m in _mig.discover_migrations(_mig.BASELINE_DIR)]
@@ -805,9 +800,31 @@ def _correction_atomicity_probe() -> tuple[str, str]:
                   "stale_refresh_rejection_result", "non_owner_committed_view_result",
                   # re-review corrections (stale view, revision source, audit-log copy):
                   "stale_view_elimination_result", "revision_binding_result",
-                  "audit_log_isolation_result"):
+                  "audit_log_isolation_result",
+                  # whole-operation committed read view (v4):
+                  "read_coherence_result", "multi_access_coherence_result",
+                  "route_coherence_result", "export_coherence_result",
+                  "authorization_coherence_result", "worker_coherence_result",
+                  "async_task_isolation_result", "get_then_reindex_result",
+                  "read_view_scope_result", "publication_failure_recovery_result"):
         if payload.get(field) != "passed":
             reasons.append(f"{field} is not 'passed'")
+    # Semantic bindings: the copy-on-write + read-view implementation must be
+    # declared, so an old-shaped artifact cannot pass by field presence alone.
+    if payload.get("publication_model") != "copy_on_write":
+        reasons.append("evidence does not declare publication_model=copy_on_write")
+    if payload.get("committed_read_view_model") != "request_task_scoped_pin_on_first_refresh":
+        reasons.append("evidence does not declare the request/task-scoped read-view model")
+    if payload.get("read_view_context_backend") != "contextvars":
+        reasons.append("evidence does not declare the contextvars read-view backend")
+    if not payload.get("guard_inventory_ok"):
+        reasons.append("evidence guard inventory did not validate (duplicate/missing/phantom id)")
+    _impl = str(payload.get("implementation_version") or "0")
+    try:
+        if tuple(int(p) for p in _impl.split(".")[:3]) < (4, 0, 0):
+            reasons.append(f"implementation_version {_impl!r} is below 4.0.0")
+    except ValueError:
+        reasons.append(f"implementation_version {_impl!r} is malformed")
     if payload.get("concurrency_scenario_total", 0) < 10:
         reasons.append("fewer than ten cross-process concurrency scenarios were proven")
     if payload.get("process_total", 0) < 10:
@@ -940,14 +957,10 @@ def _persistence_locking_probe() -> tuple[str, str]:
         if route.get("concurrent_http_idempotency_rows") != 1 or route.get("concurrent_http_correction_delta") != 1:
             reasons.append("route_idempotency concurrent proof did not commit exactly once")
 
-    # Bind to the current commit, tree and migration set.
-    current_commit = _git_rev("HEAD")
-    current_tree = _git_rev("HEAD^{tree}")
-    if current_commit != "unknown" and payload.get("git_commit") not in {current_commit, None}:
-        if payload.get("git_commit") != current_commit:
-            reasons.append("evidence is bound to a different commit")
-    if current_tree != "unknown" and payload.get("git_tree") != current_tree:
-        reasons.append("evidence is stale: the tree changed after it was generated")
+    # Bind to the current commit, tree and migration set. STRICT + symmetric with
+    # the correction probe: a missing/null/empty/wrong git_commit or git_tree fails
+    # closed (the earlier `not in {commit, None}` accepted a null commit).
+    reasons.extend(_commit_binding_reasons(payload))
     try:
         import backend.app.migrations as _mig
         baseline_versions = [m.version for m in _mig.discover_migrations(_mig.BASELINE_DIR)]
@@ -978,6 +991,32 @@ def _git_rev(ref: str) -> str:
         return subprocess.check_output(["git", "rev-parse", ref], cwd=str(ROOT), text=True).strip()
     except Exception:
         return "unknown"
+
+
+def _commit_binding_reasons(payload: dict) -> list[str]:
+    """Strict, fail-closed git commit/tree binding shared by the persistence probes.
+
+    An evidence artifact must carry git_commit AND git_tree as NON-EMPTY STRINGS
+    equal to the current clean commit/tree. A missing field, null, empty string,
+    whitespace, abbreviated/ambiguous value, wrong value, or non-string is rejected
+    -- a crafted ``{"git_commit": null}`` can never bypass the binding (the earlier
+    ``not in {commit, None}`` fail-open is gone). When git itself is unavailable
+    ("unknown") only the well-formedness (non-empty string) requirement applies.
+    """
+    reasons: list[str] = []
+    current_commit = _git_rev("HEAD")
+    current_tree = _git_rev("HEAD^{tree}")
+    ec = payload.get("git_commit")
+    et = payload.get("git_tree")
+    if not isinstance(ec, str) or not ec.strip():
+        reasons.append("evidence git_commit is missing, null, empty, or not a string")
+    elif current_commit != "unknown" and ec != current_commit:
+        reasons.append("evidence is bound to a different commit")
+    if not isinstance(et, str) or not et.strip():
+        reasons.append("evidence git_tree is missing, null, empty, or not a string")
+    elif current_tree != "unknown" and et != current_tree:
+        reasons.append("evidence is stale: the tree changed after it was generated")
+    return reasons
 
 
 def evaluate_blockers(
