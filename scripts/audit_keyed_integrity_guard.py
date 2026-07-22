@@ -97,12 +97,14 @@ def main() -> int:
     for i in range(4):
         s.audit(f"b.{i}", "tenant", s.tenant.id, {"i": i})
     s.refresh()
-    ev = s.audit_logs[2]
-    ev.metadata = {"forged": "x"}
+    # Audit entries are frozen: simulate a public forgery by REBUILDING the entry
+    # (model_copy) and replacing the list element, then re-chaining the tail.
+    s.audit_logs[2] = s.audit_logs[2].model_copy(update={"metadata": {"forged": "x"}})
     prev = s.audit_logs[1].entry_hash
-    for e in s.audit_logs[2:]:
-        e.previous_hash = prev
-        e.entry_hash = s._audit_event_hash(e)
+    for i in range(2, len(s.audit_logs)):
+        e = s.audit_logs[i].model_copy(update={"previous_hash": prev})
+        e = e.model_copy(update={"entry_hash": s._audit_event_hash(e)})
+        s.audit_logs[i] = e
         prev = e.entry_hash
     s.save(); s.refresh()
     st = s.audit_integrity_status()
@@ -142,12 +144,15 @@ def main() -> int:
         st_.save(); st_.refresh()
         return st_.audit_integrity_status()
 
-    def _set_meta(store): store.audit_logs[-1].metadata = {"i": 999, "hacked": True}
-    def _set_tenant(store): store.audit_logs[-1].tenant_id = uuid.uuid4()
-    def _set_actor(store): store.audit_logs[-1].actor_source = "tampered-actor"
-    def _set_prev(store): store.audit_logs[-1].previous_hash = "0" * 64
-    def _drop_hash(store): store.audit_logs[-1].entry_hash = None
-    def _unknown_ver(store): store.audit_logs[-1].integrity_version = 99
+    # Frozen entries: tamper by replacing the last element with a rebuilt copy.
+    def _tamper_last(store, **updates):
+        store.audit_logs[-1] = store.audit_logs[-1].model_copy(update=updates)
+    def _set_meta(store): _tamper_last(store, metadata={"i": 999, "hacked": True})
+    def _set_tenant(store): _tamper_last(store, tenant_id=uuid.uuid4())
+    def _set_actor(store): _tamper_last(store, actor_source="tampered-actor")
+    def _set_prev(store): _tamper_last(store, previous_hash="0" * 64)
+    def _drop_hash(store): _tamper_last(store, entry_hash=None)
+    def _unknown_ver(store): _tamper_last(store, integrity_version=99)
 
     check("7 changed metadata fails", tamper_broken(_set_meta).integrity_state == "broken")
     check("8 changed tenant fails", tamper_broken(_set_tenant).integrity_state == "broken")
@@ -437,7 +442,7 @@ def main() -> int:
     _forged = AuditLog(tenant_id=sInj.tenant.id, actor_user_id=sInj.audit_logs[-1].actor_user_id,
                        action="leg.forged", resource_type="tenant", resource_id=sInj.tenant.id,
                        metadata={}, previous_hash=_prev, actor_source="system", actor_roles=[])
-    _forged.entry_hash = sInj._audit_event_hash(_forged)
+    _forged = _forged.model_copy(update={"entry_hash": sInj._audit_event_hash(_forged)})
     sInj.audit_logs.append(_forged)
     sInj.save(); sInj.refresh()
     _stInj = sInj.audit_integrity_status()
