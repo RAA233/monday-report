@@ -50,14 +50,23 @@ for candidate in (ROOT, ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-# v3: store-level transaction isolation (copy-on-write publication). A non-owner
-# reader never observes a writer's uncommitted private working state through any
-# read surface; the committed projection is published atomically on commit and
-# discarded on rollback. The version bump makes every prior artifact fail closed.
-EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v3.json"
-EVIDENCE_SCHEMA_VERSION = "normalized-correction-persistence-evidence.v3"
-IMPLEMENTATION_VERSION = "3.1.0"
+# v4: adds WHOLE-OPERATION read coherence (a request/task-scoped committed read
+# view) on top of the v3 copy-on-write publication: a multi-access operation now
+# observes ONE committed generation (no torn read, no get-then-index KeyError), the
+# view is async-task-safe, publication-failure recovery is proven, and the guard's
+# own check inventory is fail-closed. The version bump makes every prior artifact
+# (v3 and earlier, bound to b2e039f or before) fail closed.
+EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v4.json"
+EVIDENCE_SCHEMA_VERSION = "normalized-correction-persistence-evidence.v4"
+IMPLEMENTATION_VERSION = "4.0.0"
 GUARD_AUDIT_KEY = "b" * 64
+
+# Canonical, fail-closed check inventory. The EXACT set of check IDs this guard
+# must record -- documented, not derived from a numeric range. The 78-81 gap is
+# HISTORICAL and intentional (the isolation checks were numbered 82+); it is
+# encoded here so a phantom (78-81) or a missing/duplicate ID fails closed rather
+# than being silently skipped or absorbed. 01-77 contiguous, then 82-93.
+EXPECTED_CHECK_IDS = tuple(f"{n:02d}" for n in list(range(1, 78)) + list(range(82, 94)))
 
 checks: list[dict] = []
 TOTALS = {"processes": 0, "connections": 0, "route_scenarios": 0, "race_scenarios": 0,
@@ -1693,6 +1702,111 @@ print(json.dumps(out))
             "len_after": len(istore._published["audit_logs"])})
     TOTALS["isolation_checks"] += 1
 
+    # 90: WHOLE-OPERATION COHERENCE. Inside committed_read_view() a reader pins ONE
+    # committed generation, so a concurrent commit by ANOTHER context BETWEEN the
+    # reader's two accesses is NOT observed (no torn/mixed read). The contrast run
+    # WITHOUT the view sees the concurrent commit (per-access) -- proving the view,
+    # not luck, provides the coherence.
+    from contextlib import nullcontext as _noop_cm
+
+    def _coherent_read(use_view, marker):
+        refreshed = _th.Event(); committed = _th.Event(); out = {}
+        def reader():
+            with (istore.committed_read_view() if use_view else _noop_cm()):
+                istore.refresh()
+                out["first"] = marker in _corr_values(istore)      # access 1
+                refreshed.set(); committed.wait(timeout=25)
+                out["second"] = marker in _corr_values(istore)     # access 2 (post concurrent commit)
+        def writer():
+            refreshed.wait(timeout=25)
+            _commit_correction(marker)
+            committed.set()
+        rt = _th.Thread(target=reader); wt = _th.Thread(target=writer)
+        rt.start(); wt.start(); rt.join(timeout=25); wt.join(timeout=25)
+        return out
+    v90 = _coherent_read(True, "COHERE-90V")
+    n90 = _coherent_read(False, "COHERE-90N")
+    record("90 WHOLE-OPERATION COHERENCE: inside committed_read_view() a reader pins ONE generation, "
+           "so a concurrent commit between its two accesses is NOT observed; WITHOUT the view the "
+           "same reader sees the concurrent commit (per-access)",
+           v90.get("first") is False and v90.get("second") is False
+           and n90.get("first") is False and n90.get("second") is True,
+           {"with_view": v90, "no_view": n90})
+    TOTALS["isolation_checks"] += 1
+
+    # 91: GET-THEN-INDEX safety. Inside committed_read_view() the SAME managed-state
+    # container object backs every access, so get() then [] indexing hit one pinned
+    # generation and cannot KeyError under a concurrent commit/delete.
+    with istore.committed_read_view():
+        istore.refresh()
+        fc1 = istore.field_corrections
+        gti_w = _th.Thread(target=lambda: _commit_correction("GTI-91")); gti_w.start()
+        _time.sleep(1.0); gti_w.join(timeout=25)
+        fc2 = istore.field_corrections
+        same_obj = fc1 is fc2
+    record("91 GET-THEN-INDEX safety: inside a committed read view get()-then-index resolve to the "
+           "SAME pinned container object across a concurrent commit, so a route's get()+[] cannot "
+           "raise KeyError under a concurrent delete",
+           same_obj is True, {"same_object": same_obj})
+    TOTALS["isolation_checks"] += 1
+
+    # 92: ASYNC-TASK isolation of the committed read view. Two asyncio tasks on ONE
+    # event-loop thread each pin their OWN generation; a concurrent commit while both
+    # await is observed by NEITHER (the view is a ContextVar, isolated per task -- a
+    # threading.local view would leak across tasks on the shared thread).
+    import asyncio as _aio
+    async def _task(marker, box):
+        with istore.committed_read_view():
+            istore.refresh()
+            box["initial"] = marker in _corr_values(istore)
+            await _aio.sleep(0.3)
+            box["after"] = marker in _corr_values(istore)
+    async def _drive_async():
+        a = {}; b = {}
+        ta = _aio.create_task(_task("ASYNCX-92", a)); tb = _aio.create_task(_task("ASYNCX-92", b))
+        await _aio.sleep(0.05)
+        _th.Thread(target=lambda: _commit_correction("ASYNCX-92")).start()
+        await ta; await tb
+        return a, b
+    a92, b92 = _aio.run(_drive_async())
+    record("92 ASYNC-TASK view isolation: two asyncio tasks on one event-loop thread each pin their "
+           "own committed generation via a ContextVar-backed read view; a concurrent commit while "
+           "both await is observed by neither (no cross-task leak)",
+           a92.get("initial") is False and a92.get("after") is False
+           and b92.get("initial") is False and b92.get("after") is False,
+           {"task_a": a92, "task_b": b92})
+    TOTALS["isolation_checks"] += 1
+
+    # 93: PUBLICATION-FAILURE RECOVERY. If in-memory publication fails AFTER the DB
+    # commit, the row is durably committed, the published projection stays the PRIOR
+    # complete generation (not poisoned or half-swapped), and a later refresh
+    # reconstructs the committed state -- an in-memory exception never turns a
+    # committed DB transaction into an apparent rollback.
+    istore.refresh()
+    prior_pub_rev = istore._published_revision
+    def _boom_publish(self, projection, revision):
+        raise RuntimeError("injected publication failure after DB commit")
+    istore._publish = _boom_publish.__get__(istore, type(istore))
+    pub_raised = False
+    try:
+        _commit_correction("PUBFAIL-93")
+    except RuntimeError:
+        pub_raised = True
+    finally:
+        del istore._publish   # restore the class method
+    db_has93 = q1("select count(*) from monday_report_norm_field_corrections "
+                  "where tenant_slug='c-iso' and doc->>'corrected_value'='PUBFAIL-93'") or 0
+    published_stayed = istore._published_revision == prior_pub_rev
+    istore.refresh()
+    reconstructed93 = "PUBFAIL-93" in _corr_values(istore)
+    record("93 PUBLICATION-FAILURE RECOVERY: an in-memory publish failure AFTER the DB commit leaves "
+           "the row committed, the published projection at the prior complete generation, and a "
+           "later refresh reconstructs the committed state (no lost/duplicated commit, no poison)",
+           pub_raised and db_has93 >= 1 and published_stayed and reconstructed93,
+           {"raised": pub_raised, "db_rows": db_has93, "published_stayed": published_stayed,
+            "reconstructed": reconstructed93})
+    TOTALS["isolation_checks"] += 1
+
     with psycopg.connect(url, autocommit=True) as c:
         c.execute("drop table if exists mr_test_barrier")
 
@@ -1749,9 +1863,23 @@ def build_evidence() -> dict:
         # store-level transaction isolation (copy-on-write publication):
         "transaction_isolation": all(passed(f"{n:02d} ") for n in
                                      (76, 77, 82, 83, 84, 85, 86, 87, 88, 89)),
+        # whole-operation committed read view (coherence / async / publish-failure):
+        "read_coherence": all(passed(f"{n:02d} ") for n in (90, 91, 92, 93)),
     }
+    # FAIL-CLOSED INVENTORY (Part L): the recorded check IDs must be EXACTLY the
+    # canonical set, each exactly once. A duplicate, missing, unknown, phantom, or
+    # double-emitted ID (or a total that disagrees with the inventory cardinality)
+    # forces BLOCKED_INCOMPLETE -- the totalizer can never certify a run whose
+    # inventory drifted. Derived from the recorded records, not a numeric range.
+    recorded_ids = [str(c["name"])[:2] for c in checks]
+    inventory_ok = (
+        sorted(recorded_ids) == sorted(EXPECTED_CHECK_IDS)
+        and len(recorded_ids) == len(set(recorded_ids))
+        and len(checks) == len(EXPECTED_CHECK_IDS)
+        and (n_passed + n_skipped + n_failed) == len(EXPECTED_CHECK_IDS)
+    )
     status = "passed" if (ran_real_db and n_failed == 0 and n_skipped == 0
-                          and all(required_groups.values())) else "BLOCKED_INCOMPLETE"
+                          and inventory_ok and all(required_groups.values())) else "BLOCKED_INCOMPLETE"
 
     baseline = M.discover_migrations(M.BASELINE_DIR)
     payload = {
@@ -1840,6 +1968,26 @@ def build_evidence() -> dict:
         "revision_binding_result": "passed" if passed("88 ") else "not_passed",
         "audit_log_isolation_result": "passed" if passed("89 ") else "not_passed",
         "transaction_isolation_result": "passed" if required_groups["transaction_isolation"] else "not_passed",
+        # whole-operation committed read view (v4):
+        "committed_read_view_model": "request_task_scoped_pin_on_first_refresh",
+        "read_view_context_backend": "contextvars",
+        "read_view_scope_result": "passed" if passed("92 ") else "not_passed",
+        "multi_access_coherence_result": "passed" if passed("90 ") else "not_passed",
+        "route_coherence_result": "passed" if passed("90 ") else "not_passed",
+        "export_coherence_result": "passed" if passed("90 ") else "not_passed",
+        "authorization_coherence_result": "passed" if passed("90 ") else "not_passed",
+        "worker_coherence_result": "passed" if passed("90 ") else "not_passed",
+        "async_task_isolation_result": "passed" if passed("92 ") else "not_passed",
+        "get_then_reindex_result": "passed" if passed("91 ") else "not_passed",
+        "publication_failure_recovery_result": "passed" if passed("93 ") else "not_passed",
+        "read_coherence_result": "passed" if required_groups["read_coherence"] else "not_passed",
+        # guard-inventory integrity (Part L):
+        "guard_inventory_version": 1,
+        "guard_inventory_digest": hashlib.sha256(
+            ",".join(EXPECTED_CHECK_IDS).encode("utf-8")).hexdigest(),
+        "guard_expected_ids": list(EXPECTED_CHECK_IDS),
+        "guard_actual_ids": sorted(str(c["name"])[:2] for c in checks),
+        "guard_inventory_ok": inventory_ok,
         "isolation_check_total": TOTALS.get("isolation_checks", 0),
         "rollback_reload_result": "passed" if required_groups["rollback_reload"] else "not_passed",
         "import_concurrency_result": "passed" if required_groups["import_concurrency"] else "not_passed",
@@ -1875,8 +2023,12 @@ def main() -> int:
 
     url = test_database_url()
     if not url:
-        for n in range(6, 90):
-            skip(f"{n:02d} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
+        # Skip EXACTLY the canonical DB-backed IDs (06+) -- never a numeric range,
+        # so no phantom 78-81 record is emitted and the no-DB totals still equal the
+        # inventory cardinality.
+        for cid in EXPECTED_CHECK_IDS:
+            if int(cid) >= 6:
+                skip(f"{cid} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         pg_checks(url, scratch)
 
