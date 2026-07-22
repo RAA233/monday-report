@@ -54,7 +54,7 @@ TASKS_TABLE = "monday_report_norm_validation_tasks"
 # Mirrored from backend.app.store (guard-verified to stay identical).
 SNAPSHOT_LOCK_NAMESPACE = "monday_report.global_snapshot.v2"
 SNAPSHOT_LOCK_TIMEOUT_MS = 5000
-UNSAFE_TEXT_CONTROL_CHARS = re.compile(r"[\x00\x08\x0b\x0c\x0e-\x1f]")
+UNSAFE_TEXT_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")
 NORMALIZED_ENTITY_KEYS = ("monday_reports", "field_corrections", "validation_tasks")
 NORMALIZED_AUTHORITY_VERSION = 1
 
