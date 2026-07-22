@@ -282,6 +282,13 @@ class LocalStateStore:
         self.state_path = Path(os.getenv("MONDAY_REPORT_STATE_PATH", default_path))
         self.storage_root = Path(os.getenv("MONDAY_REPORT_STORAGE_ROOT", default_storage_root))
         self.export_root = Path(os.getenv("MONDAY_REPORT_EXPORT_ROOT", default_export_root))
+        # Committed projection backing store for every MANAGED_STATE attribute.
+        # Managed attributes are context-aware properties (see below) that resolve
+        # to the caller's transaction-private working projection (owner) or this
+        # committed projection (non-owner). Must exist before any managed
+        # attribute is assigned. On the base (file) backend there is no
+        # transaction isolation, so every access routes here directly.
+        self._published: dict[str, object] = {}
         self.tenant = self._configured_tenant()
         self.user = self._configured_user(self.tenant.id)
         self.workspaces: dict[UUID, Workspace] = {}
@@ -347,6 +354,30 @@ class LocalStateStore:
         # construction, start, reload, health, or route access. A user is
         # persisted ONLY through an explicit provisioning operation
         # (create_user / the identity_admin CLI).
+
+    # ------------------------------------------------ managed-state routing ---
+    # Every process-wide mutable state container is a MANAGED_STATE attribute
+    # backed by a context-aware property. This is the isolation boundary that
+    # prevents a lock-free reader from observing a writer's uncommitted state:
+    #   * an owner thread inside a protected transaction reads/writes its OWN
+    #     transaction-private working projection;
+    #   * every other caller reads only the committed published projection (or a
+    #     request-consistent captured view of it).
+    # The base (file) backend has no transaction context, so _get_state/_set_state
+    # route straight to _published; PostgresStateStore overrides them.
+    MANAGED_STATE = (
+        "tenant", "user", "workspaces", "uploads", "files", "jobs",
+        "parsed_documents", "document_chunks", "failures", "validation_tasks",
+        "monday_reports", "report_exports", "benchmark_values", "anomaly_rules",
+        "benchmark_measurements", "anomaly_events", "key_decisions",
+        "field_corrections", "users", "api_credentials", "audit_logs",
+    )
+
+    def _get_state(self, name: str):
+        return self._published[name]
+
+    def _set_state(self, name: str, value) -> None:
+        self._published[name] = value
 
     def _state_exists(self) -> bool:
         return self.state_path.exists()
@@ -6998,8 +7029,12 @@ class IdempotencyConflict(RuntimeError):
 # never certify a run produced by different concurrency semantics. 3.0.0 =
 # normalized-authority cutover: the snapshot no longer stores reports, field
 # corrections or validation tasks in PostgreSQL mode; those write through
-# normalized repositories inside the same protected transaction.
-SNAPSHOT_TRANSACTION_VERSION = "3.0.0"
+# normalized repositories inside the same protected transaction. 3.1.0 =
+# copy-on-write publication with the re-review corrections: non-owner reads
+# come straight from the live committed projection (no sticky per-thread view),
+# the commit publish binds to the transaction's own committed revision, and the
+# append-only audit log is copied shallowly rather than deep-copied per txn.
+SNAPSHOT_TRANSACTION_VERSION = "3.1.0"
 # Bounded wait for the row lock. A blocked writer fails as a controlled conflict
 # rather than hanging a request thread indefinitely.
 SNAPSHOT_LOCK_TIMEOUT_MS = 5000
@@ -7153,25 +7188,25 @@ class PostgresStateStore(LocalStateStore):
         return payload
 
     def refresh(self) -> None:
-        # OWNER path: the writer loading the locked snapshot into its OWN private
-        # working state at transaction start (or re-reading inside its own
-        # transaction). It already holds _txn_lock; no extra coordination.
+        # OWNER path: the writer loading the just-locked committed snapshot into
+        # its OWN transaction-private working projection (owner-routed getters/
+        # setters). It already holds _txn_lock; no extra coordination.
         if self._owns_txn():
             super().refresh()
             self._load_normalized_entities()
             return
-        # NON-OWNER path (a read route / worker / bootstrap probe): must NOT
-        # rebind the shared projection while another thread holds an active
-        # protected transaction -- doing so would replace that writer's
-        # uncommitted working state and tear the transaction (the confirmed
-        # defect). Acquire the SAME in-process lock the writer holds for the
-        # whole transaction: this blocks until the writer has committed or
-        # rolled back and PUBLISHED, so this refresh always observes a coherent
-        # COMMITTED projection, never a half-applied one. RLock keeps a
-        # same-thread re-entrant refresh safe.
+        # NON-OWNER path (a read route / export / worker / authorization lookup):
+        # NEVER touches the writer's private working state, and NEVER mutates the
+        # published projection in place. Build a complete candidate committed
+        # projection off to the side (serialized against any active writer, so it
+        # reflects committed state), then publish it atomically. Subsequent reads
+        # on this thread come straight from the live published projection, so a
+        # non-owner read is always the current committed generation -- never a
+        # writer's uncommitted state, and never a per-thread view that could go
+        # stale on a pooled worker thread across requests.
         with self._txn_lock:
-            super().refresh()
-            self._load_normalized_entities()
+            candidate, revision = self._build_committed_projection()
+        self._publish(candidate, revision)
 
     def _refuse_unimported_snapshot(self, payload: dict | None) -> None:
         """Fail closed on a snapshot holding migrated entities un-cut-over.
@@ -7304,6 +7339,16 @@ class PostgresStateStore(LocalStateStore):
         # the database lock.
         self._txn: dict[str, object] | None = None
         self._txn_lock = threading.RLock()
+        # Copy-on-write publication. _published (base attr) holds the COMMITTED
+        # projection; a writer works on a transaction-private working projection
+        # and publishes it atomically only on commit. _publish_lock guards the
+        # single whole-projection swap; _published_revision is the monotonic
+        # generation guard so an older refresh cannot overwrite a newer publish.
+        # _read_local carries the per-thread loading buffer (non-owner refresh)
+        # and the request-consistent captured committed view.
+        self._publish_lock = threading.RLock()
+        self._published_revision = -1
+        self._read_local = threading.local()
         self._verify_repository_schema()
         # Bootstrap runs under the SAME global transaction boundary as every
         # other mutation -- one connection, the global advisory lock acquired
@@ -7318,6 +7363,109 @@ class PostgresStateStore(LocalStateStore):
         """True when THIS thread owns the open transaction context (if any)."""
         txn = self._txn
         return txn is not None and txn.get("owner") == threading.get_ident()
+
+    # ---------------------------------------------- copy-on-write routing -----
+    def _active_working(self):
+        """The calling thread's transaction-private working projection, or None."""
+        txn = self._txn
+        if txn is not None and txn.get("owner") == threading.get_ident():
+            return txn.get("working")
+        return None
+
+    def _get_state(self, name: str):
+        working = self._active_working()
+        if working is not None:
+            return working[name]
+        read_local = getattr(self, "_read_local", None)
+        if read_local is not None:
+            # A non-owner refresh loads a candidate committed projection into this
+            # per-thread buffer (never published mid-build).
+            loading = getattr(read_local, "loading", None)
+            if loading is not None and name in loading:
+                return loading[name]
+        # The live published projection -- always the current committed generation.
+        return self._published[name]
+
+    def _set_state(self, name: str, value) -> None:
+        working = self._active_working()
+        if working is not None:
+            working[name] = value
+            return
+        read_local = getattr(self, "_read_local", None)
+        if read_local is not None:
+            loading = getattr(read_local, "loading", None)
+            if loading is not None:
+                loading[name] = value
+                return
+        self._published[name] = value
+
+    def _new_working_projection(self) -> dict:
+        """A private copy of the current committed projection.
+
+        Deep for every container so any in-place mutation of a nested entity
+        model, list or dict by a domain method touches only the working copy,
+        never the published one -- EXCEPT audit_logs, which is an append-only
+        hash chain: its entries are never mutated in place (only whole-list
+        reassign, .append, .pop and .clear at the list level), so a shallow list
+        copy already gives the writer a private list without deep-copying an
+        unbounded, ever-growing log on every single transaction. The shared
+        entry objects are read-only, so no writer can reach the published log
+        through them.
+        """
+        import copy
+        projection: dict[str, object] = {}
+        for name in self.MANAGED_STATE:
+            current = self._published.get(name)
+            if name == "audit_logs" and isinstance(current, list):
+                projection[name] = list(current)
+            else:
+                projection[name] = copy.deepcopy(current)
+        return projection
+
+    def _publish(self, projection: dict, revision: int) -> None:
+        """Atomically publish a COMPLETE committed projection.
+
+        The whole projection reference is swapped under _publish_lock, so a
+        reader observes either the entire old generation or the entire new one,
+        never a mixture. An older generation (lower revision) never overwrites a
+        newer published one.
+        """
+        with self._publish_lock:
+            if revision < self._published_revision:
+                return
+            self._published = projection
+            self._published_revision = revision
+
+    def _build_committed_projection(self) -> tuple[dict, int]:
+        """Load the committed DB state into a fresh projection off to the side.
+
+        Routes the inherited refresh loaders into a per-thread loading buffer so
+        nothing is published until the atomic swap. Returns (projection, revision).
+        """
+        loading: dict = {}
+        self._read_local.loading = loading
+        try:
+            super().refresh()
+            self._load_normalized_entities()
+        finally:
+            self._read_local.loading = None
+        revision = self._read_committed_revision()
+        return loading, revision
+
+    def _read_committed_revision(self) -> int:
+        import psycopg
+
+        try:
+            with psycopg.connect(self.database_url, connect_timeout=5) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
+                    cursor.execute(
+                        f"select revision from {self.STATE_TABLE} where tenant_slug = %s",
+                        (self.tenant.slug,))
+                    row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        except Exception:  # noqa: BLE001 - revision guard is best-effort
+            return self._published_revision + 1
 
     def _bootstrap_and_init(self) -> None:
         import psycopg
@@ -7351,14 +7499,17 @@ class PostgresStateStore(LocalStateStore):
                              "operation_id": None, "request_hash": None,
                              "operation_kind": "snapshot.bootstrap", "actor_id": None,
                              "owner": threading.get_ident(),
-                             "wrote": False, "dirty": False}
+                             "working": {}, "wrote": False, "dirty": False}
                 # LocalStateStore.__init__ refreshes from the locked payload (state
-                # exists) or seeds (first run). Any save() it triggers is deferred and
-                # marks the transaction dirty; it never writes independently.
+                # exists) or seeds (first run) INTO the transaction-private working
+                # projection. Any save() it triggers is deferred and marks the
+                # transaction dirty; it never writes independently or publishes.
                 super().__init__()
                 if self._txn.get("dirty"):
                     self._commit_snapshot({"revision": revision, "result": None})
                 connection.commit()
+                # Publish the fully-constructed committed projection atomically.
+                self._publish(self._txn["working"], self._read_committed_revision())
             except BaseException:
                 connection.rollback()
                 raise
@@ -7563,8 +7714,13 @@ class PostgresStateStore(LocalStateStore):
                          "operation_id": operation_id, "request_hash": request_hash,
                          "operation_kind": operation_kind, "actor_id": actor_id,
                          "owner": threading.get_ident(),
+                         # Transaction-private working projection: a DEEP copy of
+                         # the committed projection. The owner reads/mutates it;
+                         # non-owners never see it. Published atomically on commit.
+                         "working": self._new_working_projection(),
                          "wrote": False, "dirty": False}
-            # Load the transaction's snapshot into the in-memory domain model.
+            # Load the transaction's committed snapshot into the OWNER's working
+            # projection (owner refresh reloads the just-locked committed state).
             if payload is not None and not context["replayed"]:
                 self.refresh()
             yield context
@@ -7572,6 +7728,15 @@ class PostgresStateStore(LocalStateStore):
             if not context["replayed"]:
                 self._commit_snapshot(context)
             connection.commit()
+            # COMMIT SUCCEEDED: atomically publish the complete new committed
+            # projection, stamped with THIS transaction's own committed revision
+            # (set by _commit_snapshot) -- not a value re-read on a separate
+            # connection, which would be redundant and, if the outer lock were
+            # ever relaxed, could bind our projection to a later writer's
+            # revision. On any pre-commit failure below/above we never reach
+            # here, so the private working projection is discarded, unpublished.
+            if not context["replayed"]:
+                self._publish(self._txn["working"], int(context["revision"]))
         except psycopg.errors.LockNotAvailable as exc:
             connection.rollback()
             raise SnapshotConflict("snapshot lock timeout", retryable=True) from exc
@@ -7793,6 +7958,24 @@ class PostgresStateStore(LocalStateStore):
 
     def _set_tenant_scope(self, cursor) -> None:
         cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
+
+
+# Install one context-aware property per MANAGED_STATE attribute. Domain methods
+# keep using ``self.field_corrections`` etc. verbatim; the property routes each
+# read/write through _get_state/_set_state, which the backends override to give
+# an owner its transaction-private working projection and every other caller the
+# committed published projection.
+def _install_managed_state_properties() -> None:
+    def _make(state_name: str):
+        return property(
+            lambda self, _n=state_name: self._get_state(_n),
+            lambda self, value, _n=state_name: self._set_state(_n, value),
+        )
+    for _state_name in LocalStateStore.MANAGED_STATE:
+        setattr(LocalStateStore, _state_name, _make(_state_name))
+
+
+_install_managed_state_properties()
 
 
 def create_store() -> LocalStateStore:
