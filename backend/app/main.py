@@ -119,7 +119,12 @@ def cors_allowed_origins() -> list[str]:
     configured = [
         origin.strip()
         for origin in os.getenv("MONDAY_REPORT_CORS_ORIGINS", "").split(",")
-        if origin.strip()
+        # A wildcard is never a valid explicit origin: with credentialed CORS a
+        # configured "*" would make Starlette reflect ANY requesting origin.
+        # Dropping such entries keeps the promise above enforced, not aspirational
+        # -- and in client mode a lone "*" therefore resolves to the fail-closed
+        # empty allowlist rather than to everyone.
+        if origin.strip() and "*" not in origin
     ]
     if configured:
         return configured
@@ -188,10 +193,13 @@ def _best_effort_audit(*args, **kwargs) -> None:
     """Write an audit event but never turn an already-rejected auth response into a
     500 if the audit HMAC key is unavailable. Used only on middleware auth-rejection
     paths; it still never writes an unkeyed event in client mode (audit() fails
-    closed and this swallows only that failure)."""
+    closed and this swallows only that failure). On the transactional PostgreSQL
+    backend a direct audit runs in its own snapshot transaction; a transient
+    snapshot conflict there (lock timeout under contention) is likewise swallowed --
+    best-effort means the rejection response wins over the rejection audit."""
     try:
         store.audit(*args, **kwargs)
-    except AuditIntegrityUnavailable:
+    except (AuditIntegrityUnavailable, SnapshotConflict):
         pass
 
 
