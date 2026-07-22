@@ -20,6 +20,11 @@ E. IMPORT — assess/dry-run/execute/verify lifecycle, idempotent rerun,
    conflicting source refused, unsupported state fails closed, startup gate.
 F. TENANT/RLS — forced row-level security proven with a NON-superuser role
    (direct SQL), cross-tenant idempotency isolation, and worker/tenant scoping.
+G. LIFECYCLE/AUTHORITY — retention apply deletes normalized rows in the same
+   transaction (no resurrection), create_store fails closed on an un-imported
+   snapshot (no silent local fallback), a live supersede writes the typed
+   superseded_by_id back-link, and the authority-marker refusal applies per
+   transaction (an old-version writer's snapshot is never overwritten).
 
 Honest skipping: without MONDAY_REPORT_TEST_DATABASE_URL the PostgreSQL
 sections report SKIPPED and the evidence builder refuses to emit 'passed'.
@@ -51,7 +56,7 @@ GUARD_AUDIT_KEY = "b" * 64
 
 checks: list[dict] = []
 TOTALS = {"processes": 0, "connections": 0, "route_scenarios": 0, "race_scenarios": 0,
-          "import_checks": 0, "tenant_checks": 0}
+          "import_checks": 0, "tenant_checks": 0, "lifecycle_checks": 0}
 
 
 def record(name: str, ok: bool, detail: object = "", *, skipped: bool = False) -> None:
@@ -515,26 +520,38 @@ print(json.dumps(out))
     # G12/G13 audit/HMAC failure rolls back normalized rows
     reset(); migrate_baseline()
     cfg12 = env_for("g12")
-    run_fixture(cfg12, {"correction": CORRECTION})  # keyed chain now exists
+    fx12 = run_fixture(cfg12, {"correction": CORRECTION})  # keyed chain now exists
+    ws12 = fx12["workspace_id"]
     rows_before = q1("select count(*) from monday_report_norm_field_corrections")
     rev_before = q1("select revision from monday_report_state_snapshots")
     env_nokey = os_env(cfg12)
     env_nokey.pop("MONDAY_REPORT_AUDIT_HMAC_KEY", None)
+    # A REGISTERED field key (the registry 422s unregistered ones before audit);
+    # superseding the fixture's active correction is the audited mutation path.
+    body12 = json.dumps({**CORRECTION, "corrected_value": "NOKEY-ATTEMPT"})
+    # Discriminating: the no-key request attempts a CORRECTION on the keyed
+    # chain -- if the audit failure did not roll everything back, a normalized
+    # row and a revision bump would appear.
     denied = subprocess.run([sys.executable, "-c",
         "import json,os,sys; sys.path.insert(0,os.getcwd())\n"
         "from fastapi.testclient import TestClient\n"
         "from backend.app.main import app\n"
         "c=TestClient(app, raise_server_exceptions=False)\n"
-        "ws=c.post('/workspaces', json={'name':'g12b','rig_name':'g'}).json()\n"
-        "print(json.dumps({'ws_status': 'id' in ws}))"],
+        f"r=c.post('/workspaces/{ws12}/field-corrections', "
+        "headers={'Idempotency-Key': 'key-g12-' + 'z' * 10}, "
+        f"json={body12})\n"
+        "print(json.dumps({'status': r.status_code}))"],
         env=env_nokey, capture_output=True, text=True, cwd=str(ROOT), timeout=240)
     TOTALS["processes"] += 1; TOTALS["connections"] += 1
+    lines12 = [l for l in denied.stdout.splitlines() if l.startswith("{")]
+    status12 = json.loads(lines12[-1])["status"] if lines12 else None
     rows_after = q1("select count(*) from monday_report_norm_field_corrections")
-    record("32 G12/G13 an audit/HMAC failure (keyed chain, key unavailable) persists NO "
-           "normalized rows and NO revision",
-           rows_after == rows_before
+    record("32 G12/G13 an audit/HMAC failure (keyed chain, key unavailable) fails the "
+           "correction attempt and persists NO normalized rows and NO revision",
+           status12 is not None and status12 >= 500
+           and rows_after == rows_before
            and q1("select revision from monday_report_state_snapshots") == rev_before,
-           {"rows": (rows_before, rows_after)})
+           {"status": status12, "rows": (rows_before, rows_after)})
 
     # G14 database constraint failure rolls back audit + idempotency + snapshot.
     # A planted ACTIVE correction is legitimately superseded by the app (that is
@@ -585,8 +602,10 @@ print(json.dumps(out))
     res15 = run_workers("abort_before_commit", ("a",), {"workspace_id": fx["workspace_id"]})
     TOTALS["race_scenarios"] += 1
     record("34 G15 a process killed mid-transaction leaves no partial normalized rows",
-           q1("select count(*) from monday_report_norm_field_corrections") == rows15,
-           {"before": rows15,
+           bool(res15) and res15[0].get("about_to_abort") is True
+           and q1("select count(*) from monday_report_norm_field_corrections") == rows15,
+           {"reached_txn": bool(res15 and res15[0].get("about_to_abort")),
+            "before": rows15,
             "after": q1("select count(*) from monday_report_norm_field_corrections")})
 
     # G16 independent workspaces concurrently
@@ -838,6 +857,127 @@ print(json.dumps(out))
            crossed is False, {"crossed": crossed})
     TOTALS["tenant_checks"] += 1
 
+    # MEASURED (not asserted-by-assumption) RLS catalog state for the evidence.
+    rls_rows = q("select relname, relrowsecurity, relforcerowsecurity from pg_class "
+                 "where relname like 'monday_report_norm%' and relkind = 'r' order by 1")
+    TOTALS["rls_forced_tables"] = sum(1 for r in rls_rows if r[1] and r[2])
+    record("53 RLS is ENABLED and FORCED on all four slice tables (catalog-measured)",
+           len(rls_rows) == 4 and all(r[1] and r[2] for r in rls_rows),
+           {"tables": [(r[0].replace("monday_report_norm_", ""), bool(r[1]), bool(r[2]))
+                       for r in rls_rows]})
+    TOTALS["tenant_checks"] += 1
+
+    # ------------------------------------------------- G lifecycle/authority - #
+    # 54 retention apply must DELETE normalized rows (no resurrection).
+    reset(); migrate_baseline()
+    cfg_ret = env_for("ret", slug="np-ret")
+    run_fixture(cfg_ret, {"correction": CORRECTION, "breach": BREACH, "report": True})
+    q("update monday_report_norm_reports set doc = jsonb_set(doc, '{created_at}', "
+      "to_jsonb('2020-01-01T00:00:00+00:00'::text)), created_at = '2020-01-01T00:00:00+00'")
+    os.environ["MONDAY_REPORT_TENANT_SLUG"] = cfg_ret["tenant_slug"]
+    try:
+        ret_store = store_mod.PostgresStateStore(url)
+        ret_result = ret_store.run_retention(365, apply=True)
+        ret_store.refresh()
+        resurrected = len(ret_store.monday_reports)
+    finally:
+        os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
+    TOTALS["connections"] += 1
+    record("54 retention apply DELETES the purged report's normalized row in-transaction "
+           "(no resurrection on refresh; the audited counts are true; unexpired rows kept)",
+           ret_result.monday_reports == 1
+           and q1("select count(*) from monday_report_norm_reports") == 0
+           and resurrected == 0
+           and q1("select count(*) from monday_report_norm_validation_tasks") == 1
+           and q1("select count(*) from monday_report_norm_field_corrections") == 1,
+           {"purged_reports": ret_result.monday_reports,
+            "rows_left": q1("select count(*) from monday_report_norm_reports"),
+            "resurrected": resurrected})
+    TOTALS["lifecycle_checks"] += 1
+
+    # 55 create_store must not launder the cutover gate into a local fallback.
+    reset(); migrate_baseline()
+    with psycopg.connect(url, autocommit=True) as c:
+        c.execute("insert into monday_report_state_snapshots (tenant_slug, tenant_id, payload, revision) "
+                  "values (%s, %s, %s, 1)",
+                  ("np-cs", legacy_state["tenant"]["id"], Jsonb(legacy_state)))
+    for key, value in {"MONDAY_REPORT_REPOSITORY_BACKEND": "postgres",
+                       "MONDAY_REPORT_DATABASE_URL": url,
+                       "MONDAY_REPORT_TENANT_SLUG": "np-cs"}.items():
+        os.environ[key] = value
+    laundered = err55 = None
+    try:
+        laundered = store_mod.create_store()
+    except store_mod.NormalizedCutoverRequired as exc:
+        err55 = str(exc)
+    finally:
+        for key in ("MONDAY_REPORT_REPOSITORY_BACKEND", "MONDAY_REPORT_DATABASE_URL",
+                    "MONDAY_REPORT_TENANT_SLUG"):
+            os.environ.pop(key, None)
+    TOTALS["connections"] += 1
+    record("55 create_store FAILS CLOSED on an un-imported snapshot: no silent local-JSON "
+           "split-brain, remediation text propagates to the operator",
+           laundered is None and err55 is not None and "normalized_import" in err55,
+           {"laundered_to": type(laundered).__name__ if laundered is not None else None,
+            "named_tool": bool(err55 and "normalized_import" in err55)})
+    TOTALS["lifecycle_checks"] += 1
+
+    # 56 a live supersede writes the TYPED superseded_by_id back-link.
+    reset(); migrate_baseline()
+    cfg_sb = env_for("sb", slug="np-sb")
+    fx = run_fixture(cfg_sb, {"correction": CORRECTION})
+    run_workers("same_field_race", ("a",),
+                {"workspace_id": fx["workspace_id"], "participants": 1},
+                slugs={"a": "np-sb"})
+    typed_pairs = q("select superseded_by_id::text, doc->>'superseded_by_id' "
+                    "from monday_report_norm_field_corrections where status = 'superseded'")
+    os.environ["MONDAY_REPORT_TENANT_SLUG"] = "np-sb"
+    try:
+        drift56 = normalized_drift_report(store_mod.PostgresStateStore(url))
+    finally:
+        os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
+    TOTALS["connections"] += 1
+    record("56 a live supersede writes the typed superseded_by_id column equal to the doc "
+           "back-link (and the drift detector now covers the pair)",
+           len(typed_pairs) == 1 and typed_pairs[0][0] is not None
+           and typed_pairs[0][0] == typed_pairs[0][1] and drift56 == [],
+           {"pairs": typed_pairs, "drift": drift56})
+    TOTALS["lifecycle_checks"] += 1
+
+    # 57 the marker refusal applies PER TRANSACTION, not only at bootstrap: an
+    # already-running store must refuse to overwrite (blank + re-stamp) a
+    # snapshot that an old-version concurrent writer re-populated with
+    # migrated entities and no marker.
+    reset(); migrate_baseline()
+    cfg_mk = env_for("mk", slug="np-mk")
+    fx = run_fixture(cfg_mk, {})
+    os.environ["MONDAY_REPORT_TENANT_SLUG"] = "np-mk"
+    try:
+        mk_store = store_mod.PostgresStateStore(url)  # healthy cut-over state
+    finally:
+        os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
+    q("update monday_report_state_snapshots set payload = "
+      "(payload - 'normalized_authority') || %s where tenant_slug = %s",
+      (Jsonb({"validation_tasks": [{"planted": True}]}), "np-mk"))
+    from backend.app.schemas import FieldCorrectionCreate
+    err57 = None
+    try:
+        mk_store.record_field_correction(uuid.UUID(fx["workspace_id"]),
+                                         FieldCorrectionCreate(**CORRECTION))
+    except store_mod.NormalizedCutoverRequired:
+        err57 = "refused"
+    TOTALS["connections"] += 1
+    planted_kept = q1("select payload->'validation_tasks'->0->>'planted' "
+                      "from monday_report_state_snapshots where tenant_slug = %s", ("np-mk",))
+    marker_restamped = q1("select payload ? 'normalized_authority' "
+                          "from monday_report_state_snapshots where tenant_slug = %s", ("np-mk",))
+    record("57 a RUNNING store refuses to overwrite a marker-less snapshot re-populated by an "
+           "old-version writer (entities preserved, marker not re-stamped, mutation refused)",
+           err57 == "refused" and planted_kept == "true" and marker_restamped is False,
+           {"refused": err57 == "refused", "planted_kept": planted_kept,
+            "marker_restamped": marker_restamped})
+    TOTALS["lifecycle_checks"] += 1
+
     with psycopg.connect(url, autocommit=True) as c:
         c.execute("drop table if exists mr_test_barrier")
 
@@ -879,7 +1019,8 @@ def build_evidence() -> dict:
         "concurrency": all(passed(f"{n:02d} ") for n in
                            (25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38)),
         "import": all(passed(f"{n:02d} ") for n in range(39, 47)),
-        "tenant_rls": all(passed(f"{n:02d} ") for n in range(47, 53)),
+        "tenant_rls": all(passed(f"{n:02d} ") for n in range(47, 54)),
+        "lifecycle": all(passed(f"{n:02d} ") for n in range(54, 58)),
     }
     status = "passed" if (ran_real_db and n_failed == 0 and n_skipped == 0
                           and all(required_groups.values())) else "BLOCKED_INCOMPLETE"
@@ -927,7 +1068,15 @@ def build_evidence() -> dict:
         "import_result": "passed" if required_groups["import"] else "not_passed",
         "tenant_check_total": TOTALS["tenant_checks"],
         "tenant_rls_result": "passed" if required_groups["tenant_rls"] else "not_passed",
-        "rls_state": "active_forced_on_slice_tables",
+        "lifecycle_check_total": TOTALS["lifecycle_checks"],
+        "lifecycle_result": "passed" if required_groups["lifecycle"] else "not_passed",
+        "deletion_lifecycle": "retention apply and the demo-seed self-wipe prune normalized rows "
+                              "in the same protected transaction (no resurrection); the marker "
+                              "refusal applies per transaction; create_store fails closed on an "
+                              "un-imported snapshot instead of local fallback",
+        "rls_state": ("active_forced_on_slice_tables"
+                      if TOTALS.get("rls_forced_tables") == 4 else "not_forced"),
+        "rls_forced_table_count": TOTALS.get("rls_forced_tables", 0),
         "rls_scope_note": "RLS is FORCED on the four slice tables only; the overall "
                           "tenant-authorization-enforcement control remains BLOCKED because the "
                           "full normalized store does not yet exist",
@@ -953,7 +1102,7 @@ def main() -> int:
 
     url = test_database_url()
     if not url:
-        for n in range(6, 53):
+        for n in range(6, 58):
             skip(f"{n:02d} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         pg_checks(url, scratch)

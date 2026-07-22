@@ -372,6 +372,9 @@ class LocalStateStore:
         self.api_credentials.clear()
         self.audit_logs.clear()
         self._seed()
+        # The wipe must also cover normalized-authority rows, or the "clean
+        # workspace" invariant silently breaks on the postgres backend.
+        self._normalized_prune_missing()
 
     @staticmethod
     def _configured_tenant() -> Tenant:
@@ -1315,6 +1318,14 @@ class LocalStateStore:
         return None
 
     def _normalized_persist_report_update(self, report, audit_event) -> None:
+        return None
+
+    def _normalized_prune_missing(self) -> None:
+        # Deletion reconciliation for lifecycle paths that REMOVE migrated
+        # entities from the dicts (retention apply, demo-seed self-wipe).
+        # No-op here: save() persists the dicts. PostgresStateStore overrides
+        # this to delete the corresponding normalized rows in the same
+        # transaction so purged entities cannot resurrect on refresh.
         return None
 
     # ------------------------------------------------------------------
@@ -2539,6 +2550,10 @@ class LocalStateStore:
         self._drop_many(self.failures, expired_failure_ids)
         self._drop_many(self.report_exports, expired_export_ids)
         self._drop_many(self.monday_reports, expired_report_ids)
+        # Normalized-authority backends must delete the purged entities' rows
+        # in this same transaction, or they resurrect on the next refresh and
+        # the audited retention result below would be false.
+        self._normalized_prune_missing()
         self.audit(
             "retention.apply",
             "tenant",
@@ -6985,6 +7000,16 @@ MUTATING_STORE_METHODS = (
 NON_WRAPPED_MUTATORS = ("audit",)
 
 
+class NormalizedCutoverRequired(RuntimeError):
+    """A postgres snapshot still holds migrated entities but was never cut over.
+
+    Deliberately NOT swallowed by create_store's availability fallback:
+    degrading to a fresh local JSON authority here would create the exact
+    two-live-authorities split-brain the import gate exists to prevent, with
+    the un-imported client data sitting silently in PostgreSQL.
+    """
+
+
 class PostgresStateStore(LocalStateStore):
     """PostgreSQL-backed MVP state repository with tenant-scoped RLS.
 
@@ -7065,6 +7090,26 @@ class PostgresStateStore(LocalStateStore):
         super().refresh()
         self._load_normalized_entities()
 
+    def _refuse_unimported_snapshot(self, payload: dict | None) -> None:
+        """Fail closed on a snapshot holding migrated entities un-cut-over.
+
+        Applied at bootstrap AND to every transaction's locked payload read:
+        a concurrent OLD-VERSION writer could re-materialize migrated entities
+        into the snapshot without the marker, and proceeding here would
+        silently discard its committed entities on this transaction's commit
+        (which blanks the keys and re-stamps the marker).
+        """
+        if payload is None:
+            return
+        held = [key for key in self.NORMALIZED_ENTITY_KEYS if payload.get(key)]
+        if held and not payload.get("normalized_authority"):
+            raise NormalizedCutoverRequired(
+                "PostgreSQL snapshot still holds migrated entities "
+                f"({', '.join(held)}) without a normalized-authority marker. "
+                "Run 'python -m backend.app.normalized_import assess' and then "
+                "'... execute' to cut over before starting in postgres mode."
+            )
+
     def _load_normalized_entities(self) -> None:
         """Read authority for migrated entities: the normalized tables.
 
@@ -7132,6 +7177,14 @@ class PostgresStateStore(LocalStateStore):
             report, audit_event_id=getattr(audit_event, "id", None),
             operation_id=self._txn_operation_id())
 
+    def _normalized_prune_missing(self) -> None:
+        from .repositories import prune_missing_rows
+
+        # Same-transaction deletion reconciliation: retention apply and the
+        # demo-seed self-wipe drop entities from the dicts; the rows they were
+        # loaded from must go with them or they resurrect on the next refresh.
+        prune_missing_rows(self)
+
     def __init__(self, url: str) -> None:
         self.database_url = url
         # Active transaction context, or None. OWNED BY EXACTLY ONE THREAD: the
@@ -7187,15 +7240,7 @@ class PostgresStateStore(LocalStateStore):
                 # UNSUPPORTED HISTORICAL STATE fails closed: a snapshot that still
                 # holds migrated entities but was never cut over must be imported
                 # explicitly (never silently, never at startup).
-                if payload is not None:
-                    held = [k for k in self.NORMALIZED_ENTITY_KEYS if payload.get(k)]
-                    if held and not payload.get("normalized_authority"):
-                        raise RuntimeError(
-                            "PostgreSQL snapshot still holds migrated entities "
-                            f"({', '.join(held)}) without a normalized-authority marker. "
-                            "Run 'python -m backend.app.normalized_import assess' and then "
-                            "'... execute' to cut over before starting in postgres mode."
-                        )
+                self._refuse_unimported_snapshot(payload)
                 self._txn = {"connection": connection, "revision": revision, "payload": payload,
                              "operation_id": None, "request_hash": None,
                              "operation_kind": "snapshot.bootstrap", "actor_id": None,
@@ -7365,6 +7410,11 @@ class PostgresStateStore(LocalStateStore):
                     payload = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
                     revision = int(row[1])
                 context["revision"] = revision
+                # Same refusal as bootstrap, re-applied to THIS transaction's
+                # locked read: never overwrite a marker-less snapshot that a
+                # concurrent old-version writer re-populated with migrated
+                # entities -- committing would silently discard them.
+                self._refuse_unimported_snapshot(payload)
 
                 if operation_id is not None:
                     cursor.execute(
@@ -7621,6 +7671,11 @@ def create_store() -> LocalStateStore:
     if requested_repository_backend() == POSTGRES_REPOSITORY_BACKEND and database_url():
         try:
             return PostgresStateStore(database_url())
+        except NormalizedCutoverRequired:
+            # Fail closed: an un-imported snapshot must never be laundered into
+            # a fresh local JSON authority (silent split-brain). The full
+            # remediation message propagates to the operator.
+            raise
         except Exception as exc:  # noqa: BLE001 - app must start so readiness can report the blocker.
             print(
                 f"WARN: PostgreSQL repository unavailable; falling back to local JSON: {exc.__class__.__name__}",

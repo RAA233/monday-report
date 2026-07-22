@@ -75,6 +75,33 @@ Legacy PostgreSQL snapshots that still hold migrated entities and carry no
 marker are an **unsupported historical state**: PostgreSQL startup fails closed
 naming the import tool. The import tool (Part H) is the only cutover path.
 
+Authority hardening (added after adversarial review of the slice):
+
+- **Fail-closed startup, no laundering.** The startup gate raises the dedicated
+  `NormalizedCutoverRequired` and `create_store()` re-raises it instead of
+  falling back to local JSON — a fallback would create a two-live-authorities
+  split-brain with the un-imported client data sitting silently in PostgreSQL.
+  Ordinary availability failures still fall back so readiness can report them.
+- **Per-transaction marker refusal.** The same held-entities-without-marker
+  refusal is applied to every transaction's locked payload read, not only at
+  bootstrap: a concurrent old-version writer that re-materializes migrated
+  entities into the snapshot is never silently overwritten (its committed
+  entities would otherwise be blanked and the marker re-stamped).
+- **Deletion reconciliation.** Lifecycle paths that REMOVE migrated entities
+  from the in-memory dicts — `run_retention(apply=True)` and the demo-seed
+  self-wipe — call `_normalized_prune_missing()`, which deletes the
+  corresponding normalized rows **in the same protected transaction**
+  (FK-safe order: outcomes → tasks → corrections → reports). Without it,
+  purged entities resurrect on the next refresh and the audited retention
+  counts would be false.
+- **Typed back-link on supersede.** `PgFieldCorrectionRepository.create`
+  writes the `superseded_by_id` column together with the doc, and the drift
+  detector covers the pair, so live-superseded and imported rows share one
+  shape.
+- **Tenant-filtered import queries.** The import tool's conflict and verify
+  queries carry explicit `tenant_slug` filters in addition to the RLS GUC,
+  because the tool may run as a superuser/owner role, which bypasses RLS.
+
 ## Schema (Part D — migration 0005)
 
 Typed columns carry every field that participates in keys, relationships,
