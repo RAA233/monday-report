@@ -85,7 +85,40 @@ DEV = "http://127.0.0.1:5173"
 EVIL = "https://evil.example.com"
 
 
+def _real_app_preflight(origin: str) -> str | None:
+    """Preflight the REAL application (backend.app.main.app), not a synthetic one.
+
+    The middleware binds ``allow_origins`` once at first import, so main() sets
+    the isolated origin in the environment BEFORE anything imports the app; these
+    checks therefore prove the actual wiring (env -> cors_allowed_origins() ->
+    app.add_middleware), where the synthetic-app checks below only prove the
+    middleware semantics for a given list.
+    """
+    from fastapi.testclient import TestClient
+
+    from backend.app.main import app
+
+    client = TestClient(app)
+    resp = client.options(
+        "/auth/session",
+        headers={"Origin": origin, "Access-Control-Request-Method": "GET"},
+    )
+    return resp.headers.get("access-control-allow-origin")
+
+
 def main() -> int:
+    # --- REAL application binding ------------------------------------------ #
+    # Environment FIRST, import SECOND: the app's CORSMiddleware is configured
+    # from cors_allowed_origins() at first import.
+    os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "demo"
+    os.environ["MONDAY_REPORT_CORS_ORIGINS"] = ISO
+    record("R1 the REAL app echoes the configured isolated origin on preflight",
+           _real_app_preflight(ISO) == ISO, {"acao": _real_app_preflight(ISO)})
+    record("R2 the REAL app refuses an unrelated origin",
+           _real_app_preflight(EVIL) not in (EVIL, "*"), {"acao": _real_app_preflight(EVIL)})
+    record("R3 the REAL app refuses :5173 when only the isolated origin is configured",
+           _real_app_preflight(DEV) not in (DEV, "*"), {"acao": _real_app_preflight(DEV)})
+
     # --- resolver matrix --------------------------------------------------- #
     demo_unset = _resolve("demo", None)
     record("01 demo mode with no configured origins falls back to the :5173 dev origins",
@@ -110,6 +143,21 @@ def main() -> int:
     record("06 no resolved allowlist ever contains a wildcard",
            all("*" not in o for o in (demo_unset + demo_iso + client_unset + client_iso + multi)),
            True)
+
+    # A configured wildcard must NEVER pass through: with credentialed CORS it
+    # would make the middleware reflect any requesting origin. Wildcard entries
+    # are dropped, so a lone "*" behaves exactly like an unset variable -- dev
+    # defaults in demo, fail-closed empty in protected mode.
+    w_demo = _resolve("demo", "*")
+    record("W1 a configured wildcard is dropped in demo mode (dev defaults, never '*')",
+           w_demo == [DEV, "http://localhost:5173"] and all("*" not in o for o in w_demo),
+           {"origins": w_demo})
+    w_client = _resolve("client", "*")
+    record("W2 a configured wildcard in protected mode FAILS CLOSED (empty, never '*')",
+           w_client == [], {"origins": w_client})
+    w_mixed = _resolve("client", f"{ISO}, *")
+    record("W3 wildcard entries are dropped from a mixed list (explicit origins kept)",
+           w_mixed == [ISO], {"origins": w_mixed})
 
     # --- behavioural preflight --------------------------------------------- #
     # Isolated origin allowed; unrelated origin refused; :5173 refused when the
