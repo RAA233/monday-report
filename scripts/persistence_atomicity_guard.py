@@ -587,8 +587,10 @@ def pg_checks(url: str, scratch: Path) -> dict:
         store_mod.PostgresStateStore(url)
     except RuntimeError as exc:
         err = str(exc)
-    record("37 a database missing migration 0004 fails closed naming the migration",
-           err is not None and "0004" in err, {"named": bool(err and "0004" in err)})
+    required_prefix = store_mod.PostgresStateStore.REQUIRED_MIGRATION[:4]
+    record("37 a database missing a required migration fails closed naming the CURRENT requirement",
+           err is not None and required_prefix in err,
+           {"named": bool(err and required_prefix in err), "required": required_prefix})
     record("38 that error leaks no DSN, host, user, password or absolute path",
            err is not None and not any(t in err.lower() for t in
                                        ("postgresql://", "password", "@127.", "c:\\", "/users/")),
@@ -626,11 +628,11 @@ def pg_checks(url: str, scratch: Path) -> dict:
         return json.loads(lines[-1]) if lines else {"error": (proc.stderr or proc.stdout)[-300:]}
 
     def _corr_for(slug: str, workspace_id: str) -> int:
+        # Normalized authority (migration 0005).
         with psycopg.connect(url, autocommit=True) as c:
             r = c.execute(
-                "select count(*) from monday_report_state_snapshots snap, "
-                "jsonb_array_elements(snap.payload->'field_corrections') fc "
-                "where snap.tenant_slug=%s and fc->>'workspace_id'=%s", (slug, workspace_id)).fetchone()
+                "select count(*) from monday_report_norm_field_corrections "
+                "where tenant_slug=%s and workspace_id=%s", (slug, workspace_id)).fetchone()
             return int(r[0]) if r else 0
 
     # 45: single-process HTTP suite (14 scenarios: create/replay/missing-key/

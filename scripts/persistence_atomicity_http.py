@@ -96,11 +96,12 @@ def _revision(dsn: str, slug: str) -> int | None:
 def _corrections_for(dsn: str, slug: str, workspace_id: str) -> int:
     import psycopg
 
+    # Normalized authority (migration 0005): corrections live in their own
+    # table, not the snapshot payload.
     with psycopg.connect(dsn, autocommit=True) as c:
         r = c.execute(
-            "select count(*) from monday_report_state_snapshots snap, "
-            "jsonb_array_elements(snap.payload->'field_corrections') fc "
-            "where snap.tenant_slug=%s and fc->>'workspace_id' = %s",
+            "select count(*) from monday_report_norm_field_corrections "
+            "where tenant_slug=%s and workspace_id = %s",
             (slug, workspace_id)).fetchone()
         return int(r[0]) if r else 0
 
@@ -119,11 +120,11 @@ def _idempotency_row(dsn: str, slug: str, operation_id: str) -> dict:
 def _validation_status(dsn: str, slug: str, task_id: str) -> str | None:
     import psycopg
 
+    # Normalized authority (migration 0005).
     with psycopg.connect(dsn, autocommit=True) as c:
         r = c.execute(
-            "select fc->>'status' from monday_report_state_snapshots snap, "
-            "jsonb_array_elements(snap.payload->'validation_tasks') fc "
-            "where snap.tenant_slug=%s and fc->>'id'=%s", (slug, task_id)).fetchone()
+            "select status from monday_report_norm_validation_tasks "
+            "where tenant_slug=%s and id::text = %s", (slug, task_id)).fetchone()
         return r[0] if r else None
 
 

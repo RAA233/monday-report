@@ -327,3 +327,38 @@ class PgValidationTaskRepository(_PgRepositoryBase):
                      reviewer_verified, audit_event_id, operation_id),
                 )
             return new_revision
+
+
+def normalized_drift_report(store) -> list[str]:
+    """Detect typed-column vs canonical-doc drift on the normalized tables.
+
+    The doc column is the deterministic canonical serialization; the typed
+    columns exist for keys/constraints/RLS. They are written together in one
+    statement, so ANY divergence indicates tampering or a defect. Returns a
+    list of redacted references (table:id:field), empty when consistent.
+    """
+    drift: list[str] = []
+    checks = {
+        REPORTS_TABLE: (("status", "status"), ("workspace_id", "workspace_id"),
+                        ("tenant_id", "tenant_id")),
+        CORRECTIONS_TABLE: (("status", "status"), ("workspace_id", "workspace_id"),
+                            ("target_type", "target_type"), ("field_key", "field_key"),
+                            ("tenant_id", "tenant_id")),
+        TASKS_TABLE: (("status", "status"), ("target_type", "target_type"),
+                      ("tenant_id", "tenant_id")),
+    }
+    with store._connect() as connection:
+        with connection.cursor() as cursor:
+            store._set_tenant_scope(cursor)
+            for table, pairs in checks.items():
+                columns = ", ".join(column for column, _ in pairs)
+                cursor.execute(f"select id, doc, {columns} from {table} where tenant_id = %s",
+                               (store.tenant.id,))
+                for row in cursor.fetchall():
+                    row_id, doc = row[0], row[1]
+                    for index, (column, doc_field) in enumerate(pairs):
+                        typed = row[2 + index]
+                        doc_value = doc.get(doc_field)
+                        if str(typed) != str(doc_value):
+                            drift.append(f"{table}:{row_id}:{column}")
+    return drift
