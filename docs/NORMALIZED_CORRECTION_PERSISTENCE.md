@@ -264,11 +264,58 @@ was bumped to v2 so prior artifacts fail closed:
   recorded by the marker's `normalized.import` batch reference (no fabricated events).
 - **Refresh/transaction**: a non-owner refresh serializes against the writer's
   in-process lock; a rolled-back mutation reloads committed state so no phantom row
-  leaks. **RESIDUAL (disclosed, pre-existing):** the in-memory singleton does not
-  give snapshot isolation to a lock-free reader that reads the instance dicts
-  WITHOUT refreshing during an in-flight write; readers that `refresh()` are
-  serialized and safe. Fully eliminating this requires a per-transaction private
-  working copy (a broad rewrite out of this slice's scope) and is NOT claimed fixed.
+  leaks.
+
+## Store-level transaction isolation (copy-on-write publication)
+
+The earlier disclosed residual — a lock-free reader could observe a writer's
+uncommitted state — is now **eliminated**, not documented. Every process-wide
+mutable container is a `MANAGED_STATE` context-aware property backed by a
+committed **published projection**:
+
+- an **owner** thread inside a protected transaction reads and mutates a
+  transaction-private **working projection** (a `copy.deepcopy` of the published
+  projection, so mutating any nested entity, list or dict in place never touches
+  published — the sole exception is the append-only `audit_logs` hash chain,
+  copied as a *shallow* list because its entries are never mutated in place, only
+  appended; this avoids deep-copying an unbounded log on every transaction);
+- every **non-owner** caller (route, export, authorization lookup, worker) reads
+  straight from the live committed published projection — always the current
+  committed generation. There is **no** sticky per-thread captured view: an
+  earlier read never leaves a snapshot that a pooled worker thread could serve
+  stale on a later request;
+- on **commit**, the complete new committed projection is published atomically
+  under `_publish_lock`, stamped with **this transaction's own committed
+  revision** (the value written by the snapshot compare-and-swap), not a value
+  re-read on a separate connection; a monotonic revision guard means an older
+  refresh/commit can never overwrite a newer published generation;
+- on **rollback**, the private working projection is discarded and nothing is
+  published; a defensive refresh reload keeps subsequent reads on committed state;
+- refresh builds its candidate committed projection off to the side (into a
+  per-thread loading buffer) and publishes it atomically — it never mutates the
+  published projection in place.
+
+Result: a non-owner reader **never** observes a writer's uncommitted state through
+any read surface, and every individual read is a whole committed generation — no
+dirty read and no torn projection. (Because each non-owner read is the live
+current-committed generation, two reads in one long request could span a commit
+boundary; each is a consistent committed generation, never uncommitted.) This is
+proven by deterministic two-thread guard checks (route/export/authorization/worker
+surfaces, commit-publishes, rollback-publishes-nothing, deep-copy privacy,
+generation ordering, no-stale-view, revision binding, audit-log list isolation),
+each mutation-tested to fail under a broken implementation.
+
+Every state-reading route calls `store.refresh()` before touching state (verified
+by inspection of the full route inventory), so a read handler always observes the
+current committed generation rather than whatever a prior request left on its
+pooled thread.
+
+Throughput note: the non-owner refresh builds its candidate under `_txn_lock`, so
+a reader that must rebuild the committed projection serializes behind an active
+writer for the duration of that build. This is a deliberate correctness-over-
+throughput choice for the in-process singleton: the lock guarantees the candidate
+projection and its revision come from one consistent committed generation. Writer
+transactions are short and bounded by the row-lock timeout.
 - **RLS honesty**: enforcement is proven only with a genuine non-superuser role,
   and the guard proves the superuser-bypass vs non-superuser-enforced contrast;
   `tenant-resource-authorization` stays BLOCKED.
