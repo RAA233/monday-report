@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import sys
+import contextvars
 import threading
 import time
 import zipfile
@@ -378,6 +379,18 @@ class LocalStateStore:
 
     def _set_state(self, name: str, value) -> None:
         self._published[name] = value
+
+    @contextmanager
+    def committed_read_view(self):
+        """No-op in file/memory mode.
+
+        File/memory mode is single-process with no copy-on-write publication;
+        every read already observes one in-process state, so there is no separate
+        committed generation to pin. Provided so routes, exports and the worker can
+        wrap reads in ``with store.committed_read_view():`` uniformly across
+        backends; the PostgresStateStore override does the real generation pinning.
+        """
+        yield
 
     def _state_exists(self) -> bool:
         return self.state_path.exists()
@@ -6779,7 +6792,12 @@ class LocalStateStore:
                     key_id=key_ref.key_id,
                     key_version=key_ref.key_version,
                 )
-                audit_log.entry_hash = self._audit_v2_hash(audit_log, key_ref.secret)
+                # Seal the (now frozen) entry: compute the HMAC over the entry with
+                # entry_hash unset, then build the immutable final instance carrying
+                # it. model_copy on a frozen model returns a NEW frozen instance --
+                # the hash bytes are identical to the previous in-place assignment.
+                audit_log = audit_log.model_copy(
+                    update={"entry_hash": self._audit_v2_hash(audit_log, key_ref.secret)})
             else:
                 # Forward-only keying (MC3): once ANY keyed v2 event exists in the
                 # chain, every later event MUST be keyed. Refuse to append an unkeyed
@@ -6794,7 +6812,8 @@ class LocalStateStore:
                     )
                 # Legacy (unkeyed) event, labelled by the absence of integrity_version.
                 audit_log = AuditLog(**common)
-                audit_log.entry_hash = self._audit_event_hash(audit_log)
+                audit_log = audit_log.model_copy(
+                    update={"entry_hash": self._audit_event_hash(audit_log)})
             self.audit_logs.append(audit_log)
             if save:
                 try:
@@ -7195,18 +7214,26 @@ class PostgresStateStore(LocalStateStore):
             super().refresh()
             self._load_normalized_entities()
             return
-        # NON-OWNER path (a read route / export / worker / authorization lookup):
-        # NEVER touches the writer's private working state, and NEVER mutates the
-        # published projection in place. Build a complete candidate committed
-        # projection off to the side (serialized against any active writer, so it
-        # reflects committed state), then publish it atomically. Subsequent reads
-        # on this thread come straight from the live published projection, so a
-        # non-owner read is always the current committed generation -- never a
-        # writer's uncommitted state, and never a per-thread view that could go
-        # stale on a pooled worker thread across requests.
+        # NON-OWNER path (a read route / export / worker / authorization lookup).
+        rv = getattr(self, "_read_view", None)
+        pinned = rv.get() if rv is not None else None
+        if pinned is not None and pinned is not self._VIEW_UNSET:
+            # A committed_read_view() is already pinned to a generation. Do NOT
+            # switch generations mid-operation: ordinary refresh() inside a view is
+            # coherence-preserving (Part F). A new request/task -- a fresh ContextVar
+            # -- will observe newer committed state.
+            return
+        # Build a complete candidate committed projection off to the side (serialized
+        # against any active writer, so it reflects committed state) and publish it
+        # atomically. Never touches a writer's private working state; never mutates
+        # the published projection in place.
         with self._txn_lock:
             candidate, revision = self._build_committed_projection()
         self._publish(candidate, revision)
+        if rv is not None and pinned is self._VIEW_UNSET:
+            # First refresh() inside a committed_read_view(): pin the FRESHLY
+            # published committed generation for the rest of this operation.
+            rv.set(self._published)
 
     def _refuse_unimported_snapshot(self, payload: dict | None) -> None:
         """Fail closed on a snapshot holding migrated entities un-cut-over.
@@ -7349,6 +7376,18 @@ class PostgresStateStore(LocalStateStore):
         self._publish_lock = threading.RLock()
         self._published_revision = -1
         self._read_local = threading.local()
+        # Request/task-scoped committed READ VIEW. A ContextVar -- NOT threading.local
+        # -- so it is isolated per asyncio task AND auto-scopes per threadpool request
+        # copy, and can never persist across pooled-thread request reuse (the exact
+        # failure mode of the earlier sticky thread-local view). Holds: None (no view
+        # active), _VIEW_UNSET (a committed_read_view() is entered but no generation is
+        # pinned yet -- pin happens on the first refresh() inside it), or a pinned
+        # committed projection dict that every non-owner read inside the view resolves
+        # to. This is what makes a whole multi-access operation observe ONE committed
+        # generation (authorize -> read -> serialize; get-then-index; export; worker
+        # selection) instead of straddling a concurrent commit.
+        self._read_view: contextvars.ContextVar = contextvars.ContextVar(
+            "mr_committed_read_view", default=None)
         self._verify_repository_schema()
         # Bootstrap runs under the SAME global transaction boundary as every
         # other mutation -- one connection, the global advisory lock acquired
@@ -7364,6 +7403,12 @@ class PostgresStateStore(LocalStateStore):
         txn = self._txn
         return txn is not None and txn.get("owner") == threading.get_ident()
 
+    # Sentinel: a committed_read_view() is active but has not pinned a generation
+    # yet. Distinct from None (no view active). A read while UNSET falls through to
+    # the live published projection; the pin happens on the first refresh() so the
+    # view captures the FRESHLY refreshed generation, not a stale pre-request one.
+    _VIEW_UNSET = object()
+
     # ---------------------------------------------- copy-on-write routing -----
     def _active_working(self):
         """The calling thread's transaction-private working projection, or None."""
@@ -7371,6 +7416,47 @@ class PostgresStateStore(LocalStateStore):
         if txn is not None and txn.get("owner") == threading.get_ident():
             return txn.get("working")
         return None
+
+    def _active_read_view(self):
+        """This context's PINNED committed projection, or None.
+
+        Returns the pinned projection only. A view that is entered-but-unpinned
+        (_VIEW_UNSET) or absent (None) returns None, so the caller falls through to
+        the loading buffer / live published projection.
+        """
+        rv = getattr(self, "_read_view", None)
+        if rv is None:
+            return None
+        view = rv.get()
+        if view is None or view is self._VIEW_UNSET:
+            return None
+        return view
+
+    @contextmanager
+    def committed_read_view(self):
+        """Pin ONE committed generation for the duration of one read operation.
+
+        Every non-owner managed-state access inside this context resolves to a
+        single committed projection, so a multi-access operation cannot straddle a
+        concurrent commit (no torn read, no get-then-index KeyError under a
+        concurrent delete). The generation is pinned on the first refresh() inside
+        the context (pin-on-first-refresh, so it captures the freshly refreshed
+        state), scoped to this request/task, and cleared on exit -- normal OR
+        exception -- via the ContextVar token. It never persists across threadpool
+        request reuse. A writer owner is unaffected: it still reads its own
+        transaction-private working projection. Nested views reuse the same pin.
+        """
+        rv = self._read_view
+        if rv.get() is not None:
+            # Nested: an outer committed_read_view() is already active/pinned; reuse
+            # its generation unchanged so nested reads stay on the same projection.
+            yield
+            return
+        token = rv.set(self._VIEW_UNSET)
+        try:
+            yield
+        finally:
+            rv.reset(token)
 
     def _get_state(self, name: str):
         working = self._active_working()
@@ -7383,7 +7469,11 @@ class PostgresStateStore(LocalStateStore):
             loading = getattr(read_local, "loading", None)
             if loading is not None and name in loading:
                 return loading[name]
-        # The live published projection -- always the current committed generation.
+        # A pinned committed read view keeps a whole operation on ONE generation.
+        view = self._active_read_view()
+        if view is not None:
+            return view[name]
+        # No pinned view: the live published projection (current committed generation).
         return self._published[name]
 
     def _set_state(self, name: str, value) -> None:
@@ -7435,6 +7525,17 @@ class PostgresStateStore(LocalStateStore):
                 return
             self._published = projection
             self._published_revision = revision
+        # If THIS context holds a pinned read view, advance it to the just-published
+        # generation. That lets an operation which commits its OWN mutation and then
+        # reads (e.g. a direct upload that creates a file then serializes it) observe
+        # its own write. A CONCURRENT reader in a DIFFERENT context keeps its own
+        # pinned generation -- this runs in the committing context only, so it never
+        # disturbs another operation's coherent view.
+        rv = getattr(self, "_read_view", None)
+        if rv is not None:
+            current = rv.get()
+            if current is not None and current is not self._VIEW_UNSET:
+                rv.set(self._published)
 
     def _build_committed_projection(self) -> tuple[dict, int]:
         """Load the committed DB state into a fresh projection off to the side.
