@@ -719,8 +719,8 @@ def _migration_validity_probe() -> tuple[str, str]:
     )
 
 
-PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v2.json"
-PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v2"
+PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v3.json"
+PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v3"
 
 
 def _persistence_locking_probe() -> tuple[str, str]:
@@ -787,9 +787,11 @@ def _persistence_locking_probe() -> tuple[str, str]:
     # implemented at the store. This is the specific gap the independent review
     # flagged: without it the transactional replay is unreachable from a request.
     for r in ("http_route_idempotency_result", "concurrent_http_idempotency_result",
-              "uncertain_response_result"):
+              "uncertain_response_result", "validation_route_idempotency_result"):
         if payload.get(r) != "passed":
             reasons.append(f"{r} is not 'passed'")
+    if payload.get("semantic_action_coverage_complete") is not True:
+        reasons.append("semantic action coverage is incomplete")
     route = payload.get("route_idempotency")
     if not isinstance(route, dict):
         reasons.append("evidence lacks the route_idempotency proof block")
@@ -801,13 +803,31 @@ def _persistence_locking_probe() -> tuple[str, str]:
         for r in ("http_route_result", "concurrent_http_result", "uncertain_response_result",
                   "request_hash_canonicalization_result", "missing_key_result",
                   "conflicting_reuse_result", "actor_and_operation_scope_result",
-                  "failed_attempt_reserves_no_key_result"):
+                  "failed_attempt_reserves_no_key_result",
+                  # Each validation-task transition (outcome / rejection / reopen)
+                  # behaviourally proven -- not one generic route test for all.
+                  "validation_route_result", "validation_outcome_result",
+                  "validation_rejection_result", "validation_reopen_result"):
             if route.get(r) != "passed":
                 reasons.append(f"route_idempotency.{r} is not 'passed'")
         scenarios = route.get("http_scenarios_passed")
         total_scenarios = route.get("http_scenario_count")
         if not isinstance(scenarios, int) or scenarios < 14 or scenarios != total_scenarios:
             reasons.append("route_idempotency HTTP suite did not fully pass at least 14 scenarios")
+        vscen = route.get("validation_scenarios_passed")
+        vtot = route.get("validation_scenario_count")
+        if not isinstance(vscen, int) or vscen < 7 or vscen != vtot:
+            reasons.append("route_idempotency validation-task suite did not fully pass at least 7 scenarios")
+        # Semantic-action coverage: no conflation, no under-count.
+        req = route.get("required_semantic_action_count")
+        tested = route.get("tested_semantic_action_count")
+        if not isinstance(req, int) or not isinstance(tested, int) or req < 6 or tested < req:
+            reasons.append("route_idempotency semantic-action coverage is under-counted")
+        actions = route.get("semantic_actions")
+        if not isinstance(actions, list) or any(a.get("result") != "passed" for a in actions):
+            reasons.append("route_idempotency has a semantic action that is not 'passed'")
+        if route.get("tested_route_count", 0) < 3:
+            reasons.append("route_idempotency behaviourally tested fewer than three routes")
         if route.get("concurrent_http_client_count", 0) < 2:
             reasons.append("route_idempotency concurrent proof used fewer than two client processes")
         if route.get("concurrent_http_idempotency_rows") != 1 or route.get("concurrent_http_correction_delta") != 1:
