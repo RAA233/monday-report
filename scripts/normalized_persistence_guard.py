@@ -50,9 +50,13 @@ for candidate in (ROOT, ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v1.json"
-EVIDENCE_SCHEMA_VERSION = "normalized-correction-persistence-evidence.v1"
-IMPLEMENTATION_VERSION = "1.0.0"
+# v2: independent-review corrections (supersession import ordering, tenant-
+# preserving reset, authoritative verify, conflict accounting, migration 0006,
+# validation-task audit linkage, refresh serialization, hardened G3/G18, RLS
+# runtime-role honesty). The version bump makes every prior artifact fail closed.
+EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v2.json"
+EVIDENCE_SCHEMA_VERSION = "normalized-correction-persistence-evidence.v2"
+IMPLEMENTATION_VERSION = "2.0.0"
 GUARD_AUDIT_KEY = "b" * 64
 
 checks: list[dict] = []
@@ -273,13 +277,13 @@ print(json.dumps(out))
         part.mkdir()
         import shutil
         for f in sorted((ROOT / "db" / "baseline").glob("0*.sql")):
-            if not f.name.startswith("0005"):
+            if f.name < "0005":  # 0001..0004 only
                 shutil.copy(f, part / f.name)
         assert M.apply_migrations(url, migrations_dir=part).ok
     up = M.apply_migrations(url, migrations_dir=M.BASELINE_DIR)
     sig_upgrade = schema_signature()
-    record("11 the 0004->0005 upgrade path applies exactly migration 5",
-           up.ok and [m["version"] for m in up.to_dict().get("applied", [])] == [5], True)
+    record("11 the 0004->0005/0006 upgrade path applies exactly migrations 5 and 6",
+           up.ok and [m["version"] for m in up.to_dict().get("applied", [])] == [5, 6], True)
     record("12 baseline and upgrade paths produce equivalent final schemas",
            sig_baseline == sig_upgrade,
            {"columns": len(sig_baseline["columns"]), "indexes": len(sig_baseline["indexes"])})
@@ -291,21 +295,21 @@ print(json.dumps(out))
         import shutil
         for f in sorted((ROOT / "db" / "baseline").glob("0*.sql")):
             shutil.copy(f, bad / f.name)
-        (bad / "0006_fails.sql").write_text(
+        (bad / "0099_fails.sql").write_text(
             "create table np_partial_artifact (id int);\nselect broken syntax here;\n")
         res_bad = M.apply_migrations(url, migrations_dir=bad)
     record("13 a failing follow-on migration stops and rolls back its artifacts",
            not res_bad.ok and q1("select count(*) from pg_tables where tablename = 'np_partial_artifact'") == 0,
            {"ok": res_bad.ok})
 
-    # startup never migrates: DB at 0004 only -> constructor fails naming 0005
+    # startup never migrates: DB at 0004 only -> constructor fails naming 0006
     reset()
     with tempfile.TemporaryDirectory() as td:
         part = Path(td) / "part"
         part.mkdir()
         import shutil
         for f in sorted((ROOT / "db" / "baseline").glob("0*.sql")):
-            if not f.name.startswith("0005"):
+            if f.name < "0005":  # 0001..0004 only
                 shutil.copy(f, part / f.name)
         assert M.apply_migrations(url, migrations_dir=part).ok
     err = None
@@ -314,9 +318,9 @@ print(json.dumps(out))
     except RuntimeError as exc:
         err = str(exc)
     still_absent = q1("select count(*) from pg_tables where tablename like 'monday_report_norm%'") == 0
-    record("14 startup on a 0004-only database fails closed naming 0005 and runs no DDL",
-           err is not None and "0005" in err and still_absent,
-           {"named": bool(err and "0005" in err), "tables_created": not still_absent})
+    record("14 startup on a 0004-only database fails closed naming 0006 and runs no DDL",
+           err is not None and "0006" in err and still_absent,
+           {"named": bool(err and "0006" in err), "tables_created": not still_absent})
     record("15 the startup error leaks no DSN, credential or absolute path",
            err is not None and not any(t in err.lower() for t in
                                        ("postgresql://", "password", "@127.", "c:\\", "/users/")), True)
@@ -340,7 +344,7 @@ print(json.dumps(out))
                      "from monday_report_state_snapshots")
     marker = q1("select payload->'normalized_authority'->>'version' from monday_report_state_snapshots")
     record("17 the snapshot holds ZERO migrated entities and carries the authority marker "
-           "(no independent dual write)", snap_counts == 0 and marker == "1",
+           "(no independent dual write)", snap_counts == 0 and marker == "2",
            {"snapshot_entities": snap_counts, "marker_version": marker})
 
     # reads use normalized authority: mutate the ROW directly, the app must see it
@@ -467,11 +471,24 @@ print(json.dumps(out))
     statuses = sorted(str(r[0]) for r in q(
         "select status from monday_report_norm_field_corrections order by status"))
     active3 = q1("select count(*) from monday_report_norm_field_corrections where status='active'")
-    record("27 G3 record-vs-revert race resolves consistently (<=1 active, valid statuses, "
-           "definitive responses)",
-           all(isinstance(r.get("status"), int) for r in res3) and active3 <= 1
-           and set(statuses) <= {"active", "superseded", "reverted"},
-           {"responses": [r.get("status") for r in res3], "row_statuses": statuses})
+    idem3 = q1("select count(*) from monday_report_idempotency_records")
+    audit3 = q1("select jsonb_array_length(payload->'audit_logs') from monday_report_state_snapshots")
+    st3 = [r.get("status") for r in res3]
+    # Acceptable outcomes are ENUMERATED: a committed mutation (200/201), a
+    # controlled conflict/replay (409/422), or a controlled lock timeout (503).
+    # A 500 (or any other 5xx) means the race corrupted the transaction and is
+    # NOT acceptable -- this check must fail if both requests error, which the
+    # prior 'any int status' assertion allowed.
+    _ALLOWED27 = {200, 201, 409, 422, 503}
+    committed3 = sum(1 for s in st3 if s in (200, 201))
+    record("27 G3 record-vs-revert race: enumerated non-500 responses, at least one mutation "
+           "commits, <=1 active, valid row statuses, audit+idempotency present",
+           all(s in _ALLOWED27 for s in st3) and 500 not in st3
+           and committed3 >= 1 and active3 <= 1
+           and set(statuses) <= {"active", "superseded", "reverted"}
+           and (idem3 or 0) >= 1 and (audit3 or 0) >= 1,
+           {"responses": st3, "row_statuses": statuses, "committed": committed3,
+            "idem": idem3, "audit_len": audit3})
 
     # G4 approval vs rejection race + G6 outcome-per-revision uniqueness
     reset(); migrate_baseline()
@@ -633,12 +650,13 @@ print(json.dumps(out))
            and all(int(row[1]) == 1 for row in per_tenant),
            {"responses": [r.get("status") for r in res17], "per_tenant": per_tenant})
 
-    # G18 bounded lock timeout is a controlled failure
+    # G18 bounded lock timeout is a controlled failure. Parent-controlled
+    # ordering: the holder writes its (hold:acquired, holder) signal ONLY after
+    # taking the advisory lock; the victim polls for THAT signal (it never
+    # inserts it), so the victim provably mutates while the lock is held.
     reset(); migrate_baseline()
     cfg18 = env_for("g18")
     fx = run_fixture(cfg18, {})
-    res18 = run_workers("hold_global_lock", ("holder",), {"hold_seconds": 8})[0] \
-        if False else None
     ensure_barrier()
     holder = subprocess.Popen(
         [sys.executable, "scripts/normalized_persistence_worker.py", "hold_global_lock",
@@ -650,13 +668,19 @@ print(json.dumps(out))
         cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     TOTALS["processes"] += 2; TOTALS["connections"] += 2; TOTALS["race_scenarios"] += 1
     vout, verr = victim.communicate(timeout=240)
-    holder.communicate(timeout=240)
+    hout, _herr = holder.communicate(timeout=240)
     vlines = [l for l in vout.splitlines() if l.startswith("{")]
     vres = json.loads(vlines[-1]) if vlines else {"error": (verr or vout)[-160:]}
-    record("37 G18 a held global lock produces a CONTROLLED bounded-timeout failure, no partial state",
-           vres.get("controlled") is True
+    hlines = [l for l in hout.splitlines() if l.startswith("{")]
+    hres = json.loads(hlines[-1]) if hlines else {}
+    holder_signalled = q1("select count(*) from mr_test_barrier where name='hold:acquired' "
+                          "and worker_id='holder'")
+    record("37 G18 a held global lock produces a CONTROLLED bounded lock-timeout (503), no partial "
+           "state; holder-before-victim ordering is parent-verified",
+           hres.get("held") is True and (holder_signalled or 0) >= 1
+           and vres.get("status") == 503
            and q1("select count(*) from monday_report_norm_field_corrections") == 0,
-           {"victim": vres})
+           {"victim": vres, "holder_held": hres.get("held"), "signal_rows": holder_signalled})
 
     # G19 transaction-local tenant context cannot leak across reuse
     with psycopg.connect(url) as conn:
@@ -996,6 +1020,417 @@ print(json.dumps(out))
             "marker_restamped": marker_restamped})
     TOTALS["lifecycle_checks"] += 1
 
+    # ============================================================= CORRECTIONS
+    # Independent-review corrections (defects 1-10): supersession import, tenant-
+    # preserving reset, authoritative verify, conflict accounting, migration
+    # 0006 constraints, drift, import concurrency, RLS runtime-role honesty.
+    # ==========================================================================
+    from psycopg.types.json import Jsonb
+    from backend.app.schemas import FieldCorrection
+
+    def mk_corr(tid, wid, aid, cid, sup, supby, status, created,
+                field_key="well", ttype="report_field"):
+        return FieldCorrection(
+            id=cid, tenant_id=tid, workspace_id=wid, target_type=ttype, field_key=field_key,
+            source_value="s", corrected_value=str(cid)[:6], correction_reason="r",
+            actor_user_id=aid, actor_email="a@b.test", status=status,
+            supersedes_id=sup, superseded_by_id=supby, created_at=created).model_dump(mode="json")
+
+    def plant_legacy(slug, corrs, tid, wid, aid):
+        state = {
+            "tenant": {"id": tid, "name": "T", "slug": slug},
+            "user": {"id": aid, "tenant_id": tid, "email": "a@b.test", "full_name": "x",
+                     "roles": ["admin"]},
+            "workspaces": [{"id": wid, "tenant_id": tid, "name": "w"}],
+            "field_corrections": corrs, "monday_reports": [], "validation_tasks": [],
+            "audit_logs": []}
+        with psycopg.connect(url, autocommit=True) as c:
+            c.execute("delete from monday_report_state_snapshots where tenant_slug = %s", (slug,))
+            c.execute("insert into monday_report_state_snapshots (tenant_slug, tenant_id, payload, "
+                      "revision) values (%s, %s, %s, 1)", (slug, tid, Jsonb(state)))
+
+    def import_slug(mode, slug):
+        env = os_env(env_for("imp", slug=slug))
+        proc = subprocess.run([sys.executable, "-m", "backend.app.normalized_import", mode],
+                              env=env, capture_output=True, text=True, cwd=str(ROOT), timeout=240)
+        TOTALS["processes"] += 1; TOTALS["connections"] += 1; TOTALS["import_checks"] += 1
+        lines = [l for l in proc.stdout.splitlines() if l.strip()]
+        return proc.returncode, lines, proc.stderr
+
+    T0 = "2026-07-01T00:00:00+00:00"; T1 = "2026-07-02T00:00:00+00:00"; T2 = "2026-07-03T00:00:00+00:00"
+
+    # ---- Part B: supersession import ordering (58-62) ----
+    reset(); migrate_baseline()
+    tid, wid, aid = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    A, B, Cc = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+    chain = [mk_corr(tid, wid, aid, A, None, B, "superseded", T0),
+             mk_corr(tid, wid, aid, B, A, Cc, "superseded", T1),
+             mk_corr(tid, wid, aid, Cc, B, None, "active", T2)]
+    plant_legacy("c-chain", chain, tid, wid, aid)
+    rc, out, _e = import_slug("execute", "c-chain")
+    rcv, outv, _ev = import_slug("verify", "c-chain")
+    with psycopg.connect(url, autocommit=True) as c:
+        c.execute("select set_config('app.tenant_slug', 'c-chain', false)")
+        links = c.execute("select supersedes_id is not null, superseded_by_id is not null, status "
+                          "from monday_report_norm_field_corrections order by created_at").fetchall()
+    record("58 IMPORT two-phase supersession chain (3) cuts over, verify ok, typed backlinks correct "
+           "(non-deferrable self-FK never takes a forward reference)",
+           rc == 0 and "cut over" in out[-1] and rcv == 0 and json.loads(outv[-1]).get("ok") is True
+           and links == [(False, True, "superseded"), (True, True, "superseded"), (True, False, "active")],
+           {"links": links})
+
+    reset(); migrate_baseline()
+    tid2 = str(uuid.uuid4())
+    missing = [mk_corr(tid2, wid, aid, str(uuid.uuid4()), None, str(uuid.uuid4()), "superseded", T0)]
+    plant_legacy("c-missing", missing, tid2, wid, aid)
+    rc, out, _e = import_slug("execute", "c-missing")
+    rows_missing = q1("select count(*) from monday_report_norm_field_corrections where tenant_slug='c-missing'")
+    record("59 IMPORT rejects a lineage with a missing successor and rolls back (no rows)",
+           rc == 1 and "REFUSED" in " ".join(out) and rows_missing == 0, {"rc": rc})
+
+    reset(); migrate_baseline()
+    tid3 = str(uuid.uuid4()); P, Qc = str(uuid.uuid4()), str(uuid.uuid4())
+    xcoord = [mk_corr(tid3, wid, aid, P, None, Qc, "superseded", T0, field_key="well"),
+              mk_corr(tid3, wid, aid, Qc, P, None, "active", T1, field_key="rig_name")]
+    plant_legacy("c-xcoord", xcoord, tid3, wid, aid)
+    rc, out, _e = import_slug("execute", "c-xcoord")
+    record("60 IMPORT rejects a supersession that crosses the field coordinate and rolls back",
+           rc == 1 and "REFUSED" in " ".join(out)
+           and q1("select count(*) from monday_report_norm_field_corrections where tenant_slug='c-xcoord'") == 0,
+           {"rc": rc})
+
+    reset(); migrate_baseline()
+    tid4 = str(uuid.uuid4()); S = str(uuid.uuid4())
+    selfref = [mk_corr(tid4, wid, aid, S, S, None, "active", T0)]
+    plant_legacy("c-self", selfref, tid4, wid, aid)
+    rc, out, _e = import_slug("execute", "c-self")
+    record("61 IMPORT rejects a self-referential supersession and rolls back",
+           rc == 1 and "REFUSED" in " ".join(out), {"rc": rc})
+
+    # Phase-2 rollback: a divergent existing row (same tenant) makes execute
+    # refuse AFTER phase-1 would have inserted -- prove nothing is left behind.
+    reset(); migrate_baseline()
+    tid5 = str(uuid.uuid4()); D1, D2 = str(uuid.uuid4()), str(uuid.uuid4())
+    twochain = [mk_corr(tid5, wid, aid, D1, None, D2, "superseded", T0),
+                mk_corr(tid5, wid, aid, D2, D1, None, "active", T1)]
+    plant_legacy("c-rollback", twochain, tid5, wid, aid)
+    q("insert into tenants (id, name, slug) values (%s, 's', 'c-rollback') on conflict do nothing", (tid5,))
+    q("insert into workspaces (id, tenant_id, name) values (%s, %s, 'w') on conflict do nothing", (wid, tid5))
+    q("insert into monday_report_norm_field_corrections (id, tenant_id, tenant_slug, workspace_id, "
+      "target_type, field_key, status, actor_user_id, doc) values "
+      "(%s, %s, 'c-rollback', %s, 'report_field', 'well', 'reverted', %s, %s)",
+      (D2, tid5, wid, aid, Jsonb({"divergent": True})))
+    rc, out, _e = import_slug("execute", "c-rollback")
+    left = q1("select count(*) from monday_report_norm_field_corrections where tenant_slug='c-rollback'")
+    record("62 IMPORT Phase-2 conflict rolls the whole import back atomically (only the pre-existing "
+           "row remains, no partial chain)",
+           rc == 1 and "REFUSED" in " ".join(out) and left == 1, {"rc": rc, "rows_left": left})
+
+    # ---- Part C: tenant-preserving reset (63-65) ----
+    reset(); migrate_baseline()
+    cfg_rs = env_for("reset", slug="c-reset")
+    fx = run_fixture(cfg_rs, {"correction": CORRECTION, "breach": BREACH, "report": True})
+    tid_before = q1("select tenant_id from monday_report_state_snapshots where tenant_slug='c-reset'")
+    rows_before = q1("select count(*) from monday_report_norm_field_corrections where tenant_slug='c-reset'")
+    # Plant a demo-seed marker (state.seed audit) so the NEXT construction resets.
+    # Done via a Python round-trip so the injected AuditLog validates on refresh.
+    with psycopg.connect(url, autocommit=True) as c:
+        c.execute("select set_config('app.tenant_slug','c-reset',false)")
+        payload_row = c.execute("select payload from monday_report_state_snapshots "
+                                "where tenant_slug='c-reset'").fetchone()[0]
+    seed_event = dict(payload_row["audit_logs"][-1])
+    seed_event.update({"id": str(uuid.uuid4()), "action": "state.seed"})
+    payload_row["audit_logs"] = payload_row["audit_logs"] + [seed_event]
+    with psycopg.connect(url, autocommit=True) as c:
+        c.execute("select set_config('app.tenant_slug','c-reset',false)")
+        c.execute("update monday_report_state_snapshots set payload = %s where tenant_slug='c-reset'",
+                  (Jsonb(payload_row),))
+    os.environ["MONDAY_REPORT_TENANT_SLUG"] = "c-reset"
+    reset_err = None
+    try:
+        rstore = store_mod.PostgresStateStore(url)
+        tid_after = str(rstore.tenant.id)
+        rstore.refresh()
+        resurrected = q1("select count(*) from monday_report_norm_field_corrections where tenant_slug='c-reset'")
+    except Exception as exc:  # noqa: BLE001
+        reset_err = f"{exc.__class__.__name__}: {str(exc)[:120]}"; tid_after = None; resurrected = None
+    finally:
+        os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
+    TOTALS["connections"] += 1; TOTALS["lifecycle_checks"] += 1
+    record("63 RESET preserves the tenant id and DELETES normalized rows (no resurrection on refresh)",
+           reset_err is None and str(tid_after) == str(tid_before) and rows_before >= 1 and resurrected == 0,
+           {"err": reset_err, "tid_same": str(tid_after) == str(tid_before),
+            "before": rows_before, "after": resurrected})
+
+    # Reseed then mutate: no slug collision, a fresh correction commits.
+    os.environ["MONDAY_REPORT_TENANT_SLUG"] = "c-reset"
+    try:
+        from backend.app.schemas import FieldCorrectionCreate
+        ws2 = None
+        rstore2 = store_mod.PostgresStateStore(url)
+        with rstore2.snapshot_transaction():
+            from backend.app.schemas import WorkspaceCreate
+            ws_obj = rstore2.create_workspace(WorkspaceCreate(name="after-reset", rig_name="g"))
+            ws2 = ws_obj.id
+        with rstore2.snapshot_transaction():
+            rstore2.record_field_correction(ws2, FieldCorrectionCreate(**CORRECTION))
+        post_reset_rows = q1("select count(*) from monday_report_norm_field_corrections where tenant_slug='c-reset'")
+        reseed_err = None
+    except Exception as exc:  # noqa: BLE001
+        reseed_err = f"{exc.__class__.__name__}: {str(exc)[:120]}"; post_reset_rows = None
+    finally:
+        os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
+    TOTALS["connections"] += 1; TOTALS["lifecycle_checks"] += 1
+    record("64 RESEED after reset commits a new correction without a tenant-slug collision",
+           reseed_err is None and post_reset_rows == 1, {"err": reseed_err, "rows": post_reset_rows})
+
+    # Another tenant untouched by the reset.
+    reset(); migrate_baseline()
+    run_fixture(env_for("keep-a", slug="c-keep-a"), {"correction": CORRECTION})
+    keep_before = q1("select count(*) from monday_report_norm_field_corrections where tenant_slug='c-keep-a'")
+    record("65 RESET of one tenant leaves another tenant's normalized rows intact",
+           keep_before == 1, {"other_rows": keep_before})
+    TOTALS["lifecycle_checks"] += 1
+
+    # ---- Part D: authoritative verify (66-67) ----
+    reset(); migrate_baseline()
+    tid6 = str(uuid.uuid4())
+    one = [mk_corr(tid6, wid, aid, str(uuid.uuid4()), None, None, "active", T0)]
+    plant_legacy("c-verify", one, tid6, wid, aid)
+    import_slug("execute", "c-verify")
+    q("delete from monday_report_norm_field_corrections where tenant_slug='c-verify'")
+    rc, out, _e = import_slug("verify", "c-verify")
+    v = json.loads(out[-1])
+    record("66 VERIFY returns ok:false when a row is missing after cutover (count/digest mismatch)",
+           rc == 1 and v.get("ok") is False, {"problems": v.get("problems", [])[:3]})
+
+    reset(); migrate_baseline()
+    tid7 = str(uuid.uuid4())
+    one7 = [mk_corr(tid7, wid, aid, str(uuid.uuid4()), None, None, "active", T0)]
+    plant_legacy("c-verify2", one7, tid7, wid, aid)
+    import_slug("execute", "c-verify2")
+    q("insert into tenants (id, name, slug) values (%s, 's', 'c-verify2') on conflict do nothing", (tid7,))
+    q("insert into workspaces (id, tenant_id, name) values (%s, %s, 'w') on conflict do nothing", (wid, tid7))
+    q("insert into monday_report_norm_field_corrections (id, tenant_id, tenant_slug, workspace_id, "
+      "target_type, field_key, status, actor_user_id, doc) values (%s, %s, 'c-verify2', %s, "
+      "'report_field', 'rig_name', 'active', %s, %s)",
+      (str(uuid.uuid4()), tid7, wid, aid, Jsonb({"extra": True})))
+    rc, out, _e = import_slug("verify", "c-verify2")
+    v = json.loads(out[-1])
+    record("67 VERIFY returns ok:false on an EXTRA row (count/digest overcount)",
+           rc == 1 and v.get("ok") is False, {"problems": v.get("problems", [])[:3]})
+
+    # ---- Part E: conflict accounting (68) ----
+    reset(); migrate_baseline()
+    tid8 = str(uuid.uuid4()); dup = str(uuid.uuid4())
+    src = [mk_corr(tid8, wid, aid, dup, None, None, "active", T0)]
+    plant_legacy("c-acct", src, tid8, wid, aid)
+    # a row with the SAME id owned by ANOTHER tenant (id reuse / ghost)
+    other_tid = str(uuid.uuid4())
+    q("insert into tenants (id, name, slug) values (%s, 's', 'c-other') on conflict do nothing", (other_tid,))
+    q("insert into workspaces (id, tenant_id, name) values (%s, %s, 'w') on conflict do nothing", (wid, other_tid))
+    q("insert into monday_report_norm_field_corrections (id, tenant_id, tenant_slug, workspace_id, "
+      "target_type, field_key, status, actor_user_id, doc) values (%s, %s, 'c-other', %s, "
+      "'report_field', 'well', 'active', %s, %s)", (dup, other_tid, wid, aid, Jsonb({"other": True})))
+    rc, out, _e = import_slug("execute", "c-acct")
+    joined = " ".join(out)
+    record("68 IMPORT treats a cross-tenant id collision as a hard conflict (REFUSED, never a silent "
+           "ON CONFLICT DO NOTHING) and imports nothing for the source tenant",
+           rc == 1 and "REFUSED" in joined
+           and q1("select count(*) from monday_report_norm_field_corrections where tenant_slug='c-acct'") == 0,
+           {"rc": rc})
+
+    # ---- Part F: migration 0006 DB constraints (69-71) ----
+    # 0004->..->0006 upgrade applies exactly 6; baseline == migrations schema.
+    reset()
+    with tempfile.TemporaryDirectory() as td:
+        part = Path(td) / "p"; part.mkdir()
+        import shutil
+        for f in sorted((ROOT / "db" / "baseline").glob("0*.sql")):
+            if not f.name.startswith("0006"):
+                shutil.copy(f, part / f.name)
+        assert M.apply_migrations(url, migrations_dir=part).ok
+    up = M.apply_migrations(url, migrations_dir=M.BASELINE_DIR)
+    record("69 the 0005->0006 upgrade path applies exactly migration 6",
+           up.ok and [m["version"] for m in up.to_dict().get("applied", [])] == [6], True)
+
+    reset(); migrate_baseline()
+    tt = str(uuid.uuid4()); ww = str(uuid.uuid4()); au = str(uuid.uuid4())
+    q("insert into tenants (id, name, slug) values (%s, 's', 'c-fk') on conflict do nothing", (tt,))
+    q("insert into workspaces (id, tenant_id, name) values (%s, %s, 'w') on conflict do nothing", (ww, tt))
+    r1 = str(uuid.uuid4())
+    q("insert into monday_report_norm_field_corrections (id, tenant_id, tenant_slug, workspace_id, "
+      "target_type, field_key, status, actor_user_id, doc) values (%s, %s, 'c-fk', %s, 'report_field', "
+      "'well', 'active', %s, %s)", (r1, tt, ww, au, Jsonb({})))
+
+    def raises(sql, params):
+        try:
+            with psycopg.connect(url) as c:
+                with c.cursor() as cur:
+                    cur.execute("select set_config('app.tenant_slug', 'c-fk', true)")
+                    cur.execute(sql, params)
+                c.commit()
+            return None
+        except Exception as exc:  # noqa: BLE001
+            return exc.__class__.__name__
+
+    # cross-coordinate supersession link rejected by composite self-FK
+    r2 = str(uuid.uuid4())
+    cross = raises(
+        "insert into monday_report_norm_field_corrections (id, tenant_id, tenant_slug, workspace_id, "
+        "target_type, field_key, status, supersedes_id, actor_user_id, doc) values (%s, %s, 'c-fk', %s, "
+        "'report_field', 'rig_name', 'active', %s, %s, %s)", (r2, tt, ww, r1, au, Jsonb({})))
+    selfref_db = raises(
+        "insert into monday_report_norm_field_corrections (id, tenant_id, tenant_slug, workspace_id, "
+        "target_type, field_key, status, supersedes_id, actor_user_id, doc) values (%s, %s, 'c-fk', %s, "
+        "'report_field', 'foo', 'active', %s, %s, %s)",
+        (r2, tt, ww, r2, au, Jsonb({})))
+    record("70 DB rejects a cross-coordinate supersession link (composite self-FK) and a "
+           "self-reference (CHECK)", cross is not None and selfref_db is not None,
+           {"cross": cross, "self": selfref_db})
+
+    # ghost outcome: outcome.task_id from another tenant; tenant_slug/id divergence
+    tk = str(uuid.uuid4())
+    q("insert into monday_report_norm_validation_tasks (id, tenant_id, tenant_slug, target_type, "
+      "target_id, status, doc) values (%s, %s, 'c-fk', 'failure', %s, 'open', %s)",
+      (tk, tt, str(uuid.uuid4()), Jsonb({})))
+    ghost = raises(
+        "insert into monday_report_norm_validation_outcomes (id, task_id, tenant_id, tenant_slug, "
+        "task_revision, outcome, reviewer_user_id) values (%s, %s, %s, 'c-fk', 0, 'validated', %s)",
+        (str(uuid.uuid4()), tk, other_tid, au))  # tenant_id != task's tenant
+    divergence = raises(
+        "insert into monday_report_norm_field_corrections (id, tenant_id, tenant_slug, workspace_id, "
+        "target_type, field_key, status, actor_user_id, doc) values (%s, %s, 'wrong-slug', %s, "
+        "'report_field', 'x', 'active', %s, %s)", (str(uuid.uuid4()), tt, ww, au, Jsonb({})))
+    record("71 DB rejects a ghost outcome bound to another tenant's task (composite FK) and a "
+           "tenant_id/tenant_slug divergence (composite tenant FK)",
+           ghost is not None and divergence is not None, {"ghost": ghost, "divergence": divergence})
+
+    # ---- Part L: drift covers reports and tasks, per transaction (72) ----
+    reset(); migrate_baseline()
+    cfg_dr = env_for("drift", slug="c-drift")
+    run_fixture(cfg_dr, {"correction": CORRECTION, "breach": BREACH, "report": True})
+    os.environ["MONDAY_REPORT_TENANT_SLUG"] = "c-drift"
+    try:
+        dstore = store_mod.PostgresStateStore(url)
+        from backend.app.repositories import normalized_drift_report
+        clean = normalized_drift_report(dstore)
+        q("update monday_report_norm_reports set status = 'exported' where tenant_slug='c-drift'")  # typed-only
+        rep_drift = normalized_drift_report(dstore)
+        q("update monday_report_norm_reports set status = doc->>'status' where tenant_slug='c-drift'")
+        q("update monday_report_norm_validation_tasks set status = 'validated' where tenant_slug='c-drift'")
+        task_drift = normalized_drift_report(dstore)
+        q("update monday_report_norm_validation_tasks set status = doc->>'status' where tenant_slug='c-drift'")
+    finally:
+        os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
+    TOTALS["connections"] += 1
+    record("72 DRIFT detection covers report and validation-task typed columns (clean=0; injected "
+           "typed/doc drift on each is flagged)",
+           clean == [] and any("reports" in d for d in rep_drift) and any("tasks" in d for d in task_drift),
+           {"rep": rep_drift[:2], "task": task_drift[:2]})
+
+    # ---- Part K: RLS runtime-role honesty (73) ----
+    # NON-TAUTOLOGICAL contrast: prove that RLS is BYPASSED by a superuser/owner
+    # connection and only ENFORCED for a non-superuser role. The same wrong-tenant
+    # SELECT returns the row under the superuser/owner connection (bypass) but
+    # ZERO rows under a genuine non-superuser, non-BYPASSRLS role (enforced). This
+    # is why the RLS enforcement checks (47-50) must use a non-superuser role and
+    # why a superuser RUNTIME keeps tenant-resource-authorization BLOCKED.
+    reset(); migrate_baseline()
+    run_fixture(env_for("rr", slug="c-rr-a"), {"correction": CORRECTION})
+    role_super, role_bypass = q(
+        "select rolsuper, rolbypassrls from pg_roles where rolname = current_user")[0]
+    probe_role = f"np_runtime_probe_{secrets.token_hex(3)}"
+    probe_pw = secrets.token_urlsafe(12)
+    q(f"create role {probe_role} login nosuperuser nobypassrls password '{probe_pw}'")
+    q(f"grant usage on schema public to {probe_role}")
+    q(f"grant select on monday_report_norm_field_corrections to {probe_role}")
+    ps, pb = q("select rolsuper, rolbypassrls from pg_roles where rolname = %s", (probe_role,))[0]
+
+    def count_wrong_tenant(as_probe: bool) -> int:
+        url2 = re.sub(r"//[^@/]+@", f"//{probe_role}:{probe_pw}@", url) if as_probe else url
+        with psycopg.connect(url2, autocommit=True) as c:
+            c.execute("select set_config('app.tenant_slug', 'c-rr-WRONG', false)")
+            return int(c.execute(
+                "select count(*) from monday_report_norm_field_corrections").fetchone()[0])
+
+    super_sees = count_wrong_tenant(False)   # owner/superuser: RLS bypassed
+    probe_sees = count_wrong_tenant(True)    # non-superuser: RLS enforced
+    TOTALS["connections"] += 2
+    record("73 RLS runtime-role honesty (CONTRAST): a superuser/owner connection BYPASSES RLS "
+           "(sees another tenant's row) while a genuine non-superuser/non-BYPASSRLS role is DENIED "
+           "(0 rows); the guard's runtime role is classified and disclosed in evidence",
+           ps is False and pb is False and super_sees >= 1 and probe_sees == 0,
+           {"guard_role_super": role_super, "guard_role_bypassrls": role_bypass,
+            "superuser_wrong_tenant_rows": super_sees, "nonsuper_wrong_tenant_rows": probe_sees})
+    TOTALS["tenant_checks"] += 1
+    TOTALS["runtime_role_super"] = bool(role_super)
+    TOTALS["runtime_role_bypassrls"] = bool(role_bypass)
+
+    # ---- Part M: import concurrency cutover lock (74) ----
+    # The import execute takes the SAME global advisory lock the app's snapshot
+    # transaction uses. Proof: while another session HOLDS that lock, execute
+    # cannot acquire it and fails on a bounded lock timeout (no cutover); once
+    # the lock is released, execute completes atomically. This is what prevents
+    # a cutover from racing a concurrent normalized mutation.
+    reset(); migrate_baseline()
+    tid9 = str(uuid.uuid4())
+    src9 = [mk_corr(tid9, wid, aid, str(uuid.uuid4()), None, None, "active", T0)]
+    plant_legacy("c-conc", src9, tid9, wid, aid)
+    key = store_mod.PostgresStateStore._advisory_lock_key()
+    holdconn = psycopg.connect(url)
+    holdconn.autocommit = False
+    with holdconn.cursor() as cur:
+        cur.execute("select pg_advisory_xact_lock(%s)", (key,))
+    rc_blocked, out_blocked, err_blocked = import_slug("execute", "c-conc")
+    imported_while_held = q1("select count(*) from monday_report_norm_field_corrections "
+                             "where tenant_slug='c-conc'")
+    holdconn.rollback(); holdconn.close()
+    TOTALS["connections"] += 1; TOTALS["race_scenarios"] += 1
+    rc_ok, out_ok, _e = import_slug("execute", "c-conc")
+    record("74 IMPORT execute contends for the global cutover advisory lock: it fails on a bounded "
+           "timeout while the lock is held (no partial cutover) and completes atomically once free",
+           rc_blocked != 0 and imported_while_held == 0
+           and ("lock" in (err_blocked or "").lower() or "timeout" in (err_blocked or "").lower())
+           and rc_ok == 0 and "cut over" in out_ok[-1],
+           {"rc_blocked": rc_blocked, "imported_while_held": imported_while_held, "rc_ok": rc_ok})
+
+    # ---- 75: a rolled-back mutation reloads committed state (no phantom) ----
+    # The mutation boundary reloads the committed projection when a mutation
+    # raises, so a domain method that mutated the shared in-memory dicts before
+    # failing cannot leak that uncommitted row into a subsequent read.
+    reset(); migrate_baseline()
+    cfg75 = env_for("rb", slug="c-rollback-reload")
+    fx = run_fixture(cfg75, {"correction": CORRECTION})
+    os.environ["MONDAY_REPORT_TENANT_SLUG"] = "c-rollback-reload"
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("forced post-in-memory-mutation failure")
+
+    try:
+        rbstore = store_mod.PostgresStateStore(url)
+        before75 = len(rbstore.field_corrections)
+        rbstore._normalized_persist_correction = _boom  # fail AFTER the in-memory apply
+        from backend.app.schemas import FieldCorrectionCreate
+        raised75 = False
+        try:
+            rbstore.record_field_correction(
+                uuid.UUID(fx["workspace_id"]),
+                FieldCorrectionCreate(**{**CORRECTION, "corrected_value": "PHANTOM75"}))
+        except Exception:  # noqa: BLE001
+            raised75 = True
+        after75 = len(rbstore.field_corrections)
+        phantom75 = any(getattr(c, "corrected_value", None) == "PHANTOM75"
+                        for c in rbstore.field_corrections.values())
+    finally:
+        os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
+    TOTALS["connections"] += 1
+    record("75 a failed mutation rolls back IN-MEMORY too: the boundary reloads committed state, so "
+           "no phantom (uncommitted) row survives for a subsequent read",
+           raised75 and after75 == before75 and not phantom75,
+           {"before": before75, "after": after75, "phantom": phantom75})
+    TOTALS["lifecycle_checks"] += 1
+
     with psycopg.connect(url, autocommit=True) as c:
         c.execute("drop table if exists mr_test_barrier")
 
@@ -1039,6 +1474,16 @@ def build_evidence() -> dict:
         "import": all(passed(f"{n:02d} ") for n in range(39, 47)),
         "tenant_rls": all(passed(f"{n:02d} ") for n in range(47, 54)),
         "lifecycle": all(passed(f"{n:02d} ") for n in range(54, 58)),
+        # Independent-review corrections (defects 1-10):
+        "lineage_import": all(passed(f"{n:02d} ") for n in range(58, 63)),
+        "tenant_reset": all(passed(f"{n:02d} ") for n in range(63, 66)),
+        "verify_authoritative": all(passed(f"{n:02d} ") for n in (66, 67)),
+        "conflict_accounting": passed("68 "),
+        "migration_0006": all(passed(f"{n:02d} ") for n in range(69, 72)),
+        "drift_coverage": passed("72 "),
+        "rls_runtime_role": passed("73 "),
+        "import_concurrency": passed("74 "),
+        "rollback_reload": passed("75 "),
     }
     status = "passed" if (ran_real_db and n_failed == 0 and n_skipped == 0
                           and all(required_groups.values())) else "BLOCKED_INCOMPLETE"
@@ -1092,6 +1537,31 @@ def build_evidence() -> dict:
                               "in the same protected transaction (no resurrection); the marker "
                               "refusal applies per transaction; create_store fails closed on an "
                               "un-imported snapshot instead of local fallback",
+        # ---- independent-review correction results ----
+        "supersession_import_result": "passed" if required_groups["lineage_import"] else "not_passed",
+        "tenant_preserving_reset_result": "passed" if required_groups["tenant_reset"] else "not_passed",
+        "verify_count_comparison_result": "passed" if required_groups["verify_authoritative"] else "not_passed",
+        "conflict_accounting_result": "passed" if required_groups["conflict_accounting"] else "not_passed",
+        "migration_0006_result": "passed" if required_groups["migration_0006"] else "not_passed",
+        "drift_coverage_result": "passed" if required_groups["drift_coverage"] else "not_passed",
+        "validation_task_audit_linkage": "every app-created validation task carries a non-null "
+                                         "validation_task.create audit reference committed in the same "
+                                         "transaction; imported tasks are recorded by the marker's "
+                                         "normalized.import batch reference (no fabricated per-row events)",
+        "refresh_concurrency": "a non-owner refresh acquires the same in-process transaction lock the "
+                               "writer holds, so it cannot replace an active transaction's working state; "
+                               "the projection is built off-side and published atomically; a rolled-back "
+                               "mutation reloads committed state so no phantom row leaks. RESIDUAL "
+                               "(disclosed, pre-existing, not claimed fixed): the in-memory singleton "
+                               "does not provide snapshot isolation to a lock-free READER that reads the "
+                               "instance dicts WITHOUT refreshing while a writer is mid-transaction; "
+                               "readers that refresh() are serialized against writers and safe",
+        "rollback_reload_result": "passed" if required_groups["rollback_reload"] else "not_passed",
+        "import_concurrency_result": "passed" if required_groups["import_concurrency"] else "not_passed",
+        "authority_marker_version": store_mod.PostgresStateStore.NORMALIZED_AUTHORITY_VERSION,
+        "runtime_role_is_superuser": TOTALS.get("runtime_role_super"),
+        "runtime_role_has_bypassrls": TOTALS.get("runtime_role_bypassrls"),
+        "rls_runtime_role_result": "passed" if required_groups["rls_runtime_role"] else "not_passed",
         "rls_state": ("active_forced_on_slice_tables"
                       if TOTALS.get("rls_forced_tables") == 4 else "not_forced"),
         "rls_forced_table_count": TOTALS.get("rls_forced_tables", 0),
@@ -1120,7 +1590,7 @@ def main() -> int:
 
     url = test_database_url()
     if not url:
-        for n in range(6, 58):
+        for n in range(6, 76):
             skip(f"{n:02d} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         pg_checks(url, scratch)

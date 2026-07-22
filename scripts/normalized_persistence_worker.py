@@ -172,6 +172,22 @@ def main() -> int:
 
             from backend.app.store import PostgresStateStore
             key = PostgresStateStore._advisory_lock_key()
+            # WAIT for the victim to finish constructing its store/app BEFORE
+            # taking the lock. Otherwise the victim's OWN bootstrap (which takes
+            # the same advisory lock) contends with the held lock, times out, and
+            # falls back to local mode -> a 404, not the intended 503. Poll for
+            # the victim's readiness row without inserting it.
+            deadline = time.time() + 30
+            with psycopg.connect(dsn, autocommit=True) as ready_conn:
+                while time.time() < deadline:
+                    row = ready_conn.execute(
+                        f"select count(*) from {BARRIER_TABLE} "
+                        f"where name = 'victim:ready' and worker_id = 'victim'").fetchone()
+                    if row and int(row[0]) >= 1:
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise TimeoutError("victim never signalled store readiness")
             with psycopg.connect(dsn) as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("select pg_advisory_xact_lock(%s)", (key,))
@@ -182,7 +198,27 @@ def main() -> int:
 
         elif scenario == "lock_timeout_victim":
             # G18: mutation during a held global lock -> controlled 503, no state.
-            barrier(dsn, "hold:acquired", "holder", 1)
+            # The app/store was already constructed at import (top of main), so
+            # its bootstrap completed WITHOUT contending for the lock. Signal
+            # readiness so the holder only takes the lock afterwards, then WAIT for
+            # the holder's acquisition signal (without inserting it) and mutate.
+            import psycopg
+
+            with psycopg.connect(dsn, autocommit=True) as ready_conn:
+                ready_conn.execute(
+                    f"insert into {BARRIER_TABLE} (name, worker_id) "
+                    f"values ('victim:ready', 'victim') on conflict do nothing")
+            deadline = time.time() + 30
+            with psycopg.connect(dsn, autocommit=True) as conn:
+                while time.time() < deadline:
+                    row = conn.execute(
+                        f"select count(*) from {BARRIER_TABLE} "
+                        f"where name = 'hold:acquired' and worker_id = 'holder'").fetchone()
+                    if row and int(row[0]) >= 1:
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise TimeoutError("holder never acquired the global lock")
             r = post_correction(cfg["workspace_id"], "key-lt-" + "x" * 10)
             out["status"] = r.status_code
             out["controlled"] = r.status_code in (503, 409)
