@@ -721,8 +721,8 @@ def _migration_validity_probe() -> tuple[str, str]:
 
 PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v3.json"
 PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v3"
-NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v2.json"
-NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v2"
+NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v3.json"
+NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v3"
 
 
 def _correction_atomicity_probe() -> tuple[str, str]:
@@ -798,7 +798,14 @@ def _correction_atomicity_probe() -> tuple[str, str]:
                   "verify_count_comparison_result", "conflict_accounting_result",
                   "migration_0006_result", "drift_coverage_result",
                   "import_concurrency_result", "rls_runtime_role_result",
-                  "rollback_reload_result"):
+                  "rollback_reload_result",
+                  # store-level transaction isolation (copy-on-write publication):
+                  "transaction_isolation_result", "route_dirty_read_result",
+                  "rollback_nonpublication_result", "atomic_projection_swap_result",
+                  "stale_refresh_rejection_result", "non_owner_committed_view_result",
+                  # re-review corrections (stale view, revision source, audit-log copy):
+                  "stale_view_elimination_result", "revision_binding_result",
+                  "audit_log_isolation_result"):
         if payload.get(field) != "passed":
             reasons.append(f"{field} is not 'passed'")
     if payload.get("concurrency_scenario_total", 0) < 10:
