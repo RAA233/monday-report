@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Role(str, Enum):
@@ -987,6 +987,14 @@ class RetentionRunResult(BaseModel):
 
 
 class AuditLog(BaseModel):
+    # FROZEN: a sealed audit entry is immutable. The working projection shares
+    # published entry OBJECTS by reference (the audit_logs list is shallow-copied
+    # per transaction), so making the entry itself immutable is what keeps that
+    # copy provably safe -- an attempt to reassign any field of an entry already in
+    # the published projection raises instead of silently corrupting it. New entries
+    # are built complete (entry_hash via model_copy) before being appended.
+    model_config = ConfigDict(frozen=True)
+
     id: UUID = Field(default_factory=uuid4)
     tenant_id: UUID
     actor_user_id: UUID
