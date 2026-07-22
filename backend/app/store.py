@@ -7388,6 +7388,17 @@ class PostgresStateStore(LocalStateStore):
         # selection) instead of straddling a concurrent commit.
         self._read_view: contextvars.ContextVar = contextvars.ContextVar(
             "mr_committed_read_view", default=None)
+        # Transaction OWNERSHIP token. A ContextVar (NOT threading.get_ident) so a
+        # transaction is owned by exactly one execution CONTEXT -- one asyncio task
+        # or one threadpool call -- not merely one OS thread. Two asyncio tasks on
+        # the same event-loop thread share a thread id but have distinct contexts,
+        # so a second task can never satisfy _owns_txn() for a transaction opened by
+        # the first and thereby read its private working state or join it (even if a
+        # future mutation were to await mid-transaction). Nested mutations on the
+        # owning context share the same token (the ContextVar is unchanged), so a
+        # compound operation still commits exactly once.
+        self._txn_owner: contextvars.ContextVar = contextvars.ContextVar(
+            "mr_txn_owner", default=None)
         self._verify_repository_schema()
         # Bootstrap runs under the SAME global transaction boundary as every
         # other mutation -- one connection, the global advisory lock acquired
@@ -7399,9 +7410,18 @@ class PostgresStateStore(LocalStateStore):
         self._install_mutation_boundary()
 
     def _owns_txn(self) -> bool:
-        """True when THIS thread owns the open transaction context (if any)."""
+        """True when THIS execution context owns the open transaction (if any).
+
+        Task/thread-safe: ownership is the per-context _txn_owner token, so only the
+        exact asyncio task / threadpool call that opened the transaction (or a nested
+        call within it) matches -- never a different task that merely shares the OS
+        thread id.
+        """
         txn = self._txn
-        return txn is not None and txn.get("owner") == threading.get_ident()
+        if txn is None:
+            return False
+        owner = getattr(self, "_txn_owner", None)
+        return owner is not None and owner.get() is not None and owner.get() is txn.get("token")
 
     # Sentinel: a committed_read_view() is active but has not pinned a generation
     # yet. Distinct from None (no view active). A read while UNSET falls through to
@@ -7411,11 +7431,8 @@ class PostgresStateStore(LocalStateStore):
 
     # ---------------------------------------------- copy-on-write routing -----
     def _active_working(self):
-        """The calling thread's transaction-private working projection, or None."""
-        txn = self._txn
-        if txn is not None and txn.get("owner") == threading.get_ident():
-            return txn.get("working")
-        return None
+        """The calling context's transaction-private working projection, or None."""
+        return self._txn.get("working") if self._owns_txn() else None
 
     def _active_read_view(self):
         """This context's PINNED committed projection, or None.
@@ -7490,27 +7507,20 @@ class PostgresStateStore(LocalStateStore):
         self._published[name] = value
 
     def _new_working_projection(self) -> dict:
-        """A private copy of the current committed projection.
+        """A DEEP private copy of the current committed projection.
 
-        Deep for every container so any in-place mutation of a nested entity
-        model, list or dict by a domain method touches only the working copy,
-        never the published one -- EXCEPT audit_logs, which is an append-only
-        hash chain: its entries are never mutated in place (only whole-list
-        reassign, .append, .pop and .clear at the list level), so a shallow list
-        copy already gives the writer a private list without deep-copying an
-        unbounded, ever-growing log on every single transaction. The shared
-        entry objects are read-only, so no writer can reach the published log
-        through them.
+        Every managed container -- INCLUDING audit_logs -- is deep-copied, so no
+        in-place mutation of a nested entity model, list or dict by a domain method
+        can reach the published projection. A shallow list copy of audit_logs would
+        share the AuditLog entry OBJECTS with published; AuditLog is frozen at the
+        top level, but its nested `metadata` dict and `actor_roles` list are still
+        mutable, so a shared entry could be corrupted through them. Deep-copying
+        makes every working entry independent, closing that nested-mutable leak.
+        (audit_logs is bounded by retention; the owner's refresh reloads it fresh
+        from the DB anyway, so the copy is short-lived.)
         """
         import copy
-        projection: dict[str, object] = {}
-        for name in self.MANAGED_STATE:
-            current = self._published.get(name)
-            if name == "audit_logs" and isinstance(current, list):
-                projection[name] = list(current)
-            else:
-                projection[name] = copy.deepcopy(current)
-        return projection
+        return {name: copy.deepcopy(self._published.get(name)) for name in self.MANAGED_STATE}
 
     def _publish(self, projection: dict, revision: int) -> None:
         """Atomically publish a COMPLETE committed projection.
@@ -7575,6 +7585,7 @@ class PostgresStateStore(LocalStateStore):
         with self._txn_lock:
             connection = psycopg.connect(self.database_url, connect_timeout=5)
             connection.autocommit = False
+            _owner_reset = None
             try:
                 with connection.cursor() as cursor:
                     cursor.execute("select set_config('lock_timeout', %s, true)",
@@ -7596,11 +7607,13 @@ class PostgresStateStore(LocalStateStore):
                 # holds migrated entities but was never cut over must be imported
                 # explicitly (never silently, never at startup).
                 self._refuse_unimported_snapshot(payload)
+                _owner_token = object()
                 self._txn = {"connection": connection, "revision": revision, "payload": payload,
                              "operation_id": None, "request_hash": None,
                              "operation_kind": "snapshot.bootstrap", "actor_id": None,
-                             "owner": threading.get_ident(),
+                             "token": _owner_token,
                              "working": {}, "wrote": False, "dirty": False}
+                _owner_reset = self._txn_owner.set(_owner_token)
                 # LocalStateStore.__init__ refreshes from the locked payload (state
                 # exists) or seeds (first run) INTO the transaction-private working
                 # projection. Any save() it triggers is deferred and marks the
@@ -7615,6 +7628,8 @@ class PostgresStateStore(LocalStateStore):
                 connection.rollback()
                 raise
             finally:
+                if _owner_reset is not None:
+                    self._txn_owner.reset(_owner_reset)
                 self._txn = None
                 connection.close()
 
@@ -7761,6 +7776,7 @@ class PostgresStateStore(LocalStateStore):
         connection = psycopg.connect(self.database_url, connect_timeout=5)
         connection.autocommit = False
         context: dict[str, object] = {"replayed": False, "revision": 0, "result": None}
+        _owner_reset = None
         try:
             with connection.cursor() as cursor:
                 # SET LOCAL is a utility statement and cannot take a bind
@@ -7811,15 +7827,20 @@ class PostgresStateStore(LocalStateStore):
                         context["result"] = {"result_kind": prior[3], "result_identifier": prior[4]}
                         context["revision"] = int(prior[5])
 
+            _owner_token = object()
             self._txn = {"connection": connection, "revision": revision, "payload": payload,
                          "operation_id": operation_id, "request_hash": request_hash,
                          "operation_kind": operation_kind, "actor_id": actor_id,
-                         "owner": threading.get_ident(),
+                         "token": _owner_token,
                          # Transaction-private working projection: a DEEP copy of
                          # the committed projection. The owner reads/mutates it;
                          # non-owners never see it. Published atomically on commit.
                          "working": self._new_working_projection(),
                          "wrote": False, "dirty": False}
+            # Bind ownership to THIS execution context (task/threadpool call), not the
+            # OS thread: a different asyncio task on the same event-loop thread can
+            # never satisfy _owns_txn() for this transaction.
+            _owner_reset = self._txn_owner.set(_owner_token)
             # Load the transaction's committed snapshot into the OWNER's working
             # projection (owner refresh reloads the just-locked committed state).
             if payload is not None and not context["replayed"]:
@@ -7851,6 +7872,8 @@ class PostgresStateStore(LocalStateStore):
             connection.rollback()
             raise
         finally:
+            if _owner_reset is not None:
+                self._txn_owner.reset(_owner_reset)
             self._txn = None
             connection.close()
             self._txn_lock.release()
