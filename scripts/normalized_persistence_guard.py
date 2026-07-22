@@ -857,6 +857,11 @@ print(json.dumps(out))
     os.environ["MONDAY_REPORT_TENANT_SLUG"] = "np-tt-b"
     try:
         other = store_mod.PostgresStateStore(url)
+        # refresh() explicitly: a freshly SEEDED tenant never loads normalized
+        # entities during bootstrap, so without this the membership test below
+        # is vacuously empty and passes even with tenant filtering deleted
+        # (proven by mutation testing during independent review).
+        other.refresh()
         crossed = fxa["task_id"] in {str(k) for k in other.validation_tasks}
     finally:
         os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
@@ -957,15 +962,21 @@ print(json.dumps(out))
     # migrated entities and no marker.
     reset(); migrate_baseline()
     cfg_mk = env_for("mk", slug="np-mk")
-    fx = run_fixture(cfg_mk, {})
+    fx = run_fixture(cfg_mk, {"breach": BREACH})
     os.environ["MONDAY_REPORT_TENANT_SLUG"] = "np-mk"
     try:
         mk_store = store_mod.PostgresStateStore(url)  # healthy cut-over state
     finally:
         os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
+    # Re-materialize a REAL (schema-valid) task doc into the snapshot, marked,
+    # exactly as an old-version writer would: a parseable doc means a broken
+    # refusal is recorded as a proper check failure (the mutation commits and
+    # blanks it) instead of crashing the guard on junk parsing.
     q("update monday_report_state_snapshots set payload = "
-      "(payload - 'normalized_authority') || %s where tenant_slug = %s",
-      (Jsonb({"validation_tasks": [{"planted": True}]}), "np-mk"))
+      "(payload - 'normalized_authority') || jsonb_build_object('validation_tasks', "
+      "jsonb_build_array((select doc || '{\"planted\": true}'::jsonb "
+      "from monday_report_norm_validation_tasks limit 1))) "
+      "where tenant_slug = %s", ("np-mk",))
     from backend.app.schemas import FieldCorrectionCreate
     err57 = None
     try:
