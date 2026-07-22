@@ -46,6 +46,16 @@ VALID_CORRECTION = {
     "correction_reason": "Restore the bracketed pad code dropped in extraction.",
 }
 
+# A drilling-rate measurement far below 85% of the seeded Gordon average (528) so
+# it breaches the Critical anomaly rule and spawns a fresh critical validation
+# task. Used to seed validation-task review outcomes for the transition proofs.
+BREACH_MEASUREMENT = {
+    "metric": "feet_drilled_per_day",
+    "value": 100.0,
+    "unit": "ft/day",
+    "data_source": "synthetic",
+}
+
 
 def _configure_env(cfg: dict) -> None:
     """Set env so the app builds a PostgreSQL-backed store in demo mode."""
@@ -104,6 +114,35 @@ def _idempotency_row(dsn: str, slug: str, operation_id: str) -> dict:
             "from monday_report_idempotency_records where tenant_slug=%s and operation_id=%s",
             (slug, operation_id)).fetchone()
     return {"rows": int(r[0]), "actor_id": (str(r[1]) if r[1] else None), "operation_kind": r[2]}
+
+
+def _validation_status(dsn: str, slug: str, task_id: str) -> str | None:
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as c:
+        r = c.execute(
+            "select fc->>'status' from monday_report_state_snapshots snap, "
+            "jsonb_array_elements(snap.payload->'validation_tasks') fc "
+            "where snap.tenant_slug=%s and fc->>'id'=%s", (slug, task_id)).fetchone()
+        return r[0] if r else None
+
+
+def _audit_validation_updates(dsn: str, slug: str) -> list[dict]:
+    """Return the (from,to,review_outcome) tuple of every validation_task.update
+    audit event. target_id is redacted by the audit sanitizer, so transitions are
+    identified by their status transition + review-outcome flag, which are not
+    sensitive and survive redaction."""
+    import psycopg
+
+    with psycopg.connect(dsn, autocommit=True) as c:
+        rows = c.execute(
+            "select e->'metadata'->>'from', e->'metadata'->>'to', "
+            "e->'metadata'->>'review_outcome' "
+            "from monday_report_state_snapshots snap, "
+            "jsonb_array_elements(snap.payload->'audit_logs') e "
+            "where snap.tenant_slug=%s and e->>'action'='validation_task.update'",
+            (slug,)).fetchall()
+    return [{"from": r[0], "to": r[1], "review_outcome": r[2]} for r in rows]
 
 
 def barrier(dsn: str, name: str, worker_id: str, participants: int, timeout: float = 30.0) -> None:
@@ -269,6 +308,132 @@ def run_suite(cfg: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Validation-task transition suite (PATCH /validation-tasks/{id})
+# --------------------------------------------------------------------------- #
+# The four required validation actions (validation outcome / approval / rejection
+# / administrative reopening) all share ONE route and ONE idempotency operation
+# kind. That is deliberate: the transition lives in the validated request body,
+# so the canonical request hash distinguishes them and reusing a key across
+# transitions correctly CONFLICTS (a per-transition operation kind would instead
+# let one key commit several different transitions). Each transition is therefore
+# proven separately here through real HTTP with a distinct body, a distinct state
+# transition, a distinct audit (from,to,review_outcome), and its own idempotent
+# replay.
+def run_validation_suite(cfg: dict) -> dict:
+    dsn = cfg["dsn"]
+    slug = cfg["tenant_slug"]
+    client = _client()
+    results: list[dict] = []
+
+    def record(name: str, ok: bool, detail: object = "") -> None:
+        results.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    def hdr(key: str) -> dict:
+        return {"Idempotency-Key": key}
+
+    session = client.get("/auth/session").json()
+    actor_id = (session.get("authenticated_identity") or {}).get("user_id")
+
+    r = client.post("/workspaces", json={"name": "http-validation", "rig_name": "guard"})
+    ws = r.json()["id"]
+
+    def seed_open_task() -> str:
+        # Each Critical breach spawns a fresh critical validation task (open).
+        client.post(f"/workspaces/{ws}/benchmarking/measurements", json=BREACH_MEASUREMENT)
+        open_tasks = [t for t in client.get("/validation-tasks").json() if t["status"] == "open"]
+        return open_tasks[-1]["id"]
+
+    # V1: terminal outcome VALIDATED (approval) + exact replay.
+    t1 = seed_open_task()
+    kv = "key-vt-validated-" + "1" * 8
+    body_v = {"status": "validated", "resolution_note": "review approved"}
+    v1 = client.patch(f"/validation-tasks/{t1}", headers=hdr(kv), json=body_v)
+    rev_after_v = _revision(dsn, slug)
+    v1r = client.patch(f"/validation-tasks/{t1}", headers=hdr(kv), json=body_v)
+    record("V1 validated outcome commits, replays, and reserves one idempotency row",
+           v1.status_code == 200 and v1.json().get("status") == "validated"
+           and v1.json().get("reviewer_actor_source") is not None
+           and v1r.status_code == 200 and v1r.json().get("id") == t1
+           and _validation_status(dsn, slug, t1) == "validated"
+           and _idempotency_row(dsn, slug, kv)["rows"] == 1
+           and _revision(dsn, slug) == rev_after_v,
+           {"status": v1.status_code, "replay": v1r.status_code,
+            "task": _validation_status(dsn, slug, t1),
+            "idem_rows": _idempotency_row(dsn, slug, kv)["rows"],
+            "revision_steady": _revision(dsn, slug) == rev_after_v})
+
+    # V2: terminal outcome REJECTED, a DISTINCT transition on a distinct task.
+    t2 = seed_open_task()
+    kr = "key-vt-rejected-" + "2" * 8
+    body_r = {"status": "rejected", "resolution_note": "not supported by source"}
+    v2 = client.patch(f"/validation-tasks/{t2}", headers=hdr(kr), json=body_r)
+    rev_after_r = _revision(dsn, slug)
+    v2r = client.patch(f"/validation-tasks/{t2}", headers=hdr(kr), json=body_r)
+    record("V2 rejected outcome is a distinct transition that commits and replays",
+           v2.status_code == 200 and v2.json().get("status") == "rejected"
+           and v2r.status_code == 200 and _validation_status(dsn, slug, t2) == "rejected"
+           and _idempotency_row(dsn, slug, kr)["rows"] == 1
+           and _revision(dsn, slug) == rev_after_r,
+           {"status": v2.status_code, "task": _validation_status(dsn, slug, t2)})
+
+    # V3: ADMINISTRATIVE reopen (validated -> open): not reviewer-gated, and it
+    # clears reviewer attribution.
+    ko = "key-vt-reopen-" + "3" * 8
+    body_o = {"status": "open", "resolution_note": "reopened for re-review"}
+    v3 = client.patch(f"/validation-tasks/{t1}", headers=hdr(ko), json=body_o)
+    rev_after_o = _revision(dsn, slug)
+    v3r = client.patch(f"/validation-tasks/{t1}", headers=hdr(ko), json=body_o)
+    record("V3 administrative reopen transitions to open, clears reviewer, and replays",
+           v3.status_code == 200 and v3.json().get("status") == "open"
+           and v3.json().get("reviewer_actor_source") is None
+           and v3r.status_code == 200 and _validation_status(dsn, slug, t1) == "open"
+           and _idempotency_row(dsn, slug, ko)["rows"] == 1
+           and _revision(dsn, slug) == rev_after_o,
+           {"status": v3.status_code, "reviewer_cleared": v3.json().get("reviewer_actor_source") is None,
+            "task": _validation_status(dsn, slug, t1)})
+
+    # V4: cross-transition conflict -- same key, different target status.
+    t4 = seed_open_task()
+    kx = "key-vt-conflict-" + "4" * 8
+    c4a = client.patch(f"/validation-tasks/{t4}", headers=hdr(kx),
+                       json={"status": "validated", "resolution_note": "approve"})
+    c4b = client.patch(f"/validation-tasks/{t4}", headers=hdr(kx),
+                       json={"status": "rejected", "resolution_note": "approve"})
+    record("V4 reusing a key for a different transition is a 409 conflict, no re-mutation",
+           c4a.status_code == 200 and c4b.status_code == 409
+           and _validation_status(dsn, slug, t4) == "validated",
+           {"first": c4a.status_code, "second": c4b.status_code,
+            "task": _validation_status(dsn, slug, t4)})
+
+    # V5: missing key on this protected route fails closed (400), mutates nothing.
+    t5 = seed_open_task()
+    c5 = client.patch(f"/validation-tasks/{t5}", json={"status": "validated", "resolution_note": "x"})
+    record("V5 missing Idempotency-Key on the validation route is rejected 400, no mutation",
+           c5.status_code == 400 and _validation_status(dsn, slug, t5) == "open",
+           {"status": c5.status_code, "task": _validation_status(dsn, slug, t5)})
+
+    # V6: the three transitions emitted DISTINCT audit events.
+    audits = _audit_validation_updates(dsn, slug)
+    tuples = {(a["to"], a["review_outcome"]) for a in audits}
+    record("V6 approve, reject and reopen each emit a distinct audit (to, review_outcome)",
+           ("validated", "true") in tuples and ("rejected", "true") in tuples
+           and ("open", "false") in tuples,
+           {"distinct_transitions": sorted(str(t) for t in tuples)})
+
+    # V7: the idempotency record binds the resolved request actor.
+    kv_row = _idempotency_row(dsn, slug, kv)
+    record("V7 the validation idempotency record binds the resolved request actor + operation kind",
+           bool(actor_id) and kv_row["actor_id"] == actor_id
+           and kv_row["operation_kind"] == "validation_task.update",
+           {"record_actor": kv_row["actor_id"], "session_actor": actor_id,
+            "kind": kv_row["operation_kind"]})
+
+    passed = sum(1 for r in results if r["ok"])
+    return {"mode": "validation_suite", "results": results, "passed": passed,
+            "total": len(results), "all_passed": passed == len(results)}
+
+
+# --------------------------------------------------------------------------- #
 # Concurrent duplicate through HTTP (one of two independent OS processes)
 # --------------------------------------------------------------------------- #
 def run_lost_response(cfg: dict) -> dict:
@@ -375,6 +540,11 @@ def main() -> int:
         cfg = json.loads(sys.argv[2])
         _configure_env(cfg)
         print(json.dumps(run_suite(cfg), default=str))
+        return 0
+    if mode == "validation_suite":
+        cfg = json.loads(sys.argv[2])
+        _configure_env(cfg)
+        print(json.dumps(run_validation_suite(cfg), default=str))
         return 0
     if mode == "lost_response":
         cfg = json.loads(sys.argv[2])
