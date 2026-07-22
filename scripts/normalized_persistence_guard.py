@@ -37,6 +37,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -783,11 +784,16 @@ print(json.dumps(out))
     cfg_rls = env_for("rls", slug="np-rls-a")
     run_fixture(cfg_rls, {"correction": CORRECTION})
     role = f"np_rls_probe_{secrets.token_hex(3)}"
-    q(f"create role {role} login nosuperuser")
+    role_password = secrets.token_urlsafe(16)
+    q(f"create role {role} login nosuperuser password '{role_password}'")
     q(f"grant usage on schema public to {role}")
     q(f"grant select, insert on monday_report_norm_field_corrections to {role}")
-    base = url.rsplit("/", 1)
-    probe_url = url.replace("postgresql://postgres@", f"postgresql://{role}@")
+    # Replace the ENTIRE userinfo (user[:password]@): the previous prefix
+    # replace only matched passwordless trust-auth DSNs, silently leaving the
+    # SUPERUSER credentials in place on password-bearing DSNs — which bypasses
+    # RLS and voids checks 47-50. The probe role gets its own password so it
+    # can authenticate under scram as well as trust.
+    probe_url = re.sub(r"//[^@/]+@", f"//{role}:{role_password}@", url)
 
     def rls_query(slug: str | None) -> int:
         with psycopg.connect(probe_url, autocommit=True) as c:
@@ -811,20 +817,21 @@ print(json.dumps(out))
             c.execute("select set_config('app.tenant_slug', %s, false)", ("np-rls-b",))
             c.execute("insert into monday_report_norm_field_corrections "
                       "(id, tenant_id, tenant_slug, workspace_id, target_type, field_key, "
-                      "status, actor_user_id, doc) "
-                      "select %s, tenant_id, 'np-rls-a', workspace_id, 'report_field', 'forge', "
-                      "'superseded', actor_user_id, '{}' "
-                      "from monday_report_norm_field_corrections limit 0")
-            c.execute("insert into monday_report_norm_field_corrections "
-                      "(id, tenant_id, tenant_slug, workspace_id, target_type, field_key, "
                       "status, actor_user_id, doc) values "
                       "(%s, %s, 'np-rls-a', %s, 'report_field', 'forge', 'superseded', %s, '{}')",
                       (uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()))
     except Exception as exc:  # noqa: BLE001
-        wrong_insert = exc.__class__.__name__
+        wrong_insert = f"{exc.__class__.__name__}: {str(exc)[:100]}"
     TOTALS["connections"] += 1
+    # Require a GENUINE row-security denial, not merely any exception: a
+    # ForeignKeyViolation (random FK targets, superuser probe) or a
+    # SyntaxError (malformed probe SQL) would both mean the policy never
+    # fired. WITH CHECK is evaluated per row BEFORE end-of-statement FK
+    # triggers, so under the non-superuser probe the policy must be what
+    # rejects this insert.
     record("50 RLS: WITH CHECK forbids writing another tenant's rows (relationship cannot be forged)",
-           wrong_insert is not None, {"raised": wrong_insert})
+           wrong_insert is not None and "row-level security" in wrong_insert,
+           {"raised": wrong_insert})
     TOTALS["tenant_checks"] += 1
 
     # cross-tenant idempotency isolation
