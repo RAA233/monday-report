@@ -316,6 +316,37 @@ writer for the duration of that build. This is a deliberate correctness-over-
 throughput choice for the in-process singleton: the lock guarantees the candidate
 projection and its revision come from one consistent committed generation. Writer
 transactions are short and bounded by the row-lock timeout.
+
+### Whole-operation read coherence (committed read view)
+
+Per-access committed reads (above) prevent dirty reads but not *torn* reads: an
+operation that touches several managed fields could observe entities from two
+committed generations if a writer commits between accesses (e.g. `store.X.get(id)`
+succeeding, then `store.X[id]` raising `KeyError` after a concurrent delete). A
+request/task-scoped **committed read view** closes that gap:
+
+- `store.committed_read_view()` is a context manager that pins ONE committed
+  projection for the operation. Resolution order is (1) the owner's private
+  working projection, else (2) this context's pinned committed view, else (3) the
+  live published projection.
+- The view is backed by a `contextvars.ContextVar` (`_read_view`), **not**
+  `threading.local` — verified to auto-scope per asyncio task and per threadpool
+  request copy, so it can never persist across pooled-thread request reuse (the old
+  sticky-view leak) and two async tasks on one event-loop thread stay isolated.
+- It pins **on the first `refresh()`** inside the view, capturing the freshly
+  refreshed generation; a later `refresh()` in the same view is coherence-preserving
+  (does not switch generations). An operation that commits its OWN mutation advances
+  its pinned view to the new generation, so it observes its own write.
+- Applied structurally, not per route: the `coherent_read_view` http middleware
+  wraps every request (so identity resolution, authorization/`_tenant_owned`, domain
+  reads and serialization share one generation), and the worker wraps its job pass.
+  `scripts/read_coherence_guard.py` fails closed if a new state-reading route omits
+  `store.refresh()`, if the middleware/worker boundary is removed, or if the view
+  reverts to `threading.local`.
+
+Sealed audit entries are `frozen` (`AuditLog`), so the shallow-copied working
+`audit_logs` list can safely share published entry objects: an entry present in the
+published projection cannot be mutated in place.
 - **RLS honesty**: enforcement is proven only with a genuine non-superuser role,
   and the guard proves the superuser-bypass vs non-superuser-enforced contrast;
   `tenant-resource-authorization` stays BLOCKED.
