@@ -1269,7 +1269,7 @@ class LocalStateStore:
         if task.target_type == "failure" and task.target_id in self.failures:
             self.failures[task.target_id].validation_status = payload.status
 
-        self.audit(
+        event = self.audit(
             "validation_task.update",
             "validation_task",
             task.id,
@@ -1284,7 +1284,38 @@ class LocalStateStore:
                 "reviewer_actor_source": identity.actor_source,
             },
         )
+        self._normalized_persist_validation(
+            task, previous_status.value, is_review_outcome, verified, event
+        )
         return task
+
+    # ------------------------------------------------------------------
+    # Normalized-persistence hooks (Phase 04 slice).
+    #
+    # On the snapshot backend these are deliberate no-ops: the JSON snapshot
+    # remains the single authority and is explicitly documented as lacking
+    # normalized cross-process guarantees. PostgresStateStore overrides them to
+    # write the normalized rows on the SAME open transaction, so entity state,
+    # audit event, idempotency record and revision commit or roll back together.
+    # ------------------------------------------------------------------
+    def _normalized_persist_correction(self, correction, superseded, audit_event) -> None:
+        return None
+
+    def _normalized_persist_correction_revert(self, correction, audit_event) -> None:
+        return None
+
+    def _normalized_persist_validation_create(self, task, audit_event) -> None:
+        return None
+
+    def _normalized_persist_validation(self, task, previous_status, is_review_outcome,
+                                       reviewer_verified, audit_event) -> None:
+        return None
+
+    def _normalized_persist_report_create(self, report, audit_event) -> None:
+        return None
+
+    def _normalized_persist_report_update(self, report, audit_event) -> None:
+        return None
 
     # ------------------------------------------------------------------
     # Field-level correction & review-provenance foundation.
@@ -1343,7 +1374,7 @@ class LocalStateStore:
             # audit log; only booleans, lengths, and stable identifiers are
             # recorded. audit() persists the correction state and the audit
             # event in one save(), so they cannot diverge in-process.
-            self.audit(
+            event = self.audit(
                 "field_correction.record",
                 "field_correction",
                 correction.id,
@@ -1360,6 +1391,7 @@ class LocalStateStore:
                     "reviewer_actor_source": identity.actor_source,
                 },
             )
+            self._normalized_persist_correction(correction, prior, event)
             return correction
 
     def revert_field_correction(self, correction_id: UUID, revert_reason: str) -> FieldCorrection:
@@ -1380,7 +1412,7 @@ class LocalStateStore:
             # Attribute the REVERTING reviewer, kept distinct from the recorder.
             for _k, _v in self._reviewer_attribution(identity, verified, revert=True).items():
                 setattr(correction, _k, _v)
-            self.audit(
+            event = self.audit(
                 "field_correction.revert",
                 "field_correction",
                 correction.id,
@@ -1393,6 +1425,7 @@ class LocalStateStore:
                     "reviewer_actor_source": identity.actor_source,
                 },
             )
+            self._normalized_persist_correction_revert(correction, event)
             return correction
 
     def list_field_corrections(
@@ -1862,6 +1895,7 @@ class LocalStateStore:
                     priority="critical",
                 )
                 self.validation_tasks[task.id] = task
+                self._normalized_persist_validation_create(task, None)
                 self.audit(
                     "risk_watchlist.add",
                     "anomaly_event",
@@ -2401,7 +2435,7 @@ class LocalStateStore:
             },
         )
         self.monday_reports[report.id] = report
-        self.audit(
+        event = self.audit(
             "monday_report.create",
             "monday_report",
             report.id,
@@ -2411,6 +2445,7 @@ class LocalStateStore:
                 "open_validation_tasks": len(open_tasks),
             },
         )
+        self._normalized_persist_report_create(report, event)
         return report
 
     def report_open_validation_tasks(self, report_id: UUID) -> list[ValidationTask]:
@@ -2593,12 +2628,13 @@ class LocalStateStore:
             byte_size=len(content),
         )
         self.report_exports[report_export.id] = report_export
-        self.audit(
+        event = self.audit(
             "monday_report.export",
             "monday_report",
             report.id,
             {"format": export_format, "sha256": digest, "byte_size": len(content)},
         )
+        self._normalized_persist_report_update(report, event)
         return report_export
 
     def _open_validation_tasks_for_workspace(self, workspace_id: UUID) -> list[ValidationTask]:
@@ -3773,6 +3809,7 @@ class LocalStateStore:
             priority="medium",
         )
         self.validation_tasks[task.id] = task
+        self._normalized_persist_validation_create(task, None)
         return {
             "ok": True,
             "result": "ocr_routed",
@@ -3994,6 +4031,7 @@ class LocalStateStore:
             priority="high",
         )
         self.validation_tasks[task.id] = task
+        self._normalized_persist_validation_create(task, None)
         return {"failure_ids": [failure.id], "validation_task_ids": [task.id]}
 
     def _failure_exists_for_upload(self, upload_id: UUID, event_type: str) -> bool:
@@ -6582,7 +6620,7 @@ class LocalStateStore:
         resource_id: UUID | None = None,
         metadata: dict | None = None,
         save: bool = True,
-    ) -> None:
+    ) -> AuditLog | None:
         """Append an audit event and (optionally) persist it.
 
         Integrity: when an active HMAC key is available the event is sealed with a
@@ -6671,6 +6709,9 @@ class LocalStateStore:
                     # rather than claim the event was recorded.
                     self.audit_logs.pop()
                     raise
+            # Returned so a mutator can durably LINK its normalized row to this
+            # exact event (audit_event_id) without duplicating the payload.
+            return audit_log
 
     def audit_integrity_status(self) -> AuditIntegrityStatus:
         self.refresh()
@@ -6889,8 +6930,11 @@ class IdempotencyConflict(RuntimeError):
 
 
 # Transaction/lock implementation version. Evidence binds this so a probe can
-# never certify a run produced by different concurrency semantics.
-SNAPSHOT_TRANSACTION_VERSION = "2.0.0"
+# never certify a run produced by different concurrency semantics. 3.0.0 =
+# normalized-authority cutover: the snapshot no longer stores reports, field
+# corrections or validation tasks in PostgreSQL mode; those write through
+# normalized repositories inside the same protected transaction.
+SNAPSHOT_TRANSACTION_VERSION = "3.0.0"
 # Bounded wait for the row lock. A blocked writer fails as a controlled conflict
 # rather than hanging a request thread indefinitely.
 SNAPSHOT_LOCK_TIMEOUT_MS = 5000
@@ -6977,6 +7021,13 @@ class PostgresStateStore(LocalStateStore):
     STATE_TABLE = "monday_report_state_snapshots"
     IDEMPOTENCY_TABLE = "monday_report_idempotency_records"
 
+    # Entities whose single write and read authority is the NORMALIZED tables on
+    # this backend (docs/NORMALIZED_CORRECTION_PERSISTENCE.md). The snapshot
+    # payload carries them as EMPTY lists plus an explicit marker; nothing ever
+    # dual-writes them into the snapshot.
+    NORMALIZED_ENTITY_KEYS = ("monday_reports", "field_corrections", "validation_tasks")
+    NORMALIZED_AUTHORITY_VERSION = 1
+
     def request_idempotency_required(self) -> bool:
         """The idempotency-gated routes MUST present an ``Idempotency-Key`` here.
 
@@ -6991,6 +7042,95 @@ class PostgresStateStore(LocalStateStore):
         requirement to them is future work, not a property this flag claims.
         """
         return True
+
+    # ---------------------------------------------- normalized authority ----
+    def _state_payload(self) -> dict[str, object]:
+        """Snapshot payload EXCLUDES normalized-authority entities.
+
+        Their keys are written as empty lists (so legacy readers keep a stable
+        shape) and an explicit marker records the cutover. This is the
+        single-source-of-truth rule: nothing dual-writes migrated entities into
+        the snapshot on this backend.
+        """
+        payload = super()._state_payload()
+        for key in self.NORMALIZED_ENTITY_KEYS:
+            payload[key] = []
+        payload["normalized_authority"] = {
+            "version": self.NORMALIZED_AUTHORITY_VERSION,
+            "entities": list(self.NORMALIZED_ENTITY_KEYS),
+        }
+        return payload
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._load_normalized_entities()
+
+    def _load_normalized_entities(self) -> None:
+        """Read authority for migrated entities: the normalized tables.
+
+        Inside this thread's open transaction the reads share its connection
+        (and therefore its locks); outside, a scoped read connection is used.
+        """
+        if getattr(self, "tenant", None) is None:
+            return
+        from .repositories import (PgFieldCorrectionRepository, PgReportRepository,
+                                   PgValidationTaskRepository)
+
+        self.monday_reports = {r.id: r for r in PgReportRepository(self).load_all()}
+        self.field_corrections = {c.id: c for c in PgFieldCorrectionRepository(self).load_all()}
+        self.validation_tasks = {t.id: t for t in PgValidationTaskRepository(self).load_all()}
+
+    def _txn_operation_id(self) -> str | None:
+        return self._txn.get("operation_id") if self._owns_txn() else None
+
+    def _normalized_persist_correction(self, correction, superseded, audit_event) -> None:
+        from .repositories import PgFieldCorrectionRepository
+
+        repo = PgFieldCorrectionRepository(self)
+        # Deterministic lock order: the global snapshot advisory lock is already
+        # held by this transaction; row locks on the active lineage come second.
+        repo.lock_lineage(correction.workspace_id, correction.target_type, correction.field_key)
+        repo.create(correction, superseded=superseded,
+                    audit_event_id=getattr(audit_event, "id", None),
+                    operation_id=self._txn_operation_id())
+
+    def _normalized_persist_correction_revert(self, correction, audit_event) -> None:
+        from .repositories import PgFieldCorrectionRepository
+
+        PgFieldCorrectionRepository(self).revert(
+            correction, audit_event_id=getattr(audit_event, "id", None),
+            operation_id=self._txn_operation_id())
+
+    def _normalized_persist_validation_create(self, task, audit_event) -> None:
+        from .repositories import PgValidationTaskRepository
+
+        PgValidationTaskRepository(self).create(
+            task, audit_event_id=getattr(audit_event, "id", None),
+            operation_id=self._txn_operation_id())
+
+    def _normalized_persist_validation(self, task, previous_status, is_review_outcome,
+                                       reviewer_verified, audit_event) -> None:
+        from .repositories import PgValidationTaskRepository
+
+        PgValidationTaskRepository(self).transition(
+            task, previous_status=previous_status,
+            is_review_outcome=is_review_outcome, reviewer_verified=reviewer_verified,
+            audit_event_id=getattr(audit_event, "id", None),
+            operation_id=self._txn_operation_id())
+
+    def _normalized_persist_report_create(self, report, audit_event) -> None:
+        from .repositories import PgReportRepository
+
+        PgReportRepository(self).create(
+            report, audit_event_id=getattr(audit_event, "id", None),
+            operation_id=self._txn_operation_id())
+
+    def _normalized_persist_report_update(self, report, audit_event) -> None:
+        from .repositories import PgReportRepository
+
+        PgReportRepository(self).update(
+            report, audit_event_id=getattr(audit_event, "id", None),
+            operation_id=self._txn_operation_id())
 
     def __init__(self, url: str) -> None:
         self.database_url = url
@@ -7044,6 +7184,18 @@ class PostgresStateStore(LocalStateStore):
                     if row is not None:
                         payload = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
                         revision = int(row[1])
+                # UNSUPPORTED HISTORICAL STATE fails closed: a snapshot that still
+                # holds migrated entities but was never cut over must be imported
+                # explicitly (never silently, never at startup).
+                if payload is not None:
+                    held = [k for k in self.NORMALIZED_ENTITY_KEYS if payload.get(k)]
+                    if held and not payload.get("normalized_authority"):
+                        raise RuntimeError(
+                            "PostgreSQL snapshot still holds migrated entities "
+                            f"({', '.join(held)}) without a normalized-authority marker. "
+                            "Run 'python -m backend.app.normalized_import assess' and then "
+                            "'... execute' to cut over before starting in postgres mode."
+                        )
                 self._txn = {"connection": connection, "revision": revision, "payload": payload,
                              "operation_id": None, "request_hash": None,
                              "operation_kind": "snapshot.bootstrap", "actor_id": None,
@@ -7361,7 +7513,7 @@ class PostgresStateStore(LocalStateStore):
         resource_id: UUID | None = None,
         metadata: dict | None = None,
         save: bool = True,
-    ) -> None:
+    ) -> AuditLog | None:
         """Append an audit event; OUTSIDE a transaction, open one of its own.
 
         Inside this thread's open transaction the append joins it (deferred
@@ -7409,7 +7561,7 @@ class PostgresStateStore(LocalStateStore):
             return {key: cls._postgres_safe_json(item) for key, item in value.items()}
         return value
 
-    REQUIRED_MIGRATION = "0004_transactional_snapshot.sql"
+    REQUIRED_MIGRATION = "0005_normalized_corrections.sql"
 
     def _verify_repository_schema(self) -> None:
         """Verify migration-owned schema exists. NEVER create or alter it.
@@ -7425,6 +7577,12 @@ class PostgresStateStore(LocalStateStore):
         required = {
             self.STATE_TABLE: ("revision", "updated_at"),
             self.IDEMPOTENCY_TABLE: ("operation_id", "request_hash", "committed_revision"),
+            # Normalized-authority tables (migration 0005): postgres mode cannot
+            # run without its write/read authority for the migrated entities.
+            "monday_report_norm_reports": ("revision", "doc"),
+            "monday_report_norm_field_corrections": ("field_key", "doc"),
+            "monday_report_norm_validation_tasks": ("revision", "doc"),
+            "monday_report_norm_validation_outcomes": ("task_revision", "outcome"),
         }
         missing: list[str] = []
         with self._connect() as connection:
