@@ -95,17 +95,42 @@ app = FastAPI(
     description="Local-AI-first API scaffold for rig-report intelligence.",
 )
 
+# Local dev convenience origins. Used ONLY when no explicit allowlist is
+# configured AND the deployment is not in protected client mode.
+_CORS_DEV_DEFAULT_ORIGINS = ("http://127.0.0.1:5173", "http://localhost:5173")
+
+
+def cors_allowed_origins() -> list[str]:
+    """Resolve the browser CORS allowlist as an EXPLICIT list (never a wildcard).
+
+    Contract:
+    - ``MONDAY_REPORT_CORS_ORIGINS`` (comma-separated) is the single lever. When
+      set, its exact origins are the allowlist in EVERY mode -- no implicit dev
+      origin is appended, so an isolated deployment can allow only its own
+      frontend origin and nothing else.
+    - When it is unset/blank:
+        * demo/local mode falls back to the localhost:5173 dev origins for
+          convenience;
+        * protected client mode FAILS CLOSED with an empty list -- no browser
+          origin is trusted until one is configured. It never silently permits
+          :5173 and never widens to ``*`` (a credentialed wildcard is invalid
+          anyway).
+    """
+    configured = [
+        origin.strip()
+        for origin in os.getenv("MONDAY_REPORT_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    if configured:
+        return configured
+    if client_data_mode() == "client":
+        return []
+    return list(_CORS_DEV_DEFAULT_ORIGINS)
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-        *[
-            origin.strip()
-            for origin in os.getenv("MONDAY_REPORT_CORS_ORIGINS", "").split(",")
-            if origin.strip()
-        ],
-    ],
+    allow_origins=cors_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
