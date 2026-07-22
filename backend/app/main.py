@@ -1397,6 +1397,7 @@ def dismiss_benchmark_diagnostic(
     action_id: UUID,
     payload: DiagnosticDismissRequest,
 ) -> AnomalyEvent:
+    store.refresh()
     require_benchmark_permission("dismiss_anomalies")
     if not payload.reason.strip():
         raise HTTPException(status_code=422, detail="Dismissal reason is required")
