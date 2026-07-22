@@ -7053,7 +7053,7 @@ class IdempotencyConflict(RuntimeError):
 # come straight from the live committed projection (no sticky per-thread view),
 # the commit publish binds to the transaction's own committed revision, and the
 # append-only audit log is copied shallowly rather than deep-copied per txn.
-SNAPSHOT_TRANSACTION_VERSION = "3.1.0"
+SNAPSHOT_TRANSACTION_VERSION = "4.0.0"
 # Bounded wait for the row lock. A blocked writer fails as a controlled conflict
 # rather than hanging a request thread indefinitely.
 SNAPSHOT_LOCK_TIMEOUT_MS = 5000

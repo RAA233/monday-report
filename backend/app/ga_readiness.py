@@ -719,8 +719,8 @@ def _migration_validity_probe() -> tuple[str, str]:
     )
 
 
-PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v3.json"
-PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v3"
+PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v4.json"
+PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v4"
 NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v4.json"
 NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v4"
 

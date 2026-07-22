@@ -44,8 +44,8 @@ for candidate in (ROOT, ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v3.json"
-EVIDENCE_SCHEMA_VERSION = "persistence-atomicity-evidence.v3"
+EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomicity-evidence.v4.json"
+EVIDENCE_SCHEMA_VERSION = "persistence-atomicity-evidence.v4"
 # The route-idempotency HTTP contract this run proves. Bound into the evidence so
 # a probe can reject a run produced under a different request contract.
 ROUTE_IDEMPOTENCY_CONTRACT_VERSION = "1.0.0"
