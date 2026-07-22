@@ -301,6 +301,21 @@ async def enforce_client_api_key(request: Request, call_next):
         reset_request_context(context_token)
 
 
+@app.middleware("http")
+async def coherent_read_view(request: Request, call_next):
+    # Structural whole-operation read-coherence boundary. Every request runs inside
+    # ONE committed read view, so all of its store reads -- identity resolution,
+    # authorization/_tenant_owned, domain reads, and response serialization --
+    # observe a single committed generation. Registered AFTER enforce_client_api_key
+    # so it is the OUTERMOST http middleware and its view is already active when that
+    # inner middleware resolves identity. The view pins the freshly refreshed
+    # generation on the route's first store.refresh() and clears on request exit
+    # (the ContextVar is scoped per asyncio task / per threadpool request copy, so it
+    # can never leak to a reused pooled thread). File/memory mode makes this a no-op.
+    with store.committed_read_view():
+        return await call_next(request)
+
+
 def _client_auth_exempt(request: Request) -> bool:
     if request.method == "OPTIONS":
         return True
@@ -1599,10 +1614,13 @@ def report_draft_profile_note(profiles: list[dict[str, object]]) -> str | None:
 def report_draft(workspace_id: UUID) -> ReportDraftResponse:
     store.refresh()
     require_permission("view_reports")
-    _tenant_owned(store.workspaces.get(workspace_id), "workspace", workspace_id, "Workspace not found")
+    # Reuse the object resolved by the ownership check instead of re-indexing the
+    # collection: with the request read view both accesses hit one pinned
+    # generation, and reusing the resolved object removes the get-then-index step
+    # entirely (belt-and-suspenders against a concurrent delete).
+    workspace = _tenant_owned(
+        store.workspaces.get(workspace_id), "workspace", workspace_id, "Workspace not found")
     require_client_data_ready("report_draft.generate", "workspace", workspace_id)
-
-    workspace = store.workspaces[workspace_id]
     # Report-draft input is tenant-scoped: the workspace is owned, and every record
     # fed into the draft must ALSO carry the request tenant's stamp (fail closed on a
     # contradictory foreign record that happens to carry this workspace_id).
@@ -2038,11 +2056,11 @@ def export_monday_report(
 ) -> ReportExport:
     store.refresh()
     require_permission("issue_client_reports")
-    _tenant_owned(store.monday_reports.get(report_id), "monday_report", report_id, "Monday Report not found")
+    report = _tenant_owned(
+        store.monday_reports.get(report_id), "monday_report", report_id, "Monday Report not found")
     require_client_data_ready("monday_report.export", "monday_report", report_id)
     open_tasks = store.report_open_validation_tasks(report_id)
     if open_tasks and (not allow_unresolved_validation or client_data_mode() == "client"):
-        report = store.monday_reports[report_id]
         report.status = "review"
         if isinstance(report.report_json, dict):
             report.report_json["validation"] = {

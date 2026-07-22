@@ -13,12 +13,18 @@ def run_once() -> dict[str, int]:
     failure extraction, citation mapping, and validation routing.
     """
 
-    return {
-        "processed": store.process_queued_jobs(
-            upload_id=_worker_upload_id(),
-            max_jobs=_worker_max_jobs(),
-        )
-    }
+    # Structural read-coherence boundary for the worker (mirrors the HTTP
+    # middleware): job selection and every processing decision observe ONE
+    # committed generation, pinned on the first refresh and advanced as the worker
+    # commits its own jobs. Prevents selecting/processing an entity that a
+    # concurrent request removed or transitioned mid-pass.
+    with store.committed_read_view():
+        return {
+            "processed": store.process_queued_jobs(
+                upload_id=_worker_upload_id(),
+                max_jobs=_worker_max_jobs(),
+            )
+        }
 
 
 def _worker_upload_id() -> UUID | None:
