@@ -155,6 +155,10 @@ def fail_closed_checks() -> None:
     inst = object.__new__(store_mod.PostgresStateStore)
     inst._txn = None
     inst._bootstrapping = False
+    # Managed-state backing for the bare (no-__init__) instance so property
+    # assignment routes to the committed projection instead of crashing.
+    inst._published = {}
+    inst._read_local = None
     inst.tenant = type("T", (), {"slug": "x", "id": uuid.uuid4()})()
     raised = None
     try:
