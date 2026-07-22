@@ -806,7 +806,9 @@ def _correction_atomicity_probe() -> tuple[str, str]:
                   "route_coherence_result", "export_coherence_result",
                   "authorization_coherence_result", "worker_coherence_result",
                   "async_task_isolation_result", "get_then_reindex_result",
-                  "read_view_scope_result", "publication_failure_recovery_result"):
+                  "read_view_scope_result", "publication_failure_recovery_result",
+                  # recursive audit immutability + async transaction ownership (v4):
+                  "recursive_audit_immutability_result", "async_task_ownership_result"):
         if payload.get(field) != "passed":
             reasons.append(f"{field} is not 'passed'")
     # Semantic bindings: the copy-on-write + read-view implementation must be
