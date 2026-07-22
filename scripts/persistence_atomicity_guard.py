@@ -536,10 +536,19 @@ def pg_checks(url: str, scratch: Path) -> dict:
         importlib.reload(_ak2)
         raw = store_mod.PostgresStateStore(url).audit_integrity_status()
         gone = raw if isinstance(raw, dict) else raw.model_dump()
+        # Discriminating assertion: with the retained key REMOVED, historical
+        # events must classify as key_unavailable -- and specifically NOT as
+        # "broken", which is the exact missing-key-misreported-as-linkage-break
+        # failure this check exists to exclude.
         record("32 removing the retained key surfaces a missing-key classification, not a false linkage break",
-               gone.get("integrity_state") in {"key_unavailable", "broken", "mixed_valid", "keyed_valid"},
+               gone.get("integrity_state") == "key_unavailable",
                {"integrity_state": gone.get("integrity_state")})
-        record("33 key rotation coverage exercised (multi-key, not single-key)", True, {"keys": 2})
+        record("33 key rotation coverage exercised (multi-key, not single-key)",
+               key_a != key_b and rot.get("keyed_event_count", 0) >= 2
+               and rot.get("broken_events", 1) == 0,
+               {"distinct_keys": key_a != key_b,
+                "keyed_events": rot.get("keyed_event_count"),
+                "broken": rot.get("broken_events")})
     finally:
         for k, v in saved.items():
             if v is None:
@@ -698,6 +707,66 @@ def pg_checks(url: str, scratch: Path) -> dict:
            bool(vsuite.get("all_passed")) and int(vsuite.get("total", 0)) >= 7,
            {"passed": vsuite.get("passed"), "total": vsuite.get("total"),
             "failures": [r["name"] for r in vsuite.get("results", []) if not r["ok"]] or None})
+
+    # -- 49: a DIRECT audit call outside any transaction commits atomically ----
+    # Route/worker-level audit events (rejection audits, signed-URL issuance)
+    # are durable mutations of their own: they must run in their OWN protected
+    # transaction rather than hitting the fail-closed save() and being dropped.
+    reset_and_migrate()
+    s = store_mod.PostgresStateStore(url)
+    b_rev = revision()
+    s.audit("atomicity.direct_audit_probe", "api", None, {"probe": "direct"})
+    fresh = store_mod.PostgresStateStore(url)
+    persisted = sum(1 for e in fresh.audit_logs
+                    if getattr(e, "action", "") == "atomicity.direct_audit_probe")
+    record("49 direct route-level audit outside a transaction commits atomically",
+           (revision() - b_rev) == 1 and persisted == 1,
+           {"revision_delta": revision() - b_rev, "persisted_events": persisted})
+
+    # -- 50: another THREAD can never join or clobber an open transaction ------
+    # Thread A holds an open transaction; thread B's wrapped mutation must NOT
+    # join it (it must wait and commit its own). The old cross-thread-join
+    # behavior yields ONE revision increment for both mutations; correct
+    # isolation yields TWO. Event-synchronized, not sleep-raced: B only starts
+    # inside A's window, and A does not exit until B has started.
+    import threading as _threading
+
+    reset_and_migrate()
+    s = store_mod.PostgresStateStore(url)
+    b_rev, b_ws = revision(), workspaces()
+    a_in_txn = _threading.Event()
+    b_started = _threading.Event()
+    errors: list[str] = []
+
+    def thread_a() -> None:
+        try:
+            with s.snapshot_transaction():
+                s.create_workspace(WorkspaceCreate(name="thread-a"))
+                a_in_txn.set()
+                # Hold the transaction open until B has entered its mutation call.
+                b_started.wait(timeout=15)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"A:{exc.__class__.__name__}")
+
+    def thread_b() -> None:
+        try:
+            a_in_txn.wait(timeout=15)
+            b_started.set()
+            # Under correct isolation this BLOCKS until A commits, then runs in
+            # its own transaction. Under the defect it would join A's open txn.
+            s.create_workspace(WorkspaceCreate(name="thread-b"))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"B:{exc.__class__.__name__}")
+
+    ta = _threading.Thread(target=thread_a)
+    tb = _threading.Thread(target=thread_b)
+    ta.start(); tb.start()
+    ta.join(timeout=60); tb.join(timeout=60)
+    record("50 a second thread never joins an open transaction (two mutations, two commits)",
+           not errors and (revision() - b_rev) == 2 and (workspaces() - b_ws) == 2
+           and not ta.is_alive() and not tb.is_alive(),
+           {"errors": errors, "revision_delta": revision() - b_rev,
+            "workspaces_added": workspaces() - b_ws})
 
     with psycopg.connect(url, autocommit=True) as c:
         c.execute("drop table if exists mr_test_barrier")
@@ -933,7 +1002,7 @@ def main() -> int:
     url = test_database_url()
     totals = {"processes": 0, "connections": 0}
     if not url:
-        for n in list(range(13, 40)) + [45, 46, 47, 48]:
+        for n in list(range(13, 40)) + [45, 46, 47, 48, 49, 50]:
             skip(f"{n:02d} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         totals = pg_checks(url, scratch)

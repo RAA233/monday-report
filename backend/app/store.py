@@ -6978,22 +6978,33 @@ class PostgresStateStore(LocalStateStore):
     IDEMPOTENCY_TABLE = "monday_report_idempotency_records"
 
     def request_idempotency_required(self) -> bool:
-        """Mutating routes MUST present an ``Idempotency-Key`` on this backend.
+        """The idempotency-gated routes MUST present an ``Idempotency-Key`` here.
 
-        Every durable mutation runs through :meth:`snapshot_transaction`, which
-        can replay a committed operation instead of mutating twice -- but only if
-        the request supplies the operation key. Requiring the header closes the
-        route-level gap: a retried or duplicated HTTP request that lost its
-        response cannot commit a second correction/outcome, because the second
-        attempt replays the first's committed result under the same key.
+        Scope: this requirement is enforced at the route layer (via
+        ``_establish_idempotency``) on the reviewer-mutation routes -- field-
+        correction record, field-correction revert, and validation-task update.
+        Those requests replay a committed operation instead of mutating twice: a
+        retried or duplicated HTTP request that lost its response cannot commit a
+        second correction/outcome. Other mutating routes still run inside the
+        protected snapshot transaction (lock + CAS + atomic state/audit commit)
+        but do not yet carry a request idempotency key; extending the key
+        requirement to them is future work, not a property this flag claims.
         """
         return True
 
     def __init__(self, url: str) -> None:
         self.database_url = url
-        # Active transaction context, or None. Never shared between threads: a
-        # transaction is scoped to the block that opened it.
+        # Active transaction context, or None. OWNED BY EXACTLY ONE THREAD: the
+        # context records the opening thread's id, only that thread may join or
+        # defer into it, and outer transactions are serialized in-process by
+        # _txn_lock. Without this, FastAPI's threadpool could let a second
+        # request's mutation silently join (and be acknowledged before) another
+        # request's uncommitted transaction. PostgreSQL snapshot mode serializes
+        # all application writers globally anyway, so in-process serialization
+        # costs no additional throughput -- it only moves the wait in front of
+        # the database lock.
         self._txn: dict[str, object] | None = None
+        self._txn_lock = threading.RLock()
         self._verify_repository_schema()
         # Bootstrap runs under the SAME global transaction boundary as every
         # other mutation -- one connection, the global advisory lock acquired
@@ -7004,46 +7015,53 @@ class PostgresStateStore(LocalStateStore):
         self._bootstrap_and_init()
         self._install_mutation_boundary()
 
+    def _owns_txn(self) -> bool:
+        """True when THIS thread owns the open transaction context (if any)."""
+        txn = self._txn
+        return txn is not None and txn.get("owner") == threading.get_ident()
+
     def _bootstrap_and_init(self) -> None:
         import psycopg
 
         tenant_slug = os.getenv("MONDAY_REPORT_TENANT_SLUG", "monday-report")
-        connection = psycopg.connect(self.database_url, connect_timeout=5)
-        connection.autocommit = False
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute("select set_config('lock_timeout', %s, true)",
-                               (f"{SNAPSHOT_LOCK_TIMEOUT_MS}ms",))
-                cursor.execute("select set_config('app.tenant_slug', %s, true)", (tenant_slug,))
-                cursor.execute("select pg_advisory_xact_lock(%s)", (self._advisory_lock_key(),))
-                cursor.execute(
-                    f"select payload, revision from {self.STATE_TABLE} "
-                    f"where tenant_slug = %s for update",
-                    (tenant_slug,),
-                )
-                row = cursor.fetchone()
-                payload = None
-                revision = 0
-                if row is not None:
-                    payload = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
-                    revision = int(row[1])
-            self._txn = {"connection": connection, "revision": revision, "payload": payload,
-                         "operation_id": None, "request_hash": None,
-                         "operation_kind": "snapshot.bootstrap", "actor_id": None,
-                         "wrote": False, "dirty": False}
-            # LocalStateStore.__init__ refreshes from the locked payload (state
-            # exists) or seeds (first run). Any save() it triggers is deferred and
-            # marks the transaction dirty; it never writes independently.
-            super().__init__()
-            if self._txn.get("dirty"):
-                self._commit_snapshot({"revision": revision, "result": None})
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
-        finally:
-            self._txn = None
-            connection.close()
+        with self._txn_lock:
+            connection = psycopg.connect(self.database_url, connect_timeout=5)
+            connection.autocommit = False
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("select set_config('lock_timeout', %s, true)",
+                                   (f"{SNAPSHOT_LOCK_TIMEOUT_MS}ms",))
+                    cursor.execute("select set_config('app.tenant_slug', %s, true)", (tenant_slug,))
+                    cursor.execute("select pg_advisory_xact_lock(%s)", (self._advisory_lock_key(),))
+                    cursor.execute(
+                        f"select payload, revision from {self.STATE_TABLE} "
+                        f"where tenant_slug = %s for update",
+                        (tenant_slug,),
+                    )
+                    row = cursor.fetchone()
+                    payload = None
+                    revision = 0
+                    if row is not None:
+                        payload = row[0] if isinstance(row[0], dict) else json.loads(str(row[0]))
+                        revision = int(row[1])
+                self._txn = {"connection": connection, "revision": revision, "payload": payload,
+                             "operation_id": None, "request_hash": None,
+                             "operation_kind": "snapshot.bootstrap", "actor_id": None,
+                             "owner": threading.get_ident(),
+                             "wrote": False, "dirty": False}
+                # LocalStateStore.__init__ refreshes from the locked payload (state
+                # exists) or seeds (first run). Any save() it triggers is deferred and
+                # marks the transaction dirty; it never writes independently.
+                super().__init__()
+                if self._txn.get("dirty"):
+                    self._commit_snapshot({"revision": revision, "result": None})
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+            finally:
+                self._txn = None
+                connection.close()
 
     # ------------------------------------------------- transaction boundary --
     def _install_mutation_boundary(self) -> None:
@@ -7089,8 +7107,11 @@ class PostgresStateStore(LocalStateStore):
 
         @functools.wraps(method)
         def wrapper(*args, **kwargs):
-            if self._txn is not None:
-                # Join the outer transaction: one lock, one revision increment.
+            if self._owns_txn():
+                # Nested call from THIS thread's outer transaction: join it --
+                # one lock, one revision increment. Another thread's open
+                # transaction is never joined; that thread falls through and
+                # blocks on _txn_lock until the owner commits or rolls back.
                 return method(*args, **kwargs)
             idem = idempotency.current()
             txn_kwargs: dict[str, object] = {}
@@ -7156,8 +7177,17 @@ class PostgresStateStore(LocalStateStore):
         """
         import psycopg
 
-        if self._txn is not None:
-            raise RuntimeError("snapshot_transaction is not re-entrant")
+        # Serialize OUTER transactions in-process. Another thread's transaction
+        # is invisible past this point: we block here until it finishes, so a
+        # threadpool request can never join, observe, or clobber a transaction it
+        # does not own. RLock keeps the same-thread nested-call error explicit.
+        self._txn_lock.acquire()
+        try:
+            if self._txn is not None:
+                raise RuntimeError("snapshot_transaction is not re-entrant")
+        except BaseException:
+            self._txn_lock.release()
+            raise
 
         connection = psycopg.connect(self.database_url, connect_timeout=5)
         connection.autocommit = False
@@ -7210,6 +7240,7 @@ class PostgresStateStore(LocalStateStore):
             self._txn = {"connection": connection, "revision": revision, "payload": payload,
                          "operation_id": operation_id, "request_hash": request_hash,
                          "operation_kind": operation_kind, "actor_id": actor_id,
+                         "owner": threading.get_ident(),
                          "wrote": False, "dirty": False}
             # Load the transaction's snapshot into the in-memory domain model.
             if payload is not None and not context["replayed"]:
@@ -7234,6 +7265,7 @@ class PostgresStateStore(LocalStateStore):
         finally:
             self._txn = None
             connection.close()
+            self._txn_lock.release()
 
     def _commit_snapshot(self, context: dict[str, object]) -> None:
         """Write the mutated payload under compare-and-swap, inside the open transaction."""
@@ -7288,8 +7320,9 @@ class PostgresStateStore(LocalStateStore):
     def _state_exists(self) -> bool:
         # During bootstrap the snapshot was already read under FOR UPDATE; use it
         # rather than a second connection, so existence is judged consistently
-        # with the locked read.
-        if self._txn is not None:
+        # with the locked read. Only the OWNING thread sees the transaction
+        # context; any other thread reads committed state.
+        if self._owns_txn():
             return self._txn["payload"] is not None
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -7303,8 +7336,10 @@ class PostgresStateStore(LocalStateStore):
     def _read_state_payload(self) -> dict[str, object] | None:
         # Inside a transaction the payload was already read under FOR UPDATE.
         # Re-reading on a second connection would defeat the lock and reintroduce
-        # the lost-update race this class exists to close.
-        if self._txn is not None:
+        # the lost-update race this class exists to close. Only the OWNING thread
+        # may use the transaction's payload; another thread reads committed state
+        # on its own connection and never observes an uncommitted transaction.
+        if self._owns_txn():
             return self._txn["payload"]  # type: ignore[return-value]
         with self._connect() as connection:
             with connection.cursor() as cursor:
@@ -7319,44 +7354,50 @@ class PostgresStateStore(LocalStateStore):
                 payload = row[0]
                 return payload if isinstance(payload, dict) else json.loads(str(payload))
 
-    def save(self) -> None:
-        from psycopg.types.json import Jsonb
+    def audit(
+        self,
+        action: str,
+        resource_type: str,
+        resource_id: UUID | None = None,
+        metadata: dict | None = None,
+        save: bool = True,
+    ) -> None:
+        """Append an audit event; OUTSIDE a transaction, open one of its own.
 
-        # Inside a transaction (mutation OR bootstrap), defer: the single
-        # compare-and-swap write happens once at commit, so a domain method that
-        # calls save() several times (and audit(), which saves internally) still
-        # produces exactly one revision increment and one atomic state+audit
-        # commit. Mark the transaction dirty so a no-op construction stays
-        # read-only and does not bump the revision.
-        if self._txn is not None:
+        Inside this thread's open transaction the append joins it (deferred
+        single commit, exactly as before). A DIRECT route/worker-level audit call
+        -- a rejection audit, signed-URL issuance, an operational event -- is a
+        durable mutation in its own right, so it runs inside its OWN protected
+        snapshot transaction: same global lock, same CAS, one atomic commit.
+        Without this, the fail-closed ``save()`` below would turn every direct
+        audit call on this backend into a spurious conflict and silently drop
+        the event.
+        """
+        if self._owns_txn():
+            return super().audit(action, resource_type, resource_id, metadata, save)
+        with self.snapshot_transaction(operation_kind="audit.append"):
+            return super().audit(action, resource_type, resource_id, metadata, save)
+
+    def save(self) -> None:
+        # Inside THIS THREAD'S transaction (mutation OR bootstrap), defer: the
+        # single compare-and-swap write happens once at commit, so a domain
+        # method that calls save() several times (and audit(), which saves
+        # internally) still produces exactly one revision increment and one
+        # atomic state+audit commit. Mark the transaction dirty so a no-op
+        # construction stays read-only and does not bump the revision. Another
+        # thread's transaction is never marked from here.
+        if self._owns_txn():
             self._txn["dirty"] = True
             return
         # FAIL CLOSED. Outside a transaction there is no lock and no CAS, so a
         # blind write would destroy a concurrent writer's committed work -- the
-        # exact defect this class exists to remove. There is no fallback.
+        # exact defect this class exists to remove. There is no fallback, and no
+        # unprotected write path exists below this raise.
         raise SnapshotConflict(
             "refusing an unprotected snapshot write: PostgreSQL mutations must run "
             "inside snapshot_transaction()",
             retryable=False,
         )
-
-        payload = self._postgres_safe_json(self._state_payload())
-        with self._connect() as connection:
-            with connection.cursor() as cursor:
-                self._set_tenant_scope(cursor)
-                cursor.execute(
-                    f"""
-                    insert into {self.STATE_TABLE} (tenant_slug, tenant_id, payload, revision)
-                    values (%s, %s, %s, 1)
-                    on conflict (tenant_slug)
-                    do update set
-                      tenant_id = excluded.tenant_id,
-                      payload = excluded.payload,
-                      revision = {self.STATE_TABLE}.revision + 1,
-                      updated_at = now()
-                    """,
-                    (self.tenant.slug, self.tenant.id, Jsonb(payload)),
-                )
 
     @classmethod
     def _postgres_safe_json(cls, value):
