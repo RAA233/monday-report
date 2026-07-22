@@ -145,17 +145,25 @@ corresponding `AuditLog` event in the snapshot-owned, HMAC-chained audit log.
 The payload is never duplicated. A database FK is not compatible with the
 current audit design (the chain lives inside the snapshot jsonb and its
 integrity is protected by HMAC + linkage, not by relational constraints), so the
-reference is a durable UUID; the guard proves every mutated row references a
-real committed audit event.
+reference is a durable UUID. Every APP-created protected mutation (corrections,
+validation-task creation, transitions) writes a non-null audit reference in the
+same transaction; rows introduced by the one-time import cutover carry a null
+per-row reference and are instead recorded by the marker's `normalized.import`
+batch reference. The guard proves both (checks 16, 58, the task-audit checks) —
+it does not claim database-enforced referential integrity for a snapshot-owned
+audit log.
 
 **RLS**: the four new tables get `ENABLE` + `FORCE ROW LEVEL SECURITY` with a
-`tenant_isolation` policy `tenant_id = current_setting('app.tenant_id', true)::uuid`
-(same pattern as `monday_report_state_snapshots`). The application sets
-`app.tenant_id` transaction-locally (`set_config(..., is_local => true)`) inside
-every snapshot transaction and on read connections, so pooled-connection reuse
-cannot leak context and a missing context denies access. This is enforcement for
-the slice's tables only — `tenant-authorization-enforcement`'s overall
-disposition is NOT claimed from it.
+`tenant_isolation` policy `tenant_slug = current_setting('app.tenant_slug', true)`
+(same GUC and pattern as `monday_report_state_snapshots`/the idempotency table).
+The application sets `app.tenant_slug` transaction-locally
+(`set_config(..., is_local => true)`) inside every snapshot transaction and on
+read connections, so pooled-connection reuse cannot leak context and a missing
+context denies access. RLS enforcement is proven only for a genuine
+non-superuser, non-BYPASSRLS role (foreign-key checks and superuser connections
+bypass RLS); the guard classifies its own connection role honestly. This is
+enforcement for the slice's tables only — `tenant-authorization-enforcement`'s
+overall disposition is NOT claimed from it.
 
 ## Transaction boundaries and lock ordering (Parts E/F)
 
@@ -232,3 +240,35 @@ provided.
   claim it.
 - RLS covers only the slice's tables; overall tenant-authorization disposition
   is unchanged.
+
+## Independent-review correction round (migration 0006, evidence v2)
+
+A final independent review confirmed ten defects, all corrected here; evidence
+was bumped to v2 so prior artifacts fail closed:
+
+- **Import supersession ordering** is two-phase (NULL self-refs first, validated
+  backlinks second); `_lineage_issues` rejects missing/cross-tenant/cross-coordinate/
+  self-reference/cycle/branching/non-reciprocal links **in both directions**, and
+  an empty `field_key` is refused cleanly rather than hitting the DB CHECK.
+- **Reset preserves tenant identity** (no id rotation), prunes under the preserved
+  id, and verifies deletion before reseed — no resurrection, no slug collision.
+- **`verify` is authoritative**: it compares the marker's per-entity counts AND id
+  digests to the live tenant-scoped rows (a stale marker after a mutation → `ok:false`).
+- **Conflict accounting** is explicit (no `ON CONFLICT DO NOTHING`); a cross-tenant
+  id collision is a hard REFUSED.
+- **Migration 0006** adds composite tenant/coordinate FKs, no-self-reference CHECKs,
+  no-branching unique indexes, and outcome→task tenant binding (additive over 0005;
+  the earlier "database-enforced lineage integrity" claim in 0005's header is
+  corrected by 0006's header and this document).
+- **Validation-task rows carry a non-null audit reference**; imported rows are
+  recorded by the marker's `normalized.import` batch reference (no fabricated events).
+- **Refresh/transaction**: a non-owner refresh serializes against the writer's
+  in-process lock; a rolled-back mutation reloads committed state so no phantom row
+  leaks. **RESIDUAL (disclosed, pre-existing):** the in-memory singleton does not
+  give snapshot isolation to a lock-free reader that reads the instance dicts
+  WITHOUT refreshing during an in-flight write; readers that `refresh()` are
+  serialized and safe. Fully eliminating this requires a per-transaction private
+  working copy (a broad rewrite out of this slice's scope) and is NOT claimed fixed.
+- **RLS honesty**: enforcement is proven only with a genuine non-superuser role,
+  and the guard proves the superuser-bypass vs non-superuser-enforced contrast;
+  `tenant-resource-authorization` stays BLOCKED.
