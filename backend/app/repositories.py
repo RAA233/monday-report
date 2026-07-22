@@ -205,6 +205,12 @@ class PgFieldCorrectionRepository(_PgRepositoryBase):
                audit_event_id: UUID | None, operation_id: str | None) -> None:
         self._ensure_anchor_rows(correction.workspace_id)
         with self._txn_connection().cursor() as cursor:
+            # Constraint-safe three-step order, all in the one open transaction:
+            # 1. demote the prior ACTIVE row (frees the one-active partial
+            #    unique index BEFORE the insert),
+            # 2. insert the new correction,
+            # 3. back-link superseded_by_id (a self-referential FK, so its
+            #    target row must exist before this check runs).
             if superseded is not None:
                 cursor.execute(
                     f"update {CORRECTIONS_TABLE} set status = 'superseded', doc = %s, "
@@ -226,6 +232,12 @@ class PgFieldCorrectionRepository(_PgRepositoryBase):
                  Jsonb(self._store._postgres_safe_json(correction.model_dump(mode="json"))),
                  audit_event_id, operation_id, correction.created_at, correction.created_at),
             )
+            if superseded is not None:
+                cursor.execute(
+                    f"update {CORRECTIONS_TABLE} set superseded_by_id = %s "
+                    f"where tenant_id = %s and id = %s",
+                    (correction.id, self._tenant_id, superseded.id),
+                )
 
     def revert(self, correction: FieldCorrection, *, audit_event_id: UUID | None,
                operation_id: str | None, expected_revision: int | None = None) -> int:
@@ -329,6 +341,37 @@ class PgValidationTaskRepository(_PgRepositoryBase):
             return new_revision
 
 
+def prune_missing_rows(store) -> dict[str, int]:
+    """Delete normalized rows whose entities are gone from in-memory state.
+
+    Retention apply and the demo-seed self-wipe REMOVE migrated entities from
+    the in-memory dicts. On the postgres backend those dicts are loaded FROM
+    the normalized tables, so the rows must be deleted in the SAME protected
+    transaction — otherwise every purged entity resurrects on the next
+    refresh and the audited retention/wipe result is false. Runs only inside
+    the owning snapshot transaction (global lock already held; see the
+    lock-order rule). FK-safe order: outcomes -> tasks -> corrections ->
+    reports. Returns deleted-row counts per table.
+    """
+    base = _PgRepositoryBase(store)
+    keep_tasks = list(store.validation_tasks.keys())
+    keep_corrections = list(store.field_corrections.keys())
+    keep_reports = list(store.monday_reports.keys())
+    deleted: dict[str, int] = {}
+    with base._txn_connection().cursor() as cursor:
+        for table, key_column, keep in (
+            (OUTCOMES_TABLE, "task_id", keep_tasks),
+            (TASKS_TABLE, "id", keep_tasks),
+            (CORRECTIONS_TABLE, "id", keep_corrections),
+            (REPORTS_TABLE, "id", keep_reports),
+        ):
+            cursor.execute(
+                f"delete from {table} where tenant_id = %s and not ({key_column} = any(%s))",
+                (base._tenant_id, keep))
+            deleted[table] = cursor.rowcount
+    return deleted
+
+
 def normalized_drift_report(store) -> list[str]:
     """Detect typed-column vs canonical-doc drift on the normalized tables.
 
@@ -343,6 +386,7 @@ def normalized_drift_report(store) -> list[str]:
                         ("tenant_id", "tenant_id")),
         CORRECTIONS_TABLE: (("status", "status"), ("workspace_id", "workspace_id"),
                             ("target_type", "target_type"), ("field_key", "field_key"),
+                            ("superseded_by_id", "superseded_by_id"),
                             ("tenant_id", "tenant_id")),
         TASKS_TABLE: (("status", "status"), ("target_type", "target_type"),
                       ("tenant_id", "tenant_id")),

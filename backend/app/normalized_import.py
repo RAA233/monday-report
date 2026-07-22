@@ -122,7 +122,13 @@ def _existing_row_conflicts(connection, slug: str, parsed: dict[str, list]) -> l
         cursor.execute("select set_config('app.tenant_slug', %s, true)", (slug,))
         for key, entities in parsed.items():
             for entity in entities:
-                cursor.execute(f"select doc from {tables[key]} where id = %s", (entity.id,))
+                # Explicit tenant filter IN ADDITION to the RLS GUC above: the
+                # tool may legitimately run as a superuser/owner role, which
+                # BYPASSES row-level security, and rows must never be compared
+                # (or reported as conflicts) across tenants.
+                cursor.execute(
+                    f"select doc from {tables[key]} where tenant_slug = %s and id = %s",
+                    (slug, entity.id))
                 row = cursor.fetchone()
                 if row is None:
                     continue
@@ -321,8 +327,12 @@ def run(mode: str) -> int:
             counts: dict[str, int] = {}
             with connection.cursor() as cursor:
                 cursor.execute("select set_config('app.tenant_slug', %s, true)", (slug,))
+                # Explicit tenant filters IN ADDITION to the RLS GUC: the tool
+                # may run as a superuser/owner role, which bypasses row-level
+                # security, and verification must never count or validate
+                # another tenant's rows.
                 for key, table in tables.items():
-                    cursor.execute(f"select doc from {table}")
+                    cursor.execute(f"select doc from {table} where tenant_slug = %s", (slug,))
                     rows = cursor.fetchall()
                     counts[key] = len(rows)
                     for (doc,) in rows:
@@ -332,8 +342,8 @@ def run(mode: str) -> int:
                             problems.append(f"{key}: row failed schema validation")
                 cursor.execute(
                     f"select workspace_id::text, target_type, field_key, count(*) "
-                    f"from {CORRECTIONS_TABLE} where status = 'active' "
-                    f"group by 1, 2, 3 having count(*) > 1")
+                    f"from {CORRECTIONS_TABLE} where tenant_slug = %s and status = 'active' "
+                    f"group by 1, 2, 3 having count(*) > 1", (slug,))
                 if cursor.fetchall():
                     problems.append("one-active-lineage invariant violated")
             expected = (marker or {}).get("imported_counts")
