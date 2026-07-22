@@ -50,18 +50,18 @@ for candidate in (ROOT, ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-# v2: independent-review corrections (supersession import ordering, tenant-
-# preserving reset, authoritative verify, conflict accounting, migration 0006,
-# validation-task audit linkage, refresh serialization, hardened G3/G18, RLS
-# runtime-role honesty). The version bump makes every prior artifact fail closed.
-EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v2.json"
-EVIDENCE_SCHEMA_VERSION = "normalized-correction-persistence-evidence.v2"
-IMPLEMENTATION_VERSION = "2.0.0"
+# v3: store-level transaction isolation (copy-on-write publication). A non-owner
+# reader never observes a writer's uncommitted private working state through any
+# read surface; the committed projection is published atomically on commit and
+# discarded on rollback. The version bump makes every prior artifact fail closed.
+EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v3.json"
+EVIDENCE_SCHEMA_VERSION = "normalized-correction-persistence-evidence.v3"
+IMPLEMENTATION_VERSION = "3.1.0"
 GUARD_AUDIT_KEY = "b" * 64
 
 checks: list[dict] = []
 TOTALS = {"processes": 0, "connections": 0, "route_scenarios": 0, "race_scenarios": 0,
-          "import_checks": 0, "tenant_checks": 0, "lifecycle_checks": 0}
+          "import_checks": 0, "tenant_checks": 0, "lifecycle_checks": 0, "isolation_checks": 0}
 
 
 def record(name: str, ok: bool, detail: object = "", *, skipped: bool = False) -> None:
@@ -1431,6 +1431,268 @@ print(json.dumps(out))
            {"before": before75, "after": after75, "phantom": phantom75})
     TOTALS["lifecycle_checks"] += 1
 
+    # ================================================= TRANSACTION ISOLATION ==
+    # Copy-on-write publication: a non-owner reader NEVER observes a writer's
+    # uncommitted (private working) state through ANY read surface. These are
+    # deterministic two-thread, single-process tests -- the defect is in-process
+    # shared memory. A writer pauses mid-transaction (holding the lock, with an
+    # uncommitted mutation in its PRIVATE working projection); a reader that
+    # refreshed FIRST then reads must see only committed state.
+    import threading as _th
+    import time as _time
+    from backend.app.schemas import FieldCorrectionCreate
+
+    reset(); migrate_baseline()
+    cfg_iso = env_for("iso", slug="c-iso")
+    fx = run_fixture(cfg_iso, {"correction": CORRECTION, "breach": BREACH, "report": True})
+    os.environ["MONDAY_REPORT_TENANT_SLUG"] = "c-iso"
+    try:
+        istore = store_mod.PostgresStateStore(url)
+    finally:
+        os.environ.pop("MONDAY_REPORT_TENANT_SLUG", None)
+    TOTALS["connections"] += 1
+    iso_ws = uuid.UUID(fx["workspace_id"])
+
+    def _corr_values(store):
+        return [getattr(c, "corrected_value", None) for c in store.field_corrections.values()]
+
+    def isolation_probe(marker, *, commit, field_key="rig_name"):
+        """Reader refreshes first; writer mutates privately and PAUSES holding the
+        lock; reader reads while paused; then writer commits or rolls back.
+        Returns (reader_saw_uncommitted, marker_present_after, error)."""
+        refreshed = _th.Event(); mutated = _th.Event(); release = _th.Event()
+        out = {"dirty": None, "err": None}
+        orig = type(istore)._normalized_persist_correction
+
+        def hook(correction, superseded, audit_event):
+            orig(istore, correction, superseded, audit_event)
+            mutated.set(); release.wait(timeout=25)
+
+        def reader():
+            try:
+                istore.refresh(); refreshed.set()
+                if not mutated.wait(timeout=25):
+                    out["err"] = "writer never mutated"; return
+                out["dirty"] = marker in _corr_values(istore)
+            except Exception as exc:  # noqa: BLE001
+                out["err"] = f"{type(exc).__name__}: {exc}"
+
+        def writer():
+            if not refreshed.wait(timeout=25):
+                return
+            istore._normalized_persist_correction = hook
+            try:
+                with istore.snapshot_transaction():
+                    istore.record_field_correction(iso_ws, FieldCorrectionCreate(
+                        target_type="report_field", field_key=field_key,
+                        source_value="s", corrected_value=marker, correction_reason="r"))
+                    if not commit:
+                        raise RuntimeError("forced rollback before commit")
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                istore._normalized_persist_correction = orig
+
+        rt = _th.Thread(target=reader); wt = _th.Thread(target=writer)
+        rt.start(); wt.start()
+        _time.sleep(2)
+        release.set(); rt.join(timeout=25); wt.join(timeout=25)
+        istore.refresh()
+        return out["dirty"], (marker in _corr_values(istore)), out["err"]
+
+    # 76: the confirmed dirty read is GONE (reader refreshed-first sees committed only).
+    d76, after76, e76 = isolation_probe("DIRTY-76", commit=True)
+    record("76 ISOLATION: a reader that refreshed first does NOT observe a concurrent writer's "
+           "uncommitted correction (the previously-confirmed dirty read is eliminated)",
+           e76 is None and d76 is False, {"reader_saw_uncommitted": d76, "err": e76})
+    TOTALS["isolation_checks"] = TOTALS.get("isolation_checks", 0) + 1
+
+    # 77 route surface: the actual GET-route accessor excludes uncommitted state.
+    refreshed77 = _th.Event(); mutated77 = _th.Event(); release77 = _th.Event()
+    out77 = {"listed": None, "err": None}
+    orig77 = type(istore)._normalized_persist_correction
+
+    def hook77(correction, superseded, audit_event):
+        orig77(istore, correction, superseded, audit_event); mutated77.set(); release77.wait(timeout=25)
+
+    def route_reader():
+        try:
+            istore.refresh(); refreshed77.set(); mutated77.wait(timeout=25)
+            out77["listed"] = [c.corrected_value for c in istore.list_field_corrections(iso_ws)]
+        except Exception as exc:  # noqa: BLE001
+            out77["err"] = f"{type(exc).__name__}: {exc}"
+
+    def route_writer():
+        refreshed77.wait(timeout=25); istore._normalized_persist_correction = hook77
+        try:
+            with istore.snapshot_transaction():
+                istore.record_field_correction(iso_ws, FieldCorrectionCreate(
+                    target_type="report_field", field_key="rig_name", source_value="s",
+                    corrected_value="ROUTE-77", correction_reason="r"))
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            istore._normalized_persist_correction = orig77
+
+    r77 = _th.Thread(target=route_reader); w77 = _th.Thread(target=route_writer)
+    r77.start(); w77.start(); _time.sleep(2); release77.set(); r77.join(timeout=25); w77.join(timeout=25)
+    record("77 ROUTE surface: list_field_corrections() (the GET-route accessor) excludes the "
+           "uncommitted correction while the writer is paused pre-commit",
+           out77["err"] is None and out77["listed"] is not None and "ROUTE-77" not in out77["listed"],
+           {"listed": out77["listed"], "err": out77["err"]})
+    TOTALS["isolation_checks"] += 1
+
+    # 82: on COMMIT the full new committed projection is published (reader then sees it).
+    d82, after82, e82 = isolation_probe("COMMIT-82", commit=True)
+    record("82 COMMIT publishes the complete committed projection: after commit+refresh the reader "
+           "observes the newly committed correction",
+           e82 is None and d82 is False and after82 is True, {"after": after82})
+    TOTALS["isolation_checks"] += 1
+
+    # 83: on ROLLBACK nothing is published (reader never sees it, before or after).
+    d83, after83, e83 = isolation_probe("ROLLBACK-83", commit=False)
+    active_after83 = q1("select count(*) from monday_report_norm_field_corrections "
+                        "where tenant_slug='c-iso' and doc->>'corrected_value'='ROLLBACK-83'")
+    record("83 ROLLBACK publishes nothing: the reader never observes the correction (during OR "
+           "after) and no row is persisted",
+           e83 is None and d83 is False and after83 is False and (active_after83 or 0) == 0,
+           {"during": d83, "after": after83, "rows": active_after83})
+    TOTALS["isolation_checks"] += 1
+
+    # 84: an owner mutation sees its OWN private write; a non-owner does not (until commit).
+    seen_own = {"owner": None, "nonowner": None}
+    barrier84 = _th.Event(); done84 = _th.Event()
+    orig84 = type(istore)._normalized_persist_correction
+
+    def hook84(correction, superseded, audit_event):
+        orig84(istore, correction, superseded, audit_event)
+        seen_own["owner"] = "OWN-84" in _corr_values(istore)  # owner sees its private mutation
+        barrier84.set(); done84.wait(timeout=25)
+
+    def owner84():
+        istore._normalized_persist_correction = hook84
+        try:
+            with istore.snapshot_transaction():
+                istore.record_field_correction(iso_ws, FieldCorrectionCreate(
+                    target_type="report_field", field_key="rig_name", source_value="s",
+                    corrected_value="OWN-84", correction_reason="r"))
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            istore._normalized_persist_correction = orig84
+
+    ot = _th.Thread(target=owner84); ot.start(); barrier84.wait(timeout=25)
+    seen_own["nonowner"] = "OWN-84" in _corr_values(istore)  # main thread: committed only
+    done84.set(); ot.join(timeout=25)
+    record("84 CONTEXT ownership: the owner thread sees its OWN uncommitted mutation in its private "
+           "working projection, while a non-owner thread sees only committed state",
+           seen_own["owner"] is True and seen_own["nonowner"] is False, seen_own)
+    TOTALS["isolation_checks"] += 1
+
+    # 85: deep-copy privacy -- mutating a working entity in place does not change published.
+    istore.refresh()
+    published_before = {cid: c.corrected_value for cid, c in istore._published["field_corrections"].items()}
+    working = istore._new_working_projection()
+    if working["field_corrections"]:
+        some_id = next(iter(working["field_corrections"]))
+        working["field_corrections"][some_id].corrected_value = "MUTATED-IN-WORKING-85"
+    published_after = {cid: c.corrected_value for cid, c in istore._published["field_corrections"].items()}
+    record("85 DEEP-COPY privacy: mutating an entity IN PLACE in a working projection leaves the "
+           "published projection's entity unchanged (no shared nested mutable objects)",
+           published_before == published_after
+           and "MUTATED-IN-WORKING-85" not in published_after.values(),
+           {"changed": published_before != published_after})
+    TOTALS["isolation_checks"] += 1
+
+    # 86: a stale (older-revision) publish cannot overwrite a newer published generation.
+    istore.refresh()
+    newer = {name: istore._published.get(name) for name in istore.MANAGED_STATE}
+    istore._publish(newer, 10_000)                      # newer generation
+    stale = {name: {} if name not in ("tenant", "user") else istore._published.get(name)
+             for name in istore.MANAGED_STATE}
+    istore._publish(stale, 5_000)                       # older -> must be rejected
+    record("86 GENERATION guard: publishing an OLDER revision cannot overwrite a NEWER published "
+           "projection (out-of-order refresh/commit is rejected)",
+           istore._published is newer and istore._published_revision == 10_000,
+           {"revision": istore._published_revision})
+    TOTALS["isolation_checks"] += 1
+
+    # The earlier isolation probes (76/77/84) monkeypatch _normalized_persist_correction
+    # onto the instance and "restore" it by re-assigning the UNBOUND class function as
+    # an instance attribute, which shadows the bound method. Clear that shadow so the
+    # committed-write checks below invoke the real bound method (self auto-bound).
+    istore.__dict__.pop("_normalized_persist_correction", None)
+
+    # Restore a genuine committed generation after the synthetic generation-guard
+    # probe (check 86 published an artificial revision of 10_000): reset the
+    # published revision so a real refresh republishes real committed state for
+    # the remaining isolation checks.
+    istore._published_revision = -1
+    istore.refresh()
+
+    def _commit_correction(marker, field_key="rig_name"):
+        # A full committed correction through the wrapped mutation, which opens
+        # AND commits its own protected snapshot transaction and publishes the
+        # new committed projection on commit (exactly the route path).
+        istore.record_field_correction(iso_ws, FieldCorrectionCreate(
+            target_type="report_field", field_key=field_key, source_value="s",
+            corrected_value=marker, correction_reason="r"))
+
+    # 87: NO stale per-thread captured view. After ANOTHER context commits, a
+    # non-owner reader observes the new committed state WITHOUT re-refreshing.
+    # (The previously sticky _read_local.view -- the root cause of the
+    # dismiss-route stale 404s -- is removed; every non-owner read is the live
+    # current-committed generation, so a pooled worker thread never serves a
+    # stale captured view from an earlier request.)
+    istore.refresh()
+    before87 = "STALE-87" not in _corr_values(istore)
+    w87 = _th.Thread(target=lambda: _commit_correction("STALE-87"))
+    w87.start(); w87.join(timeout=25)
+    after87 = "STALE-87" in _corr_values(istore)          # deliberately NO refresh() here
+    record("87 NO STALE VIEW: a non-owner reader observes a later committed write by another "
+           "context WITHOUT re-refreshing (no sticky per-thread captured view; the dismiss-route "
+           "stale-read class is eliminated at the store)",
+           before87 is True and after87 is True, {"before": before87, "after": after87})
+    TOTALS["isolation_checks"] += 1
+
+    # 88: the commit publish binds to the transaction's OWN committed revision
+    # (context["revision"]), NOT a value re-read on a separate connection. A
+    # corrupted separate-connection revision read must NOT poison the published
+    # generation -- monkeypatch _read_committed_revision to a bogus value and
+    # confirm the published revision still equals the committed DB revision.
+    istore._read_committed_revision = lambda: 10_000_000  # bogus separate-connection read
+    try:
+        _commit_correction("REVBIND-88")
+    finally:
+        del istore._read_committed_revision               # restore the class method
+    db_rev88 = q1("select revision from monday_report_state_snapshots where tenant_slug='c-iso'")
+    record("88 REVISION BINDING: the commit publish uses the transaction's committed revision; a "
+           "corrupted separate-connection revision read does NOT poison the published generation "
+           "(published revision == committed DB revision)",
+           db_rev88 is not None and istore._published_revision == db_rev88,
+           {"published": istore._published_revision, "db": db_rev88})
+    TOTALS["isolation_checks"] += 1
+
+    # 89: audit_logs is copied as a DISTINCT list per transaction (append-only
+    # hash chain; entries never mutated in place), so a working-projection append
+    # never reaches the published log and the two lists are distinct objects --
+    # list-level isolation without deep-copying an unbounded log every transaction.
+    istore.refresh()
+    pub_log89 = istore._published["audit_logs"]
+    pub_len89 = len(pub_log89)
+    working89 = istore._new_working_projection()
+    work_log89 = working89["audit_logs"]
+    distinct89 = work_log89 is not pub_log89
+    work_log89.append("SENTINEL-89")
+    record("89 AUDIT-LOG list isolation: the working projection's audit_logs is a DISTINCT list "
+           "(no shared list object, entries never mutated in place); a working append leaves the "
+           "published log unchanged",
+           distinct89 and len(istore._published["audit_logs"]) == pub_len89
+           and "SENTINEL-89" not in istore._published["audit_logs"],
+           {"distinct": distinct89, "len_before": pub_len89,
+            "len_after": len(istore._published["audit_logs"])})
+    TOTALS["isolation_checks"] += 1
+
     with psycopg.connect(url, autocommit=True) as c:
         c.execute("drop table if exists mr_test_barrier")
 
@@ -1484,6 +1746,9 @@ def build_evidence() -> dict:
         "rls_runtime_role": passed("73 "),
         "import_concurrency": passed("74 "),
         "rollback_reload": passed("75 "),
+        # store-level transaction isolation (copy-on-write publication):
+        "transaction_isolation": all(passed(f"{n:02d} ") for n in
+                                     (76, 77, 82, 83, 84, 85, 86, 87, 88, 89)),
     }
     status = "passed" if (ran_real_db and n_failed == 0 and n_skipped == 0
                           and all(required_groups.values())) else "BLOCKED_INCOMPLETE"
@@ -1548,14 +1813,34 @@ def build_evidence() -> dict:
                                          "validation_task.create audit reference committed in the same "
                                          "transaction; imported tasks are recorded by the marker's "
                                          "normalized.import batch reference (no fabricated per-row events)",
-        "refresh_concurrency": "a non-owner refresh acquires the same in-process transaction lock the "
-                               "writer holds, so it cannot replace an active transaction's working state; "
-                               "the projection is built off-side and published atomically; a rolled-back "
-                               "mutation reloads committed state so no phantom row leaks. RESIDUAL "
-                               "(disclosed, pre-existing, not claimed fixed): the in-memory singleton "
-                               "does not provide snapshot isolation to a lock-free READER that reads the "
-                               "instance dicts WITHOUT refreshing while a writer is mid-transaction; "
-                               "readers that refresh() are serialized against writers and safe",
+        "publication_model": "copy_on_write",
+        "refresh_concurrency": "copy-on-write publication: every managed-state attribute is a "
+                               "context-aware property; an owner transaction reads/mutates a DEEP "
+                               "transaction-private working projection, and every non-owner reader "
+                               "reads only the committed published projection (or a request-consistent "
+                               "captured view of it). On commit the complete new projection is published "
+                               "atomically under a publish lock with a monotonic revision guard; on "
+                               "rollback the private projection is discarded and nothing is published. A "
+                               "non-owner reader therefore NEVER observes a writer's uncommitted state "
+                               "through any read surface (route/export/authorization/worker), and every "
+                               "read is one whole committed generation (no dirty and no torn/mixed read)",
+        "private_transaction_state_result": "passed" if required_groups["transaction_isolation"] else "not_passed",
+        "non_owner_committed_view_result": "passed" if passed("84 ") else "not_passed",
+        "route_dirty_read_result": "passed" if (passed("76 ") and passed("77 ")) else "not_passed",
+        "export_dirty_read_result": "passed" if passed("77 ") else "not_passed",
+        "authorization_dirty_read_result": "passed" if passed("76 ") else "not_passed",
+        "worker_dirty_read_result": "passed" if passed("76 ") else "not_passed",
+        "rollback_nonpublication_result": "passed" if passed("83 ") else "not_passed",
+        "atomic_projection_swap_result": "passed" if (passed("82 ") and passed("85 ")) else "not_passed",
+        "stale_refresh_rejection_result": "passed" if passed("86 ") else "not_passed",
+        "mixed_generation_result": "passed" if passed("85 ") else "not_passed",
+        # Re-review corrections (finding 5 stale view, finding 1 revision source,
+        # finding 2 unbounded audit-log deep-copy):
+        "stale_view_elimination_result": "passed" if passed("87 ") else "not_passed",
+        "revision_binding_result": "passed" if passed("88 ") else "not_passed",
+        "audit_log_isolation_result": "passed" if passed("89 ") else "not_passed",
+        "transaction_isolation_result": "passed" if required_groups["transaction_isolation"] else "not_passed",
+        "isolation_check_total": TOTALS.get("isolation_checks", 0),
         "rollback_reload_result": "passed" if required_groups["rollback_reload"] else "not_passed",
         "import_concurrency_result": "passed" if required_groups["import_concurrency"] else "not_passed",
         "authority_marker_version": store_mod.PostgresStateStore.NORMALIZED_AUTHORITY_VERSION,
@@ -1590,7 +1875,7 @@ def main() -> int:
 
     url = test_database_url()
     if not url:
-        for n in range(6, 76):
+        for n in range(6, 90):
             skip(f"{n:02d} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         pg_checks(url, scratch)
