@@ -81,9 +81,15 @@ def role_name_from_dsn(dsn: str | None) -> str | None:
         from urllib.parse import urlsplit, unquote
 
         user = urlsplit(dsn).username
-        return unquote(user) if user else None
+        if user:
+            return unquote(user)
     except Exception:
-        return None
+        pass
+    # libpq keyword/DSN form: "host=... user=role password=...". Match a user token.
+    import re as _re
+
+    m = _re.search(r"(?:^|\s)user\s*=\s*'?([^'\s]+)'?", dsn or "")
+    return m.group(1) if m else None
 
 
 def measure_runtime_role(connection: Any) -> dict:

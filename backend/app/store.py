@@ -45,6 +45,7 @@ from .identity import get_current_identity
 from .malware import MalwareScanResult, scan_upload_content
 from .ocr import extract_ocr_text
 from .tenant_rls import (
+    TenantRuntimeRoleError,
     apply_verified_tenant_scope,
     assert_runtime_role_safe,
     role_name_from_dsn,
@@ -8147,6 +8148,12 @@ def create_store() -> LocalStateStore:
             # Fail closed: an un-imported snapshot must never be laundered into
             # a fresh local JSON authority (silent split-brain). The full
             # remediation message propagates to the operator.
+            raise
+        except TenantRuntimeRoleError:
+            # Fail closed: in client mode a runtime role that could bypass tenant
+            # RLS must STOP the app, never silently degrade to a single local JSON
+            # authority (which would nullify the database-enforced isolation the
+            # protected store exists to provide). Same posture as the cutover guard.
             raise
         except Exception as exc:  # noqa: BLE001 - app must start so readiness can report the blocker.
             print(
