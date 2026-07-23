@@ -46,8 +46,12 @@ end
 $$;
 
 -- Ensure the role never accumulates unsafe attributes even if it pre-existed.
+-- Re-assert ONLY the security-critical attributes; deliberately do NOT touch
+-- LOGIN here, so a re-run cannot strip LOGIN from a role an operator may have
+-- provisioned as their runtime login role (the group role is created NOLOGIN
+-- above, which is the intended default).
 alter role monday_report_app nosuperuser nobypassrls nocreatedb nocreaterole
-  noreplication nologin inherit;
+  noreplication;
 
 -- 2) Forced tenant isolation on the parent tables the normalized slice writes.
 --    tenants: gate directly on the slug (tenants.slug is the tenant identifier).
