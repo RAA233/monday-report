@@ -23,7 +23,15 @@ This turn is the foundation for the later functional guard. It requires Docker; 
 it every scenario records SKIPPED (never a false pass). The DSN, host, port, container
 id, credential, and raw nonce are never printed.
 
-Run: ``python scripts/restricted_postgres_runtime_guard.py``
+CLAIM SCOPE: startup-and-identity-only. This guard proves runner ownership + external
+startup + live identity + a MINIMAL smoke. It is NOT the full functional matrix
+(corrections/validation/idempotency/cross-tenant/export/import) -- that is the future
+``audit:restricted-postgres-runtime`` guard -- and it must never be consumed as
+tenant-authorization evidence or a readiness proof (see the emitted summary fields).
+
+Run (CERTIFICATION -- Docker required): ``python scripts/restricted_postgres_startup_guard.py``
+Non-certifying (Docker-less aggregate): add ``--allow-unavailable`` (reports SKIPPED,
+never eligible for evidence/readiness).
 """
 from __future__ import annotations
 
@@ -118,8 +126,17 @@ def _http(method: str, url: str, headers: dict | None = None, data: bytes | None
 
 
 def main() -> int:
+    # Direct invocation is a CERTIFICATION: Docker is required and a skipped run is NOT
+    # a pass. `--allow-unavailable` (for a Docker-less audit:all aggregate) downgrades to
+    # a clearly non-certifying SKIP that is never evidence/readiness eligible.
+    allow_unavailable = "--allow-unavailable" in sys.argv
     if _docker(["info"]).returncode != 0:
-        skip_all("docker not available")
+        if allow_unavailable:
+            skip_all("docker unavailable (non-certifying mode)")
+        else:
+            for cid, cat in _INVENTORY:
+                record(cid, False, cat,
+                       "docker required for certification; pass --allow-unavailable for a non-certifying skip")
         return _emit()
 
     run_id = secrets.token_hex(32)                 # >=128-bit nonce (raw; never printed)
@@ -130,6 +147,9 @@ def main() -> int:
     mig_role = f"mr_mig_{run_hash}"
     rt_role = f"mr_rt_{run_hash}"
     port = _free_loopback_port()
+    api_port = _free_loopback_port()   # OS-allocated (skips reserved/excluded ranges); NOT port+1
+    while api_port == port:
+        api_port = _free_loopback_port()
     scratch = Path(os.environ.get("TEMP", "/tmp")) / f"mr-rpr-{run_hash}"
     for sub in ("state", "storage", "exports", "web"):
         (scratch / sub).mkdir(parents=True, exist_ok=True)
@@ -286,7 +306,7 @@ def main() -> int:
             "MONDAY_REPORT_EXPORT_ROOT": str(scratch / "exports"),
             "MONDAY_REPORT_AUDIT_HMAC_KEY": secrets.token_hex(32),
             "MONDAY_REPORT_API_KEY": secrets.token_urlsafe(24),
-            "MONDAY_REPORT_API_BASE": f"http://127.0.0.1:{port + 1}",
+            "MONDAY_REPORT_API_BASE": f"http://127.0.0.1:{api_port}",
             "MONDAY_REPORT_WEB_BASE": "http://127.0.0.1:5183",
             "CI": "true",
         }
@@ -310,7 +330,6 @@ def main() -> int:
                     os.environ[k] = v
 
         # -- launch external API (uvicorn) on the restricted login -----------
-        api_port = port + 1
         api_env = dict(os.environ)
         for k in ("PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGSERVICE", "PGSERVICEFILE",
                   "MONDAY_REPORT_MIGRATIONS_DATABASE_URL", "MONDAY_REPORT_TEST_DATABASE_URL"):
@@ -361,21 +380,26 @@ def main() -> int:
         # -- live identity via a deterministic advisory-lock barrier ---------
         lock_key = store_mod.PostgresStateStore._advisory_lock_key()
 
-        def observe(appname: str) -> str | None:
+        def observe(appname: str, trig) -> tuple[str | None, int]:
+            # Anti-spoof: require EXACTLY ONE fresh session (backend_start after the
+            # child launched) with this run-scoped application_name that is WAITING on
+            # the advisory Lock (i.e. the session the barrier is holding), and return
+            # its login role. application_name + count + wait-state + freshness together
+            # make a rogue helper/migration connection unable to satisfy it.
             with psycopg.connect(boot_dsn, autocommit=True) as obs:
+                t0 = obs.execute("select now()").fetchone()[0]
                 obs.execute("select pg_advisory_lock(%s)", (lock_key,))
                 try:
-                    trigger()  # fire an action that takes the snapshot lock
-                    found = None
-                    for _ in range(50):
-                        row = obs.execute(
-                            "select usename from pg_stat_activity where application_name=%s "
-                            "and wait_event_type='Lock' limit 1", (appname,)).fetchone()
-                        if row:
-                            found = row[0]
-                            break
+                    trig()  # fire an action that takes the snapshot lock
+                    for _ in range(60):
+                        rows = obs.execute(
+                            "select usename from pg_stat_activity "
+                            "where application_name=%s and wait_event_type='Lock' "
+                            "and backend_start >= %s", (appname, t0)).fetchall()
+                        if rows:
+                            return rows[0][0], len(rows)
                         time.sleep(0.1)
-                    return found
+                    return None, 0
                 finally:
                     obs.execute("select pg_advisory_unlock(%s)", (lock_key,))
 
@@ -387,9 +411,10 @@ def main() -> int:
                               "data=json.dumps({'name':'idp','rig_name':'g'}).encode(),"
                               f"headers={{'X-Monday-Report-Key':'{token}','Content-Type':'application/json'}});"
                               "urllib.request.urlopen(req,timeout=20)"], cwd=str(ROOT))
-        api_user = observe(api_appname)
+        api_user, api_n = observe(api_appname, trigger)
         record("I01 API session_user is the restricted runtime login (pg_stat_activity)",
-               api_user == rt_role, "identity", {"observed_is_restricted": api_user == rt_role})
+               api_user == rt_role and api_n == 1, "identity",
+               {"observed_is_restricted": api_user == rt_role, "sessions": api_n})
 
         # worker identity: run the external worker; it blocks on the held lock during its job
         worker_appname = f"mr-verification-worker-{run_hash}"
@@ -404,24 +429,27 @@ def main() -> int:
         # the worker only takes the snapshot lock if there is a job; seed one cheaply by
         # letting the worker run its bootstrap/retention mutation path
         with psycopg.connect(boot_dsn, autocommit=True) as obs:
+            t0w = obs.execute("select now()").fetchone()[0]
             obs.execute("select pg_advisory_lock(%s)", (lock_key,))
             try:
                 trigger_worker()
-                w_user = None
-                for _ in range(80):
-                    row = obs.execute(
-                        "select usename from pg_stat_activity where application_name=%s limit 1",
-                        (worker_appname,)).fetchone()
-                    if row:
-                        w_user = row[0]
+                w_user, w_n = None, 0
+                for _ in range(120):
+                    rows = obs.execute(
+                        "select usename from pg_stat_activity "
+                        "where application_name=%s and wait_event_type='Lock' and backend_start >= %s",
+                        (worker_appname, t0w)).fetchall()
+                    if rows:
+                        w_user, w_n = rows[0][0], len(rows)
                         break
                     time.sleep(0.1)
             finally:
                 obs.execute("select pg_advisory_unlock(%s)", (lock_key,))
-        record("X03 worker is an external process on PostgreSQL", w_user is not None, "external",
-               {"observed": w_user is not None})
+        record("X03 worker is an external process on PostgreSQL", w_user is not None and w_n == 1, "external",
+               {"observed": w_user is not None, "sessions": w_n})
         record("I02 worker session_user is the restricted runtime login (pg_stat_activity)",
-               w_user == rt_role, "identity", {"observed_is_restricted": w_user == rt_role})
+               w_user == rt_role and w_n == 1, "identity",
+               {"observed_is_restricted": w_user == rt_role, "sessions": w_n})
         record("I03 migration/runtime principal separation", mig_role != rt_role and api_user == rt_role, "identity")
 
     except Exception as exc:  # noqa: BLE001
@@ -457,18 +485,29 @@ def _emit() -> int:
     failed = [c for c in checks if not c["ok"]]
     print(json.dumps({"checks": checks,
                       "summary": {"passed": len(passed), "skipped": len(skipped), "failed": len(failed),
-                                  "missing_ids": missing, "expected": len(_INVENTORY)}},
+                                  "missing_ids": missing, "expected": len(_INVENTORY),
+                                  # Explicit, machine-readable claim scope. This guard proves
+                                  # runner ownership + external startup + live identity + a
+                                  # minimal smoke ONLY -- it does NOT run the corrections/
+                                  # validation/idempotency/cross-tenant/export/import matrix and
+                                  # must never be consumed as tenant-authorization evidence or a
+                                  # readiness proof.
+                                  "claim_scope": "startup-and-identity-only",
+                                  "full_functional_matrix": "not_run",
+                                  "eligible_for_tenant_evidence": False,
+                                  "eligible_for_readiness": False}},
                      indent=2, default=str))
     if missing:
         print(f"\nInventory mismatch: {len(missing)} expected id(s) produced no result.")
         return 1
     if failed:
-        print(f"\nRestricted-postgres-runtime guard FAILED: {len(failed)} failing check(s).")
+        print(f"\nRestricted-postgres-startup guard FAILED: {len(failed)} failing check(s).")
         for c in failed:
             print(f"  FAIL: {c['id']} -> {c['detail']}")
         return 1
-    tail = f" ({len(skipped)} skipped: no Docker)" if skipped else ""
-    print(f"\nRestricted-postgres-runtime guard passed: {len(passed)} check(s).{tail}")
+    tail = f" ({len(skipped)} skipped: docker unavailable, non-certifying)" if skipped else ""
+    print(f"\nRestricted-postgres-startup guard passed: {len(passed)} check(s).{tail}"
+          "\n[claim_scope=startup-and-identity-only; NOT tenant-evidence/readiness eligible]")
     return 0
 
 
