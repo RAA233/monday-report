@@ -205,8 +205,7 @@ def main() -> int:
 
         def clean():
             with psycopg.connect(dsn, autocommit=True) as c:
-                c.execute(f"drop function if exists {vb.ATTESTATION_CHECK_FN}(text) cascade")
-                c.execute(f"drop table if exists {vb.ATTESTATION_QUALIFIED} cascade")
+                c.execute(f"drop schema if exists {vb.ATTESTATION_SCHEMA} cascade")
 
         clean()
         env = {**ISOLATED_ENV, "MONDAY_REPORT_DATABASE_URL": dsn, "MONDAY_REPORT_VERIFICATION_RUN_ID": run_id}
@@ -240,8 +239,7 @@ def main() -> int:
             c.execute(f"drop role if exists {role}")
             c.execute(f"create role {role} login nosuperuser nobypassrls nocreatedb nocreaterole password '{pw}'")
             c.execute(f"grant connect on database {db} to {role}")
-            c.execute(f"grant usage on schema {vb.ATTESTATION_SCHEMA} to {role}")
-        vb.install_database_attestation(dsn, run_id, ttl_seconds=3600, grant_to=role)  # EXECUTE-only
+        vb.install_database_attestation(dsn, run_id, ttl_seconds=3600, grant_to=role)  # USAGE + EXECUTE only
         rt_dsn = re.sub(r"//[^@/]+@", f"//{role}:{pw}@", dsn)
 
         def rt_denied(sql: str) -> bool:
@@ -267,14 +265,28 @@ def main() -> int:
         record("38 the restricted runtime role CANNOT read the attestation table (stored fingerprint) directly",
                rt_denied(f"select * from {vb.ATTESTATION_QUALIFIED}")
                and rt_denied(f"select server_fingerprint from {vb.ATTESTATION_QUALIFIED}"))
-        record("39 the restricted runtime role CANNOT modify the table or replace the checker",
-               rt_denied(f"insert into {vb.ATTESTATION_QUALIFIED}(run_id_hash,server_fingerprint,expires_at,purpose) values ('z','z',now(),'z')")
-               and rt_denied(f"update {vb.ATTESTATION_QUALIFIED} set purpose='y'")
+        record("39 the restricted runtime role CANNOT modify the table, replace the checker, or plant a shadow",
+               rt_denied(f"update {vb.ATTESTATION_QUALIFIED} set purpose='y'")
                and rt_denied(f"delete from {vb.ATTESTATION_QUALIFIED}")
                and rt_denied(f"truncate {vb.ATTESTATION_QUALIFIED}")
                and rt_denied(f"drop table {vb.ATTESTATION_QUALIFIED}")
                and rt_denied(f"create or replace function {vb.ATTESTATION_CHECK_FN}(p_run_hash text) "
-                             "returns boolean language sql as $x$ select true $x$"))
+                             "returns boolean language sql as $x$ select true $x$")
+               and rt_denied(f"create table {vb.ATTESTATION_SCHEMA}.shadow(x int)")
+               and rt_denied(f"alter function {vb.ATTESTATION_CHECK_FN}(text) owner to {role}"))
+
+        # 39b GUC INDEPENDENCE: the typed checker returns the same result under hostile
+        # caller settings (a text-serialised fingerprint would not).
+        def rt_check_under(guc_sql):
+            try:
+                with psycopg.connect(rt_dsn, autocommit=True) as c:
+                    c.execute(guc_sql)
+                    return c.execute(f"select {vb.ATTESTATION_CHECK_FN}('{run_hash}')").fetchone()[0]
+            except Exception:  # noqa: BLE001
+                return None
+        record("39b the checker result is invariant under hostile caller TimeZone/DateStyle/float GUCs",
+               rt_check_under("set timezone='Pacific/Kiritimati'; set datestyle='German, DMY'; set extra_float_digits=0") is True
+               and rt_check_under("set timezone='UTC'") is True)
         with psycopg.connect(dsn, autocommit=True) as c:
             c.execute(f"drop owned by {role}")  # revoke its grants before dropping
             c.execute(f"drop role if exists {role}")
@@ -289,25 +301,24 @@ def main() -> int:
         # server-instance fingerprint must reject it.
         dsn_b = os.environ.get("MONDAY_REPORT_TEST_DATABASE_URL_B")
         if dsn_b and vb._loopback_tcp_dsn(dsn_b) and vb._expected_db_name(dsn_b) == db:
+            cols = "run_id_hash,sysid,db_oid,srv_addr,srv_port,pmst,server_fingerprint,created_at,expires_at,purpose"
             vb.install_database_attestation(dsn, run_id, ttl_seconds=3600)
             with psycopg.connect(dsn, autocommit=True) as ca:
-                cloned = ca.execute(
-                    f"select run_id_hash, server_fingerprint, created_at, expires_at, purpose "
-                    f"from {vb.ATTESTATION_QUALIFIED}").fetchone()
+                arow = ca.execute(f"select {cols} from {vb.ATTESTATION_QUALIFIED}").fetchone()
+            # B gets its own schema/table/function; then A's row is transplanted verbatim
+            # (a faithful clone/restore). B's live cluster identity differs from A's.
+            vb.install_database_attestation(dsn_b, run_id, ttl_seconds=3600)
             with psycopg.connect(dsn_b, autocommit=True) as cb:
-                cb.execute(f"drop table if exists {vb.ATTESTATION_QUALIFIED} cascade")
-                cb.execute(
-                    f"create table {vb.ATTESTATION_QUALIFIED}(run_id_hash text primary key, "
-                    "server_fingerprint text not null, created_at timestamptz not null default now(), "
-                    "expires_at timestamptz not null, purpose text not null)")
-                cb.execute(f"insert into {vb.ATTESTATION_QUALIFIED} values (%s,%s,%s,%s,%s)", cloned)
+                cb.execute(f"truncate {vb.ATTESTATION_QUALIFIED}")
+                cb.execute(f"insert into {vb.ATTESTATION_QUALIFIED}({cols}) "
+                           "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", arow)
             _apply({**ISOLATED_ENV, "MONDAY_REPORT_DATABASE_URL": dsn_b,
                     "MONDAY_REPORT_VERIFICATION_RUN_ID": run_id})
             on_clone = vb.verification_execution_allowed()
-            record("41 an attestation CLONED to another server does not activate (server-instance binding)",
+            record("41 an attestation CLONED to another cluster does not activate (cluster/server binding)",
                    on_clone is False, {"activated_on_clone": on_clone})
             with psycopg.connect(dsn_b, autocommit=True) as cb:
-                cb.execute(f"drop table if exists {vb.ATTESTATION_QUALIFIED} cascade")
+                cb.execute(f"drop schema if exists {vb.ATTESTATION_SCHEMA} cascade")
             clean()
         else:
             record("41 clone-to-another-server rejection", True,

@@ -59,9 +59,11 @@ LIVE_API_PORT = 8000
 LIVE_WEB_PORT = 5173
 POSTGRES_SCHEMES = {"postgres", "postgresql"}
 
-# Schema-qualified so a shadow table in another search-path schema cannot satisfy it.
-ATTESTATION_SCHEMA = "public"
-ATTESTATION_TABLE = "mr_verification_isolation_attestation"
+# A DEDICATED, admin-owned schema (not public): the runtime role gets USAGE but never
+# CREATE, so it cannot plant a shadow relation/function that a mutable search_path
+# might resolve instead. Everything is fully schema-qualified.
+ATTESTATION_SCHEMA = "mr_verification"
+ATTESTATION_TABLE = "attestation"
 ATTESTATION_QUALIFIED = f"{ATTESTATION_SCHEMA}.{ATTESTATION_TABLE}"
 ATTESTATION_PURPOSE = "monday-report-restricted-runtime-verification"
 
@@ -200,18 +202,14 @@ def _expected_db_name(dsn: str) -> str:
         return ""
 
 
-# A collision-resistant SHA-256 fingerprint of the CURRENT PostgreSQL cluster + server
-# instance, computed entirely inside PostgreSQL on one connection. Bound to the cluster
-# ``system_identifier`` (assigned at initdb, so a logical dump/restore gets a new one)
-# AND the postmaster start time (so a physical filesystem copy, which preserves the
-# system_identifier, still differs because it is started separately) AND the database
-# name/OID/server address/port. jsonb_build_object produces a canonical, key-sorted,
-# structurally-delimited encoding, so fields cannot run together ambiguously. The
-# ``system_identifier`` is read via pg_control_system(), which needs elevated
-# privileges, so the whole comparison runs inside a SECURITY DEFINER function the
-# migration/admin principal owns -- the runtime role only EXECUTEs it and never reads
-# the raw cluster id.
-FINGERPRINT_VERSION = 3
+# The DECISION uses TYPED field-by-field equality (below), never text serialization,
+# so no caller GUC (TimeZone, DateStyle, extra_float_digits, ...) can change whether a
+# valid attestation matches. This SHA-256 is used ONLY as a safe, non-sensitive
+# fingerprint for the audit/evidence display -- never as the equality test. It still
+# folds in the cluster ``system_identifier`` (new on a logical restore) and the
+# postmaster start time (different on a physical copy) plus db/OID/addr/port, over a
+# canonical key-sorted jsonb encoding.
+FINGERPRINT_VERSION = 4
 _FINGERPRINT_EXPR = (
     "encode(sha256(convert_to(jsonb_build_object("
     f"'v', {FINGERPRINT_VERSION}, "
@@ -226,12 +224,13 @@ _FINGERPRINT_EXPR = (
 )
 
 # The SECURITY DEFINER checker: owned by the migration/admin principal, non-mutating,
-# fixed search_path, EXECUTE granted only to the runtime group (never PUBLIC). It reads
-# the attestation table and returns only a boolean, so the runtime role never reads the
-# stored fingerprint or raw run hash and cannot replace the function. (The cluster
+# fixed search_path (pinned GUCs), EXECUTE granted only to the runtime group (never
+# PUBLIC). It compares stored TYPED columns against the live typed values and returns
+# only a boolean, so the runtime role never reads the stored fingerprint or raw run
+# hash and cannot replace the function. (The cluster
 # system_identifier itself is a public identifier; the boundary is that the runtime
 # cannot WRITE the attestation, not that it cannot learn the cluster id.)
-ATTESTATION_CHECK_FN = f"{ATTESTATION_SCHEMA}.mr_verification_isolation_check"
+ATTESTATION_CHECK_FN = f"{ATTESTATION_SCHEMA}.check_attestation"
 
 
 def _is_loopback_addr(addr: str | None) -> bool:
@@ -372,9 +371,19 @@ def install_database_attestation(
         sysid = conn.execute("select system_identifier::text from pg_control_system()").fetchone()
         if not sysid or not sysid[0]:
             raise RuntimeError("cluster system_identifier unavailable; environment unsupported")
+        # Dedicated, admin-owned schema: runtime gets USAGE but never CREATE, so it
+        # cannot plant a shadow relation/function.
+        conn.execute(f"create schema if not exists {ATTESTATION_SCHEMA}")
+        conn.execute(f"revoke all on schema {ATTESTATION_SCHEMA} from public")
+        # Typed columns for the DECISION; the SHA-256 is stored only for audit display.
         conn.execute(
             f"create table if not exists {ATTESTATION_QUALIFIED} ("
             "run_id_hash text primary key, "
+            "sysid text not null, "
+            "db_oid oid not null, "
+            "srv_addr inet, "
+            "srv_port integer, "
+            "pmst timestamptz not null, "
             "server_fingerprint text not null, "
             "created_at timestamptz not null default now(), "
             "expires_at timestamptz not null, "
@@ -382,27 +391,38 @@ def install_database_attestation(
         )
         conn.execute(f"revoke all on {ATTESTATION_QUALIFIED} from public")
         conn.execute(f"truncate {ATTESTATION_QUALIFIED}")  # single active record
-        # The fingerprint is computed on THIS (same-server, admin) connection; the
-        # runtime check recomputes it via the SECURITY DEFINER function on the same
-        # server. A clone/restore to another cluster has a different system_identifier
-        # and/or postmaster start time, so it will not match.
+        # Typed values captured on THIS (same-server, admin) connection.
         conn.execute(
-            f"insert into {ATTESTATION_QUALIFIED} (run_id_hash, server_fingerprint, expires_at, purpose) "
-            f"values (%s, {_FINGERPRINT_EXPR}, now() + make_interval(secs => %s), %s)",
+            f"insert into {ATTESTATION_QUALIFIED} "
+            "(run_id_hash, sysid, db_oid, srv_addr, srv_port, pmst, server_fingerprint, expires_at, purpose) "
+            "select %s, "
+            "(select system_identifier::text from pg_control_system()), "
+            "(select oid from pg_database where datname = current_database()), "
+            "inet_server_addr(), inet_server_port(), pg_postmaster_start_time(), "
+            f"{_FINGERPRINT_EXPR}, now() + make_interval(secs => %s), %s",
             (_run_id_hash(run_id), int(ttl_seconds), ATTESTATION_PURPOSE),
         )
-        # The admin-owned, non-mutating checker. Fixed search_path; reads the privileged
-        # cluster id and the attestation and returns only a boolean.
+        # The admin-owned, non-mutating checker. Fixed search_path AND pinned harmless
+        # GUCs; TYPED equality (never text serialization), so no caller setting can
+        # change the outcome. A clone to another cluster differs in system_identifier
+        # and/or postmaster start time.
         conn.execute(
             f"create or replace function {ATTESTATION_CHECK_FN}(p_run_hash text) "
             "returns boolean language sql security definer "
-            "set search_path = pg_catalog, public as $mrfn$ "
+            f"set search_path = pg_catalog, {ATTESTATION_SCHEMA} "
+            "set timezone = 'UTC' set datestyle = 'ISO, MDY' set extra_float_digits = 3 "
+            "as $mrfn$ "
             "select count(*) = 1 "
             f"from {ATTESTATION_QUALIFIED} a "
             "where a.run_id_hash = p_run_hash and a.expires_at > now() "
-            f"and a.server_fingerprint = {_FINGERPRINT_EXPR} $mrfn$"
+            "and a.sysid = (select system_identifier::text from pg_control_system()) "
+            "and a.db_oid = (select oid from pg_database where datname = current_database()) "
+            "and a.srv_addr is not distinct from inet_server_addr() "
+            "and a.srv_port is not distinct from inet_server_port() "
+            "and a.pmst = pg_postmaster_start_time() $mrfn$"
         )
         conn.execute(f"revoke all on function {ATTESTATION_CHECK_FN}(text) from public")
         if grant_to:
-            # EXECUTE-only on the checker; no direct table privilege.
+            # USAGE on the schema + EXECUTE on the checker; no table privilege, no CREATE.
+            conn.execute(f"grant usage on schema {ATTESTATION_SCHEMA} to {grant_to}")
             conn.execute(f"grant execute on function {ATTESTATION_CHECK_FN}(text) to {grant_to}")
