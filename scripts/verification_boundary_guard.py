@@ -19,8 +19,9 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
+import secrets
 import sys
-import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,8 +41,11 @@ def record(name: str, ok: bool, detail: object = "", *, skipped: bool = False) -
 # database carries no attestation.
 NO_SERVER_DSN = "postgresql://rt:pw@127.0.0.1:5999/monday_rt_test"
 
+RUN_ID = "a" * 64  # a stand-in >=128-bit run id for environment-predicate tests
+
 ISOLATED_ENV = {
     "MONDAY_REPORT_VERIFICATION_ISOLATION": "1",
+    "MONDAY_REPORT_VERIFICATION_RUN_ID": RUN_ID,
     "MONDAY_REPORT_REPOSITORY_BACKEND": "postgres",
     "MONDAY_REPORT_DATABASE_URL": NO_SERVER_DSN,
     "MONDAY_REPORT_STATE_PATH": r"C:\scratch-verify\state\state.json",
@@ -95,6 +99,10 @@ def main() -> int:
             {**ISOLATED_ENV, "MONDAY_REPORT_EXPORT_ROOT": r"C:\scratch\..\app\.local_data\exports"},
         "11 with an export root left unset": {k: v for k, v in ISOLATED_ENV.items()
                                               if k != "MONDAY_REPORT_EXPORT_ROOT"},
+        "11b without a verification run id": {k: v for k, v in ISOLATED_ENV.items()
+                                             if k != "MONDAY_REPORT_VERIFICATION_RUN_ID"},
+        "11c with a too-short (low-entropy) run id":
+            {**ISOLATED_ENV, "MONDAY_REPORT_VERIFICATION_RUN_ID": "short"},
     }
     for name, env in axes.items():
         _apply(env)
@@ -178,27 +186,80 @@ def main() -> int:
            and "_best_effort_audit" not in relax,
            {"fail_closed_audit": "store.audit(" in relax and "except" in relax})
 
-    # -- POSITIVE activation + attestation lifecycle against a real PostgreSQL --
+    # -- run-scoped attestation lifecycle + privilege proof (real PostgreSQL) ---
     dsn = os.environ.get("MONDAY_REPORT_TEST_DATABASE_URL")
     if not dsn or not vb._loopback_tcp_dsn(dsn):
-        record("33 positive activation with a real database attestation", True,
-               "no loopback MONDAY_REPORT_TEST_DATABASE_URL provided", skipped=True)
-        record("34 dropping the attestation deactivates the boundary", True,
-               "no loopback MONDAY_REPORT_TEST_DATABASE_URL provided", skipped=True)
+        for n in ("33 run-scoped activation", "34 wrong run id inert", "35 expired inert",
+                  "36 reinstated active", "37 runtime SELECT allowed", "38 runtime write denied",
+                  "39 runtime TRUNCATE/DROP denied", "40 removal deactivates"):
+            record(n, True, "no loopback MONDAY_REPORT_TEST_DATABASE_URL provided", skipped=True)
     else:
         import psycopg
-        with psycopg.connect(dsn, autocommit=True) as c:
-            c.execute(f"drop table if exists {vb.ATTESTATION_TABLE}")
-        env = {**ISOLATED_ENV, "MONDAY_REPORT_DATABASE_URL": dsn}
+        run_id = secrets.token_hex(32)
+        db = vb._expected_db_name(dsn)
+
+        def clean():
+            with psycopg.connect(dsn, autocommit=True) as c:
+                c.execute(f"drop table if exists {vb.ATTESTATION_QUALIFIED} cascade")
+
+        clean()
+        env = {**ISOLATED_ENV, "MONDAY_REPORT_DATABASE_URL": dsn, "MONDAY_REPORT_VERIFICATION_RUN_ID": run_id}
         _apply(env)
         before = vb.verification_execution_allowed()
-        vb.install_database_attestation(dsn)
+        vb.install_database_attestation(dsn, run_id, ttl_seconds=3600)
         after = vb.verification_execution_allowed()
-        record("33 positive activation requires the real database attestation",
-               before is False and after is True, {"before_install": before, "after_install": after})
+        record("33 activation requires the installed run-scoped attestation",
+               before is False and after is True, {"before": before, "after": after})
+
+        _apply({**env, "MONDAY_REPORT_VERIFICATION_RUN_ID": secrets.token_hex(32)})
+        record("34 a DIFFERENT run id does not satisfy the attestation",
+               vb.verification_execution_allowed() is False)
+
+        _apply(env)
+        vb.install_database_attestation(dsn, run_id, ttl_seconds=-10)
+        record("35 an EXPIRED attestation does not activate the boundary",
+               vb.verification_execution_allowed() is False)
+
+        vb.install_database_attestation(dsn, run_id, ttl_seconds=3600)
+        record("36 activation holds again after reinstalling a fresh attestation",
+               vb.verification_execution_allowed() is True)
+
+        # Privilege proof: a restricted runtime role may SELECT but cannot write/DDL.
+        role = f"vbnd_rt_{secrets.token_hex(4)}"
+        pw = secrets.token_urlsafe(18)
         with psycopg.connect(dsn, autocommit=True) as c:
-            c.execute(f"drop table if exists {vb.ATTESTATION_TABLE}")
-        record("34 dropping the attestation deactivates the boundary",
+            c.execute(f"drop role if exists {role}")
+            c.execute(f"create role {role} login nosuperuser nobypassrls nocreatedb nocreaterole password '{pw}'")
+            c.execute(f"grant connect on database {db} to {role}")
+            c.execute(f"grant usage on schema {vb.ATTESTATION_SCHEMA} to {role}")
+            c.execute(f"grant select on {vb.ATTESTATION_QUALIFIED} to {role}")
+        rt_dsn = re.sub(r"//[^@/]+@", f"//{role}:{pw}@", dsn)
+
+        def rt_denied(sql: str) -> bool:
+            try:
+                with psycopg.connect(rt_dsn, autocommit=True) as c:
+                    c.execute(sql)
+                return False
+            except Exception:  # noqa: BLE001 - any refusal counts as denied
+                return True
+
+        with psycopg.connect(rt_dsn, autocommit=True) as c:
+            sel = c.execute(f"select count(*) from {vb.ATTESTATION_QUALIFIED}").fetchone()[0]
+        record("37 the restricted runtime role MAY SELECT the attestation", sel is not None, {"rows": sel})
+        record("38 the restricted runtime role CANNOT INSERT/UPDATE/DELETE the attestation",
+               rt_denied(f"insert into {vb.ATTESTATION_QUALIFIED}(run_id_hash,expires_at,purpose) values ('z',now(),'z')")
+               and rt_denied(f"update {vb.ATTESTATION_QUALIFIED} set purpose='y'")
+               and rt_denied(f"delete from {vb.ATTESTATION_QUALIFIED}"))
+        record("39 the restricted runtime role CANNOT TRUNCATE or DROP the attestation",
+               rt_denied(f"truncate {vb.ATTESTATION_QUALIFIED}")
+               and rt_denied(f"drop table {vb.ATTESTATION_QUALIFIED}"))
+        with psycopg.connect(dsn, autocommit=True) as c:
+            c.execute(f"drop owned by {role}")  # revoke its grants before dropping
+            c.execute(f"drop role if exists {role}")
+
+        clean()
+        _apply(env)
+        record("40 removing the attestation deactivates the boundary",
                vb.verification_execution_allowed() is False)
 
     passed = [c for c in checks if c["ok"] and not c["skipped"]]

@@ -83,7 +83,7 @@ from .corrections_registry import (
 )
 from . import idempotency
 from .readiness import client_data_mode, evaluate_client_data_readiness
-from .verification_boundary import verification_context
+from .verification_boundary import verification_context, verification_run_fingerprint
 from .runtime_backends import runtime_backend_status
 from .signed_urls import create_signed_token, signing_secret_configured, verify_signed_token
 from .store import store, IdempotencyConflict, ReviewerNotVerified, SnapshotConflict
@@ -414,7 +414,14 @@ def require_client_data_ready(operation: str, resource_type: str, resource_id: U
                 "client_data.verification_isolation_execution",
                 resource_type,
                 resource_id,
-                {"operation": operation, "readiness_status": readiness.status, **verification},
+                {
+                    "operation": operation,
+                    "readiness_status": readiness.status,
+                    # A safe short fingerprint of the run id (never the raw value),
+                    # binding this boundary use to the specific verification run.
+                    "verification_run": verification_run_fingerprint(),
+                    **verification,
+                },
             )
         except Exception:  # noqa: BLE001 - any audit failure fails the relaxation closed
             raise HTTPException(status_code=503, detail="Client data readiness checks are failing")

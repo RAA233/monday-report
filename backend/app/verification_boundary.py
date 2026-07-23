@@ -1,68 +1,69 @@
 """Fail-closed verification-isolation boundary for the client-mode readiness lock.
 
 THE PROBLEM. In client mode, ``require_client_data_ready`` returns HTTP 423 until
-every client-data readiness check passes. Several of those checks are, by design,
-un-satisfiable by a disposable test stack (a reachable local LLM with the pinned
-model, a *reviewed* anonymized client-fixture attestation, passing parser/OCR
-fixture evals). That is correct for production safety, but it makes it impossible to
-exercise the real client-mode request path (authentication, per-user credential
-validation, RBAC, tenant ownership, verified-reviewer enforcement, forced RLS on a
-restricted PostgreSQL runtime role, the idempotency contract) in an automated
-tenant-isolation test: the release-readiness lock -- unrelated to tenant isolation
--- masks the very behaviour under test.
+every client-data readiness check passes. Several are, by design, un-satisfiable by a
+disposable test stack (a reachable local LLM with the pinned model, a *reviewed*
+anonymized client-fixture attestation, passing parser/OCR fixture evals). That is
+correct for production safety, but it makes it impossible to exercise the real
+client-mode request path (authentication, per-user credential validation, RBAC,
+tenant ownership, verified-reviewer enforcement, forced RLS on a restricted
+PostgreSQL runtime role, the idempotency contract) in an automated tenant-isolation
+test: an unrelated release-readiness lock masks the behaviour under test.
 
-THE BOUNDARY. This module answers one question: *is this process a provably
-isolated, disposable, synthetic verification stack?* Only then does
-``require_client_data_ready`` allow the route to EXECUTE instead of raising 423. It
-changes nothing else: authentication, identity resolution, RBAC, ownership, tenant
-authorization, verified-reviewer enforcement, forced RLS, the restricted runtime
-role, audit HMAC/chain, and the idempotency contract all stay active and are NOT
-bypassed; ``evaluate_client_data_readiness(...).ready`` still returns False; NO GA
-control is made to pass; and every relaxed execution is audited FAIL-CLOSED (if the
-audit cannot be durably recorded the route does not continue).
+THE BOUNDARY. This module answers one question: *is this process a provably isolated,
+disposable, single-run verification stack?* Only then does ``require_client_data_ready``
+allow the route to EXECUTE instead of raising 423. It changes nothing else --
+authentication, identity resolution, RBAC, ownership, tenant authorization,
+verified-reviewer enforcement, forced RLS, audit HMAC/chain, and idempotency all stay
+active; ``evaluate_client_data_readiness(...).ready`` still returns False; NO GA
+control is made to pass; and every relaxed execution is audited FAIL-CLOSED.
 
-WHY A DATABASE-SIDE ATTESTATION. An environment-only predicate is spoofable -- a
-production database can be *named* with a "test" substring, reached over a loopback
-tunnel, or fronted by a non-live proxy port. So the strong signal is a marker that
-must physically exist IN the database the app is using: a dedicated attestation row
-that only the disposable-stack harness creates (never a production migration),
-carries no secret, is verified on the same runtime connection before the gate is
-relaxed, and disappears when the disposable database is dropped. A production
-database simply does not contain it. The environment signals (opt-in marker, real
-PostgreSQL backend, strict loopback-TCP DSN, isolated real-path roots, non-live
-ports) are necessary pre-conditions that gate whether the database is even
-consulted -- a production request (no opt-in marker) never opens that connection.
+WHY A RUN-SCOPED DATABASE ATTESTATION. An environment-only predicate is spoofable
+(a production database can be *named* with "test", reached over a loopback tunnel, or
+fronted by a non-live proxy port). A *static* database marker is still insufficient --
+it survives a clone, a test-to-production restore, or a retained/reused disposable
+database. So activation requires a **run-scoped** attestation: a row whose primary key
+is the SHA-256 of a fresh >=128-bit run identifier that only the current harness knows,
+with a short expiry, installed by the migration/admin principal AFTER migrations and
+role provisioning, granted SELECT-only to the runtime group (PUBLIC and the runtime
+role hold no write privilege), verified on the same runtime connection against
+``current_database()``. The raw run id is never logged, never stored (only its hash),
+and never emitted into evidence. A clone/restore of yesterday's database carries an
+expired hash; a different run carries a different hash; a production database carries
+none. The environment signals merely gate whether the database is consulted at all --
+a production request (no opt-in marker / no run id) never opens that connection.
 
-FAIL CLOSED on every axis. Any missing signal, any live indicator, any DSN that is
-not a clean single-host loopback TCP URL, any root that canonicalises under
-``.local_data``, or an absent/erroring attestation disables the boundary and the 423
-stands. It reads ONLY process configuration and the database attestation -- never a
-request header, query parameter, or body -- so no caller can trigger it, and it
-cannot make any readiness or GA control pass. It is a narrow, audited, production-
-inert switch, not a generic ``DISABLE_READINESS`` flag.
+FAIL CLOSED on every axis. Any missing signal, live indicator, non-loopback-TCP DSN,
+root canonicalising under ``.local_data``, or absent/expired/mismatched attestation
+disables the boundary and the 423 stands. It reads ONLY process configuration and the
+database attestation -- never a request header, query, or body -- so no caller can
+trigger it, and it cannot make any readiness or GA control pass.
 """
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import os
+import socket
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 VERIFICATION_MARKER_ENV = "MONDAY_REPORT_VERIFICATION_ISOLATION"
+# The raw run identifier (>=128 bits). Supplied to the isolated harness only; the
+# database stores its SHA-256, never the raw value, and it is never logged/emitted.
+VERIFICATION_RUN_ID_ENV = "MONDAY_REPORT_VERIFICATION_RUN_ID"
+MIN_RUN_ID_CHARS = 32  # >= 128 bits when hex-encoded
 
 LIVE_STATE_MARKER = ".local_data"
 LIVE_API_PORT = 8000
 LIVE_WEB_PORT = 5173
-
-# Loopback hosts only. 0.0.0.0 is a bind-all wildcard, never a connect target, and
-# is deliberately excluded (a bind-all indicates a service exposed beyond loopback).
-LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 POSTGRES_SCHEMES = {"postgres", "postgresql"}
 
-# The database-side disposable-environment attestation. Created ONLY by the isolated
-# harness (never by a production migration); carries no secret; dropped with the
-# disposable database.
+# Schema-qualified so a shadow table in another search-path schema cannot satisfy it.
+ATTESTATION_SCHEMA = "public"
 ATTESTATION_TABLE = "mr_verification_isolation_attestation"
-ATTESTATION_MARKER = "disposable-verification-environment"
+ATTESTATION_QUALIFIED = f"{ATTESTATION_SCHEMA}.{ATTESTATION_TABLE}"
+ATTESTATION_PURPOSE = "monday-report-restricted-runtime-verification"
 
 
 def _truthy(value: str | None) -> bool:
@@ -73,62 +74,91 @@ def _runtime_dsn() -> str:
     return (os.environ.get("MONDAY_REPORT_DATABASE_URL") or os.environ.get("DATABASE_URL") or "").strip()
 
 
+def _run_id() -> str:
+    return (os.environ.get(VERIFICATION_RUN_ID_ENV) or "").strip()
+
+
+def _run_id_hash(run_id: str) -> str:
+    return hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+
+
+def _all_loopback(host: str) -> bool:
+    """True only when every address the host resolves to is loopback. Literal
+    loopback IPs pass directly; ``localhost`` is resolved and EVERY returned address
+    must be loopback (a split-horizon localhost pointing off-box fails closed)."""
+    h = host.strip().strip("[]").lower()
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        pass
+    if h != "localhost":
+        return False
+    try:
+        infos = socket.getaddrinfo(h, None)
+    except socket.gaierror:
+        return False
+    addrs = {info[4][0] for info in infos}
+    if not addrs:
+        return False
+    for a in addrs:
+        try:
+            if not ipaddress.ip_address(a.split("%")[0]).is_loopback:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 def _loopback_tcp_dsn(dsn: str) -> bool:
     """True only for a clean single-host loopback TCP PostgreSQL URL.
 
-    Rejects (fails closed) keyword-form DSNs (no URL host), Unix-domain sockets
-    (empty/`/`-prefixed host or a ``host=`` socket-dir query), multi-host URLs,
-    non-loopback hosts, non-PostgreSQL schemes, and URL-encoded host obfuscation.
+    Rejects (fails closed) keyword-form DSNs, Unix sockets, ``host=`` redirects,
+    multi-host URLs, percent-encoded delimiters, userinfo confusion, empty database,
+    fragments, non-loopback hosts, non-PostgreSQL schemes, and portless DSNs.
     """
     if not dsn or "://" not in dsn:
-        return False  # keyword-form / libpq DSN -> no parseable URL host
+        return False
     try:
         parts = urlsplit(dsn)
     except ValueError:
         return False
     if (parts.scheme or "").lower() not in POSTGRES_SCHEMES:
         return False
+    if parts.fragment:
+        return False
     netloc = parts.netloc
-    # Multi-host URLs (postgresql://h1,h2/db) are never a single disposable target.
     hostportion = netloc.split("@")[-1]
+    # No percent-encoding in the authority (an encoded comma/slash could smuggle a
+    # second host or a socket path past the parser).
+    if "%" in hostportion:
+        return False
     if "," in hostportion:
         return False
-    # A ``host=`` query parameter can redirect to a Unix socket or another host.
     if "host=" in (parts.query or "").lower():
         return False
     try:
         host = parts.hostname
+        port = parts.port
     except ValueError:
         return False
-    if not host:
-        return False  # Unix-domain socket or malformed -> no TCP host
-    # Reject URL-encoded host obfuscation: the decoded form must equal the raw form.
-    if unquote(host) != host:
+    if not host or port is None:
         return False
-    if host.lower().strip() not in LOOPBACK_HOSTS:
+    if not _all_loopback(host):
         return False
-    # A real TCP port must be present (a socket path carries none).
-    try:
-        if parts.port is None:
-            return False
-    except ValueError:
+    db = (parts.path or "").lstrip("/")
+    if not db or "/" in db:
         return False
     return True
 
 
 def _isolated_root(value: str | None) -> bool:
-    """True only when the root is set and its CANONICAL path (symlinks resolved,
-    normalised) does not fall under the live ``.local_data`` tree. Catches symlink
-    escapes, relative-path escapes, and platform path aliases."""
     if not value:
         return False
     try:
         resolved = Path(os.path.realpath(value))
     except (OSError, ValueError):
-        return False  # unresolvable -> fail closed
+        return False
     parts = {p.lower() for p in resolved.parts}
-    # Compare by path COMPONENT, not substring, so ``.local_data`` anywhere in the
-    # resolved ancestry disqualifies it while an innocuous name cannot false-match.
     return LIVE_STATE_MARKER not in parts
 
 
@@ -144,13 +174,15 @@ def _port(url: str | None) -> int | None:
 def isolation_signals() -> dict[str, bool]:
     """Every ENVIRONMENT isolation signal, from process config only (no database).
 
-    These are necessary pre-conditions. They gate whether the database attestation
-    is even consulted; a production request (no opt-in marker) short-circuits here
-    and never opens a database connection.
+    Necessary pre-conditions; they gate whether the database attestation is even
+    consulted. A production request (no opt-in marker / no run id) short-circuits
+    here and never opens a database connection.
     """
     dsn = _runtime_dsn()
+    run_id = _run_id()
     return {
         "marker_set": _truthy(os.environ.get(VERIFICATION_MARKER_ENV)),
+        "run_id_present": len(run_id) >= MIN_RUN_ID_CHARS,
         "postgres_backend": os.environ.get("MONDAY_REPORT_REPOSITORY_BACKEND", "") == "postgres" and bool(dsn),
         "loopback_tcp_dsn": _loopback_tcp_dsn(dsn),
         "isolated_state_root": _isolated_root(os.environ.get("MONDAY_REPORT_STATE_PATH")),
@@ -161,35 +193,49 @@ def isolation_signals() -> dict[str, bool]:
     }
 
 
-def database_attestation_present(dsn: str | None = None) -> bool:
-    """True iff the disposable-environment attestation row exists in the runtime
-    database, verified on a fresh connection to it. Fails closed on ANY error (no
-    connection, missing table, missing marker, driver error)."""
+def _expected_db_name(dsn: str) -> str:
+    try:
+        return (urlsplit(dsn).path or "").lstrip("/")
+    except ValueError:
+        return ""
+
+
+def database_attestation_present(dsn: str | None = None, run_id: str | None = None) -> bool:
+    """True iff a matching, unexpired, run-scoped attestation exists in the runtime
+    database, verified on a fresh connection to it against ``current_database()``.
+    Fails closed on ANY error (no connection, missing table, missing/expired/
+    mismatched hash, wrong database, driver error)."""
     dsn = dsn if dsn is not None else _runtime_dsn()
-    if not _loopback_tcp_dsn(dsn):
+    run_id = run_id if run_id is not None else _run_id()
+    if not _loopback_tcp_dsn(dsn) or len(run_id) < MIN_RUN_ID_CHARS:
         return False
+    expected_db = _expected_db_name(dsn)
     try:
         import psycopg
-    except Exception:  # noqa: BLE001 - driver unavailable -> fail closed
+    except Exception:  # noqa: BLE001
         return False
     try:
         with psycopg.connect(dsn, connect_timeout=5, autocommit=True) as conn:
+            actual_db = conn.execute("select current_database()").fetchone()
+            if not actual_db or actual_db[0] != expected_db:
+                return False  # env-to-database equality: the DSN names the live db
             row = conn.execute(
-                f"select 1 from {ATTESTATION_TABLE} where marker = %s",
-                (ATTESTATION_MARKER,),
+                f"select count(*) from {ATTESTATION_QUALIFIED} "
+                f"where run_id_hash = %s and expires_at > now()",
+                (_run_id_hash(run_id),),
             ).fetchone()
-            return row is not None
-    except Exception:  # noqa: BLE001 - table absent / permission / connection -> fail closed
+            # Exactly one active matching record (a single active run).
+            return bool(row) and int(row[0]) == 1
+    except Exception:  # noqa: BLE001
         return False
 
 
 def verification_context() -> dict:
-    """Single evaluation of the whole boundary (env signals + database attestation).
+    """Single evaluation (environment signals + run-scoped database attestation).
 
-    The database is consulted ONLY when every environment signal already holds, so a
-    production request never opens the attestation connection. Returns the aggregate
-    decision plus each signal, redacted to booleans and signal names -- never a DSN,
-    host, port, credential, or path.
+    The database is consulted only when every environment signal already holds, so a
+    production request never opens the attestation connection. Redacted: booleans and
+    signal names only -- never a DSN, host, port, credential, path, or run identifier.
     """
     signals = isolation_signals()
     env_ok = all(signals.values())
@@ -206,29 +252,50 @@ def verification_context() -> dict:
 
 
 def verification_execution_allowed() -> bool:
-    """True only when the process is a provably-isolated disposable verification
-    stack (environment isolation AND the database-side attestation). Fails closed on
-    any missing/live signal or absent attestation. Never reads request state."""
     return verification_context()["verification_isolation_active"]
 
 
 def verification_context_summary() -> dict:
-    """Redacted, non-sensitive summary for audit/evidence: booleans and signal names
-    only, never the DSN, host, port, credential, or absolute path."""
     return verification_context()
 
 
-def install_database_attestation(dsn: str, *, grant_to: str | None = None) -> None:
-    """Create the disposable-environment attestation in a disposable database. Called
-    ONLY by the isolated verification harness -- never by a production migration.
-    Idempotent; carries no secret; optionally grants SELECT to the runtime group."""
+def verification_run_fingerprint() -> str | None:
+    """A short, non-reversible fingerprint of the run id for audit binding: the first
+    12 hex chars of its SHA-256. Never the raw run id. None when unset."""
+    run_id = _run_id()
+    return _run_id_hash(run_id)[:12] if len(run_id) >= MIN_RUN_ID_CHARS else None
+
+
+def install_database_attestation(
+    dsn: str,
+    run_id: str,
+    *,
+    ttl_seconds: int = 3600,
+    grant_to: str | None = None,
+) -> None:
+    """Install the run-scoped attestation in a disposable database. Called ONLY by the
+    isolated verification harness (never a production migration), AFTER migrations and
+    role provisioning. Stores only the SHA-256 of ``run_id`` (never the raw value),
+    keeps a single active record, and grants SELECT-only to the runtime group with no
+    PUBLIC or runtime write privilege."""
     import psycopg
 
+    if len(run_id) < MIN_RUN_ID_CHARS:
+        raise ValueError("run_id must be at least 128 bits")
     with psycopg.connect(dsn, connect_timeout=5, autocommit=True) as conn:
-        conn.execute(f"create table if not exists {ATTESTATION_TABLE} (marker text primary key)")
         conn.execute(
-            f"insert into {ATTESTATION_TABLE} (marker) values (%s) on conflict do nothing",
-            (ATTESTATION_MARKER,),
+            f"create table if not exists {ATTESTATION_QUALIFIED} ("
+            "run_id_hash text primary key, "
+            "created_at timestamptz not null default now(), "
+            "expires_at timestamptz not null, "
+            "purpose text not null)"
+        )
+        conn.execute(f"revoke all on {ATTESTATION_QUALIFIED} from public")
+        conn.execute(f"truncate {ATTESTATION_QUALIFIED}")  # single active record
+        conn.execute(
+            f"insert into {ATTESTATION_QUALIFIED} (run_id_hash, expires_at, purpose) "
+            "values (%s, now() + make_interval(secs => %s), %s)",
+            (_run_id_hash(run_id), int(ttl_seconds), ATTESTATION_PURPOSE),
         )
         if grant_to:
-            conn.execute(f"grant select on {ATTESTATION_TABLE} to {grant_to}")
+            conn.execute(f"grant select on {ATTESTATION_QUALIFIED} to {grant_to}")
