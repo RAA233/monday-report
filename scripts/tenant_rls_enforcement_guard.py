@@ -33,17 +33,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-EVIDENCE_PATH = ROOT / "output" / "tenant-rls" / "tenant-rls-enforcement-evidence.v1.json"
-EVIDENCE_SCHEMA_VERSION = "tenant-rls-enforcement-evidence.v1"
-IMPLEMENTATION_VERSION = "1.0.0"
+EVIDENCE_PATH = ROOT / "output" / "tenant-rls" / "tenant-rls-enforcement-evidence.v2.json"
+EVIDENCE_SCHEMA_VERSION = "tenant-rls-enforcement-evidence.v2"
+IMPLEMENTATION_VERSION = "1.1.0"
 GUARD_AUDIT_KEY = "c" * 64
 
 # Canonical, documented inventory (NOT a numeric range, so a phantom or missing id
-# cannot slip through). 46 checks: schema 01-09, roles 10-15, direct SQL 16-24,
+# cannot slip through). 47 checks: schema 01-09, roles 10-15, direct SQL 16-24,
 # routes 25-30, worker/pool 31-34, import/admin 35-38, inventory 39-43, and the
 # behavioral extras 44 (idempotency replay), 45 (positive readiness path), 46
-# (worker.run_once isolation).
-EXPECTED_CHECK_IDS = tuple(f"{n:02d}" for n in range(1, 47))
+# (worker.run_once isolation), 47 (GUC trust-model honesty / limitation disclosure).
+EXPECTED_CHECK_IDS = tuple(f"{n:02d}" for n in range(1, 48))
 
 NORMALIZED_TABLES = (
     "monday_report_norm_reports",
@@ -102,6 +102,17 @@ def _role_of(url: str) -> str | None:
 
     user = urlsplit(url).username
     return unquote(user) if user else None
+
+
+def role_name_from_dsn_safe() -> str | None:
+    """The migration principal's role name (no password/host), for evidence."""
+    return _role_of(os.environ.get("MONDAY_REPORT_TEST_DATABASE_URL") or "")
+
+
+def _guc_trust_model() -> str:
+    from backend.app.tenant_rls import GUC_TRUST_MODEL
+
+    return GUC_TRUST_MODEL
 
 
 def _fresh_schema(url: str) -> None:
@@ -281,7 +292,13 @@ def role_checks(url: str, runtime_dsn: str, runtime_role: str) -> dict:
 
     with _connect(runtime_dsn) as c:
         measurement = T.measure_runtime_role(c)
-    check("10 runtime role is NOT a superuser", measurement["is_superuser"] is False)
+        measurement["policy_inventory"] = T.policy_inventory(c)
+    check("10 runtime principal is a non-superuser LOGIN role that INHERITs the app group "
+          "(not the NOLOGIN group itself)",
+          measurement["is_superuser"] is False and measurement.get("is_login_not_group") is True
+          and "monday_report_app" in (measurement.get("group_membership") or []),
+          {"login": measurement.get("can_login"), "is_login_not_group": measurement.get("is_login_not_group"),
+           "groups": measurement.get("group_membership")})
     check("11 runtime role does NOT have BYPASSRLS", measurement["has_bypassrls"] is False)
     check("12 runtime role owns none of the protected tables",
           not measurement["owner_bypass_tables"] and
@@ -502,13 +519,25 @@ def app_checks(url: str, runtime_dsn: str, scratch: Path) -> None:
     _, tok = store.create_credential(admin.id)
     wa = store.create_workspace(WorkspaceCreate(name="A ws"))
 
-    # 25 client-mode: an unauthenticated request establishes no identity/tenant and
-    # is denied. The middleware reads the mode live, so flip to client for this probe.
+    # 25 auth is a real denial, NOT a broken/misconfigured service. Prove the service
+    # is HEALTHY (a valid key returns 200) AND that missing/invalid credentials are
+    # denied. A 503 alone (which a misconfigured stack could always return) is not
+    # accepted as proof: the valid-key 200 rules out "the service is just down".
+    healthy = client.get("/monday-reports", headers=hdr(tok))
     os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client"
     anon = client.get("/monday-reports")
+    bad = client.get("/monday-reports", headers=hdr("not-a-real-key"))
     os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "demo"
-    check("25 client-mode: an unauthenticated request is denied (no tenant established)",
-          anon.status_code in (401, 403, 503), {"status": anon.status_code})
+    # Service is HEALTHY (valid key -> 200) so a 503 cannot be "the stack is down";
+    # missing AND invalid credentials are both denied (the client-mode edge preflight
+    # returns 503 for any non-valid key per the documented MC1 contract). The valid-key
+    # 200 vs no/bad-key denial contrast proves credentials are required and validated.
+    check("25 service healthy on a valid key (200); missing AND invalid credentials both "
+          "denied (valid-key 200 rules out a misconfigured/down stack)",
+          healthy.status_code == 200
+          and anon.status_code in (401, 403, 503)
+          and bad.status_code in (401, 403, 503),
+          {"valid_key": healthy.status_code, "no_key": anon.status_code, "bad_key": bad.status_code})
 
     # 26 tenant A cannot GET the foreign (tenant-B) report id -> existence-hiding 404
     got = client.get(f"/monday-reports/{rid_b}", headers=hdr(tok))
@@ -705,14 +734,35 @@ def import_admin_checks(url: str, runtime_dsn: str) -> None:
     check("38 no context leakage across transactions on one connection (A never sees B)",
           a_ctx_sees_b == 0, {"a_sees_b": a_ctx_sees_b})
 
+    # 47 GUC TRUST-MODEL HONESTY: RLS keyed on a custom GUC does NOT stop a trusted
+    # runtime principal from CHOOSING another valid tenant slug. Prove this limitation
+    # empirically (the runtime login CAN set a foreign slug and read that tenant) and
+    # require the code to declare the trust model honestly (GUC_TRUST_MODEL), so the
+    # evidence/docs cannot overclaim "the runtime SQL principal cannot select another
+    # tenant". The isolation guarantee is: missing/spoofed/forgotten-predicate context
+    # is denied; total runtime-principal compromise is out of scope (documented).
+    from backend.app import tenant_rls as _T
+    c = psycopg.connect(runtime_dsn); c.autocommit = False; cur = c.cursor()
+    cur.execute("select set_config('app.tenant_slug', %s, true)", (TA,))
+    cur.execute("select set_config('app.tenant_slug', %s, true)", (TB,))  # choose a foreign slug
+    can_choose_foreign = cur.execute(
+        "select count(*) from monday_report_norm_reports").fetchone()[0] >= 1
+    c.rollback(); c.close()
+    disclosed = isinstance(getattr(_T, "GUC_TRUST_MODEL", None), str) and \
+        "compromise" in _T.GUC_TRUST_MODEL.lower()
+    check("47 GUC trust-model is disclosed honestly (runtime principal CAN select another "
+          "valid tenant; RLS is not a defense against total runtime-principal compromise)",
+          can_choose_foreign and disclosed,
+          {"runtime_can_choose_foreign_tenant": can_choose_foreign, "trust_model_disclosed": disclosed})
+
 
 # --------------------------------------------------------------------------- #
 # 39-43 Inventory integrity (self-tests, no DB)
 # --------------------------------------------------------------------------- #
 def inventory_checks() -> None:
     ids = list(EXPECTED_CHECK_IDS)
-    check("39 canonical inventory has unique, gapless 01..46 ids",
-          len(ids) == len(set(ids)) == 46 and ids == sorted(ids), {"n": len(ids)})
+    check("39 canonical inventory has unique, gapless 01..47 ids",
+          len(ids) == len(set(ids)) == 47 and ids == sorted(ids), {"n": len(ids)})
 
     def inv_ok(recorded_ids):
         return (sorted(recorded_ids) == sorted(EXPECTED_CHECK_IDS)
@@ -744,11 +794,19 @@ def inventory_checks() -> None:
         "routes_result": "passed", "worker_pool_result": "passed", "import_admin_result": "passed",
         "idempotency_result": "passed",
         "tenant_context_mechanism": "transaction_local_guc:app.tenant_slug",
-        "guard_inventory_ok": True, "totals": {"passed": 46, "skipped": 0, "failed": 0},
+        "runtime_role_can_login": True, "runtime_role_is_login_not_group": True,
+        "runtime_group_membership": ["monday_report_app"],
+        "policy_inventory": {"tenants": {"policies": [{"name": "x"}]}},
+        "policy_inventory_digest": "deadbeef",
+        "guc_trust_model": "declares compromise limitation",
+        "guard_inventory_ok": True, "totals": {"passed": 47, "skipped": 0, "failed": 0},
     }
     good["payload_sha256"] = _g.payload_sha256(good)
     tampers = [
         ("superuser", {"runtime_role_is_superuser": True}),
+        ("nologin_group", {"runtime_role_is_login_not_group": False}),
+        ("no_policy_inv", {"policy_inventory": {}}),
+        ("no_trust_model", {"guc_trust_model": "isolation is absolute"}),
         ("few_forced", {"rls_forced_table_count": 4}),
         ("bad_int", {"rls_forced_normalized_count": "x"}),
         ("not_passed", {"status": "blocked"}),
@@ -807,9 +865,23 @@ def build_evidence(measurement: dict | None, ran_real_db: bool) -> dict:
         "pgvector_version": os.environ.get("MONDAY_REPORT_TEST_PGVECTOR_VERSION"),
         "postgres_image_digest": os.environ.get("MONDAY_REPORT_TEST_PG_IMAGE_DIGEST"),
         "tenant_context_mechanism": "transaction_local_guc:app.tenant_slug",
+        # Actual runtime principal (distinct login vs the NOLOGIN privilege group).
+        "runtime_session_user": m.get("session_user"),
+        "runtime_current_user": m.get("current_user"),
+        "runtime_role_can_login": bool(m.get("can_login")),
+        "runtime_role_is_login_not_group": bool(m.get("is_login_not_group")),
+        "runtime_group_membership": list(m.get("group_membership") or []),
+        "migration_role_login": role_name_from_dsn_safe(),
         "runtime_role_is_superuser": bool(m.get("is_superuser")),
         "runtime_role_has_bypassrls": bool(m.get("has_bypassrls")),
         "runtime_role_owner_bypass": bool(m.get("owner_bypass_tables")),
+        # Exact per-table ownership + a full policy inventory (name/cmd/permissive/
+        # using/with_check/roles) with a digest -- not merely a count.
+        "table_ownership": {t: (m.get("tables") or {}).get(t, {}).get("owned")
+                            for t in PROTECTED_TABLES},
+        "policy_inventory": (m.get("policy_inventory") or {}).get("tables", {}),
+        "policy_inventory_digest": (m.get("policy_inventory") or {}).get("policy_digest"),
+        "guc_trust_model": _guc_trust_model(),
         # Measured (not assumed): count PROTECTED_TABLES whose measured
         # relforcerowsecurity is true, so a missing FORCE cannot pass as forced.
         "rls_forced_table_count": sum(
@@ -857,7 +929,7 @@ def main() -> int:
 
     if not url:
         for cid in EXPECTED_CHECK_IDS:
-            if int(cid) <= 38 or cid in ("44", "46"):  # DB-backed checks (39-43, 45 run without a DB)
+            if int(cid) <= 38 or cid in ("44", "46", "47"):  # DB-backed (39-43, 45 run without a DB)
                 skip(f"{cid} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         ran_real_db = True
