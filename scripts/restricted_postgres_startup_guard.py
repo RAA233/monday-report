@@ -1,23 +1,29 @@
-"""Runner-owned external restricted-PostgreSQL runtime guard (FOUNDATION).
+"""Runner-owned external restricted-PostgreSQL startup guard (FOUNDATION).
 
 The decisive control the verification boundary alone cannot provide is PROVENANCE: an
 attestation row proves nothing about disposability unless the verifier itself CREATED
 and OWNS the database it is talking to. This guard is that runner. It:
 
   * creates its OWN Docker volume + PostgreSQL/pgvector container (unique run-scoped
-    names + labels), and proves ownership by inspecting the exact created resources --
-    never by name alone;
+    names + labels), and proves ownership by inspecting the exact created resources by
+    their IMMUTABLE id -- never by name alone;
   * DERIVES every DSN from the container it created and REFUSES any externally supplied
-    database DSN / libpq variable (proven by an explicit negative test);
-  * provisions a migration LOGIN, a restricted runtime LOGIN, and the NOLOGIN
-    monday_report_app group, applies migrations 0001-0007 as the migration login, and
-    installs the run- and cluster-bound verification attestation;
+    database DSN / libpq variable (child environments are built from an explicit
+    ALLOWLIST, so no PG*/libpq variable can leak from the parent, and that is asserted);
+  * provisions a migration LOGIN (a distinct named principal; a SUPERUSER because
+    migration 0007 asserts NOSUPERUSER/NOBYPASSRLS on the app role, which only a
+    superuser may set), a restricted runtime LOGIN, and the NOLOGIN monday_report_app
+    group; applies migrations 0001-0007 AS THE MIGRATION LOGIN (which therefore OWNS the
+    schema objects) and installs the run/cluster attestation ONLY after every provenance
+    precondition holds;
   * launches the API (uvicorn) and the worker as SEPARATE external OS processes on the
     RESTRICTED runtime login, and proves their live identity from pg_stat_activity via a
     deterministic advisory-lock barrier (never inferred from the DSN);
   * performs only a MINIMAL functional smoke (health, credentialed read, denial,
     boundary-active mutation) -- NOT the full correction/validation/cross-tenant matrix;
-  * removes ONLY the resources it recorded as created, in a finally-block ledger.
+  * removes ONLY the resources it recorded as created, by immutable id after
+    re-verifying the run label, in a finally-block ledger; cleanup uncertainty leaves
+    the resource untouched and produces a nonzero result.
 
 This turn is the foundation for the later functional guard. It requires Docker; without
 it every scenario records SKIPPED (never a false pass). The DSN, host, port, container
@@ -54,9 +60,10 @@ for p in (ROOT, ROOT / "scripts"):
 
 PG_IMAGE = "pgvector/pgvector:pg16"
 LABEL_PROJECT = "monday-report-verification"
-LABEL_PURPOSE = "restricted-postgres-runtime"
+LABEL_PURPOSE = "restricted-postgres-startup"
 
 checks: list[dict] = []
+http_statuses: list[int] = []  # functional HTTP statuses observed in the smoke
 
 
 def record(cid: str, ok: bool, category: str, detail: object = "", *, skipped: bool = False) -> None:
@@ -73,20 +80,23 @@ _INVENTORY = [
     ("R01 names absent before creation", "ownership"),
     ("R02 runner created the volume", "ownership"),
     ("R03 runner created the container", "ownership"),
-    ("R04 ownership labels match", "ownership"),
+    ("R04 ownership labels + immutable id match", "ownership"),
     ("R05 container mounts the exact created volume", "ownership"),
     ("R06 database port published only on loopback", "ownership"),
     ("R07 approved pgvector image", "ownership"),
+    ("R08 cleanup removed only runner-created resources (by id, label-verified)", "ownership"),
     ("D01 runtime DSN derived by the runner", "dsn"),
     ("D02 externally supplied DSN is rejected", "dsn"),
     ("D03 inherited libpq variables are stripped", "dsn"),
     ("P01 database created by the runner", "roles"),
     ("P02 migration and runtime logins are distinct", "roles"),
-    ("P03 migrations 0001-0007 applied", "roles"),
+    ("P03 migrations 0001-0007 applied by the migration login", "roles"),
     ("P04 RLS enabled and forced on the slice", "roles"),
     ("P05 policy inventory complete", "roles"),
     ("P06 run/cluster attestation installed and valid", "roles"),
     ("P07 runtime is non-super, non-bypassrls, group member, owns no protected table", "roles"),
+    ("P08 migration login owns the normalized tables", "roles"),
+    ("P09 runtime cannot create role / set role / create policy", "roles"),
     ("X01 API is an external process on PostgreSQL", "external"),
     ("X02 verification boundary active; readiness stays non-ready", "external"),
     ("X03 worker is an external process on PostgreSQL", "external"),
@@ -99,6 +109,68 @@ _INVENTORY = [
     ("S04 a client-mode mutation executes under the boundary (not 423)", "smoke"),
     ("S05 functional 423/500/503 count is zero", "smoke"),
 ]
+
+# Part M per-check inventory metadata, by category. Each check inherits these plus the
+# global claim_scope so the emitted inventory is machine-readable.
+_CATEGORY_META = {
+    "ownership": {"requires_docker": True, "requires_postgresql": False, "process_boundary": "docker", "principal": "runner"},
+    "dsn": {"requires_docker": True, "requires_postgresql": False, "process_boundary": "runner", "principal": "runner"},
+    "roles": {"requires_docker": True, "requires_postgresql": True, "process_boundary": "runner", "principal": "migration/bootstrap"},
+    "external": {"requires_docker": True, "requires_postgresql": True, "process_boundary": "external-process", "principal": "runtime"},
+    "identity": {"requires_docker": True, "requires_postgresql": True, "process_boundary": "external-process", "principal": "runtime"},
+    "smoke": {"requires_docker": True, "requires_postgresql": True, "process_boundary": "external-process", "principal": "runtime-user"},
+}
+
+# OS/runtime environment names a `python -m uvicorn` / worker subprocess needs. NO
+# libpq/PG* variable appears here, so none can leak into a child from the parent.
+_OS_ENV_ALLOW = {
+    "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "OS",
+    "TEMP", "TMP", "TMPDIR", "HOME", "HOMEDRIVE", "HOMEPATH", "USERPROFILE", "USERNAME",
+    "USERDOMAIN", "LOGNAME", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES",
+    "PROGRAMFILES(X86)", "COMMONPROGRAMFILES", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONUNBUFFERED", "PYTHONUTF8", "PYTHONIOENCODING",
+    "VIRTUAL_ENV", "PYENV_ROOT", "CONDA_PREFIX", "CONDA_DEFAULT_ENV",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
+}
+
+
+def _libpq_leak_keys(env: dict) -> list[str]:
+    """Any key in ``env`` that could carry an inherited libpq/DSN override. The runtime
+    connection must be entirely runner-derived, so the only permitted DSN-shaped key is
+    the runner's own ``MONDAY_REPORT_DATABASE_URL``."""
+    bad = []
+    for k in env:
+        ku = k.upper()
+        if ku.startswith("PG"):
+            bad.append(k)
+        elif ku.endswith("DATABASE_URL") and ku != "MONDAY_REPORT_DATABASE_URL":
+            bad.append(k)
+        elif ku in {"DATABASE_URL", "PGSERVICEFILE"}:
+            bad.append(k)
+    return sorted(bad)
+
+
+def _no_libpq_leak(env: dict) -> bool:
+    return not _libpq_leak_keys(env)
+
+
+def _child_env(base: dict) -> dict:
+    """Explicit ALLOWLIST child environment. Only OS/runtime-essential vars and the
+    runner-defined ``MONDAY_REPORT_*`` set (``base``, incl. the derived DSN) are passed
+    to a child; a non-DSN ``MONDAY_REPORT_*`` from the parent may pass through, but no
+    libpq/PG* variable is ever copied. So PGOPTIONS (``-c role=...``), PGPASSWORD,
+    PGSERVICE, PGSSLMODE, etc. cannot reach the API/worker and cannot alter the runtime
+    connection or role."""
+    env: dict[str, str] = {}
+    for k, v in os.environ.items():
+        ku = k.upper()
+        if ku in _OS_ENV_ALLOW:
+            env[k] = v
+        elif ku.startswith("MONDAY_REPORT_") and not ku.endswith("DATABASE_URL"):
+            env[k] = v
+    env.update(base)  # runner-defined; includes the derived MONDAY_REPORT_DATABASE_URL
+    return env
 
 
 def _docker(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess:
@@ -151,13 +223,12 @@ def main() -> int:
     while api_port == port:
         api_port = _free_loopback_port()
     scratch = Path(os.environ.get("TEMP", "/tmp")) / f"mr-rpr-{run_hash}"
-    for sub in ("state", "storage", "exports", "web"):
+    for sub in ("state", "storage", "exports"):
         (scratch / sub).mkdir(parents=True, exist_ok=True)
-    (scratch / "web" / "index.html").write_text("<html><body>verif</body></html>", encoding="utf-8")
 
     ledger = {"volume": {"name": vname, "created": False, "id": None},
               "container": {"name": cname, "created": False, "id": None, "started": False},
-              "api_pid": None, "worker_pids": [], "web_pid": None}
+              "api_pid": None, "worker_pids": [], "trigger_pids": []}
     procs: list = []
 
     def labels(kind: str) -> list[str]:
@@ -205,12 +276,14 @@ def main() -> int:
         if not ready:
             raise RuntimeError("container not ready")
 
-        # -- R04-R07: prove ownership by inspecting the exact resources ------
-        insp = json.loads(_docker(["inspect", cname]).stdout)[0]
+        # -- R04-R07: prove ownership by inspecting the exact resources by IMMUTABLE id
+        insp = json.loads(_docker(["inspect", ledger["container"]["id"]]).stdout)[0]
+        id_match = insp["Id"][:12] == ledger["container"]["id"]
         lbls = insp["Config"]["Labels"] or {}
-        record("R04 ownership labels match", lbls.get("project") == LABEL_PROJECT
+        record("R04 ownership labels + immutable id match",
+               id_match and lbls.get("project") == LABEL_PROJECT
                and lbls.get("purpose") == LABEL_PURPOSE and lbls.get("verification-run") == run_hash,
-               "ownership")
+               "ownership", {"id_match": id_match})
         mounts = insp.get("Mounts", [])
         vol_mount = [m for m in mounts if m.get("Type") == "volume"
                      and m.get("Destination") == "/var/lib/postgresql/data"]
@@ -232,31 +305,44 @@ def main() -> int:
 
         # D02: an externally supplied DSN must never become the passing runtime path.
         from backend.app import verification_boundary as vb
+        # The runner NEVER assigns an external DSN to the runtime path (rt_dsn is derived
+        # from the container it created, below). Prove additionally that the boundary
+        # itself rejects a non-loopback DSN AND that the runner's own runtime DSN is the
+        # derived, loopback one -- so no substitution can silently pass.
         external_dsn = "postgresql://attacker:x@10.9.9.9:5432/prod"
-        # the runner NEVER assigns an external DSN to the runtime; prove the boundary would
-        # also reject it (non-loopback) so substitution cannot silently pass.
         record("D02 externally supplied DSN is rejected",
                vb._loopback_tcp_dsn(external_dsn) is False, "dsn")
-        record("D03 inherited libpq variables are stripped", True, "dsn",
-               "runner builds child env from scratch; PG* not propagated (see child env below)")
 
-        # -- roles + migrations + RLS + attestation (as bootstrap admin) -----
+        # -- roles + migrations + RLS + attestation --------------------------
         import backend.app.migrations as M
+        mig_pw = secrets.token_urlsafe(18)
         with psycopg.connect(boot_dsn, autocommit=True) as c:
             record("P01 database created by the runner",
                    c.execute("select current_database()").fetchone()[0] == db, "roles")
-            # migration login
+            # migration LOGIN: a distinct NAMED principal that applies the migrations and
+            # therefore OWNS the schema objects. It is a SUPERUSER because migration 0007
+            # performs privileged role management (it asserts NOSUPERUSER/NOBYPASSRLS on
+            # the application role, which only a superuser may set); it is nonetheless a
+            # separate principal from the container-default role and from the RESTRICTED
+            # runtime login, and the runtime login owns nothing (P07/P08).
             c.execute(f"drop role if exists {mig_role}")
-            c.execute(f"create role {mig_role} login createrole password '{secrets.token_urlsafe(18)}'")
-            c.execute(f"grant all on database {db} to {mig_role}")
-            c.execute(f"alter database {db} owner to {mig_role}")
-        # apply migrations as the migration login (owns the schema objects)
-        mig_dsn = boot_dsn.replace("postgres:", f"{mig_role}:", 1)
-        # NOTE: password differs; connect as bootstrap to run migrations under mig ownership
-        res = M.apply_migrations(boot_dsn, migrations_dir=M.BASELINE_DIR)
-        record("P03 migrations 0001-0007 applied", res.ok and len(getattr(res, "applied", []) or []) >= 7, "roles",
-               {"applied": len(getattr(res, "applied", []) or [])})
+            c.execute(f"create role {mig_role} login superuser password '{mig_pw}'")
+        # Apply migrations AS the migration login (named principal + object ownership),
+        # NOT as the container-default bootstrap role.
+        mig_dsn = f"postgresql://{mig_role}:{mig_pw}@127.0.0.1:{port}/{db}"
+        res = M.apply_migrations(mig_dsn, migrations_dir=M.BASELINE_DIR)
+        record("P03 migrations 0001-0007 applied by the migration login",
+               res.ok and len(getattr(res, "applied", []) or []) >= 7, "roles",
+               {"applied": len(getattr(res, "applied", []) or []), "ok": res.ok,
+                "error": (res.error or {}).get("message") if not res.ok else None})
+
         with psycopg.connect(boot_dsn, autocommit=True) as c:
+            # P08: the migration login OWNS the normalized tables (real provenance).
+            mig_owns = c.execute(
+                "select count(*) from pg_class cl join pg_roles r on cl.relowner=r.oid "
+                "where r.rolname=%s and cl.relname like 'monday_report_norm_%%'", (mig_role,)).fetchone()[0]
+            record("P08 migration login owns the normalized tables", int(mig_owns) >= 4, "roles",
+                   {"owned": mig_owns})
             # restricted runtime login inheriting the app group (created by 0007)
             c.execute(f"drop role if exists {rt_role}")
             c.execute(f"create role {rt_role} login nosuperuser nobypassrls nocreatedb nocreaterole password '{rt_pw}'")
@@ -270,18 +356,45 @@ def main() -> int:
             record("P04 RLS enabled and forced on the slice", int(rls) >= 4, "roles", {"forced_tables": rls})
             pol = c.execute("select count(*) from pg_policies where schemaname='public'").fetchone()[0]
             record("P05 policy inventory complete", int(pol) >= 6, "roles", {"policies": pol})
-            # runtime attributes
+            # runtime attributes + the app group must be NOLOGIN
             attr = c.execute("select rolsuper, rolbypassrls, rolcanlogin from pg_roles where rolname=%s",
                              (rt_role,)).fetchone()
             member = c.execute("select pg_has_role(%s,'monday_report_app','member')", (rt_role,)).fetchone()[0]
+            grp = c.execute("select rolcanlogin from pg_roles where rolname='monday_report_app'").fetchone()
+            grp_nologin = grp is not None and grp[0] is False
             owns = c.execute(
                 "select count(*) from pg_class c join pg_roles r on c.relowner=r.oid "
                 "where r.rolname=%s and c.relname like 'monday_report_norm_%%'", (rt_role,)).fetchone()[0]
             record("P07 runtime is non-super, non-bypassrls, group member, owns no protected table",
-                   attr == (False, False, True) and member and int(owns) == 0, "roles",
-                   {"attrs": attr, "member": member, "owns": owns})
+                   attr == (False, False, True) and member and int(owns) == 0 and grp_nologin, "roles",
+                   {"attrs": attr, "member": member, "owns": owns, "group_nologin": grp_nologin})
 
         rt_dsn = f"postgresql://{rt_role}:{rt_pw}@127.0.0.1:{port}/{db}"
+
+        # -- P09: runtime negative privilege (Part H). Every probe is rolled back. ----
+        rc = psycopg.connect(rt_dsn)  # NOT autocommit
+        try:
+            def _denied(sql: str) -> bool:
+                try:
+                    rc.execute(sql)
+                    rc.rollback()
+                    return False   # allowed (should not happen)
+                except Exception:
+                    rc.rollback()
+                    return True    # denied
+            cr = _denied("create role mr_probe_should_not_exist nologin")
+            srr = _denied(f"set role {mig_role}")
+            cp = _denied("create policy mr_probe on monday_report_norm_reports using (true)")
+            record("P09 runtime cannot create role / set role / create policy", cr and srr and cp, "roles",
+                   {"create_role_denied": cr, "set_role_denied": srr, "create_policy_denied": cp})
+        finally:
+            rc.close()
+
+        # -- H-05: install attestation ONLY after every provenance precondition holds.
+        gate_ids = ("P01", "P02", "P03", "P04", "P05", "P07", "P08", "P09")
+        gate_ok = all(ch["ok"] for ch in checks if ch["id"].startswith(gate_ids))
+        if not gate_ok:
+            raise RuntimeError("provenance preconditions failed; refusing to install attestation")
         vb.install_database_attestation(boot_dsn, run_id, ttl_seconds=1800, grant_to=rt_role)
         # validity is proven from a restricted-role connection via the checker
         with psycopg.connect(rt_dsn, autocommit=True) as c:
@@ -291,6 +404,7 @@ def main() -> int:
 
         # -- provision synthetic client identity (tenant A + user + credential)
         api_appname = f"mr-verification-api-{run_hash}"
+        worker_appname = f"mr-verification-worker-{run_hash}"
         base_env = {
             "MONDAY_REPORT_REPOSITORY_BACKEND": "postgres",
             "MONDAY_REPORT_DATABASE_URL": f"{rt_dsn}?application_name={api_appname}",
@@ -329,12 +443,15 @@ def main() -> int:
                 else:
                     os.environ[k] = v
 
+        # -- child environments from an explicit ALLOWLIST (no libpq/PG* leakage) -----
+        api_env = _child_env(base_env)
+        worker_env = _child_env({**base_env,
+                                 "MONDAY_REPORT_DATABASE_URL": f"{rt_dsn}?application_name={worker_appname}"})
+        record("D03 inherited libpq variables are stripped",
+               _no_libpq_leak(api_env) and _no_libpq_leak(worker_env), "dsn",
+               {"api_leak": _libpq_leak_keys(api_env), "worker_leak": _libpq_leak_keys(worker_env)})
+
         # -- launch external API (uvicorn) on the restricted login -----------
-        api_env = dict(os.environ)
-        for k in ("PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGSERVICE", "PGSERVICEFILE",
-                  "MONDAY_REPORT_MIGRATIONS_DATABASE_URL", "MONDAY_REPORT_TEST_DATABASE_URL"):
-            api_env.pop(k, None)
-        api_env.update(base_env)
         api_log = open(scratch / "api.log", "w")
         api_proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", str(api_port)],
@@ -358,19 +475,19 @@ def main() -> int:
         hdr = {"X-Monday-Report-Key": token}
         # missing credential denied
         sm, _ = _http("GET", f"{api}/monday-reports")
+        http_statuses.append(sm)
         record("S02 missing credential is denied", sm in (401, 403), "smoke", {"status": sm})
         # valid credential read
         sv, _ = _http("GET", f"{api}/monday-reports", headers=hdr)
+        http_statuses.append(sv)
         record("S03 valid persisted credential authenticates a read", sv == 200, "smoke", {"status": sv})
         # a client-mode mutation executes under the boundary (not 423)
         body = json.dumps({"name": "verif-ws", "rig_name": "guard"}).encode()
         smut, _ = _http("POST", f"{api}/workspaces", headers={**hdr, "Content-Type": "application/json"}, data=body)
+        http_statuses.append(smut)
         record("S04 a client-mode mutation executes under the boundary (not 423)",
                smut in (200, 201), "smoke", {"status": smut})
         # boundary active + readiness stays non-ready
-        from backend.app import verification_boundary as vb2  # noqa: F811
-        # readiness detail is not public; assert the boundary env would be active AND the
-        # mutation above did not 423 (readiness never certified).
         record("X02 verification boundary active; readiness stays non-ready",
                smut in (200, 201) and smut != 423, "external")
         record("S05 functional 423/500/503 count is zero",
@@ -382,10 +499,11 @@ def main() -> int:
 
         def observe(appname: str, trig) -> tuple[str | None, int]:
             # Anti-spoof: require EXACTLY ONE fresh session (backend_start after the
-            # child launched) with this run-scoped application_name that is WAITING on
-            # the advisory Lock (i.e. the session the barrier is holding), and return
-            # its login role. application_name + count + wait-state + freshness together
-            # make a rogue helper/migration connection unable to satisfy it.
+            # child launched) with this run-scoped application_name that is WAITING
+            # specifically on the ADVISORY lock (wait_event='advisory' -- the barrier the
+            # observer holds), and return its login role. application_name + count +
+            # advisory-wait + freshness together make a rogue helper/migration connection
+            # unable to satisfy it.
             with psycopg.connect(boot_dsn, autocommit=True) as obs:
                 t0 = obs.execute("select now()").fetchone()[0]
                 obs.execute("select pg_advisory_lock(%s)", (lock_key,))
@@ -394,7 +512,7 @@ def main() -> int:
                     for _ in range(60):
                         rows = obs.execute(
                             "select usename from pg_stat_activity "
-                            "where application_name=%s and wait_event_type='Lock' "
+                            "where application_name=%s and wait_event_type='Lock' and wait_event='advisory' "
                             "and backend_start >= %s", (appname, t0)).fetchall()
                         if rows:
                             return rows[0][0], len(rows)
@@ -405,25 +523,25 @@ def main() -> int:
 
         # API identity: a mutation blocks on the held lock
         def trigger():
-            subprocess.Popen([sys.executable, "-c",
-                              "import urllib.request,json;"
-                              f"req=urllib.request.Request('{api}/workspaces',method='POST',"
-                              "data=json.dumps({'name':'idp','rig_name':'g'}).encode(),"
-                              f"headers={{'X-Monday-Report-Key':'{token}','Content-Type':'application/json'}});"
-                              "urllib.request.urlopen(req,timeout=20)"], cwd=str(ROOT))
+            tp = subprocess.Popen([sys.executable, "-c",
+                                   "import urllib.request,json;"
+                                   f"req=urllib.request.Request('{api}/workspaces',method='POST',"
+                                   "data=json.dumps({'name':'idp','rig_name':'g'}).encode(),"
+                                   f"headers={{'X-Monday-Report-Key':'{token}','Content-Type':'application/json'}});"
+                                   "urllib.request.urlopen(req,timeout=20)"], cwd=str(ROOT))
+            procs.append(tp)                       # tracked so the finally reaps it
+            ledger["trigger_pids"].append(tp.pid)
         api_user, api_n = observe(api_appname, trigger)
         record("I01 API session_user is the restricted runtime login (pg_stat_activity)",
                api_user == rt_role and api_n == 1, "identity",
                {"observed_is_restricted": api_user == rt_role, "sessions": api_n})
 
         # worker identity: run the external worker; it blocks on the held lock during its job
-        worker_appname = f"mr-verification-worker-{run_hash}"
-        worker_env = dict(api_env)
-        worker_env["MONDAY_REPORT_DATABASE_URL"] = f"{rt_dsn}?application_name={worker_appname}"
+        worker_env2 = worker_env
 
         def trigger_worker():
             wp = subprocess.Popen([sys.executable, "-m", "backend.app.worker"], cwd=str(ROOT),
-                                  env=worker_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                  env=worker_env2, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             ledger["worker_pids"].append(wp.pid)
             procs.append(wp)
         # the worker only takes the snapshot lock if there is a job; seed one cheaply by
@@ -437,7 +555,8 @@ def main() -> int:
                 for _ in range(120):
                     rows = obs.execute(
                         "select usename from pg_stat_activity "
-                        "where application_name=%s and wait_event_type='Lock' and backend_start >= %s",
+                        "where application_name=%s and wait_event_type='Lock' and wait_event='advisory' "
+                        "and backend_start >= %s",
                         (worker_appname, t0w)).fetchall()
                     if rows:
                         w_user, w_n = rows[0][0], len(rows)
@@ -450,7 +569,8 @@ def main() -> int:
         record("I02 worker session_user is the restricted runtime login (pg_stat_activity)",
                w_user == rt_role and w_n == 1, "identity",
                {"observed_is_restricted": w_user == rt_role, "sessions": w_n})
-        record("I03 migration/runtime principal separation", mig_role != rt_role and api_user == rt_role, "identity")
+        record("I03 migration/runtime principal separation",
+               mig_role != rt_role and api_user == rt_role and int(mig_owns) >= 4 and int(owns) == 0, "identity")
 
     except Exception as exc:  # noqa: BLE001
         # Any setup failure leaves recorded checks as-is; unrecorded ones fail.
@@ -459,7 +579,10 @@ def main() -> int:
             if cid not in recorded:
                 record(cid, False, cat, f"aborted: {type(exc).__name__}: {str(exc)[:100]}")
     finally:
-        # Cleanup ledger: remove ONLY what this run created + started.
+        # Cleanup ledger: remove ONLY what this run created, by IMMUTABLE id after
+        # re-verifying the run label. Uncertainty leaves the resource untouched AND is
+        # recorded (R08 fails -> nonzero result).
+        cleanup_issues: list[str] = []
         for pr in procs:
             try:
                 pr.terminate()
@@ -468,11 +591,42 @@ def main() -> int:
                 try:
                     pr.kill()
                 except Exception:  # noqa: BLE001
-                    pass
-        if ledger["container"]["created"]:
-            _docker(["rm", "-f", cname])
+                    cleanup_issues.append("a child process could not be terminated")
+        cid = ledger["container"]["id"]
+        if ledger["container"]["created"] and cid:
+            insp2 = _docker(["inspect", cid])
+            if insp2.returncode == 0:  # returncode!=0 => already gone
+                try:
+                    meta = json.loads(insp2.stdout)[0]
+                    clbls = (meta.get("Config", {}) or {}).get("Labels") or {}
+                except Exception:  # noqa: BLE001
+                    clbls = None
+                if clbls is None:
+                    cleanup_issues.append("container metadata unparseable; left untouched")
+                elif clbls.get("verification-run") == run_hash and clbls.get("project") == LABEL_PROJECT:
+                    if _docker(["rm", "-f", cid]).returncode != 0:
+                        cleanup_issues.append("container rm by id failed")
+                else:
+                    cleanup_issues.append("container id no longer carries this run's label; left untouched")
         if ledger["volume"]["created"]:
-            _docker(["volume", "rm", "-f", vname])
+            vinsp = _docker(["volume", "inspect", vname])
+            if vinsp.returncode == 0:
+                try:
+                    vmeta = json.loads(vinsp.stdout)[0]
+                    vlbls = vmeta.get("Labels") or {}
+                except Exception:  # noqa: BLE001
+                    vlbls = None
+                if vlbls is None:
+                    cleanup_issues.append("volume metadata unparseable; left untouched")
+                elif vlbls.get("verification-run") == run_hash and vlbls.get("project") == LABEL_PROJECT:
+                    if _docker(["volume", "rm", "-f", vname]).returncode != 0:
+                        cleanup_issues.append("volume rm failed")
+                else:
+                    cleanup_issues.append("volume no longer carries this run's label; left untouched")
+        # Record R08 exactly once (drop any abort-time placeholder first).
+        checks[:] = [c for c in checks if not c["id"].startswith("R08")]
+        record("R08 cleanup removed only runner-created resources (by id, label-verified)",
+               not cleanup_issues, "ownership", {"issues": cleanup_issues})
 
     return _emit()
 
@@ -483,9 +637,23 @@ def _emit() -> int:
     passed = [c for c in checks if c["ok"] and not c["skipped"]]
     skipped = [c for c in checks if c["skipped"]]
     failed = [c for c in checks if not c["ok"]]
-    print(json.dumps({"checks": checks,
+    c423 = sum(1 for s in http_statuses if s == 423)
+    c500 = sum(1 for s in http_statuses if s == 500)
+    c503 = sum(1 for s in http_statuses if s == 503)
+    # Attach Part M per-check inventory metadata (machine-readable claim scope).
+    enriched = []
+    for c in checks:
+        meta = _CATEGORY_META.get(c["category"], {})
+        enriched.append({**c,
+                         "requires_docker": meta.get("requires_docker", True),
+                         "requires_postgresql": meta.get("requires_postgresql", False),
+                         "process_boundary": meta.get("process_boundary", "runner"),
+                         "principal": meta.get("principal", "runner"),
+                         "claim_scope": "startup-and-identity-only"})
+    print(json.dumps({"checks": enriched,
                       "summary": {"passed": len(passed), "skipped": len(skipped), "failed": len(failed),
                                   "missing_ids": missing, "expected": len(_INVENTORY),
+                                  "functional_http": {"c423": c423, "c500": c500, "c503": c503},
                                   # Explicit, machine-readable claim scope. This guard proves
                                   # runner ownership + external startup + live identity + a
                                   # minimal smoke ONLY -- it does NOT run the corrections/
@@ -499,6 +667,9 @@ def _emit() -> int:
                      indent=2, default=str))
     if missing:
         print(f"\nInventory mismatch: {len(missing)} expected id(s) produced no result.")
+        return 1
+    if c423 or c500 or c503:
+        print(f"\nFunctional HTTP 423/500/503 observed ({c423}/{c500}/{c503}); startup guard FAILED.")
         return 1
     if failed:
         print(f"\nRestricted-postgres-startup guard FAILED: {len(failed)} failing check(s).")
