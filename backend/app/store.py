@@ -44,6 +44,11 @@ from .auth import (
 from .identity import get_current_identity
 from .malware import MalwareScanResult, scan_upload_content
 from .ocr import extract_ocr_text
+from .tenant_rls import (
+    apply_verified_tenant_scope,
+    assert_runtime_role_safe,
+    role_name_from_dsn,
+)
 from .queue_backend import (
     active_queue_backend,
     enqueue_processing_job,
@@ -7400,6 +7405,12 @@ class PostgresStateStore(LocalStateStore):
         self._txn_owner: contextvars.ContextVar = contextvars.ContextVar(
             "mr_txn_owner", default=None)
         self._verify_repository_schema()
+        # Refuse to run the protected store under a runtime role that would bypass
+        # tenant RLS (superuser / BYPASSRLS / owner-bypass / == migration role). In
+        # demo/local mode this only MEASURES (so superuser-backed tests keep
+        # working); in client mode it fails closed. See backend/app/tenant_rls.py.
+        self._runtime_role_measurement = None
+        self._assert_runtime_role_safe()
         # Bootstrap runs under the SAME global transaction boundary as every
         # other mutation -- one connection, the global advisory lock acquired
         # before the read, a single commit. There is no unprotected-write bypass:
@@ -7569,7 +7580,7 @@ class PostgresStateStore(LocalStateStore):
         try:
             with psycopg.connect(self.database_url, connect_timeout=5) as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
+                    apply_verified_tenant_scope(cursor, self.tenant.slug)
                     cursor.execute(
                         f"select revision from {self.STATE_TABLE} where tenant_slug = %s",
                         (self.tenant.slug,))
@@ -7590,7 +7601,7 @@ class PostgresStateStore(LocalStateStore):
                 with connection.cursor() as cursor:
                     cursor.execute("select set_config('lock_timeout', %s, true)",
                                    (f"{SNAPSHOT_LOCK_TIMEOUT_MS}ms",))
-                    cursor.execute("select set_config('app.tenant_slug', %s, true)", (tenant_slug,))
+                    apply_verified_tenant_scope(cursor, tenant_slug)
                     cursor.execute("select pg_advisory_xact_lock(%s)", (self._advisory_lock_key(),))
                     cursor.execute(
                         f"select payload, revision from {self.STATE_TABLE} "
@@ -7784,7 +7795,7 @@ class PostgresStateStore(LocalStateStore):
                 # equivalent and is still scoped to this transaction.
                 cursor.execute("select set_config('lock_timeout', %s, true)",
                                (f"{SNAPSHOT_LOCK_TIMEOUT_MS}ms",))
-                cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
+                apply_verified_tenant_scope(cursor, self.tenant.slug)
                 # Lock BEFORE the mutable-state read. Covers the not-yet-existing row.
                 cursor.execute("select pg_advisory_xact_lock(%s)", (self._advisory_lock_key(),))
                 cursor.execute(
@@ -7888,7 +7899,7 @@ class PostgresStateStore(LocalStateStore):
         expected = int(txn["revision"])
         payload = self._postgres_safe_json(self._state_payload())
         with connection.cursor() as cursor:
-            cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
+            apply_verified_tenant_scope(cursor, self.tenant.slug)
             if txn["payload"] is None:
                 cursor.execute(
                     f"insert into {self.STATE_TABLE} (tenant_slug, tenant_id, payload, revision) "
@@ -8081,7 +8092,33 @@ class PostgresStateStore(LocalStateStore):
         return psycopg.connect(self.database_url, connect_timeout=2)
 
     def _set_tenant_scope(self, cursor) -> None:
-        cursor.execute("select set_config('app.tenant_slug', %s, true)", (self.tenant.slug,))
+        apply_verified_tenant_scope(cursor, self.tenant.slug)
+
+    def _assert_runtime_role_safe(self) -> None:
+        """Validate the runtime connection's role can enforce tenant RLS.
+
+        Opens one short-lived connection, measures the role + protected-table RLS
+        state, and (in client mode only) raises a redacted TenantRuntimeRoleError
+        so the protected store refuses to start under a role that would bypass RLS.
+        The measurement is retained for readiness/evidence. In demo/local mode a
+        measurement failure is non-fatal (the mode makes no DB-enforcement claim);
+        in client mode any failure fails closed.
+        """
+        import psycopg
+        from . import tenant_rls
+
+        migration_role = role_name_from_dsn(
+            os.getenv("MONDAY_REPORT_MIGRATIONS_DATABASE_URL"))
+        try:
+            with psycopg.connect(self.database_url, connect_timeout=5) as connection:
+                self._runtime_role_measurement = assert_runtime_role_safe(
+                    connection, migration_role=migration_role)
+        except tenant_rls.TenantRuntimeRoleError:
+            raise
+        except Exception:
+            if tenant_rls.enforce_runtime_role():
+                raise
+            self._runtime_role_measurement = None
 
 
 # Install one context-aware property per MANAGED_STATE attribute. Domain methods
