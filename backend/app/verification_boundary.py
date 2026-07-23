@@ -200,18 +200,38 @@ def _expected_db_name(dsn: str) -> str:
         return ""
 
 
-# A fingerprint of the CURRENT server instance, computed entirely inside PostgreSQL
-# on one connection: database name + database OID + the server's own address + port
-# + the postmaster start time. It does not travel with a dump/restore -- a clone to
-# another server has a different postmaster start time (and usually OID/address/port),
-# so the fingerprint stored at install will not match the live one at check.
-_SERVER_FINGERPRINT_SQL = (
-    "md5(current_database() || ':' || "
-    "(select oid::text from pg_database where datname = current_database()) || ':' || "
-    "coalesce(host(inet_server_addr()), '') || ':' || "
-    "coalesce(inet_server_port()::text, '') || ':' || "
-    "extract(epoch from pg_postmaster_start_time())::text)"
+# A collision-resistant SHA-256 fingerprint of the CURRENT PostgreSQL cluster + server
+# instance, computed entirely inside PostgreSQL on one connection. Bound to the cluster
+# ``system_identifier`` (assigned at initdb, so a logical dump/restore gets a new one)
+# AND the postmaster start time (so a physical filesystem copy, which preserves the
+# system_identifier, still differs because it is started separately) AND the database
+# name/OID/server address/port. jsonb_build_object produces a canonical, key-sorted,
+# structurally-delimited encoding, so fields cannot run together ambiguously. The
+# ``system_identifier`` is read via pg_control_system(), which needs elevated
+# privileges, so the whole comparison runs inside a SECURITY DEFINER function the
+# migration/admin principal owns -- the runtime role only EXECUTEs it and never reads
+# the raw cluster id.
+FINGERPRINT_VERSION = 3
+_FINGERPRINT_EXPR = (
+    "encode(sha256(convert_to(jsonb_build_object("
+    f"'v', {FINGERPRINT_VERSION}, "
+    f"'purpose', '{ATTESTATION_PURPOSE}', "
+    "'sysid', (select system_identifier::text from pg_control_system()), "
+    "'db', current_database(), "
+    "'oid', (select oid::text from pg_database where datname = current_database()), "
+    "'addr', coalesce(host(inet_server_addr()), ''), "
+    "'port', coalesce(inet_server_port()::text, ''), "
+    "'pmst', extract(epoch from pg_postmaster_start_time())::text"
+    ")::text, 'UTF8')), 'hex')"
 )
+
+# The SECURITY DEFINER checker: owned by the migration/admin principal, non-mutating,
+# fixed search_path, EXECUTE granted only to the runtime group (never PUBLIC). It reads
+# the attestation table and returns only a boolean, so the runtime role never reads the
+# stored fingerprint or raw run hash and cannot replace the function. (The cluster
+# system_identifier itself is a public identifier; the boundary is that the runtime
+# cannot WRITE the attestation, not that it cannot learn the cluster id.)
+ATTESTATION_CHECK_FN = f"{ATTESTATION_SCHEMA}.mr_verification_isolation_check"
 
 
 def _is_loopback_addr(addr: str | None) -> bool:
@@ -271,21 +291,21 @@ def database_attestation_present(dsn: str | None = None, run_id: str | None = No
         return False
     try:
         with psycopg.connect(dsn, connect_timeout=5, autocommit=True) as conn:
+            # The whole cluster-bound match runs inside the admin-owned SECURITY DEFINER
+            # checker (fully qualified call, single text argument, no dynamic SQL); the
+            # runtime role only EXECUTEs it and receives a boolean.
             row = conn.execute(
-                "select current_database(), host(inet_server_addr()), "
-                f"(select count(*) from {ATTESTATION_QUALIFIED} a "
-                " where a.run_id_hash = %s and a.expires_at > now() "
-                f"   and a.server_fingerprint = {_SERVER_FINGERPRINT_SQL})",
+                f"select current_database(), host(inet_server_addr()), {ATTESTATION_CHECK_FN}(%s)",
                 (_run_id_hash(run_id),),
             ).fetchone()
             if not row:
                 return False
-            actual_db, server_addr, match_count = row
+            actual_db, server_addr, matches = row
             if actual_db != expected_db:
                 return False  # env-to-database equality: the DSN names the live db
             if not _is_local_server_addr(server_addr):
                 return False  # reject a globally-routable server address (public-prod tunnel)
-            return int(match_count) == 1  # single active run- + server-bound record
+            return matches is True  # single active run- + cluster/server-bound record
     except Exception:  # noqa: BLE001
         return False
 
@@ -333,16 +353,25 @@ def install_database_attestation(
     ttl_seconds: int = 3600,
     grant_to: str | None = None,
 ) -> None:
-    """Install the run-scoped attestation in a disposable database. Called ONLY by the
-    isolated verification harness (never a production migration), AFTER migrations and
-    role provisioning. Stores only the SHA-256 of ``run_id`` (never the raw value),
-    keeps a single active record, and grants SELECT-only to the runtime group with no
-    PUBLIC or runtime write privilege."""
+    """Install the cluster-bound attestation in a disposable database. Called ONLY by
+    the isolated verification harness (never a production migration), AFTER migrations
+    and role provisioning, on a connection to the SAME server the app uses. Stores only
+    the SHA-256 of ``run_id`` and a SHA-256 cluster/server fingerprint (never the raw
+    run id, never the raw cluster id). The runtime role receives EXECUTE on the
+    SECURITY DEFINER checker only -- no direct table access, no PUBLIC privilege."""
     import psycopg
 
     if len(run_id) < MIN_RUN_ID_CHARS:
         raise ValueError("run_id must be at least 128 bits")
+    if grant_to and not grant_to.replace("_", "").isalnum():
+        raise ValueError("grant_to must be a bare identifier")  # no injection via role name
     with psycopg.connect(dsn, connect_timeout=5, autocommit=True) as conn:
+        # Fail closed if the privileged cluster id is unreadable here: the whole model
+        # depends on binding to it, so a silent fallback to a weaker fingerprint is
+        # unacceptable.
+        sysid = conn.execute("select system_identifier::text from pg_control_system()").fetchone()
+        if not sysid or not sysid[0]:
+            raise RuntimeError("cluster system_identifier unavailable; environment unsupported")
         conn.execute(
             f"create table if not exists {ATTESTATION_QUALIFIED} ("
             "run_id_hash text primary key, "
@@ -353,13 +382,27 @@ def install_database_attestation(
         )
         conn.execute(f"revoke all on {ATTESTATION_QUALIFIED} from public")
         conn.execute(f"truncate {ATTESTATION_QUALIFIED}")  # single active record
-        # The fingerprint is computed on THIS (same-server) connection, so a later
-        # runtime check on the same server matches and a clone/restore to another
-        # server does not.
+        # The fingerprint is computed on THIS (same-server, admin) connection; the
+        # runtime check recomputes it via the SECURITY DEFINER function on the same
+        # server. A clone/restore to another cluster has a different system_identifier
+        # and/or postmaster start time, so it will not match.
         conn.execute(
             f"insert into {ATTESTATION_QUALIFIED} (run_id_hash, server_fingerprint, expires_at, purpose) "
-            f"values (%s, {_SERVER_FINGERPRINT_SQL}, now() + make_interval(secs => %s), %s)",
+            f"values (%s, {_FINGERPRINT_EXPR}, now() + make_interval(secs => %s), %s)",
             (_run_id_hash(run_id), int(ttl_seconds), ATTESTATION_PURPOSE),
         )
+        # The admin-owned, non-mutating checker. Fixed search_path; reads the privileged
+        # cluster id and the attestation and returns only a boolean.
+        conn.execute(
+            f"create or replace function {ATTESTATION_CHECK_FN}(p_run_hash text) "
+            "returns boolean language sql security definer "
+            "set search_path = pg_catalog, public as $mrfn$ "
+            "select count(*) = 1 "
+            f"from {ATTESTATION_QUALIFIED} a "
+            "where a.run_id_hash = p_run_hash and a.expires_at > now() "
+            f"and a.server_fingerprint = {_FINGERPRINT_EXPR} $mrfn$"
+        )
+        conn.execute(f"revoke all on function {ATTESTATION_CHECK_FN}(text) from public")
         if grant_to:
-            conn.execute(f"grant select on {ATTESTATION_QUALIFIED} to {grant_to}")
+            # EXECUTE-only on the checker; no direct table privilege.
+            conn.execute(f"grant execute on function {ATTESTATION_CHECK_FN}(text) to {grant_to}")

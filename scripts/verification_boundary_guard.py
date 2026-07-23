@@ -205,6 +205,7 @@ def main() -> int:
 
         def clean():
             with psycopg.connect(dsn, autocommit=True) as c:
+                c.execute(f"drop function if exists {vb.ATTESTATION_CHECK_FN}(text) cascade")
                 c.execute(f"drop table if exists {vb.ATTESTATION_QUALIFIED} cascade")
 
         clean()
@@ -229,7 +230,10 @@ def main() -> int:
         record("36 activation holds again after reinstalling a fresh attestation",
                vb.verification_execution_allowed() is True)
 
-        # Privilege proof: a restricted runtime role may SELECT but cannot write/DDL.
+        # Privilege proof: the restricted runtime role gets EXECUTE on the SECURITY
+        # DEFINER checker only -- no direct table access, no ability to modify the
+        # table or replace the function.
+        run_hash = vb._run_id_hash(run_id)
         role = f"vbnd_rt_{secrets.token_hex(4)}"
         pw = secrets.token_urlsafe(18)
         with psycopg.connect(dsn, autocommit=True) as c:
@@ -237,7 +241,7 @@ def main() -> int:
             c.execute(f"create role {role} login nosuperuser nobypassrls nocreatedb nocreaterole password '{pw}'")
             c.execute(f"grant connect on database {db} to {role}")
             c.execute(f"grant usage on schema {vb.ATTESTATION_SCHEMA} to {role}")
-            c.execute(f"grant select on {vb.ATTESTATION_QUALIFIED} to {role}")
+        vb.install_database_attestation(dsn, run_id, ttl_seconds=3600, grant_to=role)  # EXECUTE-only
         rt_dsn = re.sub(r"//[^@/]+@", f"//{role}:{pw}@", dsn)
 
         def rt_denied(sql: str) -> bool:
@@ -248,16 +252,29 @@ def main() -> int:
             except Exception:  # noqa: BLE001 - any refusal counts as denied
                 return True
 
-        with psycopg.connect(rt_dsn, autocommit=True) as c:
-            sel = c.execute(f"select count(*) from {vb.ATTESTATION_QUALIFIED}").fetchone()[0]
-        record("37 the restricted runtime role MAY SELECT the attestation", sel is not None, {"rows": sel})
-        record("38 the restricted runtime role CANNOT INSERT/UPDATE/DELETE the attestation",
-               rt_denied(f"insert into {vb.ATTESTATION_QUALIFIED}(run_id_hash,expires_at,purpose) values ('z',now(),'z')")
+        try:
+            with psycopg.connect(rt_dsn, autocommit=True) as c:
+                exec_result = c.execute(f"select {vb.ATTESTATION_CHECK_FN}('{run_hash}')").fetchone()[0]
+        except Exception:  # noqa: BLE001
+            exec_result = None
+        record("37 the restricted runtime role MAY EXECUTE the SECURITY DEFINER checker (boolean)",
+               exec_result is True, {"result": exec_result})
+        # The stored fingerprint (and the raw run hash) live in the table; the runtime
+        # role must not read them directly -- it only gets the checker's boolean. (The
+        # cluster system_identifier itself is a public, non-secret identifier; hiding it
+        # is not the boundary -- forging still requires WRITING the table, which is
+        # denied below.)
+        record("38 the restricted runtime role CANNOT read the attestation table (stored fingerprint) directly",
+               rt_denied(f"select * from {vb.ATTESTATION_QUALIFIED}")
+               and rt_denied(f"select server_fingerprint from {vb.ATTESTATION_QUALIFIED}"))
+        record("39 the restricted runtime role CANNOT modify the table or replace the checker",
+               rt_denied(f"insert into {vb.ATTESTATION_QUALIFIED}(run_id_hash,server_fingerprint,expires_at,purpose) values ('z','z',now(),'z')")
                and rt_denied(f"update {vb.ATTESTATION_QUALIFIED} set purpose='y'")
-               and rt_denied(f"delete from {vb.ATTESTATION_QUALIFIED}"))
-        record("39 the restricted runtime role CANNOT TRUNCATE or DROP the attestation",
-               rt_denied(f"truncate {vb.ATTESTATION_QUALIFIED}")
-               and rt_denied(f"drop table {vb.ATTESTATION_QUALIFIED}"))
+               and rt_denied(f"delete from {vb.ATTESTATION_QUALIFIED}")
+               and rt_denied(f"truncate {vb.ATTESTATION_QUALIFIED}")
+               and rt_denied(f"drop table {vb.ATTESTATION_QUALIFIED}")
+               and rt_denied(f"create or replace function {vb.ATTESTATION_CHECK_FN}(p_run_hash text) "
+                             "returns boolean language sql as $x$ select true $x$"))
         with psycopg.connect(dsn, autocommit=True) as c:
             c.execute(f"drop owned by {role}")  # revoke its grants before dropping
             c.execute(f"drop role if exists {role}")
