@@ -183,10 +183,21 @@ async def _idempotency_conflict_handler(request: Request, exc: IdempotencyConfli
 async def _snapshot_conflict_handler(request: Request, exc: SnapshotConflict) -> JSONResponse:
     # A durable mutation lost a compare-and-swap race or timed out on the snapshot
     # lock. Nothing partial was committed (rollback discards both state and audit).
-    # Retryable conflicts (lock timeout, serialization) map to 503 so a client may
-    # retry; a definite stale-revision loss maps to 409. No DSN/driver detail leaks.
-    status_code = 503 if exc.retryable else 409
-    return JSONResponse(status_code=status_code, content={"detail": "Snapshot write conflict; please retry"})
+    # Retryable conflicts (lock timeout, serialization) map to 503 and DO invite a
+    # retry -- the same request may succeed once contention clears. A definite
+    # non-retryable loss (stale revision, idempotency-key conflict) maps to 409 and
+    # must NOT invite a retry: replaying the identical request cannot change the
+    # outcome, and telling the caller to "please retry" is misleading. Neither
+    # message leaks a DSN, driver, role, revision number, SQL, or filesystem path.
+    if exc.retryable:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Snapshot write conflict; please retry"},
+        )
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "Snapshot write conflict"},
+    )
 
 
 def _best_effort_audit(*args, **kwargs) -> None:
@@ -1069,6 +1080,13 @@ async def create_direct_upload(
             },
         )
         raise HTTPException(status_code=413, detail=f"Upload exceeds {max_upload_bytes()} byte limit")
+    # Persist durably inside create_uploaded_file's own mutation boundary (save=True)
+    # rather than following it with a bare store.save(). On the transactional
+    # PostgreSQL backend a direct store.save() outside a snapshot transaction fails
+    # closed (SnapshotConflict), and the blocked record + upload.blocked audit are
+    # already committed by this call's wrapper regardless of the branch taken -- so a
+    # trailing save() was both redundant and fatal (a non-retryable 409). The clean
+    # branch commits again in complete_upload; a second durable commit is harmless.
     upload, file_record, signed_url = store.create_uploaded_file(
         workspace_id=workspace_id,
         file_name=original_name,
@@ -1076,10 +1094,10 @@ async def create_direct_upload(
         source_type=source_type,
         content=content,
         refresh=False,
-        save=False,
+        save=True,
     )
     if file_record.malware_status == "blocked":
-        store.save()
+        # The block and its upload.blocked audit are already durable; reject.
         raise HTTPException(status_code=422, detail="Upload blocked by malware scanner")
     upload = store.complete_upload(upload.id, [file_record.id], refresh=False)
     return UploadCreateResponse(
