@@ -291,8 +291,8 @@ print(json.dumps(out))
         assert M.apply_migrations(url, migrations_dir=part).ok
     up = M.apply_migrations(url, migrations_dir=M.BASELINE_DIR)
     sig_upgrade = schema_signature()
-    record("11 the 0004->0005/0006 upgrade path applies exactly migrations 5 and 6",
-           up.ok and [m["version"] for m in up.to_dict().get("applied", [])] == [5, 6], True)
+    record("11 the 0004->normalized upgrade path applies exactly migrations 5, 6 and 7",
+           up.ok and [m["version"] for m in up.to_dict().get("applied", [])] == [5, 6, 7], True)
     record("12 baseline and upgrade paths produce equivalent final schemas",
            sig_baseline == sig_upgrade,
            {"columns": len(sig_baseline["columns"]), "indexes": len(sig_baseline["indexes"])})

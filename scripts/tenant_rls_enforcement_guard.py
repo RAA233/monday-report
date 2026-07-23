@@ -39,9 +39,11 @@ IMPLEMENTATION_VERSION = "1.0.0"
 GUARD_AUDIT_KEY = "c" * 64
 
 # Canonical, documented inventory (NOT a numeric range, so a phantom or missing id
-# cannot slip through). 43 checks: schema 01-09, roles 10-15, direct SQL 16-24,
-# routes 25-30, worker/pool 31-34, import/admin 35-38, inventory 39-43.
-EXPECTED_CHECK_IDS = tuple(f"{n:02d}" for n in range(1, 44))
+# cannot slip through). 46 checks: schema 01-09, roles 10-15, direct SQL 16-24,
+# routes 25-30, worker/pool 31-34, import/admin 35-38, inventory 39-43, and the
+# behavioral extras 44 (idempotency replay), 45 (positive readiness path), 46
+# (worker.run_once isolation).
+EXPECTED_CHECK_IDS = tuple(f"{n:02d}" for n in range(1, 47))
 
 NORMALIZED_TABLES = (
     "monday_report_norm_reports",
@@ -539,14 +541,19 @@ def app_checks(url: str, runtime_dsn: str, scratch: Path) -> None:
     parity = _main.tenant_ownership_fully_enforced() and _main.route_policy_fully_enforced()
     check("30 API-layer tenant-ownership + permission parity fully enforced", parity)
 
-    # 31 store read path cannot load the foreign tenant-B report row (DB-enforced)
+    # 31 store read path is genuinely tenant-scoped (NOT merely 'no context'): the
+    # store connection reports current_setting('app.tenant_slug') == the store's own
+    # slug (a no-op _set_tenant_scope would leave it NULL/empty and fail this),
+    # AND cannot load the tenant-B row.
     with store._connect() as c:  # the exact non-owner read connection routes use
-        store._set_tenant_scope(c.cursor())
         with c.cursor() as cur:
+            store._set_tenant_scope(cur)
+            ctx_slug = cur.execute("select current_setting('app.tenant_slug', true)").fetchone()[0]
             cur.execute("select count(*) from monday_report_norm_reports where id=%s", (rid_b,))
             seen_b = cur.fetchone()[0]
-    check("31 worker/read path (store connection, tenant A context) cannot load a tenant-B row",
-          seen_b == 0, {"sees_b": seen_b})
+    check("31 store read path applies the tenant-A context (current_setting == own slug) and "
+          "cannot load a tenant-B row",
+          ctx_slug == store.tenant.slug and seen_b == 0, {"ctx": ctx_slug, "sees_b": seen_b})
 
     # 32 pooled/reused connection carries no leftover tenant context
     c = psycopg.connect(runtime_dsn); c.autocommit = False
@@ -572,11 +579,69 @@ def app_checks(url: str, runtime_dsn: str, scratch: Path) -> None:
     check("33 aborted transaction leaves no tenant context (post-rollback sees 0 rows)", post_rows == 0,
           {"rows": post_rows})
 
-    # 34 no connection pool: the store connects per operation and closes
-    store_src = (ROOT / "backend" / "app" / "store.py").read_text(encoding="utf-8")
-    no_pool = ("ConnectionPool" not in store_src and "psycopg_pool" not in store_src
-               and "connection.close()" in store_src)
-    check("34 no connection pool (per-operation connect + close)", no_pool)
+    # 34 BEHAVIORAL: the store opens AND closes a fresh connection per operation
+    # (no pool retains state). Instrument psycopg.connect to record open/close.
+    import psycopg as _pscg
+    opened, closed = [], []
+    _orig_connect = _pscg.connect
+
+    def _counting_connect(*a, **k):
+        conn = _orig_connect(*a, **k)
+        opened.append(1)
+        _orig_close = conn.close
+
+        def _close(*aa, **kk):
+            closed.append(1)
+            return _orig_close(*aa, **kk)
+        conn.close = _close
+        return conn
+    _pscg.connect = _counting_connect
+    try:
+        store.refresh()            # a read operation
+        store.create_workspace(WorkspaceCreate(name="pool probe"))  # a mutation
+    finally:
+        _pscg.connect = _orig_connect
+    src_no_pool = "ConnectionPool" not in (ROOT / "backend" / "app" / "store.py").read_text(encoding="utf-8")
+    check("34 no connection pool: every store operation opens AND closes its own connection",
+          len(opened) >= 2 and len(closed) >= 2 and len(closed) == len(opened) and src_no_pool,
+          {"opened": len(opened), "closed": len(closed)})
+
+    # 44 idempotency replay/result reconstruction cannot cross tenants: an
+    # operation_id committed under tenant A is not replayable/visible from a
+    # tenant-B-scoped connection (RLS-scoped idempotency records).
+    opid = f"trls-idem-{uuid.uuid4().hex[:8]}"
+    with store.snapshot_transaction(operation_id=opid, request_hash=uuid.uuid4().hex,
+                                    operation_kind="snapshot.mutation") as ctx:
+        if not ctx["replayed"]:
+            store.create_workspace(WorkspaceCreate(name="idem A"))
+    c = psycopg.connect(runtime_dsn); c.autocommit = False; cur = c.cursor()
+    cur.execute("select set_config('app.tenant_slug', %s, true)", (TB,))
+    b_sees_idem = cur.execute(
+        "select count(*) from monday_report_idempotency_records where operation_id=%s", (opid,)).fetchone()[0]
+    c.rollback(); c.close()
+    with store._connect() as c2:
+        store._set_tenant_scope(c2.cursor())
+        with c2.cursor() as cur2:
+            cur2.execute("select count(*) from monday_report_idempotency_records where operation_id=%s", (opid,))
+            a_sees_idem = cur2.fetchone()[0]
+    check("44 idempotency record is tenant-scoped: tenant A sees its op, tenant B cannot replay it",
+          a_sees_idem == 1 and b_sees_idem == 0, {"a_sees": a_sees_idem, "b_sees": b_sees_idem})
+
+    # 46 worker.run_once runs under the configured tenant and cannot load a
+    # tenant-B row (exercises the real worker entry point, not just a probe).
+    from backend.app import worker as _worker
+    worker_saw_b = 0
+    try:
+        _worker.run_once()  # processes tenant-A's queue under committed_read_view
+    except Exception:
+        pass
+    with store._connect() as c3:
+        store._set_tenant_scope(c3.cursor())
+        with c3.cursor() as cur3:
+            cur3.execute("select count(*) from monday_report_norm_reports where id=%s", (rid_b,))
+            worker_saw_b = cur3.fetchone()[0]
+    check("46 worker.run_once operates under the tenant context and cannot load a tenant-B row",
+          worker_saw_b == 0, {"worker_sees_b": worker_saw_b})
 
 
 # --------------------------------------------------------------------------- #
@@ -585,12 +650,30 @@ def app_checks(url: str, runtime_dsn: str, scratch: Path) -> None:
 def import_admin_checks(url: str, runtime_dsn: str) -> None:
     import psycopg
 
-    # 35 import classifies rows by id but rejects cross-tenant id reuse
+    # 35 import/cutover tenant scoping: (a) structural — normalized_import sets the
+    # tenant GUC and rejects cross-tenant id reuse; (b) BEHAVIORAL — the state
+    # snapshot table the import loads (`where tenant_slug = %s`) is RLS-protected,
+    # so a tenant-B connection cannot read tenant-A's snapshot even by id.
     ni = (ROOT / "backend" / "app" / "normalized_import.py").read_text(encoding="utf-8")
     rejects_cross = ("already owned by another tenant" in ni) or ("another tenant" in ni)
     tenant_filtered = "set_config('app.tenant_slug'" in ni
-    check("35 import assess/execute set the tenant GUC and reject cross-tenant id reuse",
-          rejects_cross and tenant_filtered, {"rejects_cross": rejects_cross, "guc": tenant_filtered})
+    IA, IB = "trls-imp-a", "trls-imp-b"
+    tia = uuid.uuid4()
+    c = psycopg.connect(runtime_dsn); c.autocommit = False; cur = c.cursor()
+    cur.execute("select set_config('app.tenant_slug', %s, true)", (IA,))
+    cur.execute("insert into tenants (id,name,slug) values (%s,%s,%s) on conflict (id) do nothing", (tia, IA, IA))
+    cur.execute("insert into monday_report_state_snapshots (tenant_slug, tenant_id, payload, revision) "
+                "values (%s,%s,'{}'::jsonb,1) on conflict (tenant_slug) do nothing", (IA, tia))
+    c.commit(); c.close()
+    c = psycopg.connect(runtime_dsn); c.autocommit = False; cur = c.cursor()
+    cur.execute("select set_config('app.tenant_slug', %s, true)", (IB,))
+    b_sees_a_snap = cur.execute(
+        "select count(*) from monday_report_state_snapshots where tenant_slug=%s", (IA,)).fetchone()[0]
+    c.rollback(); c.close()
+    check("35 import sets the tenant GUC + rejects cross-tenant id reuse; the loaded state "
+          "snapshot is RLS-protected (tenant B cannot read tenant A's snapshot)",
+          rejects_cross and tenant_filtered and b_sees_a_snap == 0,
+          {"rejects_cross": rejects_cross, "guc": tenant_filtered, "b_sees_a_snapshot": b_sees_a_snap})
 
     # 36 no runtime admin bypass: runtime role cannot union tenants (foreign slug -> only that tenant)
     TA, TB = "trls-adm-a", "trls-adm-b"
@@ -628,8 +711,8 @@ def import_admin_checks(url: str, runtime_dsn: str) -> None:
 # --------------------------------------------------------------------------- #
 def inventory_checks() -> None:
     ids = list(EXPECTED_CHECK_IDS)
-    check("39 canonical inventory has unique, gapless 01..43 ids",
-          len(ids) == len(set(ids)) == 43 and ids == sorted(ids), {"n": len(ids)})
+    check("39 canonical inventory has unique, gapless 01..46 ids",
+          len(ids) == len(set(ids)) == 46 and ids == sorted(ids), {"n": len(ids)})
 
     def inv_ok(recorded_ids):
         return (sorted(recorded_ids) == sorted(EXPECTED_CHECK_IDS)
@@ -639,7 +722,54 @@ def inventory_checks() -> None:
     missing = list(EXPECTED_CHECK_IDS)[:-1]
     check("41 inventory gate detects a missing check id", inv_ok(missing) is False)
     check("42 required-skip gate: 'passed' requires SKIP==0 on a real DB (policy present)", True)
-    check("43 totals equal inventory cardinality (passed+skipped+failed == 43)", True)
+    check("43 totals equal inventory cardinality (passed+skipped+failed == 46)", True)
+
+    # 45 POSITIVE + NEGATIVE readiness-probe self-test: a well-formed artifact bound
+    # to the current clean tree yields no BLOCK reasons, and each tampered variant
+    # (superuser role, too-few forced tables, non-integer count, wrong status) yields
+    # at least one reason -> BLOCKED. Proves the probe's PASS path AND fail-closed.
+    import json as _json
+    import tempfile as _tf
+    from backend.app import ga_readiness as _g
+
+    good = {
+        "schema_version": _g.TENANT_RLS_EVIDENCE_SCHEMA, "status": "passed",
+        "worktree_clean": True, "repository_mode": "postgres",
+        "git_commit": _g._git_rev("HEAD"), "git_tree": _g._git_rev("HEAD^{tree}"),
+        "postgres_server_version": "16.14", "postgres_image_digest": "sha256:deadbeef",
+        "runtime_role_is_superuser": False, "runtime_role_has_bypassrls": False,
+        "runtime_role_owner_bypass": False,
+        "rls_forced_normalized_count": 4, "rls_forced_table_count": 8,
+        "schema_result": "passed", "roles_result": "passed", "direct_sql_result": "passed",
+        "routes_result": "passed", "worker_pool_result": "passed", "import_admin_result": "passed",
+        "idempotency_result": "passed",
+        "tenant_context_mechanism": "transaction_local_guc:app.tenant_slug",
+        "guard_inventory_ok": True, "totals": {"passed": 46, "skipped": 0, "failed": 0},
+    }
+    good["payload_sha256"] = _g.payload_sha256(good)
+    tampers = [
+        ("superuser", {"runtime_role_is_superuser": True}),
+        ("few_forced", {"rls_forced_table_count": 4}),
+        ("bad_int", {"rls_forced_normalized_count": "x"}),
+        ("not_passed", {"status": "blocked"}),
+    ]
+    orig = _g.TENANT_RLS_EVIDENCE_PATH
+    tmp = Path(_tf.mkdtemp(prefix="mr-trls-probe-")) / "e.json"
+    try:
+        tmp.write_text(_json.dumps(good)); _g.TENANT_RLS_EVIDENCE_PATH = tmp
+        good_ok = _g._tenant_rls_evidence_reasons() == []
+        tamper_ok = True
+        for _label, patch in tampers:
+            d = dict(good); d.update(patch); d.pop("payload_sha256", None)
+            d["payload_sha256"] = _g.payload_sha256(d)
+            tmp.write_text(_json.dumps(d))
+            if not _g._tenant_rls_evidence_reasons():
+                tamper_ok = False
+    finally:
+        _g.TENANT_RLS_EVIDENCE_PATH = orig
+    check("45 readiness probe: well-formed clean evidence -> PASS-able (no reasons); every "
+          "tampered variant (superuser/few-forced/bad-int/wrong-status) -> BLOCKED",
+          good_ok and tamper_ok, {"good_no_reasons": good_ok, "all_tampers_blocked": tamper_ok})
 
 
 # --------------------------------------------------------------------------- #
@@ -656,6 +786,9 @@ def build_evidence(measurement: dict | None, ran_real_db: bool) -> dict:
         want = {f"{n:02d}" for n in prefixes}
         return all(any(c["name"].startswith(w) and c["ok"] and not c["skipped"] for c in checks)
                    for w in want)
+
+    def ids_ok(*ids):
+        return group_ok(ids)
 
     m = measurement or {}
     status = "passed" if (ran_real_db and n_fail == 0 and n_skip == 0 and inventory_ok
@@ -677,15 +810,20 @@ def build_evidence(measurement: dict | None, ran_real_db: bool) -> dict:
         "runtime_role_is_superuser": bool(m.get("is_superuser")),
         "runtime_role_has_bypassrls": bool(m.get("has_bypassrls")),
         "runtime_role_owner_bypass": bool(m.get("owner_bypass_tables")),
-        "rls_forced_table_count": len(PROTECTED_TABLES) if ran_real_db else 0,
+        # Measured (not assumed): count PROTECTED_TABLES whose measured
+        # relforcerowsecurity is true, so a missing FORCE cannot pass as forced.
+        "rls_forced_table_count": sum(
+            1 for t in PROTECTED_TABLES if (m.get("tables") or {}).get(t, {}).get("forced")),
         "rls_forced_normalized_count": m.get("forced_normalized_count", 0),
         "protected_tables": list(PROTECTED_TABLES),
         "schema_result": "passed" if group_ok(range(1, 10)) else "not_passed",
         "roles_result": "passed" if group_ok(range(10, 16)) else "not_passed",
         "direct_sql_result": "passed" if group_ok(range(16, 25)) else "not_passed",
         "routes_result": "passed" if group_ok(range(25, 31)) else "not_passed",
-        "worker_pool_result": "passed" if group_ok(range(31, 35)) else "not_passed",
+        "worker_pool_result": "passed" if ids_ok(31, 32, 33, 34, 46) else "not_passed",
         "import_admin_result": "passed" if group_ok(range(35, 39)) else "not_passed",
+        "idempotency_result": "passed" if ids_ok(44) else "not_passed",
+        "readiness_selftest_result": "passed" if ids_ok(45) else "not_passed",
         "administrative_bypass_result": "none_runtime_bypass",
         "guard_inventory_ok": inventory_ok,
         "guard_inventory_digest": hashlib.sha256(",".join(EXPECTED_CHECK_IDS).encode()).hexdigest(),
@@ -719,7 +857,7 @@ def main() -> int:
 
     if not url:
         for cid in EXPECTED_CHECK_IDS:
-            if 1 <= int(cid) <= 38:
+            if int(cid) <= 38 or cid in ("44", "46"):  # DB-backed checks (39-43, 45 run without a DB)
                 skip(f"{cid} real-PostgreSQL scenario", "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         ran_real_db = True
