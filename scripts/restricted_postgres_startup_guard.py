@@ -640,6 +640,14 @@ def _emit() -> int:
     c423 = sum(1 for s in http_statuses if s == 423)
     c500 = sum(1 for s in http_statuses if s == 500)
     c503 = sum(1 for s in http_statuses if s == 503)
+    # Certification disposition: skipped => non-certifying "unavailable"; any failure =>
+    # "failed"; otherwise "passed". No evidence artifact is ever written to disk.
+    if skipped:
+        certification = "unavailable"
+    elif missing or failed or c423 or c500 or c503:
+        certification = "failed"
+    else:
+        certification = "passed"
     # Attach Part M per-check inventory metadata (machine-readable claim scope).
     enriched = []
     for c in checks:
@@ -654,6 +662,7 @@ def _emit() -> int:
                       "summary": {"passed": len(passed), "skipped": len(skipped), "failed": len(failed),
                                   "missing_ids": missing, "expected": len(_INVENTORY),
                                   "functional_http": {"c423": c423, "c500": c500, "c503": c503},
+                                  "certification": certification,
                                   # Explicit, machine-readable claim scope. This guard proves
                                   # runner ownership + external startup + live identity + a
                                   # minimal smoke ONLY -- it does NOT run the corrections/
