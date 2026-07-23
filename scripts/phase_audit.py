@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -317,14 +319,66 @@ def check_processing_workflow() -> dict[str, object]:
     }
 
 
-def request_json(method: str, url: str, body: dict | None = None) -> object:
+def _send_with_conflict_retry(request: "urllib.request.Request", *, timeout: float = 5.0,
+                              attempts: int = 6) -> object:
+    """Send a request, retrying ONLY the documented *retryable* snapshot conflict.
+
+    The PostgreSQL store maps a RETRYABLE compare-and-swap collision (lock timeout /
+    serialization failure) to HTTP 503; a definite non-retryable loss is 409 (which
+    the caller must observe as-is). The local backend has no CAS boundary, so neither
+    occurs there. We retry the 503 with a short backoff; 409 and every other status
+    propagate unchanged so callers still see the real result.
+    """
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 503:
+                last_error = exc
+                time.sleep(0.15 * (attempt + 1))
+                continue
+            raise
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("request did not complete")
+
+
+def idempotency_key(
+    *,
+    scenario: str,
+    operation: str,
+    tenant: str,
+    actor: str,
+    target: str,
+    attempt: str = "initial",
+) -> str:
+    """Deterministic, API-safe Idempotency-Key for an E2E mutation.
+
+    Deterministic for an EXACT replay (same inputs -> same key) and stable across a
+    lost-response retry (reuse the same ``attempt``); DISTINCT for any different
+    tenant/actor/operation/target/attempt. Contains only ``[A-Za-z0-9._~-]`` and is
+    8..200 chars. Carries no credentials, private data, or secrets.
+    """
+    material = "|".join(str(part) for part in (scenario, operation, tenant, actor, target, attempt))
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    label = re.sub(r"[^A-Za-z0-9._~-]", "-", f"{scenario}.{operation}")[:40].strip("-") or "e2e"
+    return f"{label}-{digest}"[:200]
+
+
+def request_json(
+    method: str, url: str, body: dict | None = None, *, idempotency_key: str | None = None
+) -> object:
     data = None
     headers = auth_headers()
+    if idempotency_key is not None:
+        # Never weaken the API contract; the harness now SUPPLIES the required header.
+        headers["Idempotency-Key"] = idempotency_key
     if body is not None:
         data = json.dumps(body).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(request, timeout=5) as response:
-        return json.loads(response.read().decode("utf-8"))
+    return _send_with_conflict_retry(request)
 
 
 def run_worker_until_progress(upload_id: str | None = None, max_attempts: int = 4) -> subprocess.CompletedProcess[str]:
@@ -586,8 +640,7 @@ def request_multipart(
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
-        return json.loads(response.read().decode("utf-8"))
+    return _send_with_conflict_retry(request)
 
 
 if __name__ == "__main__":
