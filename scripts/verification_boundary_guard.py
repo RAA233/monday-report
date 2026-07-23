@@ -127,6 +127,11 @@ def main() -> int:
            vb._loopback_tcp_dsn("postgresql://rt:pw@127.0.0.1:5432/monday_rt_test") is True)
     record("21 a clean IPv6 loopback TCP DSN is accepted by the parser",
            vb._loopback_tcp_dsn("postgresql://rt:pw@[::1]:5432/monday_rt_test") is True)
+    record("21b _is_local_server_addr accepts loopback/private (incl. container IPs), rejects public",
+           vb._is_local_server_addr("127.0.0.1") and vb._is_local_server_addr("::1")
+           and vb._is_local_server_addr("172.17.0.4") and vb._is_local_server_addr("10.0.0.5")
+           and not vb._is_local_server_addr("8.8.8.8") and not vb._is_local_server_addr("93.184.216.34")
+           and not vb._is_local_server_addr(None))
 
     # -- path canonicalisation ------------------------------------------------
     record("22 a root whose canonical path is under .local_data is rejected",
@@ -261,6 +266,35 @@ def main() -> int:
         _apply(env)
         record("40 removing the attestation deactivates the boundary",
                vb.verification_execution_allowed() is False)
+
+        # 41 CLONE-TO-ANOTHER-SERVER (Part B): copy the attestation row verbatim into a
+        # SECOND server with the SAME database name and the SAME run id, unexpired. The
+        # server-instance fingerprint must reject it.
+        dsn_b = os.environ.get("MONDAY_REPORT_TEST_DATABASE_URL_B")
+        if dsn_b and vb._loopback_tcp_dsn(dsn_b) and vb._expected_db_name(dsn_b) == db:
+            vb.install_database_attestation(dsn, run_id, ttl_seconds=3600)
+            with psycopg.connect(dsn, autocommit=True) as ca:
+                cloned = ca.execute(
+                    f"select run_id_hash, server_fingerprint, created_at, expires_at, purpose "
+                    f"from {vb.ATTESTATION_QUALIFIED}").fetchone()
+            with psycopg.connect(dsn_b, autocommit=True) as cb:
+                cb.execute(f"drop table if exists {vb.ATTESTATION_QUALIFIED} cascade")
+                cb.execute(
+                    f"create table {vb.ATTESTATION_QUALIFIED}(run_id_hash text primary key, "
+                    "server_fingerprint text not null, created_at timestamptz not null default now(), "
+                    "expires_at timestamptz not null, purpose text not null)")
+                cb.execute(f"insert into {vb.ATTESTATION_QUALIFIED} values (%s,%s,%s,%s,%s)", cloned)
+            _apply({**ISOLATED_ENV, "MONDAY_REPORT_DATABASE_URL": dsn_b,
+                    "MONDAY_REPORT_VERIFICATION_RUN_ID": run_id})
+            on_clone = vb.verification_execution_allowed()
+            record("41 an attestation CLONED to another server does not activate (server-instance binding)",
+                   on_clone is False, {"activated_on_clone": on_clone})
+            with psycopg.connect(dsn_b, autocommit=True) as cb:
+                cb.execute(f"drop table if exists {vb.ATTESTATION_QUALIFIED} cascade")
+            clean()
+        else:
+            record("41 clone-to-another-server rejection", True,
+                   "no MONDAY_REPORT_TEST_DATABASE_URL_B (same db name)", skipped=True)
 
     passed = [c for c in checks if c["ok"] and not c["skipped"]]
     skipped = [c for c in checks if c["skipped"]]

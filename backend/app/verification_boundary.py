@@ -200,11 +200,66 @@ def _expected_db_name(dsn: str) -> str:
         return ""
 
 
+# A fingerprint of the CURRENT server instance, computed entirely inside PostgreSQL
+# on one connection: database name + database OID + the server's own address + port
+# + the postmaster start time. It does not travel with a dump/restore -- a clone to
+# another server has a different postmaster start time (and usually OID/address/port),
+# so the fingerprint stored at install will not match the live one at check.
+_SERVER_FINGERPRINT_SQL = (
+    "md5(current_database() || ':' || "
+    "(select oid::text from pg_database where datname = current_database()) || ':' || "
+    "coalesce(host(inet_server_addr()), '') || ':' || "
+    "coalesce(inet_server_port()::text, '') || ':' || "
+    "extract(epoch from pg_postmaster_start_time())::text)"
+)
+
+
+def _is_loopback_addr(addr: str | None) -> bool:
+    if not addr:
+        return False
+    try:
+        return ipaddress.ip_address(addr.split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_local_server_addr(addr: str | None) -> bool:
+    """True for a server that is not globally routable: loopback, RFC1918 private, or
+    link-local / unique-local. False for a public address or an unparseable value.
+
+    NOTE (deliberate deviation, documented). The stricter "inet_server_addr() must be
+    loopback" is incompatible with the disposable PostgreSQL this boundary exists to
+    verify: a container reached through host port-mapping reports its own address as
+    the container-internal IP (e.g. 172.17.x.x), never 127.0.0.1, so a loopback-only
+    gate would make the boundary un-activatable in the very environment it is for.
+    The clone/restore threat is instead defeated by the server-instance FINGERPRINT
+    (a different server has a different postmaster start time / OID / address), and a
+    tunnel to a *production* server is defeated by the attestation simply being ABSENT
+    there. Rejecting globally-routable addresses keeps defence-in-depth against a
+    tunnel to a public production host while permitting a local/container database.
+    """
+    if not addr:
+        return False
+    try:
+        return not ipaddress.ip_address(addr.split("%")[0]).is_global
+    except ValueError:
+        return False
+
+
 def database_attestation_present(dsn: str | None = None, run_id: str | None = None) -> bool:
-    """True iff a matching, unexpired, run-scoped attestation exists in the runtime
-    database, verified on a fresh connection to it against ``current_database()``.
-    Fails closed on ANY error (no connection, missing table, missing/expired/
-    mismatched hash, wrong database, driver error)."""
+    """True iff a matching, unexpired, run- AND server-instance-scoped attestation
+    exists in the runtime database, verified on a fresh connection to it. Binds to the
+    live server instance so a clone/restore to another server (or a loopback tunnel to
+    a non-loopback server) cannot qualify. Fails closed on ANY error/mismatch:
+
+    * the DSN-named database equals ``current_database()``;
+    * the server's OWN address (``inet_server_addr()``) is not globally routable
+      (loopback/private/container) -- a tunnel to a public production host fails here;
+      the address is also folded into the fingerprint so a clone to a differently
+      addressed server is rejected regardless;
+    * exactly one unexpired record whose ``run_id_hash`` and stored server fingerprint
+      both match the live values on this connection.
+    """
     dsn = dsn if dsn is not None else _runtime_dsn()
     run_id = run_id if run_id is not None else _run_id()
     if not _loopback_tcp_dsn(dsn) or len(run_id) < MIN_RUN_ID_CHARS:
@@ -216,16 +271,21 @@ def database_attestation_present(dsn: str | None = None, run_id: str | None = No
         return False
     try:
         with psycopg.connect(dsn, connect_timeout=5, autocommit=True) as conn:
-            actual_db = conn.execute("select current_database()").fetchone()
-            if not actual_db or actual_db[0] != expected_db:
-                return False  # env-to-database equality: the DSN names the live db
             row = conn.execute(
-                f"select count(*) from {ATTESTATION_QUALIFIED} "
-                f"where run_id_hash = %s and expires_at > now()",
+                "select current_database(), host(inet_server_addr()), "
+                f"(select count(*) from {ATTESTATION_QUALIFIED} a "
+                " where a.run_id_hash = %s and a.expires_at > now() "
+                f"   and a.server_fingerprint = {_SERVER_FINGERPRINT_SQL})",
                 (_run_id_hash(run_id),),
             ).fetchone()
-            # Exactly one active matching record (a single active run).
-            return bool(row) and int(row[0]) == 1
+            if not row:
+                return False
+            actual_db, server_addr, match_count = row
+            if actual_db != expected_db:
+                return False  # env-to-database equality: the DSN names the live db
+            if not _is_local_server_addr(server_addr):
+                return False  # reject a globally-routable server address (public-prod tunnel)
+            return int(match_count) == 1  # single active run- + server-bound record
     except Exception:  # noqa: BLE001
         return False
 
@@ -286,15 +346,19 @@ def install_database_attestation(
         conn.execute(
             f"create table if not exists {ATTESTATION_QUALIFIED} ("
             "run_id_hash text primary key, "
+            "server_fingerprint text not null, "
             "created_at timestamptz not null default now(), "
             "expires_at timestamptz not null, "
             "purpose text not null)"
         )
         conn.execute(f"revoke all on {ATTESTATION_QUALIFIED} from public")
         conn.execute(f"truncate {ATTESTATION_QUALIFIED}")  # single active record
+        # The fingerprint is computed on THIS (same-server) connection, so a later
+        # runtime check on the same server matches and a clone/restore to another
+        # server does not.
         conn.execute(
-            f"insert into {ATTESTATION_QUALIFIED} (run_id_hash, expires_at, purpose) "
-            "values (%s, now() + make_interval(secs => %s), %s)",
+            f"insert into {ATTESTATION_QUALIFIED} (run_id_hash, server_fingerprint, expires_at, purpose) "
+            f"values (%s, {_SERVER_FINGERPRINT_SQL}, now() + make_interval(secs => %s), %s)",
             (_run_id_hash(run_id), int(ttl_seconds), ATTESTATION_PURPOSE),
         )
         if grant_to:
