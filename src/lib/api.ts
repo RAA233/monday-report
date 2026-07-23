@@ -962,13 +962,30 @@ export async function createUploadFileSignedUrl(fileId: string): Promise<ApiSign
   });
 }
 
+function newIdempotencyKey(): string {
+  const c: Crypto | undefined = globalThis.crypto;
+  if (c && typeof c.randomUUID === "function") {
+    return `ui-${c.randomUUID()}`;
+  }
+  const bytes = new Uint8Array(16);
+  c?.getRandomValues?.(bytes);
+  return `ui-${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const isMultipart = init.body instanceof FormData;
+  const method = (init.method ?? "GET").toUpperCase();
+  // Mutating requests carry an Idempotency-Key: the PostgreSQL store REQUIRES it on
+  // transactional operations (validation-task transitions, correction record/revert)
+  // and non-transactional routes ignore it. One user action = one call = one key; a
+  // caller may override via init.headers so a retry of the same action reuses the key.
+  const isMutation = method !== "GET" && method !== "HEAD";
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
       ...(isMultipart ? {} : { "Content-Type": "application/json" }),
       ...(API_KEY ? { "X-Monday-Report-Key": API_KEY } : {}),
+      ...(isMutation ? { "Idempotency-Key": newIdempotencyKey() } : {}),
       ...init.headers
     }
   });
