@@ -240,6 +240,9 @@ def main() -> int:
         check("61 Identity administration still works", status_of("GET", "/auth/users", tokens["admin"]) == 200)
         check("62 Field corrections still work (permission gate intact)", perms.has_permission([Role.ENGINEER], "record_field_corrections"))
         import backend.app.ga_readiness as gar
+        # Hermetic: no tenant-RLS evidence supplied here, so tenant-authorization
+        # is BLOCKED regardless of any stray local evidence artifact.
+        gar.TENANT_RLS_EVIDENCE_PATH = gar.ROOT / "output" / "tenant-rls" / "__guard_absent__.json"
 
         from backend.app.readiness import evaluate_client_data_readiness
 

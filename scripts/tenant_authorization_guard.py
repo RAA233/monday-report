@@ -66,6 +66,11 @@ def main() -> int:
         from backend.app import main as m
         from backend.app import tenant_authorization as ta
         from backend.app import ga_readiness as gar
+        # This API-layer guard supplies no tenant-RLS evidence; the
+        # tenant-authorization control therefore stays BLOCKED here (it is
+        # PASS-capable only with committed RLS evidence from
+        # tenant_rls_enforcement_guard.py). Neutralize any stray local artifact.
+        gar.TENANT_RLS_EVIDENCE_PATH = gar.ROOT / "output" / "tenant-rls" / "__guard_absent__.json"
         from backend.app.identity import (
             get_current_identity,
             reset_current_identity,

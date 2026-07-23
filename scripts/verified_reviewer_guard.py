@@ -263,6 +263,9 @@ def main() -> int:
 
     # 38-39: readiness is evidence-driven and requires all reviewer workflows wired
     import backend.app.ga_readiness as gar
+    # Hermetic: no tenant-RLS evidence here, so tenant-authorization is BLOCKED
+    # regardless of any stray local evidence artifact.
+    gar.TENANT_RLS_EVIDENCE_PATH = gar.ROOT / "output" / "tenant-rls" / "__guard_absent__.json"
     disp, detail = gar._verified_reviewer_probe()
     check("38 verified-reviewer blocker is evidence-driven PASS (behavioral)", disp == "PASS" and "Behavioral evidence" in detail)
     import inspect as _inspect

@@ -383,6 +383,11 @@ def main() -> int:
 
         # 55-58. Readiness / GA blockers remain truthfully unresolved. GA stays GA_BLOCKED.
         import backend.app.ga_readiness as gar
+        # Hermetic: this guard supplies no tenant-RLS evidence, so the
+        # tenant-authorization control is BLOCKED here regardless of any stray
+        # local evidence artifact (it is PASS-capable only with committed RLS
+        # evidence, proven separately by tenant_rls_enforcement_guard.py).
+        gar.TENANT_RLS_EVIDENCE_PATH = gar.ROOT / "output" / "tenant-rls" / "__guard_absent__.json"
 
         readiness = evaluate_client_data_readiness(store)
         readiness_by_id = {c.id: c.status for c in readiness.checks}

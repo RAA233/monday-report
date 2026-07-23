@@ -132,6 +132,11 @@ def main() -> int:
         "retention_policy": "warn",
         "hosted_fallback_disabled": "pass",
     }
+    # Hermetic: no tenant-RLS evidence here, so tenant-authorization stays BLOCKED
+    # regardless of any stray local evidence artifact (PASS-capable only with
+    # committed RLS evidence from tenant_rls_enforcement_guard.py).
+    import backend.app.ga_readiness as _gar
+    _gar.TENANT_RLS_EVIDENCE_PATH = _gar.ROOT / "output" / "tenant-rls" / "__guard_absent__.json"
     ga_checks = evaluate_blockers(readiness_demo, forge_report=None)
     by_id = {c["id"]: c for c in ga_checks}
 

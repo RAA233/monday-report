@@ -301,17 +301,92 @@ def _tenant_authorization_probe() -> tuple[str, str]:
     if reasons:
         # Even the API-layer half is not fully wired; still BLOCKED.
         return "BLOCKED", "Tenant authorization enforcement incomplete: " + "; ".join(reasons) + "."
+
+    # API-layer half is fully enforced. The resolution condition ALSO requires
+    # "Postgres RLS active for the normalized store", proven by committed evidence
+    # from a real, non-superuser runtime role on the current clean tree. Anything
+    # absent/stale/dirty/mismatched/failed/skipped keeps the control BLOCKED.
+    rls_reasons = _tenant_rls_evidence_reasons()
+    if rls_reasons:
+        return (
+            "BLOCKED",
+            "API-layer per-request tenant ownership enforcement is implemented and verified, but "
+            "database-enforced tenant isolation is not proven: " + "; ".join(rls_reasons) + ".",
+        )
     return (
-        "BLOCKED",
-        "API-layer per-request tenant ownership enforcement is implemented and verified: every "
-        "resource-scoped route proves a tenant-ownership dependency (tenant_ownership_fully_enforced), "
-        "the ownership graph fails closed on a contradictory resource->parent->tenant chain, cross-tenant "
-        "access is an existence-hiding 404, list/aggregate reads are tenant-filtered before counting, and "
-        "signed capabilities bind the owning tenant (behavior proven by scripts/tenant_authorization_guard.py). "
-        "The control remains BLOCKED because its resolution ALSO requires Postgres RLS active over the "
-        "normalized multi-tenant store, which is not implemented: the process serves one configured tenant "
-        "via the local JSON snapshot and RLS is inactive.",
+        "PASS",
+        "Tenant is resolved from the authenticated request and enforced at the API layer (every "
+        "resource-scoped route proves a tenant-ownership dependency; cross-tenant access is an "
+        "existence-hiding 404; signed capabilities bind the owning tenant), AND Postgres RLS is "
+        "active over the normalized store: forced row level security on the normalized + parent + "
+        "operational tables is enforced against a real non-superuser, non-BYPASSRLS runtime role "
+        "(missing/wrong/malformed tenant context denies; WITH CHECK blocks cross-tenant writes; "
+        "connection reuse retains no context), proven by committed real-PostgreSQL evidence "
+        "(scripts/tenant_rls_enforcement_guard.py).",
     )
+
+
+def _tenant_rls_evidence_reasons() -> list[str]:
+    """Fail-closed validation of the tenant-RLS-enforcement evidence artifact.
+
+    Returns an empty list ONLY when committed evidence from a real PostgreSQL run
+    on the current clean tree proves forced RLS is enforced against a non-superuser,
+    non-BYPASSRLS runtime role. Any absence/staleness/mismatch/failure/skip is a
+    reason the control stays BLOCKED.
+    """
+    if not TENANT_RLS_EVIDENCE_PATH.exists():
+        return ["no tenant-RLS-enforcement evidence artifact"]
+    try:
+        payload = json.loads(TENANT_RLS_EVIDENCE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return [f"tenant-RLS evidence unreadable: {exc.__class__.__name__}"]
+    if not isinstance(payload, dict):
+        return ["tenant-RLS evidence malformed"]
+
+    reasons: list[str] = []
+    if payload.get("schema_version") != TENANT_RLS_EVIDENCE_SCHEMA:
+        reasons.append(f"evidence schema is {payload.get('schema_version')!r}")
+    if payload.get("status") != "passed":
+        reasons.append(f"status is {payload.get('status')!r}, not 'passed'")
+    stored = payload.get("payload_sha256")
+    if not stored:
+        reasons.append("no payload hash")
+    else:
+        recomputed = payload_sha256({k: v for k, v in payload.items() if k != "payload_sha256"})
+        if recomputed != stored:
+            reasons.append("payload hash does not verify")
+    if not payload.get("worktree_clean"):
+        reasons.append("evidence was not captured from a clean worktree")
+    if payload.get("repository_mode") != "postgres":
+        reasons.append("evidence was not generated in PostgreSQL mode")
+    if not payload.get("postgres_server_version") or not payload.get("postgres_image_digest"):
+        reasons.append("evidence lacks a real PostgreSQL server version or image digest")
+    reasons.extend(_commit_binding_reasons(payload))
+    # Runtime role must genuinely be unable to bypass RLS.
+    if payload.get("runtime_role_is_superuser"):
+        reasons.append("evidence runtime role is a superuser (would bypass RLS)")
+    if payload.get("runtime_role_has_bypassrls"):
+        reasons.append("evidence runtime role has BYPASSRLS")
+    if payload.get("runtime_role_owner_bypass"):
+        reasons.append("evidence runtime role owns a protected table without FORCE (owner bypass)")
+    if int(payload.get("rls_forced_normalized_count", 0)) < 4:
+        reasons.append("fewer than four normalized tables have FORCE row level security")
+    if int(payload.get("rls_forced_table_count", 0)) < 8:
+        reasons.append("fewer than eight protected tables have FORCE row level security")
+    for field in ("schema_result", "roles_result", "direct_sql_result", "routes_result",
+                  "worker_pool_result", "import_admin_result"):
+        if payload.get(field) != "passed":
+            reasons.append(f"{field} is not 'passed'")
+    if payload.get("tenant_context_mechanism") != "transaction_local_guc:app.tenant_slug":
+        reasons.append("evidence does not declare the transaction-local tenant-context mechanism")
+    if not payload.get("guard_inventory_ok"):
+        reasons.append("guard check inventory is not fail-closed")
+    totals = payload.get("totals") or {}
+    if totals.get("failed") != 0:
+        reasons.append("evidence records failed checks")
+    if totals.get("skipped") != 0:
+        reasons.append("evidence records skipped checks")
+    return reasons
 
 
 def _audit_keyed_integrity_probe() -> tuple[str, str]:
@@ -723,6 +798,8 @@ PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomi
 PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v4"
 NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v4.json"
 NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v4"
+TENANT_RLS_EVIDENCE_PATH = ROOT / "output" / "tenant-rls" / "tenant-rls-enforcement-evidence.v1.json"
+TENANT_RLS_EVIDENCE_SCHEMA = "tenant-rls-enforcement-evidence.v1"
 
 
 def _correction_atomicity_probe() -> tuple[str, str]:
