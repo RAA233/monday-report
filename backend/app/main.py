@@ -83,7 +83,7 @@ from .corrections_registry import (
 )
 from . import idempotency
 from .readiness import client_data_mode, evaluate_client_data_readiness
-from .verification_boundary import verification_context_summary, verification_execution_allowed
+from .verification_boundary import verification_context
 from .runtime_backends import runtime_backend_status
 from .signed_urls import create_signed_token, signing_secret_configured, verify_signed_token
 from .store import store, IdempotencyConflict, ReviewerNotVerified, SnapshotConflict
@@ -394,24 +394,30 @@ def require_client_data_ready(operation: str, resource_type: str, resource_id: U
     readiness = evaluate_client_data_readiness(store)
     if readiness.ready:
         return
-    if verification_execution_allowed():
+    verification = verification_context()
+    if verification["verification_isolation_active"]:
         # Provably-isolated disposable verification stack (see verification_boundary):
         # allow the real client-mode request path to EXECUTE so tenant isolation,
-        # authentication, RBAC, forced RLS on the restricted runtime role, and the
-        # idempotency contract can be proven. Readiness is NOT certified
-        # (readiness.ready stays False) and NO GA control is made to pass -- this
-        # only skips the unrelated release-readiness 423 lock, only here, only under
-        # the full isolation conjunction, and it is audited on every execution.
-        _best_effort_audit(
-            "client_data.verification_isolation_execution",
-            resource_type,
-            resource_id,
-            {
-                "operation": operation,
-                "readiness_status": readiness.status,
-                **verification_context_summary(),
-            },
-        )
+        # authentication, RBAC, verified-reviewer enforcement, forced RLS on the
+        # restricted runtime role, and the idempotency contract can be proven.
+        # Readiness is NOT certified (readiness.ready stays False) and NO GA control
+        # is made to pass -- this only skips the unrelated release-readiness 423
+        # lock, only here, only under the full isolation conjunction plus the
+        # database-side attestation.
+        #
+        # A readiness relaxation MUST be durably audited. Use the FAIL-CLOSED audit
+        # primitive (never best-effort): if the event cannot be committed -- missing
+        # audit key, HMAC failure, snapshot/transaction failure, or a store that
+        # cannot durably record it -- do NOT relax the gate.
+        try:
+            store.audit(
+                "client_data.verification_isolation_execution",
+                resource_type,
+                resource_id,
+                {"operation": operation, "readiness_status": readiness.status, **verification},
+            )
+        except Exception:  # noqa: BLE001 - any audit failure fails the relaxation closed
+            raise HTTPException(status_code=503, detail="Client data readiness checks are failing")
         return
     blocking_checks = [check.id for check in readiness.checks if check.status == "fail"]
     warning_checks = [check.id for check in readiness.checks if check.status == "warn"]
