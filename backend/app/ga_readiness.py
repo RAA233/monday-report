@@ -321,8 +321,8 @@ def _tenant_authorization_probe() -> tuple[str, str]:
         "active over the normalized store: forced row level security on the normalized + parent + "
         "operational tables is enforced against a real non-superuser, non-BYPASSRLS runtime role "
         "(missing/wrong/malformed tenant context denies; WITH CHECK blocks cross-tenant writes; "
-        "connection reuse retains no context), proven by committed real-PostgreSQL evidence "
-        "(scripts/tenant_rls_enforcement_guard.py).",
+        "connection reuse retains no context), proven by real-PostgreSQL evidence bound to the "
+        "current clean tree (scripts/tenant_rls_enforcement_guard.py).",
     )
 
 
@@ -369,12 +369,18 @@ def _tenant_rls_evidence_reasons() -> list[str]:
         reasons.append("evidence runtime role has BYPASSRLS")
     if payload.get("runtime_role_owner_bypass"):
         reasons.append("evidence runtime role owns a protected table without FORCE (owner bypass)")
-    if int(payload.get("rls_forced_normalized_count", 0)) < 4:
+    def _as_int(value: object) -> int:
+        # Malformed (non-integer) evidence must fail closed to 0 -> BLOCKED, never crash.
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+    if _as_int(payload.get("rls_forced_normalized_count")) < 4:
         reasons.append("fewer than four normalized tables have FORCE row level security")
-    if int(payload.get("rls_forced_table_count", 0)) < 8:
+    if _as_int(payload.get("rls_forced_table_count")) < 8:
         reasons.append("fewer than eight protected tables have FORCE row level security")
     for field in ("schema_result", "roles_result", "direct_sql_result", "routes_result",
-                  "worker_pool_result", "import_admin_result"):
+                  "worker_pool_result", "import_admin_result", "idempotency_result"):
         if payload.get(field) != "passed":
             reasons.append(f"{field} is not 'passed'")
     if payload.get("tenant_context_mechanism") != "transaction_local_guc:app.tenant_slug":
