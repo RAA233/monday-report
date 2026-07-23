@@ -385,6 +385,21 @@ def _tenant_rls_evidence_reasons() -> list[str]:
             reasons.append(f"{field} is not 'passed'")
     if payload.get("tenant_context_mechanism") != "transaction_local_guc:app.tenant_slug":
         reasons.append("evidence does not declare the transaction-local tenant-context mechanism")
+    # The runtime principal must be a real LOGIN role that inherits the app group,
+    # never the NOLOGIN group misreported as the DSN login principal.
+    if not payload.get("runtime_role_can_login"):
+        reasons.append("evidence runtime principal is not a LOGIN role")
+    if not payload.get("runtime_role_is_login_not_group"):
+        reasons.append("evidence runtime principal is the NOLOGIN group, not a distinct login role")
+    if "monday_report_app" not in (payload.get("runtime_group_membership") or []):
+        reasons.append("evidence runtime login does not inherit the monday_report_app group")
+    # Exact policy inventory (not a count) + digest must be present.
+    if not payload.get("policy_inventory") or not payload.get("policy_inventory_digest"):
+        reasons.append("evidence lacks an exact RLS policy inventory + digest")
+    # The GUC trust model must be disclosed honestly (limitation stated).
+    guc = str(payload.get("guc_trust_model") or "")
+    if "compromise" not in guc.lower():
+        reasons.append("evidence does not disclose the GUC trust-model limitation")
     if not payload.get("guard_inventory_ok"):
         reasons.append("guard check inventory is not fail-closed")
     totals = payload.get("totals") or {}
@@ -804,8 +819,8 @@ PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomi
 PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v4"
 NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v4.json"
 NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v4"
-TENANT_RLS_EVIDENCE_PATH = ROOT / "output" / "tenant-rls" / "tenant-rls-enforcement-evidence.v1.json"
-TENANT_RLS_EVIDENCE_SCHEMA = "tenant-rls-enforcement-evidence.v1"
+TENANT_RLS_EVIDENCE_PATH = ROOT / "output" / "tenant-rls" / "tenant-rls-enforcement-evidence.v2.json"
+TENANT_RLS_EVIDENCE_SCHEMA = "tenant-rls-enforcement-evidence.v2"
 
 
 def _correction_atomicity_probe() -> tuple[str, str]:

@@ -50,6 +50,68 @@ NORMALIZED_TABLES: tuple[str, ...] = (
 
 TENANT_GUC = "app.tenant_slug"
 
+# Honest trust-model disclosure for the app.tenant_slug GUC. RLS keyed on a custom
+# GUC protects against a MISSING context (deny), a query that forgets the tenant
+# predicate (RLS still scopes to the set slug), and route/payload/header tenant
+# spoofing (the slug is derived from authenticated server state, never client input).
+# It is NOT a defense against total compromise of, or arbitrary SQL execution as, the
+# trusted runtime principal: a connected principal CAN set the GUC to any valid slug
+# and read that tenant. RLS therefore reduces blast radius and enforces the API-layer
+# tenant boundary at the database, but is not a hard boundary against a fully
+# compromised runtime role (which is why the runtime role is least-privilege,
+# non-superuser, and non-BYPASSRLS, and cross-tenant admin work uses a separate role).
+GUC_TRUST_MODEL = (
+    "rls_guc_app_set_context: protects against missing/spoofed/forgotten-predicate "
+    "tenant context; NOT a defense against total runtime-principal compromise "
+    "(a connected principal can set app.tenant_slug to any valid tenant)"
+)
+
+
+def policy_inventory(connection: Any) -> dict:
+    """Enumerate RLS state, owner, and every policy for the protected tables.
+
+    Returns {tables: {name: {...}}, policy_digest: sha256-hex}. Used by the guard to
+    emit an exact, auditable policy inventory (not merely a count) into evidence.
+    """
+    import hashlib
+    import json as _json
+
+    result: dict[str, dict] = {}
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "select c.relname, c.relrowsecurity, c.relforcerowsecurity, "
+            "       pg_get_userbyid(c.relowner) as owner "
+            "from pg_class c where c.relkind='r' and c.relname = any(%s)",
+            (list(PROTECTED_TABLES),),
+        )
+        for name, rowsec, forced, owner in cursor.fetchall():
+            result[name] = {
+                "rowsecurity": bool(rowsec), "forced": bool(forced),
+                "owner": owner, "policies": [],
+            }
+        cursor.execute(
+            "select c.relname, p.polname, "
+            "  case p.polcmd when 'r' then 'SELECT' when 'a' then 'INSERT' "
+            "    when 'w' then 'UPDATE' when 'd' then 'DELETE' else 'ALL' end as cmd, "
+            "  p.polpermissive, "
+            "  pg_get_expr(p.polqual, p.polrelid) as using_expr, "
+            "  pg_get_expr(p.polwithcheck, p.polrelid) as check_expr, "
+            "  coalesce((select array_agg(rolname order by rolname) from pg_roles "
+            "     where oid = any(p.polroles)), array['PUBLIC']) as roles "
+            "from pg_policy p join pg_class c on c.oid = p.polrelid "
+            "where c.relname = any(%s)",
+            (list(PROTECTED_TABLES),),
+        )
+        for relname, polname, cmd, permissive, using_expr, check_expr, roles in cursor.fetchall():
+            if relname in result:
+                result[relname]["policies"].append({
+                    "name": polname, "cmd": cmd, "permissive": bool(permissive),
+                    "using": using_expr, "with_check": check_expr,
+                    "roles": list(roles) if roles else [],
+                })
+    canonical = _json.dumps(result, sort_keys=True, default=str)
+    return {"tables": result, "policy_digest": hashlib.sha256(canonical.encode()).hexdigest()}
+
 
 class TenantRuntimeRoleError(RuntimeError):
     """The runtime PostgreSQL role cannot safely enforce tenant RLS."""
@@ -100,14 +162,23 @@ def measure_runtime_role(connection: Any) -> dict:
     for the migration-role comparison and is not emitted into evidence by callers.
     """
     with connection.cursor() as cursor:
-        cursor.execute("select current_user")
-        current_user = cursor.fetchone()[0]
+        cursor.execute("select session_user, current_user")
+        session_user, current_user = cursor.fetchone()
         cursor.execute(
-            "select rolsuper, rolbypassrls from pg_roles where rolname = current_user"
+            "select rolsuper, rolbypassrls, rolcanlogin from pg_roles where rolname = current_user"
         )
         row = cursor.fetchone()
         is_super = bool(row[0]) if row else True  # unknown -> treat as unsafe
         has_bypassrls = bool(row[1]) if row else True
+        can_login = bool(row[2]) if row else False
+        # Group roles the runtime login is a member of (the privilege group must be a
+        # role it INHERITs, not the login principal itself).
+        cursor.execute(
+            "select g.rolname from pg_auth_members m "
+            "join pg_roles r on r.oid = m.member join pg_roles g on g.oid = m.roleid "
+            "where r.rolname = current_user"
+        )
+        group_membership = sorted(row2[0] for row2 in cursor.fetchall())
         cursor.execute(
             "select c.relname, c.relrowsecurity, c.relforcerowsecurity, "
             "       pg_get_userbyid(c.relowner) = current_user as owned_by_current "
@@ -130,7 +201,13 @@ def measure_runtime_role(connection: Any) -> dict:
     ]
     forced_normalized = [t for t in NORMALIZED_TABLES if tables.get(t, {}).get("forced")]
     return {
+        "session_user": session_user,
         "current_user": current_user,
+        "can_login": can_login,
+        # The runtime login must be a LOGIN principal that INHERITs the app group,
+        # never the NOLOGIN group role itself.
+        "is_login_not_group": can_login and current_user != "monday_report_app",
+        "group_membership": group_membership,
         "is_superuser": is_super,
         "has_bypassrls": has_bypassrls,
         "tables": tables,

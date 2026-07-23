@@ -63,6 +63,27 @@ applied policy, the store, the import tool, and a data path — strictly more ri
 benefit. `tenant_slug` is FK-bound to `tenant_id` by the composite `(tenant_id, tenant_slug) →
 tenants(id, slug)` foreign keys added in 0006, so the slug cannot diverge from the id.
 
+### GUC trust model (what RLS-with-a-GUC does and does not defend)
+
+RLS keyed on the `app.tenant_slug` GUC is a **defense-in-depth** boundary at the database, not
+an absolute one. It **does** defend against:
+
+- a **missing** context (unset GUC → `NULL` → every policy denies);
+- a query that **forgets the tenant predicate** (RLS still scopes results to the set slug);
+- **route/payload/header tenant spoofing** (the slug is derived from authenticated server state
+  — the store never reads a tenant from client input).
+
+It **does not** defend against **total compromise of, or arbitrary SQL execution as, the trusted
+runtime principal**: a connected SQL principal *can* execute `SELECT set_config('app.tenant_slug',
+'<another-valid-tenant>', true)` and read that tenant's rows. This is inherent to any
+application-set-GUC RLS design and is verified empirically by the guard (check 47). RLS therefore
+**reduces blast radius** and enforces the API-layer tenant boundary at the database, but is not a
+hard boundary against a fully compromised runtime role. That is precisely why the runtime role is
+**least-privilege, non-superuser, non-`BYPASSRLS`, and non-owner**, why cross-tenant administrative
+work uses a **separate** role, and why this remains one control within a still-`GA_BLOCKED` product
+rather than a claim of complete multi-tenant isolation. The evidence records this limitation in a
+`guc_trust_model` field; the readiness probe rejects evidence that omits the disclosure.
+
 ### Context contract (enforced)
 
 1. Context is set on the **same connection and transaction** the repository uses
