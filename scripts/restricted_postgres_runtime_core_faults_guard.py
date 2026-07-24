@@ -1,12 +1,13 @@
-"""Restricted-PostgreSQL FUNCTIONAL mutation battery (Part O).
+"""Restricted-PostgreSQL functional-CORE mutation battery (non-vacuity for the -core guard).
 
-Proves the restricted-runtime FUNCTIONAL guard's assertions are NON-VACUOUS: for each
-functional invariant the runtime guard checks (RLS isolation, audit integrity, malware
-blocking, idempotency dedup, credential auth, fail-closed persistence), this guard injects
-a REAL fault into the LIVE runner-owned stack, confirms the invariant FLIPS (the regression
-is caught), then REVERTS the fault. It reuses the ACCEPTED foundation (restricted_postgres_
-startup_guard.run_stack + its _ON_LIVE hook -- the foundation is unchanged) and drives the
-real client-mode HTTP API + the live PostgreSQL.
+Proves the restricted-runtime functional-CORE guard's assertions (audit:restricted-postgres-runtime-
+core) are NON-VACUOUS: for each core functional invariant the runtime-core guard checks (RLS
+isolation, audit integrity, malware blocking, idempotency dedup, credential auth, fail-closed
+persistence), this guard injects a REAL fault into the LIVE runner-owned stack, confirms the invariant
+FLIPS (the regression is caught), then REVERTS the fault. It reuses the ACCEPTED foundation
+(restricted_postgres_startup_guard.run_stack + its _ON_LIVE hook -- the foundation is unchanged) and
+drives the real client-mode HTTP API + the live PostgreSQL. Command: audit:restricted-postgres-
+runtime-core-faults (the unqualified -faults name is RESERVED for the future COMPLETE guard's battery).
 
 Each mutation is self-contained: it captures the prior state, injects the fault, asserts the
 flip, and restores in a finally block so no fault outlives its check and the stack stays intact
@@ -15,7 +16,7 @@ next to cross-tenant denial; post-revert RLS restored to exactly one row).
 
 HONEST SCOPE. This is the functional mutation battery, not a whole-stack fault battery (that is
 scripts/restricted_postgres_startup_fault_guard.py). It emits per-check execution_level, and
-  claim_scope = restricted-runtime-mutation-battery
+  claim_scope = restricted-runtime-functional-core-faults-only
   eligible_for_tenant_evidence = false / eligible_for_readiness = false / production_parity = false
 It must NEVER be consumed as tenant-authorization or readiness evidence. Requires Docker.
 """
@@ -382,14 +383,14 @@ def _emit(skipped=False) -> int:
     exec_totals = {}
     for c in checks:
         exec_totals[c["execution_level"]] = exec_totals.get(c["execution_level"], 0) + 1
-    enriched = [{**c, "claim_scope": "restricted-runtime-mutation-battery"} for c in checks]
+    enriched = [{**c, "claim_scope": "restricted-runtime-functional-core-faults-only"} for c in checks]
     # _scrub the ENTIRE verdict as a safety net against any nonce/DSN/role/db/token in a detail.
     print(_scrub(json.dumps({"checks": enriched,
                       "summary": {"passed": len(passed) if not skipped else 0,
                                   "skipped": len(checks) if skipped else 0,
                                   "failed": 0 if skipped else len(failed),
                                   "execution_level_totals": exec_totals,
-                                  "claim_scope": "restricted-runtime-mutation-battery",
+                                  "claim_scope": "restricted-runtime-functional-core-faults-only",
                                   "mutation_battery": battery,
                                   "eligible_for_tenant_evidence": False,
                                   "eligible_for_readiness": False,
@@ -405,7 +406,7 @@ def _emit(skipped=False) -> int:
             print(_scrub(f"  FAIL: {c['id']} -> {c['detail']}"))
         return 1
     print(f"\nRestricted-runtime mutation battery passed: {len(passed)} non-vacuity proof(s)."
-          "\n[claim_scope=restricted-runtime-mutation-battery; NOT evidence/readiness eligible]")
+          "\n[claim_scope=restricted-runtime-functional-core-faults-only; NOT evidence/readiness eligible]")
     return 0
 
 

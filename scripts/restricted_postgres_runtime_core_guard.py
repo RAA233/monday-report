@@ -1,17 +1,20 @@
-"""Restricted-PostgreSQL FUNCTIONAL runtime guard (functional CORE).
+"""Restricted-PostgreSQL functional runtime guard -- functional CORE (NOT the complete matrix).
 
 Stands up the ACCEPTED runner-owned stack (via restricted_postgres_startup_guard.run_stack
 and its _ON_LIVE hook -- the accepted foundation is unchanged) and drives the REAL client-mode
 HTTP API across TWO synthetic tenants (two external uvicorn processes on the same runner-owned
 PostgreSQL, RLS-isolated by app.tenant_slug), plus the external worker and the import module, to
-prove the restricted-runtime FUNCTIONAL behaviour: authentication/identity, field-correction +
-idempotency, validation-task transitions (verified-reviewer terminal outcome + idempotent replay),
-the report-export validation gate (409 while unresolved, all-format export once resolved, controlled
-signed-url), cross-tenant HTTP isolation, direct RLS negative controls, malware blocking, audit
-integrity, worker identity, and tenant-scoped import.
+prove a CORE slice of the restricted-runtime FUNCTIONAL behaviour: authentication/identity,
+field-correction + idempotency (create/replay/changed-body/lost-response), validation-task
+transitions (verified-reviewer terminal VALIDATED outcome + idempotent replay + cross-tenant denial),
+the report-export validation gate (409 while unresolved, all-format export once resolved, the
+client-mode signed-url 409 gate), cross-tenant HTTP isolation, direct RLS negative controls, malware
+blocking, audit integrity, worker identity, and the tenant-scoped import env boundary.
 
-HONEST SCOPE. This is the functional CORE, not the exhaustive matrix. It emits:
-  claim_scope = restricted-runtime-functional-only
+NAMING / HONEST SCOPE. This is the functional CORE, deliberately NOT the exhaustive matrix -- so the
+command is `audit:restricted-postgres-runtime-core` and the unqualified `audit:restricted-postgres-
+runtime` is RESERVED for the future COMPLETE guard. It emits:
+  claim_scope = restricted-runtime-functional-core-only
   full_functional_matrix = not_run     (the COMPLETE matrix is NOT run here)
   functional_core = passed|failed
   covered_areas / deferred_areas       (explicit -- no overclaim)
@@ -21,9 +24,14 @@ HONEST SCOPE. This is the functional CORE, not the exhaustive matrix. It emits:
   migration_principal_class = test-only-bootstrap-migration-admin
 It must NEVER be consumed as tenant-authorization or readiness evidence. Requires Docker.
 
-DEFERRED (honest): the reject/conflict/reopen validation transitions and the export-override path,
-the full worker-isolation and import-mode matrices, and the functional mutation battery
-(audit:restricted-postgres-runtime-faults) -- delivered separately as the Part O guard.
+DEFERRED to the future COMPLETE guard (honest, specific): reject/reopen/conflict validation
+transitions and their replays/races; the full idempotency variant matrix (changed-operation/actor/
+tenant, stale-revision); correction supersede/revert; the export-OVERRIDE path and full tenant-A/
+tenant-B export matrix; signed-reference SUCCESSFUL retrieval + tamper/expiry/substitution + secret
+scan; the complete cross-tenant HTTP matrix; the expanded direct-RLS matrix (INSERT/UPDATE/DELETE
+per protected table, per-txn/rollback/pool GUC clearing); the complete worker tenant-isolation
+matrix; the complete import assess/dry-run/execute/verify matrix. The non-vacuity mutation battery
+for this core is audit:restricted-postgres-runtime-core-faults.
 """
 from __future__ import annotations
 
@@ -61,13 +69,20 @@ def _scrub(text: str) -> str:
     return text
 
 
-COVERED = ["auth-identity", "corrections-idempotency", "validation-transition",
-           "report-export-gate", "cross-tenant-http", "rls-direct", "malware",
-           "audit-integrity", "worker-identity", "import-boundary"]
-DEFERRED = ["validation-reject/conflict/reopen-transitions", "export-override-path",
-            "signed-url-200-branch-secret-scan(needs-stack-signing-secret)",
-            "full-worker-isolation-matrix", "full-import-mode-matrix",
-            "functional-mutation-battery(audit:restricted-postgres-runtime-faults)"]
+COVERED = ["auth-identity(core)", "corrections-idempotency(create/replay/changed-body/lost-response)",
+           "validation-transition(validated-terminal+replay+cross-tenant)",
+           "report-export-gate(409+all-format+signed-url-409)", "cross-tenant-http(core)",
+           "rls-direct(read+cross-tenant-write)", "malware", "audit-integrity",
+           "worker-identity", "import-env-boundary"]
+# Deferred to the future COMPLETE guard (`audit:restricted-postgres-runtime`). Explicit + specific.
+DEFERRED = ["validation-reject/reopen/conflict-transitions+replays+races",
+            "idempotency-variants(changed-operation/actor/tenant, stale-revision)",
+            "correction-supersede/revert",
+            "export-override-path+full-tenant-A/B-export-matrix",
+            "signed-reference-successful-retrieval+tamper/expiry/substitution+secret-scan",
+            "complete-cross-tenant-HTTP-matrix", "expanded-direct-RLS-matrix(INSERT/UPDATE/DELETE+GUC-lifecycle)",
+            "complete-worker-tenant-isolation-matrix", "complete-import-assess/dry-run/execute/verify-matrix",
+            "functional-mutation-battery(audit:restricted-postgres-runtime-core-faults)"]
 # The full functional-matrix inventory. A clean run records exactly these; a missing id means a
 # check silently did not run (partial matrix) and _emit fails closed rather than reading "passed".
 EXPECTED_CHECK_IDS = [
@@ -646,7 +661,7 @@ def _emit(skipped=False) -> int:
     exec_totals = {}
     for c in checks:
         exec_totals[c["execution_level"]] = exec_totals.get(c["execution_level"], 0) + 1
-    enriched = [{**c, "claim_scope": "restricted-runtime-functional-only"} for c in checks]
+    enriched = [{**c, "claim_scope": "restricted-runtime-functional-core-only"} for c in checks]
     # _scrub the ENTIRE emitted verdict as a safety net: no nonce/DSN/role/db/token/container-id
     # can reach stdout even if a check detail accidentally carried one.
     print(_scrub(json.dumps({"checks": enriched,
@@ -654,7 +669,7 @@ def _emit(skipped=False) -> int:
                                   "skipped": len(checks) if skipped else 0,
                                   "failed": 0 if skipped else len(failed),
                                   "execution_level_totals": exec_totals,
-                                  "claim_scope": "restricted-runtime-functional-only",
+                                  "claim_scope": "restricted-runtime-functional-core-only",
                                   "full_functional_matrix": "not_run",
                                   "functional_core": core,
                                   "covered_areas": COVERED,
@@ -673,7 +688,7 @@ def _emit(skipped=False) -> int:
             print(_scrub(f"  FAIL: {c['id']} -> {c['detail']}"))
         return 1
     print(f"\nRestricted-runtime functional CORE passed: {len(passed)} check(s)."
-          "\n[claim_scope=restricted-runtime-functional-only; full matrix NOT run; NOT evidence/readiness eligible]")
+          "\n[claim_scope=restricted-runtime-functional-core-only; full matrix NOT run; NOT evidence/readiness eligible]")
     return 0
 
 
