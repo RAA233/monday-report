@@ -74,6 +74,11 @@ _INVENTORY = [
     "AF02 a failed boundary audit persists no event and no business mutation",
     "MT01 tampering an event's content breaks its HMAC seal (detectable)",
     "MT02 the boundary event chains to the prior event (previous_hash linkage)",
+    "HF01 audit-write failure with active boundary -> controlled 503, no business mutation",
+    "HF02 attestation expired -> boundary inactive -> 423, no business mutation",
+    "HF03 attestation missing -> boundary inactive -> 423, no business mutation",
+    "HF04 checker function missing -> boundary inactive -> 423, no business mutation",
+    "HF05 no functional 500 in any boundary-failure path (503/423 are the contract)",
 ]
 
 
@@ -199,26 +204,47 @@ def run() -> int:
                {"boundary_events": len(bnd), "post_status": s1})
         record("N02 at least one business audit committed", len(biz) >= 1, {"business_events": len(biz)})
         if bnd and biz:
-            i_b = after_logs.index(bnd[0])
-            i_z = after_logs.index(biz[0])
+            # DURABLE ordering (not just Python list order): the audit_logs are loaded from
+            # the persisted PostgreSQL snapshot in hash-chain order, and we verify the
+            # boundary event is a CHAIN PREDECESSOR of the business event -- i.e. following
+            # previous_hash backward from the business event reaches the boundary event's
+            # entry_hash. That proves the boundary audit was durably committed before the
+            # business mutation's audit, using the chain relationship, not list position.
+            b_pos = next((i for i, x in enumerate(after_logs) if x.entry_hash == bnd[0].entry_hash), -1)
+            z_pos = next((i for i, x in enumerate(after_logs) if x.entry_hash == biz[0].entry_hash), -1)
+            by_hash = {x.entry_hash: x for x in after_logs if x.entry_hash}
+            chain_reaches, cur = False, biz[0]
+            for _ in range(len(after_logs) + 1):
+                if not cur.previous_hash:
+                    break
+                prev = by_hash.get(cur.previous_hash)
+                if prev is None:
+                    break
+                if prev.entry_hash == bnd[0].entry_hash:
+                    chain_reaches = True
+                    break
+                cur = prev
             record("N03 boundary-use audit is committed BEFORE the business mutation (ordering)",
-                   i_b < i_z, {"boundary_index": i_b, "business_index": i_z})
+                   b_pos >= 0 and z_pos > b_pos and chain_reaches,
+                   {"boundary_chain_pos": b_pos, "business_chain_pos": z_pos,
+                    "chain_predecessor_verified": chain_reaches})
         else:
             record("N03 boundary-use audit is committed BEFORE the business mutation (ordering)", False,
                    "missing boundary or business event")
         if bnd:
             e = bnd[0]
             md = e.metadata or {}
+            fp_val, fp_len, fp_ok = _persisted_fp(md.get("verification_run"), expected_fp)
             ok_content = (e.action == BND and md.get("operation") == "field_correction.record"
                           and str(e.actor_user_id) == api_user_id and e.tenant_id == tenant_id
-                          and md.get("verification_run") == expected_fp
+                          and fp_ok
                           and md.get("verification_isolation_active") is True)
             record("N04 boundary event binds correct actor + tenant + operation + safe run fingerprint + decision",
-                   ok_content, {"operation": md.get("operation"), "run_fp_ok": md.get("verification_run") == expected_fp,
+                   ok_content, {"operation": md.get("operation"), "run_fp_ok": fp_ok, "persisted_fp_hex_bits": fp_len * 4,
                                 "actor_ok": str(e.actor_user_id) == api_user_id, "active": md.get("verification_isolation_active")})
             blob = json.dumps(event_dict(e), default=str)
             leaked = [s for s in secrets_to_check if s and s in blob]
-            # a raw run id (nonce) must never appear -- only its 12-hex fingerprint may.
+            # a raw run id (nonce) must never appear -- only its full 64-hex SHA-256 fingerprint may.
             nonce_leak = run_id in blob
             record("N05 boundary event carries no nonce/DSN/host/port/role/docker-id/volume/path/credential",
                    not leaked and not nonce_leak, {"leaked_kinds": len(leaked), "nonce_leak": nonce_leak})
@@ -322,6 +348,52 @@ def run() -> int:
             for k, v in s2.items():
                 (os.environ.__setitem__(k, v) if v is not None else os.environ.pop(k, None))
 
+        # ============ REAL EXTERNAL-HTTP BOUNDARY FAILURES (through uvicorn) ===========
+        # Prove the failure paths via REAL HTTP requests to the runner-owned external API
+        # process -- not only the in-process primitive above. Each failure is induced by a
+        # test-owned database mutation (no request-controlled failure header). The request
+        # must return the documented controlled status and mutate NO business state.
+        import psycopg
+        from backend.app import verification_boundary as vb
+        boot = ctx["boot_dsn"]
+        state_table = store_mod.PostgresStateStore.STATE_TABLE
+        hf_base = rows()
+        hf = {}
+
+        def _hf_post():
+            return _http("POST", f"{api}/workspaces/{ws_id}/field-corrections", key=hdr_key,
+                         body=corr_body("hf"), idem=str(uuid.uuid4()))
+        with psycopg.connect(boot, autocommit=True) as admin:
+            # HF01: boundary ACTIVE but the audit's save() cannot persist -> controlled 503.
+            # Revoke the runtime group's write on the snapshot table so store.audit's save()
+            # fails; require_client_data_ready fails closed (503) and no business row appears.
+            admin.execute(f"revoke insert, update on {state_table} from monday_report_app")
+            s1h, _ = _hf_post()
+            hf["HF01"] = s1h
+            record("HF01 audit-write failure with active boundary -> controlled 503, no business mutation",
+                   s1h == 503 and rows() == hf_base, {"status": s1h, "business_rows": rows()})
+            admin.execute(f"grant insert, update on {state_table} to monday_report_app")
+            # HF02: attestation expired -> boundary inactive -> readiness lock (423).
+            admin.execute(f"update {vb.ATTESTATION_QUALIFIED} set expires_at = now() - interval '1 hour'")
+            s2h, _ = _hf_post()
+            hf["HF02"] = s2h
+            record("HF02 attestation expired -> boundary inactive -> 423, no business mutation",
+                   s2h == 423 and rows() == hf_base, {"status": s2h, "business_rows": rows()})
+            # HF03: attestation missing -> 423.
+            admin.execute(f"truncate {vb.ATTESTATION_QUALIFIED}")
+            s3h, _ = _hf_post()
+            hf["HF03"] = s3h
+            record("HF03 attestation missing -> boundary inactive -> 423, no business mutation",
+                   s3h == 423 and rows() == hf_base, {"status": s3h, "business_rows": rows()})
+            # HF04: checker function dropped -> present() fails closed -> 423.
+            admin.execute(f"drop function if exists {vb.ATTESTATION_CHECK_FN}(text)")
+            s4h, _ = _hf_post()
+            hf["HF04"] = s4h
+            record("HF04 checker function missing -> boundary inactive -> 423, no business mutation",
+                   s4h == 423 and rows() == hf_base, {"status": s4h, "business_rows": rows()})
+        record("HF05 no functional 500 in any boundary-failure path (503/423 are the contract)",
+               all(v in (423, 503) for v in hf.values()) and len(hf) == 4, {"statuses": hf})
+
     G.checks = []
     G.http_statuses = []
     G._ON_LIVE = on_live
@@ -334,6 +406,25 @@ def run() -> int:
         if cid not in have:
             record(cid, False, "on_live aborted before this check ran")
     return _emit()
+
+
+def _persisted_fp(v, expected_fp):
+    """The EFFECTIVE persisted run fingerprint (in whatever form the audit sanitizer left
+    it), plus its hex length and whether it is >=128 bits (>=32 hex) AND deterministically
+    bound to the run. verification_run is sha256(run_id) (64 hex); the audit sanitizer treats
+    any >=32-char token conservatively and redacts it into {redacted, reason, length, sha256},
+    where sha256 is a 256-bit SHA-256 of the fingerprint -- a deterministic, non-reversible
+    binding to the run. So the persisted binding is a top-level >=32-hex string OR that
+    256-bit sha256. Never the raw nonce."""
+    if isinstance(v, str):
+        return v, len(v), (v == expected_fp and len(v) >= 32)
+    if isinstance(v, dict) and isinstance(v.get("sha256"), str):
+        h = v["sha256"]
+        # audit_safety._redacted_value hashes json.dumps(value, sort_keys, compact) -- match it.
+        canonical = json.dumps(expected_fp, sort_keys=True, separators=(",", ":"), default=str)
+        deterministic = h == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return h, len(h), (len(h) >= 32 and deterministic)
+    return None, 0, False
 
 
 def _tamper_detectable(store, event, secret) -> bool:
@@ -355,11 +446,15 @@ def _emit(skipped=False) -> int:
     missing = [cid for cid in _INVENTORY if cid not in {c["id"] for c in checks}]
     enriched = [{**c, "claim_scope": "verification-boundary-audit-only",
                  "requires_docker": True, "requires_postgresql": True} for c in checks]
+    hf_checks = [c for c in checks if c["id"].startswith("HF")]
+    ext_http = ("skipped" if skipped else
+                ("passed" if hf_checks and all(c["ok"] for c in hf_checks) else "failed"))
     print(json.dumps({"checks": enriched,
                       "summary": {"passed": len(passed) if not skipped else 0,
                                   "skipped": len(checks) if skipped else 0,
                                   "failed": 0 if skipped else len(failed),
                                   "missing_ids": missing, "expected": len(_INVENTORY),
+                                  "external_http_failure_scenarios": ext_http,
                                   "claim_scope": "verification-boundary-audit-only",
                                   "eligible_for_tenant_evidence": False,
                                   "eligible_for_readiness": False}}, indent=2, default=str))
