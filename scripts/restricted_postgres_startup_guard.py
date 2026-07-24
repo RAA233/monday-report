@@ -803,9 +803,11 @@ def _emit() -> int:
                                   # login cannot SET ROLE to it (P09). This is NOT a runtime
                                   # pattern -- production parity is false.
                                   "migration_principal": {
+                                      "principal_class": "test-only-bootstrap-migration-admin",
                                       "migration_superuser": True,
                                       "test_only_migration_principal": True,
-                                      "production_parity": False},
+                                      "production_parity": False,
+                                      "eligible_for_production_adapter_evidence": False},
                                   # Explicit, machine-readable claim scope. This guard proves
                                   # runner ownership + external startup + live identity + a
                                   # minimal smoke ONLY -- it does NOT run the corrections/

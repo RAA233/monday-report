@@ -137,6 +137,29 @@ def _no_secret(text: str, secrets_list: list[str]) -> bool:
     return True
 
 
+def _exec_level(cid: str) -> str:
+    """HONEST per-check execution level. A predicate/unit test is never described as a
+    whole-stack live fault. Whole-stack faults invoke the real runner + its real cleanup;
+    live Docker/PG/session tests create real resources or mutate a live database/session;
+    predicate/unit tests exercise the real functions over crafted inputs."""
+    p = cid.split()[0]
+    if p.startswith("FA"):
+        return "whole-stack fault"                 # real run_stack + real cleanup path
+    if p in ("CU01", "CU02", "CU03", "CU04", "CU05", "CU06"):
+        return "live Docker substitution"          # real containers/volumes + real decision
+    if p in ("DK01", "DK02"):
+        return "live Docker substitution"          # real `docker inspect` via the decision helper
+    if p in ("DK03", "DK04", "DK05", "DK06", "CU07") or p.startswith("EN"):
+        return "pure predicate/unit mutation"      # real predicate/env functions over crafted input
+    if p.startswith("RP"):
+        return "live PostgreSQL mutation"          # real role/policy/attestation mutation on the live DB
+    if p.startswith("SS"):
+        return "live process/session spoof"        # real pg_stat_activity sessions
+    if p.startswith("FC"):
+        return "direct component integration"      # real create_store / verification_context vs the live DB
+    return "structural source check"
+
+
 def run() -> int:
     allow_unavailable = "--allow-unavailable" in sys.argv
     if _d(["info"]).returncode != 0:
@@ -583,10 +606,16 @@ def _emit() -> int:
         enriched.append({**c, "requires_docker": meta.get("requires_docker", True),
                          "requires_postgresql": meta.get("requires_postgresql", False),
                          "process_boundary": meta.get("process_boundary", "runner"),
+                         "execution_level": _exec_level(c["id"]),
                          "claim_scope": "startup-fault-injection-only"})
+    # Honest execution-level totals (a predicate/unit test is NOT a whole-stack live fault).
+    exec_totals: dict = {}
+    for c in enriched:
+        exec_totals[c["execution_level"]] = exec_totals.get(c["execution_level"], 0) + 1
     print(json.dumps({"checks": enriched,
                       "summary": {"passed": len(passed), "skipped": len(skipped), "failed": len(failed),
                                   "missing_ids": missing, "expected": len(_INVENTORY),
+                                  "execution_level_totals": exec_totals,
                                   "claim_scope": "startup-fault-injection-only",
                                   "eligible_for_tenant_evidence": False,
                                   "eligible_for_readiness": False}}, indent=2, default=str))
