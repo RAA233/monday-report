@@ -78,6 +78,7 @@
     "audit:restricted-postgres-runtime-core": "python scripts/restricted_postgres_runtime_core_guard.py",
     "audit:restricted-postgres-runtime-core-faults": "python scripts/restricted_postgres_runtime_core_faults_guard.py",
     "audit:restricted-postgres-runtime-mutations": "python scripts/restricted_postgres_runtime_mutations_guard.py",
+    "audit:restricted-postgres-runtime-mutations-faults": "python scripts/restricted_postgres_runtime_mutations_faults_guard.py",
     "audit:postgres-malware-route": "python scripts/postgres_malware_route_guard.py",
     "audit:storage-paths": "python scripts/storage_path_guard.py",
     "audit:archive-safety": "python scripts/archive_safety_guard.py",
