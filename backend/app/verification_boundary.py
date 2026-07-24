@@ -339,10 +339,15 @@ def verification_context_summary() -> dict:
 
 
 def verification_run_fingerprint() -> str | None:
-    """A short, non-reversible fingerprint of the run id for audit binding: the first
-    12 hex chars of its SHA-256. Never the raw run id. None when unset."""
+    """A non-reversible fingerprint of the run id for audit binding: the FULL SHA-256
+    (64 hex chars = 256 bits) of the run id. Never the raw run id. None when unset.
+
+    It must retain at least 128 bits (>= 32 hex): a 48-bit (12-hex) prefix would be
+    brute-forceable / collision-prone for a value that binds a security-relevant
+    verification-boundary relaxation to a specific run, so the full digest is emitted.
+    Stable across processes and reruns for the same run id (SHA-256, not Python hash())."""
     run_id = _run_id()
-    return _run_id_hash(run_id)[:12] if len(run_id) >= MIN_RUN_ID_CHARS else None
+    return _run_id_hash(run_id) if len(run_id) >= MIN_RUN_ID_CHARS else None
 
 
 def install_database_attestation(
