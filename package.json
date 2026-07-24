@@ -83,6 +83,7 @@
     "audit:restricted-postgres-runtime-exports-faults": "python scripts/restricted_postgres_runtime_exports_faults_guard.py",
     "audit:restricted-postgres-runtime-isolation": "python scripts/restricted_postgres_runtime_isolation_guard.py",
     "audit:restricted-postgres-runtime-isolation-faults": "python scripts/restricted_postgres_runtime_isolation_faults_guard.py",
+    "audit:restricted-postgres-runtime-worker-import": "python scripts/restricted_postgres_runtime_worker_import_guard.py",
     "audit:postgres-malware-route": "python scripts/postgres_malware_route_guard.py",
     "audit:storage-paths": "python scripts/storage_path_guard.py",
     "audit:archive-safety": "python scripts/archive_safety_guard.py",
