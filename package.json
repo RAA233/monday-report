@@ -73,6 +73,8 @@
     "audit:snapshot-conflict-semantics": "python scripts/snapshot_conflict_semantics_guard.py",
     "audit:verification-boundary": "python scripts/verification_boundary_guard.py",
     "audit:restricted-postgres-startup": "python scripts/restricted_postgres_startup_guard.py",
+    "audit:restricted-postgres-startup-faults": "python scripts/restricted_postgres_startup_fault_guard.py",
+    "audit:verification-boundary-external": "python scripts/verification_boundary_external_guard.py",
     "audit:postgres-malware-route": "python scripts/postgres_malware_route_guard.py",
     "audit:storage-paths": "python scripts/storage_path_guard.py",
     "audit:archive-safety": "python scripts/archive_safety_guard.py",
