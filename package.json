@@ -91,6 +91,7 @@
     "audit:dual-backend-ui": "python scripts/dual_backend_ui_guard.py",
     "audit:dual-backend-ui-faults": "python scripts/dual_backend_ui_faults_guard.py",
     "audit:tenant-authorization-evidence": "python scripts/tenant_authorization_evidence_guard.py",
+    "audit:evidence-reproducibility": "python scripts/evidence_reproducibility_guard.py",
     "audit:postgres-malware-route": "python scripts/postgres_malware_route_guard.py",
     "audit:storage-paths": "python scripts/storage_path_guard.py",
     "audit:archive-safety": "python scripts/archive_safety_guard.py",
