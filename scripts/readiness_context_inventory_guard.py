@@ -126,6 +126,47 @@ def independent_canonical_hash(contexts) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def _safe_source(fn) -> str:
+    """Source of ``fn``, or "" if it cannot be read. Never raises -- a guard that cannot inspect
+    the implementation must record a FAILED gate, not crash without emitting a verdict."""
+    try:
+        return textwrap.dedent(inspect.getsource(fn))
+    except Exception:  # noqa: BLE001 - unreadable source is a refusal, not a crash
+        return ""
+
+
+def reachable_store_classes() -> set[str] | None:
+    """Derive the store classes ``create_store()`` can actually return.
+
+    ``detect_active_repository_backend()`` is not the whole axis: readiness reads the active
+    backend off the STORE OBJECT (``getattr(store, "repository_backend", ...)``), so a third store
+    class added to ``create_store`` would widen the axis even with the detector untouched. Both
+    halves are therefore derived, not just the detector.
+
+    Returns ``None`` (a refusal) if any returned value cannot be resolved to a class on the store
+    module, so an unrecognised return shape fails closed instead of being ignored.
+    """
+    source = _safe_source(STORE.create_store)
+    if not source:
+        return None
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    classes: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Return):
+            continue
+        call = node.value
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+            return None
+        resolved = getattr(STORE, call.func.id, None)
+        if not isinstance(resolved, type):
+            return None
+        classes.add(call.func.id)
+    return classes or None
+
+
 def reachable_repository_backends() -> set[str] | None:
     """Derive the repository-backend axis from the IMPLEMENTATION's actual reachable values.
 
@@ -138,7 +179,13 @@ def reachable_repository_backends() -> set[str] | None:
     to a string constant, so an added branch returning something dynamic fails closed rather than
     being silently ignored.
     """
-    tree = ast.parse(textwrap.dedent(inspect.getsource(RB.detect_active_repository_backend)))
+    source = _safe_source(RB.detect_active_repository_backend)
+    if not source:
+        return None
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
     values: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Return):
@@ -160,7 +207,9 @@ def reachable_repository_backends() -> set[str] | None:
 def observed_client_data_modes() -> set[str]:
     """Drive the REAL readiness.client_data_mode() across recognised and unrecognised inputs."""
     observed = set()
-    env = READINESS.CLIENT_DATA_MODE_ENV
+    env = getattr(READINESS, "CLIENT_DATA_MODE_ENV", None)
+    if not isinstance(env, str):
+        return observed  # empty => CX01 fails closed rather than crashing
     previous = os.environ.get(env)
     try:
         for raw in ["", "demo", "client", "1", "true", "yes", "production", "prod", "real",
@@ -180,7 +229,12 @@ def run() -> int:
     INV_ERROR = None
 
     # ------------------------------------------------------------------ axes from implementation
-    observed_modes = observed_client_data_modes()
+    # Every derivation below is computed defensively: an implementation this guard cannot inspect
+    # must produce a FAILED gate and a printed verdict, never an uncaught traceback with no JSON.
+    try:
+        observed_modes = observed_client_data_modes()
+    except Exception:  # noqa: BLE001
+        observed_modes = set()
     rec("CX01", observed_modes == set(RC.SUPPORTED_CLIENT_DATA_MODES),
         "client-data mode is a TOTAL function of the environment onto exactly the declared axis "
         f"values (observed {sorted(observed_modes)} across 14 raw inputs incl. unrecognised ones)",
@@ -196,15 +250,23 @@ def run() -> int:
         extra={"reachable_backends": sorted(impl_backends) if impl_backends else None,
                "declared_backends": sorted(RC.SUPPORTED_REPOSITORY_BACKENDS)})
 
-    detect_src = inspect.getsource(RB.detect_active_repository_backend)
-    create_src = inspect.getsource(STORE.create_store)
+    detect_src = _safe_source(RB.detect_active_repository_backend)
+    create_src = _safe_source(STORE.create_store)
+
+    # The OTHER half of the axis. Readiness reads the active backend off the store object, so a
+    # third store class in create_store() would widen the axis even with the detector untouched.
+    # Resolved from create_store's actual returns for the same reason CX02 is: a substring check
+    # that PostgresStateStore and LocalStateStore are merely *mentioned* survives a third branch.
+    store_classes = reachable_store_classes()
     rec("CX03",
-        "LOCAL_REPOSITORY_BACKEND" in detect_src and "POSTGRES_REPOSITORY_BACKEND" in detect_src
-        and "PostgresStateStore" in create_src and "LocalStateStore" in create_src,
-        "the repository axis is realised by two concrete store classes: create_store() builds "
-        "PostgresStateStore or LocalStateStore, and detect_active_repository_backend() returns "
-        "exactly the two declared constants",
-        level="structural source check")
+        store_classes == {"LocalStateStore", "PostgresStateStore"}
+        and "LOCAL_REPOSITORY_BACKEND" in detect_src and "POSTGRES_REPOSITORY_BACKEND" in detect_src,
+        "the repository axis is realised by EXACTLY two concrete store classes: every return of "
+        f"the real create_store() resolves to a class on the store module and the set is "
+        f"{sorted(store_classes) if store_classes else None} -- a third store class makes this "
+        "fail even if detect_active_repository_backend() is untouched",
+        level="implementation derivation",
+        extra={"reachable_store_classes": sorted(store_classes) if store_classes else None})
 
     # Axis independence: create_store() must not SELECT A STORE CLASS from the client-data mode,
     # otherwise the combinations are not free and the Cartesian product would be unjustified.

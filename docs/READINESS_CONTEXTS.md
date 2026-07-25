@@ -78,11 +78,19 @@ requires the inventory to equal their product. The two axes are derived differen
 - **client-data mode** is derived *dynamically* — the guard drives the real `client_data_mode()`
   across 14 inputs, including unrecognised ones, and asserts the observed range is exactly the
   declared axis;
-- **repository backend** is derived *statically* — reaching the PostgreSQL branch of
-  `detect_active_repository_backend()` requires a live database, which a Docker-free guard must not
-  start. So the guard parses the real function and resolves **every `return` statement** against
-  the live module namespace, and refuses outright if any return value cannot be resolved to a
-  string constant.
+- **repository backend** is derived *statically*, in **both halves** — reaching the PostgreSQL
+  branch of `detect_active_repository_backend()` requires a live database, which a Docker-free
+  guard must not start. So the guard parses the real functions and resolves **every `return`
+  statement** against the live module namespace:
+  - `detect_active_repository_backend()` must return exactly the two declared backend strings, and
+  - `create_store()` must return exactly the two store classes `LocalStateStore` /
+    `PostgresStateStore`.
+
+  Both halves matter because readiness reads the active backend off the *store object*
+  (`getattr(store, "repository_backend", …)`), so a third store class would widen the axis even
+  with the detector untouched. Either derivation refuses outright if a return value cannot be
+  resolved, and an implementation whose source cannot be inspected at all fails a **named gate**
+  with a printed verdict rather than crashing.
 
 If the implementation ever drops an axis value or grows a third, the product stops being four and
 **the guard fails closed** rather than certifying an inventory the implementation cannot justify.
@@ -177,7 +185,10 @@ Stated plainly, because a green guard is easy to over-read:
 - the inventory guard's completeness pin catches gate **deletion**. It does not catch a gate
   *neutered in place*, nor a gate deleted together with its own pin entry. Those are caught by the
   fault battery, which pins the gate list **cross-file** and re-runs the real guard once per
-  mutation — so a silent weakening requires editing two files in concert;
+  mutation — so weakening an *inventory-guard gate* silently requires editing both files in
+  concert. The recursion stops there: the battery's own pins and expected-check list live in the
+  battery itself and nothing pins them from a third file, so editing that one file can still narrow
+  the battery. Review it as the root of trust it is;
 - each mutation names the specific gate that must catch it and only counts as caught when that gate
   fails. A non-zero exit alone is not accepted, so the frozen-hash pin cannot stand in for the gate
   that is supposed to reason about the change;

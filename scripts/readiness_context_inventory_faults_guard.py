@@ -41,6 +41,10 @@ import readiness_context_inventory_guard as G  # noqa: E402
 
 checks: list[dict] = []
 
+#: Declared mutation families. Any emitted id that is neither a fixture (``F...``) nor one of these
+#: fails the completeness gate, so a new family cannot silently escape the advertised count.
+MUTATION_PREFIXES = ("MC", "MS", "MR", "MD", "MA", "MX", "MZ")
+
 #: Cross-file pin of the inventory guard's own gate list. Its EXPECTED_CHECK_IDS catches gate
 #: DELETION; pinning it from a second file also catches a gate deleted together with its entry.
 PINNED_INVENTORY_GATES = [
@@ -86,6 +90,7 @@ EXPECTED_CHECK_IDS = [
     "MA01 axis-product-no-longer-four", "MA02 mode-axis-not-total",
     "MA03 backend-axis-diverges-from-implementation", "MA04 backend-axis-grows-third-branch",
     "MA05 store-classes-no-longer-two", "MA06 create-store-branches-on-mode",
+    "MA07 third-store-class-detector-untouched", "MA08 uninspectable-implementation",
     "MX01 runner-reports-executed-pass", "MX02 runner-emits-simulated-disposition",
     "MX03 unknown-context-id-accepted", "MX04 run-input-not-isolated",
     "MX05 nondeterministic-canonical-hash", "MX06 hash-payload-carries-timestamp",
@@ -184,6 +189,19 @@ def detector_with_third_backend():  # pragma: no cover - parsed, never executed
 
 def create_store_single_class():  # pragma: no cover - parsed, never executed
     """A create_store that no longer realises the repository axis with two store classes."""
+    return LocalStateStore()  # noqa: F821
+
+
+def create_store_with_third_class():  # pragma: no cover - parsed, never executed
+    """A create_store returning a THIRD store class while the detector is untouched.
+
+    ``TenantRuntimeRoleError`` merely stands in for a third store class: it is a real, resolvable
+    type on the store module, which is what the derivation checks.
+    """
+    if requested_repository_backend() == POSTGRES_REPOSITORY_BACKEND and database_url():  # noqa: F821
+        return PostgresStateStore(database_url())  # noqa: F821
+    if requested_repository_backend() == "mysql":  # noqa: F821
+        return TenantRuntimeRoleError()  # noqa: F821
     return LocalStateStore()  # noqa: F821
 
 
@@ -397,6 +415,18 @@ def run() -> int:
                     "when create_store() selects the store class from the client-data mode the "
                     "axes are no longer independent and the guard refuses",
                     G.STORE, create_store=create_store_branching_on_mode)
+    refuses_patched("MA07 third-store-class-detector-untouched", "CX03",
+                    "a THIRD store class added to create_store() is refused even though "
+                    "detect_active_repository_backend() is untouched -- readiness reads the active "
+                    "backend off the store object, so both halves of the axis are derived",
+                    G.STORE, level="implementation derivation",
+                    create_store=create_store_with_third_class)
+    refuses_patched("MA08 uninspectable-implementation", "CX02",
+                    "an implementation whose source cannot be inspected at all is refused with a "
+                    "named gate and a printed verdict -- the guard fails closed rather than dying "
+                    "with an uncaught traceback and no JSON for a CI consumer",
+                    G.RB, level="implementation derivation",
+                    detect_active_repository_backend=len)
 
     # ---------------------------------------------------------------- runner cannot fabricate
     def fake_pass_runner(context_id, **_kw):
@@ -500,15 +530,21 @@ def run() -> int:
     # Checked over the parsed AST, never by scanning for a literal: a text scan for
     # "import readiness_context_inventory_guard as G" would match the scan's own needle and can
     # never be false -- the exact self-referential vacuity this battery exists to catch.
+    # Restricted to the LIVE path, not merely "somewhere in the file": the import must be
+    # module-level (so it actually binds G for the battery) and the G.run() call must sit inside
+    # run_real_guard (so it is the call the mutations go through). Dead code containing the same
+    # construct therefore cannot satisfy either check.
     fault_ast = ast.parse(fault_src)
     imports_guard = any(
         isinstance(n, ast.Import) and any(a.name == "readiness_context_inventory_guard"
                                           for a in n.names)
-        for n in ast.walk(fault_ast))
-    calls_guard_run = any(
+        for n in fault_ast.body)
+    runner_def = next((n for n in fault_ast.body
+                       if isinstance(n, ast.FunctionDef) and n.name == "run_real_guard"), None)
+    calls_guard_run = runner_def is not None and any(
         isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "run"
         and isinstance(n.func.value, ast.Name) and n.func.value.id == "G"
-        for n in ast.walk(fault_ast))
+        for n in ast.walk(runner_def))
     rec("FS01 drives-the-real-guard", imports_guard and calls_guard_run,
         "this battery drives the REAL inventory guard: the parsed AST contains a real import of "
         "the guard module and a real call to G.run(); it does not reimplement the gates it tests",
@@ -556,13 +592,21 @@ def run() -> int:
     # Also AST-checked: assert the real `refuses`/`refuses_patched` bodies contain a membership
     # test of expect_check against the failed-gate list, rather than scanning for that phrase in
     # source text (which would match this very check).
+    # The membership test must be part of the value ASSIGNED TO `ok` -- the value that decides the
+    # mutation's verdict. A bare `expect_check in failed` expression statement whose result is
+    # discarded no longer satisfies this.
     def couples_expected_gate(fn_name: str) -> bool:
         for node in ast.walk(fault_ast):
-            if isinstance(node, ast.FunctionDef) and node.name == fn_name:
-                return any(
-                    isinstance(sub, ast.Compare) and any(isinstance(o, ast.In) for o in sub.ops)
-                    and isinstance(sub.left, ast.Name) and sub.left.id == "expect_check"
-                    for sub in ast.walk(node))
+            if not (isinstance(node, ast.FunctionDef) and node.name == fn_name):
+                continue
+            for stmt in ast.walk(node):
+                if not (isinstance(stmt, ast.Assign)
+                        and any(isinstance(t, ast.Name) and t.id == "ok" for t in stmt.targets)):
+                    continue
+                if any(isinstance(sub, ast.Compare) and any(isinstance(o, ast.In) for o in sub.ops)
+                       and isinstance(sub.left, ast.Name) and sub.left.id == "expect_check"
+                       for sub in ast.walk(stmt.value)):
+                    return True
         return False
 
     coupled = [fn for fn in ("refuses", "refuses_patched") if couples_expected_gate(fn)]
@@ -599,19 +643,24 @@ def run() -> int:
     missing = [cid for cid in EXPECTED_CHECK_IDS if cid not in emitted]
     unknown = [cid for cid in emitted if cid not in EXPECTED_CHECK_IDS and cid != "FZ00 completeness"]
     dupes = sorted({cid for cid in emitted if emitted.count(cid) > 1})
-    if missing or unknown or dupes:
+    # A future mutation family with an unrecognised prefix would silently drop out of the
+    # advertised mutation count, so every id must be either a fixture (F...) or a known family.
+    stray_prefix = [cid for cid in emitted
+                    if not cid.startswith("F") and cid[:2] not in MUTATION_PREFIXES]
+    if missing or unknown or dupes or stray_prefix:
         rec("FZ00 completeness", False,
-            "the emitted check set must equal the expected set exactly -- a mutation cannot be "
-            "quietly deleted from the battery",
+            "the emitted check set must equal the expected set exactly, and every id must belong "
+            "to a declared family -- a mutation cannot be quietly deleted from the battery, nor "
+            "silently excluded from the advertised mutation count",
             level="structural source check",
-            extra={"missing": missing, "unknown": unknown, "duplicates": dupes})
+            extra={"missing": missing, "unknown": unknown, "duplicates": dupes,
+                   "unknown_prefix": stray_prefix})
 
     passed = sum(1 for c in checks if c["ok"])
     failed_n = len(checks) - passed
     # Count ONLY real mutations: the baseline (FB00), the restoration check, the structural source
     # checks and the cross-file pins are not mutations and must not be advertised as such.
-    mutation_ids = [c["check_id"] for c in checks
-                    if c["check_id"][:2] in ("MC", "MS", "MR", "MD", "MA", "MX", "MZ")]
+    mutation_ids = [c["check_id"] for c in checks if c["check_id"][:2] in MUTATION_PREFIXES]
     summary = {
         "guard": "readiness-context-inventory-faults",
         "claim_scope": "readiness-context-inventory-faults-only",
