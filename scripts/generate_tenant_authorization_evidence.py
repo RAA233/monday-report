@@ -152,6 +152,24 @@ def main() -> int:
         return fail("git commit/tree could not be resolved as full 40-character SHAs")
     if not TAE.worktree_is_clean():
         return fail("worktree is not clean (tracked changes present); commit before generating evidence")
+    # STRICT cleanliness (Part I): the accepted RLS sub-proof counts UNTRACKED files, so evidence may
+    # only be produced from a tree that is clean under that same bare-porcelain definition. A developer
+    # tree carrying untracked files is refused here -- generate from a pristine worktree of this commit
+    # instead. The rule is never relaxed and untracked files are never touched.
+    strict_status = subprocess.run(["git", "status", "--porcelain"], cwd=str(ROOT),
+                                   capture_output=True, text=True).stdout.strip()
+    if strict_status:
+        return fail("the generating tree is not clean under the STRICT rule the RLS sub-proof uses "
+                    "(bare `git status --porcelain` is non-empty: untracked files count). Generate "
+                    "from a pristine worktree of this commit; never relax the rule and never touch "
+                    "untracked files")
+    # disclose WHICH worktree produced the artifact (a linked/pristine worktree has its own git dir)
+    _gd = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=str(ROOT),
+                         capture_output=True, text=True).stdout.strip()
+    _cd = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                         cwd=str(ROOT), capture_output=True, text=True).stdout.strip()
+    generation_worktree = ("pristine linked worktree" if (_gd and _cd and _gd != _cd)
+                           else "primary worktree (clean under the strict rule)")
     impl_rel = "backend/app/tenant_authorization_evidence.py"
     tracked = subprocess.run(["git", "ls-files", "--error-unmatch", impl_rel], cwd=str(ROOT),
                              capture_output=True, text=True)
@@ -342,6 +360,9 @@ def main() -> int:
             "all_proofs_executed_this_run": True,
             "rls_artifact_regenerated_this_run": True,
             "stale_capture_reuse": False,
+            "strict_worktree_clean_at_generation": True,
+            "generation_worktree": generation_worktree,
+            "strict_cleanliness_definition": "bare `git status --porcelain` empty (untracked files count)",
             "executed_commands": sorted(cmd for cmd, _s in PROOFS.values()),
         },
         "proof_scope": {"statement": TAE.PROOF_SCOPE_STATEMENT,

@@ -80,6 +80,8 @@ def build_valid_v3() -> dict:
         "generation_execution": {"all_proofs_executed_this_run": True,
                                  "rls_artifact_regenerated_this_run": True,
                                  "stale_capture_reuse": False,
+                                 "strict_worktree_clean_at_generation": True,
+                                 "generation_worktree": "pristine linked worktree",
                                  "executed_commands": ["audit:dual-backend-ui"]},
         "proof_scope": {"statement": TAE.PROOF_SCOPE_STATEMENT,
                         "functional_runtime_mode": "client", "ui_mode": "demo"},
@@ -410,6 +412,13 @@ def run() -> int:
     mutation("EM81-stale-capture-admitted", "execution-attestation",
              "an artifact admitting stale-capture reuse is rejected",
              lambda p: p["generation_execution"].__setitem__("stale_capture_reuse", True))
+    mutation("EM85-strict-cleanliness-not-attested", "execution-attestation",
+             "an artifact that does not attest STRICT (bare-porcelain) cleanliness in the generating "
+             "tree is rejected",
+             lambda p: p["generation_execution"].__setitem__("strict_worktree_clean_at_generation", False))
+    mutation("EM86-generation-worktree-undisclosed", "execution-attestation",
+             "an artifact that does not disclose which worktree generated it is rejected",
+             lambda p: p["generation_execution"].pop("generation_worktree"))
     mutation("EM82-rls-not-regenerated", "execution-attestation",
              "an artifact whose RLS sub-proof was not regenerated in the run is rejected",
              lambda p: p["generation_execution"].__setitem__("rls_artifact_regenerated_this_run", False))

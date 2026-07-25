@@ -45,6 +45,18 @@
 *.html text eol=lf
 *.sh   text eol=lf
 
+# --- remaining tracked text files (independent review F4: these resolved eol=unspecified and
+#     still materialized CRLF on a fresh autocrlf=true checkout; none is digest-bound today, but
+#     covering them removes the latent recurrence risk if one ever becomes bound) ---
+*.txt  text eol=lf
+*.svg  text eol=lf
+*.cfg  text eol=lf
+*.ini  text eol=lf
+*.example text eol=lf
+.gitignore    text eol=lf
+.gitattributes text eol=lf
+.npmrc        text eol=lf
+
 # --- binary formats: never treat as text, never smudge ---
 *.pdf   -text
 *.png   -text

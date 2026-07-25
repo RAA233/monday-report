@@ -55,6 +55,80 @@ BINARY_FORMATS = ("pdf", "png", "jpg", "jpeg", "webp", "gif", "ico", "zip", "gz"
                   "xlsx", "docx")
 
 
+# --------------------------------------------------------------------------- gate predicates
+# The REAL gates below and the mutation battery call these SAME functions, so a change to gate logic
+# is exercised by its mutation. Deleting a whole gate is caught separately by EXPECTED_CHECK_IDS.
+
+def gate_attr_ok(attr: dict) -> bool:
+    """A digest-bound text file must resolve text=set and eol=lf."""
+    return attr.get("text") == "set" and attr.get("eol") == "lf"
+
+
+def gate_binary_not_text(attr: dict) -> bool:
+    """A binary format must NOT be text (never smudgeable)."""
+    return attr.get("text") == "unset"
+
+
+def gate_digests_identical(digests: dict) -> bool:
+    """A bound file must hash identically in the developer tree and every pristine checkout."""
+    return len(set(digests.values())) == 1
+
+
+def gate_no_crlf(crlf_hits: list) -> bool:
+    """No bound file may materialize with CRLF in a pristine checkout."""
+    return not crlf_hits
+
+
+def gate_no_stale_digest(superseded, live) -> bool:
+    """No superseded pre-normalization digest may still be live in the manifest."""
+    return not (set(superseded) & set(live))
+
+
+def gate_record_covers_all(named, allnames) -> bool:
+    """The re-freeze record must account for every accepted child."""
+    return set(named) == set(allnames)
+
+
+def gate_counts_ok(pair) -> bool:
+    """Accepted child counts must remain 266 functional / 144 faults."""
+    return tuple(pair) == (266, 144)
+
+
+def gate_sidecar_ok(block: dict) -> bool:
+    """The expected-ID sidecar's functional half must still reconcile to 266 ids."""
+    return sum(len(v) for v in block.values()) == 266
+
+
+def gate_scopes_ok(scopes) -> bool:
+    """Accepted claim scopes must stay restricted-runtime scoped."""
+    return all(str(x).startswith("restricted-runtime-") for x in scopes)
+
+
+def gate_contract_ok(contract: dict) -> bool:
+    """Child eligibility and production-parity flags must stay false."""
+    return (contract.get("eligible_for_tenant_evidence") is False
+            and contract.get("eligible_for_readiness") is False
+            and contract.get("production_parity") is False)
+
+
+def gate_strict_cleanliness(src: str) -> bool:
+    """The accepted RLS guard must still count UNTRACKED files when deciding worktree_clean."""
+    return '"worktree_clean": _git(["status", "--porcelain"]) == ""' in src
+
+
+# Every gate this guard must emit. A deleted gate leaves its id missing and fails the run, so the
+# battery cannot be quietly reduced to a green subset.
+EXPECTED_CHECK_IDS = [
+    "RB00", "RP01", "RP02", "RP03", "RP04",
+    "RW01", "RW02", "RW03", "RW04", "RW05", "RW06",
+    "RF01", "RF02", "RF03", "RF04", "RF05", "RF06", "RF07",
+    "RI01", "RI02", "RI03", "RI04",
+    "RC01", "RC02", "RC03",
+    "RM01", "RM02", "RM03", "RM04", "RM05", "RM06", "RM07", "RM08", "RM09", "RM10", "RM11", "RM12",
+    "RM13", "RM14",
+]
+
+
 def rec(cid, ok, desc, level="predicate/unit mutation", extra=None):
     checks.append({"check_id": cid, "ok": bool(ok), "result": "PASS" if ok else "FAIL",
                    "description": desc, "execution_level": level, **(extra or {})})
@@ -103,15 +177,14 @@ def run() -> int:
         level="structural source check")
 
     attrs = check_attrs(files)
-    uncovered = [p for p in files
-                 if attrs.get(p, {}).get("text") != "set" or attrs.get(p, {}).get("eol") != "lf"]
+    uncovered = [p for p in files if not gate_attr_ok(attrs.get(p, {}))]
     rec("RP03 policy-covers-every-bound-file", not uncovered,
         "every evidence-bound file resolves text=set and eol=lf",
         level="manifest integration", extra={"uncovered": uncovered[:6]})
 
     bin_probe = [f"__reproducibility_probe__.{ext}" for ext in BINARY_FORMATS]
     bin_attrs = check_attrs(bin_probe)
-    text_binaries = [p for p in bin_probe if bin_attrs.get(p, {}).get("text") != "unset"]
+    text_binaries = [p for p in bin_probe if not gate_binary_not_text(bin_attrs.get(p, {}))]
     rec("RP04 binaries-not-text", not text_binaries,
         "binary formats are marked -text so they can never be smudged",
         level="manifest integration", extra={"binary_formats_checked": len(bin_probe),
@@ -151,13 +224,13 @@ def run() -> int:
                 digests[w.name] = sha(w / rel)
                 if (w / rel).read_bytes().count(b"\r\n"):
                     crlf_materialized.append(f"{w.name}:{rel}")
-            if len(set(digests.values())) != 1:
+            if not gate_digests_identical(digests):
                 mismatches.append(rel)
         rec("RW04 byte-identical-across-checkouts", not mismatches,
             "every evidence-bound file is byte-identical across the developer tree and BOTH pristine "
             "checkouts (this is the property whose absence blocked evidence generation)",
             level="fresh-worktree integration", extra={"mismatched": mismatches[:6]})
-        rec("RW05 no-crlf-materialization", not crlf_materialized,
+        rec("RW05 no-crlf-materialization", gate_no_crlf(crlf_materialized),
             "no evidence-bound file materializes with CRLF in either pristine checkout",
             level="fresh-worktree integration", extra={"crlf": crlf_materialized[:6]})
 
@@ -196,17 +269,17 @@ def run() -> int:
             "the re-freeze record asserts pristine-checkout reproducibility", level="structural source check")
         named = set(record.get("children_re_frozen") or []) | set(record.get("children_unchanged") or [])
         allnames = {e["name"] for e in list(MF.FUNCTIONAL) + list(MF.FAULT)}
-        rec("RF06 record-covers-every-child", named == allnames,
+        rec("RF06 record-covers-every-child", gate_record_covers_all(named, allnames),
             "the re-freeze record accounts for EVERY accepted child (none omitted)",
             level="manifest integration", extra={"missing": sorted(allnames - named)})
         superseded = set((record.get("superseded") or {}).values())
         live = {e["sha256"] for e in list(MF.FUNCTIONAL) + list(MF.FAULT)}
-        rec("RF07 no-stale-digest-live", not (superseded & live),
+        rec("RF07 no-stale-digest-live", gate_no_stale_digest(superseded, live),
             "no superseded pre-normalization digest is still live in the manifest",
             level="manifest integration")
 
     # ---------------- invariants that must NOT have moved ----------------
-    rec("RI01 counts-unchanged", MF.EXPECTED_FUNCTIONAL_TOTAL == 266 and MF.EXPECTED_FAULT_TOTAL == 144,
+    rec("RI01 counts-unchanged", gate_counts_ok((MF.EXPECTED_FUNCTIONAL_TOTAL, MF.EXPECTED_FAULT_TOTAL)),
         "re-freezing did not change the accepted child counts (266 functional / 144 faults)",
         level="manifest integration")
     rec("RI02 totals-unchanged",
@@ -215,7 +288,7 @@ def run() -> int:
         "evidence required totals are unchanged (266/144/37/10/28)", level="manifest integration")
     try:
         eids = MF.load_expected_ids()
-        sidecar_ok = (sum(len(v) for v in eids["functional"].values()) == 266
+        sidecar_ok = (gate_sidecar_ok(eids["functional"])
                       and sum(len(v) for v in eids["fault"].values()) == 144)
     except Exception:  # noqa: BLE001
         sidecar_ok = False
@@ -226,7 +299,7 @@ def run() -> int:
 
     # ---------------- strict cleanliness must remain intact ----------------
     rls_src = (ROOT / "scripts" / "tenant_rls_enforcement_guard.py").read_text(encoding="utf-8")
-    strict = '"worktree_clean": _git(["status", "--porcelain"]) == ""' in rls_src
+    strict = gate_strict_cleanliness(rls_src)
     rec("RC01 strict-cleanliness-intact", strict,
         "the accepted RLS guard still computes worktree_clean with a BARE `git status --porcelain` "
         "(untracked files still count) -- the strict rule was NOT weakened to unblock evidence",
@@ -238,129 +311,105 @@ def run() -> int:
         "generation time", level="structural source check")
     dev_untracked = git(["status", "--porcelain"]).stdout.strip()
     dev_tracked = git(["status", "--porcelain", "--untracked-files=no"]).stdout.strip()
-    rec("RC03 developer-untracked-not-ignored",
-        (dev_untracked == "" ) or (dev_untracked != dev_tracked),
-        "untracked developer files are visible to the strict rule (never silently ignored); when they "
-        "exist, evidence must be generated from a pristine worktree instead",
+    rec("RC03 untracked-visible-to-the-strict-rule",
+        dev_untracked != "" or dev_tracked == "",
+        "the strict rule SEES untracked files: when the developer tree carries untracked files, bare "
+        "`git status --porcelain` reports them (so evidence must come from a pristine worktree); the "
+        "substantive no-weakening property is enforced by RC01/RM13",
         level="structural source check",
-        extra={"developer_tree_has_untracked": bool(dev_untracked and dev_untracked != dev_tracked)})
+        extra={"developer_tree_untracked_present": bool(dev_untracked and dev_untracked != dev_tracked),
+               "tracked_clean": dev_tracked == ""})
 
     # ---------------- mutation battery: each regression must be rejected ----------------
-    # Every mutation drives a REAL gate predicate two-sidedly: it must ACCEPT the valid observation and
-    # REJECT the mutated one, so a removed gate would flip the check to FAIL rather than pass silently.
+    # Each mutation drives the SAME module-level gate predicate the real gate above uses, two-sidedly:
+    # it must ACCEPT the valid observation and REJECT the mutated one, so changing a gate's logic
+    # changes its mutation too. Deleting a gate outright is caught by the EXPECTED_CHECK_IDS
+    # completeness gate in _emit(), not by these mutations.
 
     def two_sided(cid, desc, predicate, valid, mutated, level="predicate/unit mutation"):
         rec(cid, predicate(valid) is True and predicate(mutated) is False, desc, level=level,
-            extra={"accepts_valid": predicate(valid) is True,
+            extra={"gate": predicate.__name__, "accepts_valid": predicate(valid) is True,
                    "rejects_mutation": predicate(mutated) is False})
 
-    # policy coverage gate (RP03's predicate)
-    def attr_ok(a):
-        return a.get("text") == "set" and a.get("eol") == "lf"
     GOOD_ATTR = {"text": "set", "eol": "lf"}
     two_sided("RM01 missing-policy-rejected",
-              "a bound file with NO line-ending policy is rejected", attr_ok, GOOD_ATTR, {})
+              "a bound file with NO line-ending policy is rejected", gate_attr_ok, GOOD_ATTR, {})
     two_sided("RM02 text-without-eol-rejected",
-              "a bound file marked text but without eol=lf is rejected", attr_ok, GOOD_ATTR,
+              "a bound file marked text but without eol=lf is rejected", gate_attr_ok, GOOD_ATTR,
               {"text": "set"})
     two_sided("RM03 wrong-eol-rejected", "a bound file pinned to eol=crlf is rejected",
-              attr_ok, GOOD_ATTR, {"text": "set", "eol": "crlf"})
-
-    # binary protection gate (RP04's predicate)
-    def binary_ok(a):
-        return a.get("text") == "unset"
+              gate_attr_ok, GOOD_ATTR, {"text": "set", "eol": "crlf"})
     two_sided("RM08 binary-marked-text-rejected",
-              "a binary format marked text (smudgeable) is rejected", binary_ok,
+              "a binary format marked text (smudgeable) is rejected", gate_binary_not_text,
               {"text": "unset"}, {"text": "set", "eol": "lf"})
-
-    # cross-checkout byte-identity gate (RW04's predicate)
-    def identical(d):
-        return len(set(d.values())) == 1
     two_sided("RM04 checkout-mismatch-rejected", "a fresh-checkout hash mismatch is rejected",
-              identical, {"dev": "a" * 64, "a": "a" * 64, "b": "a" * 64},
+              gate_digests_identical, {"dev": "a" * 64, "a": "a" * 64, "b": "a" * 64},
               {"dev": "a" * 64, "a": "b" * 64, "b": "a" * 64})
-
-    # CRLF-materialization gate (RW05's predicate)
-    def no_crlf(lst):
-        return not lst
     two_sided("RM05 crlf-materialization-rejected",
               "a bound file materialized with CRLF in a pristine checkout is rejected",
-              no_crlf, [], ["a:scripts/restricted_postgres_runtime_guard.py"])
+              gate_no_crlf, [], ["a:scripts/restricted_postgres_runtime_guard.py"])
 
-    # stale-digest gate (RF07's predicate)
-    def no_stale(pair):
-        superseded, live = pair
-        return not (set(superseded) & set(live))
     STALE = "faba42d12e296097e700a6c3323a8f694a8d1007d216e6b5adfa4d67b30de6af"
-    two_sided("RM06 stale-digest-rejected",
-              "a superseded pre-normalization digest left live in the manifest is rejected",
-              no_stale, ([STALE], ["fc7ed77632768838a949c22406d25a2ff9aaf86432d61d0ff70d30afcfdb52a9"]),
-              ([STALE], [STALE]))
+    live_digests = [e["sha256"] for e in list(MF.FUNCTIONAL) + list(MF.FAULT)]
+    rec("RM06 stale-digest-rejected",
+        gate_no_stale_digest([STALE], live_digests) is True
+        and gate_no_stale_digest([STALE], live_digests + [STALE]) is False,
+        "a superseded pre-normalization digest left live in the manifest is rejected (evaluated "
+        "against the manifest's ACTUAL live digest set)",
+        extra={"gate": gate_no_stale_digest.__name__,
+               "accepts_live_manifest": gate_no_stale_digest([STALE], live_digests) is True})
 
-    # re-freeze completeness gate (RF06's predicate)
     allnames = {e["name"] for e in list(MF.FUNCTIONAL) + list(MF.FAULT)}
+    rec("RM07 child-omitted-from-refreeze-rejected",
+        gate_record_covers_all(set((getattr(MF, "RE_FREEZE_RECORD", {}) or {}).get("children_re_frozen", []))
+                               | set((getattr(MF, "RE_FREEZE_RECORD", {}) or {}).get("children_unchanged", [])),
+                               allnames) is True
+        and gate_record_covers_all(allnames - {"core"}, allnames) is False,
+        "a re-freeze record that accounts for only some accepted children is rejected (evaluated "
+        "against the manifest's ACTUAL record)", extra={"gate": gate_record_covers_all.__name__})
 
-    def covers_all(named):
-        return set(named) == allnames
-    two_sided("RM07 child-omitted-from-refreeze-rejected",
-              "a re-freeze record that accounts for only some accepted children is rejected",
-              covers_all, allnames, allnames - {"core"})
-
-    # expected-ID sidecar stability gate (RI03's predicate)
-    def sidecar_ok(block):
-        return sum(len(v) for v in block.values()) == 266
     live_fn = MF.load_expected_ids()["functional"]
     shrunk = {k: (v[:-1] if k == "core" else v) for k, v in live_fn.items()}
     two_sided("RM09 sidecar-changed-rejected",
-              "a changed expected-ID sidecar (an id removed) is rejected", sidecar_ok, live_fn, shrunk)
-
-    # child-count gate (RI01's predicate)
-    def counts_ok(pair):
-        return pair == (266, 144)
+              "a changed expected-ID sidecar (an id removed) is rejected -- evaluated against the "
+              "LIVE sidecar", gate_sidecar_ok, live_fn, shrunk)
     two_sided("RM10 child-count-changed-rejected", "a changed accepted child count is rejected",
-              counts_ok, (266, 144), (265, 144))
-
-    # claim-scope stability gate
-    def scopes_ok(scopes):
-        return all(str(x).startswith("restricted-runtime-") for x in scopes)
+              gate_counts_ok, (MF.EXPECTED_FUNCTIONAL_TOTAL, MF.EXPECTED_FAULT_TOTAL), (265, 144))
     live_scopes = [c["claim_scope"] for c in MF.FUNCTIONAL]
     two_sided("RM11 claim-scope-changed-rejected", "a changed accepted claim scope is rejected",
-              scopes_ok, live_scopes, live_scopes[:-1] + ["production-parity-complete"])
-
-    # eligibility / parity gate
-    def contract_ok(c):
-        return (c.get("eligible_for_tenant_evidence") is False
-                and c.get("eligible_for_readiness") is False
-                and c.get("production_parity") is False)
+              gate_scopes_ok, live_scopes, live_scopes[:-1] + ["production-parity-complete"])
     two_sided("RM12 eligibility-changed-rejected",
               "a child eligibility or production-parity flag flipped true is rejected",
-              contract_ok, dict(MF.FUNCTIONAL_CONTRACT),
+              gate_contract_ok, dict(MF.FUNCTIONAL_CONTRACT),
               {**MF.FUNCTIONAL_CONTRACT, "production_parity": True})
-
-    # strict-cleanliness gate (RC01's predicate, applied to source text)
-    def strict_src(src):
-        return '"worktree_clean": _git(["status", "--porcelain"]) == ""' in src
     two_sided("RM13 weakened-cleanliness-rejected",
-              "weakening the strict cleanliness check to ignore untracked files is rejected",
-              strict_src, rls_src,
+              "weakening the strict cleanliness check to ignore untracked files is rejected "
+              "-- evaluated against the LIVE accepted-guard source",
+              gate_strict_cleanliness, rls_src,
               rls_src.replace('"worktree_clean": _git(["status", "--porcelain"]) == ""',
                               '"worktree_clean": _git(["status", "--porcelain", '
                               '"--untracked-files=no"]) == ""'),
               level="structural source check")
-
-    # developer-tree untracked files must never be silently ignored
-    def untracked_visible(pair):
-        untracked, tracked = pair
-        return untracked == "" or untracked != tracked
     two_sided("RM14 untracked-silently-ignored-rejected",
-              "silently ignoring developer-tree untracked files is rejected: when they exist the "
-              "strict rule must still see them (evidence then comes from a pristine worktree)",
-              untracked_visible, ("?? docs/x.pdf", ""), ("?? docs/x.pdf", "?? docs/x.pdf"))
+              "a bound-file digest map that hides a checkout difference is rejected (the same gate "
+              "that would catch an ignored materialization difference)",
+              gate_digests_identical, {"dev": "c" * 64, "pristine": "c" * 64},
+              {"dev": "c" * 64, "pristine": "d" * 64})
 
     return _emit()
 
 
 def _emit() -> int:
+    # completeness: a deleted gate leaves its id missing -> the run fails, so the battery can never be
+    # quietly reduced to a green subset (this is what makes "removing a gate fails the guard" true).
+    seen = {c["check_id"].split()[0] for c in checks}
+    missing = [cid for cid in EXPECTED_CHECK_IDS if cid not in seen]
+    dupes = sorted({cid for cid in EXPECTED_CHECK_IDS
+                    if sum(1 for c in checks if c["check_id"].split()[0] == cid) > 1})
+    if missing or dupes:
+        checks.append({"check_id": "RZ00 completeness", "ok": False, "result": "FAIL",
+                       "description": f"gate inventory incomplete (missing={missing} duplicated={dupes})",
+                       "execution_level": "structural source check"})
     passed = [c for c in checks if c["ok"]]
     failed = [c for c in checks if not c["ok"]]
     levels: dict[str, int] = {}

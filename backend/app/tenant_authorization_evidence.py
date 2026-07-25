@@ -561,6 +561,14 @@ def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
             reasons.append("generation_execution does not attest the RLS sub-proof was regenerated this run")
         if ge.get("stale_capture_reuse") is not False:
             reasons.append("generation_execution admits reuse of a stale capture")
+        # WHERE the artifact was generated is part of the claim: the accepted RLS sub-proof defines a
+        # clean worktree with a BARE `git status --porcelain` (untracked files count), so the artifact
+        # must attest that the STRICT definition held in the tree that produced it.
+        if ge.get("strict_worktree_clean_at_generation") is not True:
+            reasons.append("generation_execution does not attest STRICT worktree cleanliness "
+                           "(bare `git status --porcelain` empty) in the generating tree")
+        if not str(ge.get("generation_worktree") or "").strip():
+            reasons.append("generation_execution does not disclose which worktree generated the evidence")
 
     # ---- accepted totals ----
     totals = payload.get("check_totals")
