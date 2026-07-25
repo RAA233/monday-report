@@ -90,6 +90,36 @@ def docker_available() -> bool:
         return False
 
 
+def observe_pg_facts(dsn: str) -> dict:
+    """Observe the real server version, pgvector version and image digest from the container this
+    generator created. These are OBSERVATIONS (live SQL + local image metadata), never constants."""
+    facts = {}
+    try:
+        import psycopg
+        with psycopg.connect(dsn, autocommit=True) as c:
+            facts["server_version"] = str(c.execute("show server_version").fetchone()[0])
+            # the application's own migrations require pgvector; create it here so its version can be
+            # observed from the same server the proof runs against
+            try:
+                c.execute("create extension if not exists vector")
+            except Exception:  # noqa: BLE001
+                pass
+            row = c.execute("select extversion from pg_extension where extname = 'vector'").fetchone()
+            if row:
+                facts["pgvector_version"] = str(row[0])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out = subprocess.run(["docker", "image", "inspect", "--format",
+                              "{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}",
+                              "pgvector/pgvector:pg16"], capture_output=True, text=True, timeout=60)
+        if out.returncode == 0 and out.stdout.strip():
+            facts["image_digest"] = out.stdout.strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return facts
+
+
 def provision_focus_pg():
     """Disposable PostgreSQL for the tenant-RLS proof (its own container/port; removed afterwards)."""
     import socket
@@ -156,8 +186,17 @@ def main() -> int:
     try:
         # --emit-evidence is REQUIRED: without it the guard does not rewrite the artifact, and this
         # generator would embed a PRIOR capture while claiming it executed the proof.
+        pg_facts = observe_pg_facts(dsn)
+        missing_facts = [k for k in ("server_version", "pgvector_version", "image_digest")
+                         if not pg_facts.get(k)]
+        if missing_facts:
+            return fail(f"could not OBSERVE the PostgreSQL environment facts {missing_facts}; "
+                        "evidence must never fabricate them")
         proc = run([sys.executable, str(ROOT / PROOFS["tenant_rls"][1]), "--emit-evidence"],
-                   env={"MONDAY_REPORT_TEST_DATABASE_URL": dsn})
+                   env={"MONDAY_REPORT_TEST_DATABASE_URL": dsn,
+                        "MONDAY_REPORT_TEST_PG_SERVER_VERSION": pg_facts["server_version"],
+                        "MONDAY_REPORT_TEST_PGVECTOR_VERSION": pg_facts["pgvector_version"],
+                        "MONDAY_REPORT_TEST_PG_IMAGE_DIGEST": pg_facts["image_digest"]})
         rls_summary = parse_summary(proc.stdout)
         if proc.returncode != 0 or not rls_summary:
             return fail(f"accepted proof audit:tenant-rls-enforcement did not pass (rc={proc.returncode})")
@@ -176,7 +215,17 @@ def main() -> int:
     rls = json.loads(GAR.TENANT_RLS_EVIDENCE_PATH.read_text(encoding="utf-8"))
     rls_reasons = GAR._tenant_rls_evidence_reasons()
     if rls_reasons:
-        return fail("the RLS sub-proof artifact is not valid: " + "; ".join(rls_reasons[:4]))
+        hint = ""
+        if any("clean worktree" in r for r in rls_reasons):
+            untracked = subprocess.run(["git", "status", "--porcelain", "--untracked-files=normal"],
+                                       cwd=str(ROOT), capture_output=True, text=True)
+            if untracked.returncode == 0 and untracked.stdout.strip() and not subprocess.run(
+                    ["git", "status", "--porcelain", "--untracked-files=no"], cwd=str(ROOT),
+                    capture_output=True, text=True).stdout.strip():
+                hint = (" -- the tracked tree is clean but UNTRACKED files are present and the accepted "
+                        "RLS guard counts them; generate from a pristine worktree of this same commit "
+                        "(git worktree add <dir> HEAD) rather than relaxing the check")
+        return fail("the RLS sub-proof artifact is not valid: " + "; ".join(rls_reasons[:4]) + hint)
 
     # ---- 3. exact accepted totals + zero counters ---------------------------------------
     fsum = results["functional"]["summary"]
