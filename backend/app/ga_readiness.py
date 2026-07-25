@@ -313,6 +313,18 @@ def _tenant_authorization_probe() -> tuple[str, str]:
             "API-layer per-request tenant ownership enforcement is implemented and verified, but "
             "database-enforced tenant isolation is not proven: " + "; ".join(rls_reasons) + ".",
         )
+    # Tenant-authorization evidence v3 (fail-closed): beyond the RLS sub-proof the control now requires
+    # a v3 artifact bound to this exact clean commit/tree that carries the ACCEPTED client-mode
+    # functional runtime matrix, the ACCEPTED demo-mode dual-backend UI certification (recorded as
+    # consistency-only, never as authentication proof), the runtime-role/RLS/audit/privacy proof, and the
+    # SHA-256 of every accepted proof implementation. v1/v2 artifacts are rejected outright.
+    v3_reasons = _tenant_authorization_v3_reasons()
+    if v3_reasons:
+        return (
+            "BLOCKED",
+            "API-layer enforcement and database-enforced isolation are proven, but tenant-authorization "
+            "evidence v3 is not: " + "; ".join(v3_reasons[:6]) + ".",
+        )
     return (
         "PASS",
         "Tenant is resolved from the authenticated request and enforced at the API layer (every "
@@ -324,6 +336,23 @@ def _tenant_authorization_probe() -> tuple[str, str]:
         "connection reuse retains no context), proven by real-PostgreSQL evidence bound to the "
         "current clean tree (scripts/tenant_rls_enforcement_guard.py).",
     )
+
+
+def _tenant_authorization_v3_reasons() -> list[str]:
+    """Fail-closed validation of the tenant-authorization evidence **v3** artifact.
+
+    Delegates to the versioned contract module. A missing, unreadable, malformed, stale, dirty,
+    hash-tampered, scope-overclaiming, or superseded (v1/v2) artifact yields reasons -> BLOCKED. A
+    malformed artifact never raises: the control degrades to BLOCKED, it does not crash the evaluator.
+    """
+    try:
+        from . import tenant_authorization_evidence as _tae
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return [f"tenant-authorization evidence contract unavailable: {exc.__class__.__name__}"]
+    try:
+        return _tae.load_and_validate(TENANT_AUTHORIZATION_EVIDENCE_PATH)
+    except Exception as exc:  # noqa: BLE001 - fail closed, never crash the evaluator
+        return [f"tenant-authorization evidence could not be evaluated: {exc.__class__.__name__}"]
 
 
 def _tenant_rls_evidence_reasons() -> list[str]:
@@ -820,6 +849,12 @@ PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v4"
 NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v4.json"
 NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v4"
 TENANT_RLS_EVIDENCE_PATH = ROOT / "output" / "tenant-rls" / "tenant-rls-enforcement-evidence.v2.json"
+# Tenant-authorization evidence v3 lives at its OWN path with its OWN schema id; the v2 artifact above
+# remains the RLS sub-proof only and can never satisfy the control by itself (see
+# backend/app/tenant_authorization_evidence.py). Patchable for hermetic guard runs.
+TENANT_AUTHORIZATION_EVIDENCE_PATH = (
+    ROOT / "output" / "tenant-authorization" / "tenant-authorization-evidence.v3.json"
+)
 TENANT_RLS_EVIDENCE_SCHEMA = "tenant-rls-enforcement-evidence.v2"
 
 
