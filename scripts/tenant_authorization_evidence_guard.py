@@ -44,6 +44,11 @@ def rec(cid, description, category, expected, observed, ok):
                    "result": "PASS" if ok else "FAIL"})
 
 
+def _claims(fields, command="audit:restricted-postgres-runtime"):
+    """Provenance-bearing claims: every derived assertion names the accepted command proving it."""
+    return {name: {"status": "passed", "proven_by": command} for name in fields}
+
+
 def build_valid_v3() -> dict:
     """A complete, VALID synthetic v3 artifact bound to the current clean commit/tree."""
     proc = {"database_backend": "postgres", "store_class": "PostgresStateStore",
@@ -51,17 +56,31 @@ def build_valid_v3() -> dict:
             "current_user_classification": "restricted runtime LOGIN",
             "rolcanlogin": True, "rolsuper": False, "rolbypassrls": False,
             "protected_table_owner": False, "runtime_group_membership": True,
-            "local_fallback": "rejected"}
-    tables = [{"schema": "public", "table": f"t{i}", "owner_classification": "migration admin",
+            "local_fallback": "rejected",
+            "observation_source": "audit:tenant-rls-enforcement (live pg_roles/pg_class observation)"}
+    tables = [{"schema": "public", "table": f"t{i}", "owner_classification": "migration/bootstrap administrator",
                "rls_enabled": True, "force_enabled": True,
                "policies": [{"policy_name": f"p{i}", "command": "ALL", "permissiveness": "PERMISSIVE",
-                             "roles": ["monday_report_app"], "using": "tenant_slug = current_setting(...)",
+                             "roles": ["PUBLIC"], "using": "tenant_slug = current_setting(...)",
                              "with_check": "tenant_slug = current_setting(...)"}]} for i in range(8)]
     payload = {
         "schema_version": TAE.SCHEMA_VERSION, "implementation_version": TAE.IMPLEMENTATION_VERSION,
         "evidence_type": TAE.EVIDENCE_TYPE, "control": "tenant-authorization-enforcement",
         "git_commit": COMMIT, "git_tree": TREE, "worktree_clean": True,
         "generated_at": "2026-07-25T00:00:00Z",
+        "hash_limitation": TAE.HASH_LIMITATION,
+        "composition_note": TAE.COMPOSITION_NOTE,
+        "source_declarations": {
+            "audit:restricted-postgres-runtime": {"eligible_for_tenant_evidence": False,
+                                                  "claim_scope": "restricted-runtime-functional-complete",
+                                                  "passed": 266},
+            "audit:dual-backend-ui": {"eligible_for_tenant_evidence": False,
+                                      "claim_scope": "dual-backend-ui-functional-only", "passed": None},
+        },
+        "generation_execution": {"all_proofs_executed_this_run": True,
+                                 "rls_artifact_regenerated_this_run": True,
+                                 "stale_capture_reuse": False,
+                                 "executed_commands": ["audit:dual-backend-ui"]},
         "proof_scope": {"statement": TAE.PROOF_SCOPE_STATEMENT,
                         "functional_runtime_mode": "client", "ui_mode": "demo"},
         "functional_runtime": {
@@ -80,8 +99,9 @@ def build_valid_v3() -> dict:
                                         "failed_business_request_count", "normal_HTTP_423_count",
                                         "normal_HTTP_500_count", "normal_HTTP_503_count")}},
         "postgres_environment": {
-            "postgres_version": "16.4", "pgvector_version": "0.7.4",
-            "approved_container_image": "pgvector/pgvector:pg16", "container_image_digest": "sha256:" + "a" * 64,
+            "postgres_version": "16.14", "pgvector_version": "0.8.5",
+            "approved_container_image": "pgvector/pgvector:pg16",
+            "container_image_digest": "pgvector/pgvector@sha256:" + "a" * 64,
             "migrations": [{"name": f"000{i}_x.sql", "sha256": "b" * 64} for i in range(1, 8)],
             "migration_inventory_result": "passed", "migration_0007_applied": True},
         "classification": {"principal_class": TAE.MIGRATION_PRINCIPAL_CLASS, "migration_superuser": True,
@@ -97,30 +117,41 @@ def build_valid_v3() -> dict:
             "same_connection_transaction_switching": "passed", "rollback_context_clearance": "passed",
             "connection_lifecycle_scope": "same-connection transaction lifecycle (no application pool exercised)",
             "guc_trust_disclosure": TAE.GUC_TRUST_DISCLOSURE},
-        "tenant_authorization": {k: "passed" for k in (
-            "valid_credential", "missing_credential", "invalid_credential", "revoked_credential",
-            "disabled_credential", "wrong_tenant_credential", "actor_spoof_rejection",
-            "tenant_spoof_rejection", "cross_tenant_report_denial", "cross_tenant_correction_denial",
-            "cross_tenant_validation_denial", "cross_tenant_idempotency_denial",
-            "cross_tenant_export_denial", "cross_tenant_signed_reference_denial")},
-        "mutations": {k: "passed" for k in (
-            "correction_create", "correction_supersede", "correction_revert", "validation_approve",
-            "validation_reject", "validation_reopen", "exact_replay", "lost_response_replay",
-            "changed_body", "changed_operation", "changed_actor", "changed_tenant", "changed_target",
-            "missing_key", "malformed_key", "concurrency_race_handling")},
-        "operational": {k: "passed" for k in (
-            "blocked_row_exactly_once", "upload_blocked_audit_exactly_once",
-            "unresolved_export_validation_409", "unresolved_export_not_snapshot_conflict",
-            "resolved_export_formats", "signed_reference_success", "signed_reference_tenant_denial",
-            "signed_reference_tamper_expiry_denial", "external_worker_process",
-            "worker_process_boundary_tenant_isolation", "worker_retry_failure_isolation",
-            "import_assess", "import_dry_run", "import_execute", "import_verify",
-            "import_tenant_scoped_digests_markers")},
-        "audit_integrity": {k: "passed" for k in (
-            "boundary_use_audit_ordering", "business_audit_ordering", "hmac_verification",
-            "chain_verification", "tamper_detection", "actor_attribution", "tenant_attribution",
-            "operation_attribution")},
-        "privacy": {"secret_scan": "clean", "scanned_categories": list(TAE.SECRET_SCAN_CATEGORIES)},
+        "tenant_authorization": {
+            **_claims(("valid_credential", "missing_credential", "invalid_credential",
+                       "revoked_credential", "disabled_credential", "wrong_tenant_credential",
+                       "actor_spoof_rejection", "tenant_spoof_rejection", "cross_tenant_report_denial",
+                       "cross_tenant_correction_denial", "cross_tenant_validation_denial",
+                       "cross_tenant_idempotency_denial", "cross_tenant_export_denial",
+                       "cross_tenant_signed_reference_denial")),
+            "cross_tenant_target_mutation_delta": 0, "cross_tenant_business_audit_delta": 0,
+            "cross_tenant_idempotency_delta": 0, "cross_tenant_content_disclosure": 0},
+        "mutations": {
+            **_claims(("correction_create", "correction_supersede", "correction_revert",
+                       "validation_approve", "validation_reject", "validation_reopen", "exact_replay",
+                       "lost_response_replay", "changed_body", "changed_operation", "changed_actor",
+                       "changed_tenant", "changed_target", "missing_key", "malformed_key",
+                       "concurrency_race_handling")),
+            "duplicate_business_mutations": 0, "duplicate_business_audits": 0,
+            "duplicate_idempotency_rows": 0, "unexpected_revision_advances": 0,
+            "lost_response_replay_scope": TAE.LOST_RESPONSE_REPLAY_SCOPE},
+        "operational": {
+            **_claims(("blocked_row_exactly_once", "upload_blocked_audit_exactly_once",
+                       "unresolved_export_validation_409", "unresolved_export_not_snapshot_conflict",
+                       "resolved_export_formats", "signed_reference_success",
+                       "signed_reference_tenant_denial", "signed_reference_tamper_expiry_denial",
+                       "external_worker_process", "worker_process_boundary_tenant_isolation",
+                       "worker_retry_failure_isolation", "import_assess", "import_dry_run",
+                       "import_execute", "import_verify", "import_tenant_scoped_digests_markers")),
+            "eicar_http_status": 422, "worker_model": TAE.WORKER_MODEL,
+            "worker_isolation_model": TAE.WORKER_ISOLATION_MODEL},
+        "audit_integrity": _claims(
+            ("boundary_use_audit_ordering", "business_audit_ordering", "hmac_verification",
+             "chain_verification", "tamper_detection", "actor_attribution", "tenant_attribution",
+             "operation_attribution")),
+        "privacy": {"secret_scan": "clean",
+                    "pattern_scanned_categories": list(TAE.PATTERN_SCANNED_CATEGORIES),
+                    "disclosed_by_design": TAE.DISCLOSED_BY_DESIGN},
         "counters": {"normal_functional_http_423": 0, "normal_functional_http_500": 0,
                      "normal_functional_http_503": 0, "normal_worker_process_failures": 0,
                      "normal_import_process_failures": 0, "required_failed_checks": 0,
@@ -128,16 +159,33 @@ def build_valid_v3() -> dict:
         "bound_implementations": {rel: TAE.sha256_file(rel) for rel in TAE.BOUND_IMPLEMENTATIONS},
         "check_totals": dict(TAE.REQUIRED_TOTALS),
     }
-    payload["tenant_authorization"].update({
-        "cross_tenant_target_mutation_delta": 0, "cross_tenant_business_audit_delta": 0,
-        "cross_tenant_idempotency_delta": 0, "cross_tenant_content_disclosure": 0})
-    payload["mutations"].update({
-        "duplicate_business_mutations": 0, "duplicate_business_audits": 0,
-        "duplicate_idempotency_rows": 0, "unexpected_revision_advances": 0,
-        "lost_response_replay_scope": TAE.LOST_RESPONSE_REPLAY_SCOPE})
-    payload["operational"].update({"eicar_http_status": 422, "worker_model": TAE.WORKER_MODEL,
-                                   "worker_isolation_model": TAE.WORKER_ISOLATION_MODEL})
     payload["canonical_payload_hash"] = TAE.canonical_hash(payload)
+    return payload
+
+
+def build_valid_v2_rls() -> dict:
+    """A VALID v2 RLS sub-proof bound to the current clean tree, so the probe battery actually REACHES
+    the v3 gate instead of short-circuiting on a stale RLS artifact (which would make it vacuous)."""
+    payload = {
+        "schema_version": GAR.TENANT_RLS_EVIDENCE_SCHEMA, "status": "passed",
+        "git_commit": COMMIT, "git_tree": TREE, "worktree_clean": True,
+        "repository_mode": "postgres", "postgres_server_version": "16.14",
+        "postgres_image_digest": "pgvector/pgvector@sha256:" + "a" * 64,
+        "pgvector_version": "0.8.5",
+        "runtime_role_is_superuser": False, "runtime_role_has_bypassrls": False,
+        "runtime_role_owner_bypass": False, "runtime_role_can_login": True,
+        "runtime_role_is_login_not_group": True, "runtime_group_membership": ["monday_report_app"],
+        "rls_forced_normalized_count": 4, "rls_forced_table_count": 8,
+        "schema_result": "passed", "roles_result": "passed", "direct_sql_result": "passed",
+        "routes_result": "passed", "worker_pool_result": "passed", "import_admin_result": "passed",
+        "idempotency_result": "passed",
+        "tenant_context_mechanism": "transaction_local_guc:app.tenant_slug",
+        "policy_inventory": {f"t{i}": {"rowsecurity": True, "forced": True} for i in range(8)},
+        "policy_inventory_digest": "c" * 64,
+        "guc_trust_model": "declares the compromise limitation honestly",
+        "guard_inventory_ok": True, "totals": {"passed": 47, "skipped": 0, "failed": 0},
+    }
+    payload["payload_sha256"] = GAR.payload_sha256(payload)
     return payload
 
 
@@ -277,8 +325,106 @@ def run() -> int:
              "a structurally malformed section (non-object) is rejected without crashing",
              lambda p: p.update({"rls_policy": "not-an-object"}))
 
+    # ---- coverage: tenant-authorization denial matrix (was uncovered) ----
+    for field in ("valid_credential", "missing_credential", "invalid_credential", "revoked_credential",
+                  "disabled_credential", "wrong_tenant_credential", "actor_spoof_rejection",
+                  "tenant_spoof_rejection", "cross_tenant_report_denial", "cross_tenant_correction_denial",
+                  "cross_tenant_validation_denial", "cross_tenant_idempotency_denial",
+                  "cross_tenant_export_denial", "cross_tenant_signed_reference_denial"):
+        mutation(f"EM60-ta-{field}", "tenant-denial",
+                 f"tenant_authorization.{field} not passed is rejected",
+                 (lambda fld: (lambda p: p["tenant_authorization"].__setitem__(
+                     fld, {"status": "failed", "proven_by": "audit:restricted-postgres-runtime"})))(field))
+    mutation("EM61-ta-bare-literal", "tenant-denial",
+             "a bare literal (no provenance) tenant-authorization claim is rejected",
+             lambda p: p["tenant_authorization"].__setitem__("valid_credential", "passed"))
+    for delta in ("cross_tenant_target_mutation_delta", "cross_tenant_business_audit_delta",
+                  "cross_tenant_idempotency_delta", "cross_tenant_content_disclosure"):
+        mutation(f"EM62-ta-{delta}", "tenant-denial", f"a nonzero {delta} is rejected",
+                 (lambda d: (lambda p: p["tenant_authorization"].__setitem__(d, 1)))(delta))
+
+    # ---- coverage: corrections/validation/idempotency matrix (was uncovered) ----
+    for field in ("correction_create", "correction_supersede", "correction_revert", "validation_approve",
+                  "validation_reject", "validation_reopen", "exact_replay", "lost_response_replay",
+                  "changed_body", "changed_operation", "changed_actor", "changed_tenant",
+                  "changed_target", "missing_key", "malformed_key", "concurrency_race_handling"):
+        mutation(f"EM63-mu-{field}", "mutations-matrix", f"mutations.{field} not passed is rejected",
+                 (lambda fld: (lambda p: p["mutations"].__setitem__(
+                     fld, {"status": "failed", "proven_by": "audit:restricted-postgres-runtime"})))(field))
+    for delta in ("duplicate_business_mutations", "duplicate_business_audits",
+                  "duplicate_idempotency_rows", "unexpected_revision_advances"):
+        mutation(f"EM64-mu-{delta}", "mutations-matrix", f"a nonzero {delta} is rejected",
+                 (lambda d: (lambda p: p["mutations"].__setitem__(d, 1)))(delta))
+    mutation("EM65-replay-scope", "scope-overclaim",
+             "a lost-response replay scope beyond the server/API contract is rejected",
+             lambda p: p["mutations"].__setitem__("lost_response_replay_scope",
+                                                  "frontend automatic replay"))
+
+    # ---- coverage: PostgreSQL environment + migrations (was uncovered) ----
+    mutation("EM66-pg-version", "postgres-environment", "a missing PostgreSQL version is rejected",
+             lambda p: p["postgres_environment"].__setitem__("postgres_version", ""))
+    mutation("EM67-pg-digest", "postgres-environment", "a missing container image digest is rejected",
+             lambda p: p["postgres_environment"].__setitem__("container_image_digest", ""))
+    mutation("EM68-migrations-count", "postgres-environment",
+             "a migration set that is not 0001-0007 is rejected",
+             lambda p: p["postgres_environment"]["migrations"].pop())
+    mutation("EM69-migration-hash", "postgres-environment",
+             "a migration entry without a full SHA-256 is rejected",
+             lambda p: p["postgres_environment"]["migrations"][0].__setitem__("sha256", "short"))
+    mutation("EM70-migration-0007", "postgres-environment",
+             "migration 0007 not applied is rejected",
+             lambda p: p["postgres_environment"].__setitem__("migration_0007_applied", False))
+
+    # ---- coverage: proof-scope + functional 'verified' fields + UI labels ----
+    mutation("EM71-scope-mode", "scope-overclaim", "proof_scope functional_runtime_mode != client is rejected",
+             lambda p: p["proof_scope"].__setitem__("functional_runtime_mode", "demo"))
+    mutation("EM72-scope-uimode", "scope-overclaim", "proof_scope ui_mode != demo is rejected",
+             lambda p: p["proof_scope"].__setitem__("ui_mode", "client"))
+    for field in ("persisted_credentials", "identity_resolution", "tenant_resolution", "RBAC",
+                  "verified_reviewer_enforcement", "restricted_postgres_runtime"):
+        mutation(f"EM73-fr-{field}", "functional-proof", f"functional_runtime.{field} unverified is rejected",
+                 (lambda fld: (lambda p: p["functional_runtime"].__setitem__(fld, "not_run")))(field))
+    mutation("EM74-fr-matrix", "functional-proof", "a functional matrix that is not 'passed' is rejected",
+             lambda p: p["functional_runtime"].__setitem__("full_functional_matrix", "not_run"))
+    for field, bad in (("UI_login_workflow", "exercised"), ("tenant_switch_UI", "exercised"),
+                       ("corrections_UI", "UI_exposed"), ("validation_mutation_UI", "api_backed"),
+                       ("signed_reference_UI", "UI_exposed"), ("backend_consistency", "failed")):
+        mutation(f"EM75-ui-{field}", "ui-proof", f"ui_certification.{field}={bad!r} is rejected",
+                 (lambda fld, b: (lambda p: p["ui_certification"].__setitem__(fld, b)))(field, bad))
+
+    # ---- coverage: the new honesty gates ----
+    mutation("EM76-hash-limitation", "honesty",
+             "an artifact omitting the unkeyed-hash limitation disclosure is rejected",
+             lambda p: p.pop("hash_limitation"))
+    mutation("EM77-source-declarations", "honesty",
+             "omitting the children's own scope declarations is rejected",
+             lambda p: p.pop("source_declarations"))
+    mutation("EM78-child-eligibility-flipped", "honesty",
+             "recording a child as tenant-evidence eligible is rejected",
+             lambda p: p["source_declarations"]["audit:dual-backend-ui"].__setitem__(
+                 "eligible_for_tenant_evidence", True))
+    mutation("EM79-composition-note", "honesty",
+             "omitting the composition note is rejected", lambda p: p.pop("composition_note"))
+    mutation("EM80-execution-attestation", "execution-attestation",
+             "omitting the execution attestation is rejected", lambda p: p.pop("generation_execution"))
+    mutation("EM81-stale-capture-admitted", "execution-attestation",
+             "an artifact admitting stale-capture reuse is rejected",
+             lambda p: p["generation_execution"].__setitem__("stale_capture_reuse", True))
+    mutation("EM82-rls-not-regenerated", "execution-attestation",
+             "an artifact whose RLS sub-proof was not regenerated in the run is rejected",
+             lambda p: p["generation_execution"].__setitem__("rls_artifact_regenerated_this_run", False))
+    mutation("EM83-scan-categories", "privacy",
+             "a privacy section whose scanned categories do not match what is actually scanned is rejected",
+             lambda p: p["privacy"].__setitem__("pattern_scanned_categories", ["DSN"]))
+    mutation("EM84-disclosure", "privacy",
+             "omitting the disclosed-by-design statement is rejected",
+             lambda p: p["privacy"].pop("disclosed_by_design"))
+
     # malformed inputs must never raise
-    for label, blob in (("string", "not-an-object"), ("list", [1, 2, 3]), ("none", None)):
+    for label, blob in (("string", "not-an-object"), ("list", [1, 2, 3]), ("none", None),
+                        ("hostile-counters", {**build_valid_v3(), "ui_certification": {"counters": "nope"}}),
+                        ("hostile-sections", {**build_valid_v3(), "runtime_roles": 7, "rls_policy": [],
+                                              "counters": "x", "bound_implementations": 1})):
         try:
             reasons = TAE.validate(blob, current_commit=COMMIT, current_tree=TREE)
             ok = bool(reasons)
@@ -294,7 +440,12 @@ def run() -> int:
 
 
 def _probe_with(v3_payload, *, rls_valid=True):
-    """Drive the REAL readiness probe with a patched evidence pair; returns the disposition."""
+    """Drive the REAL readiness probe with a patched evidence pair; returns the disposition.
+
+    The RLS sub-proof is replaced by a VALID synthetic v2 bound to the current tree so the probe does
+    NOT short-circuit before the v3 evaluator -- otherwise every probe case would report BLOCKED for
+    the wrong reason and the battery would be vacuous.
+    """
     orig_v3, orig_rls = GAR.TENANT_AUTHORIZATION_EVIDENCE_PATH, GAR.TENANT_RLS_EVIDENCE_PATH
     tmp = Path(tempfile.mkdtemp(prefix="mr-tae-probe-"))
     try:
@@ -303,7 +454,9 @@ def _probe_with(v3_payload, *, rls_valid=True):
             v3p.write_text(json.dumps(v3_payload), encoding="utf-8")
         GAR.TENANT_AUTHORIZATION_EVIDENCE_PATH = v3p
         if rls_valid:
-            GAR.TENANT_RLS_EVIDENCE_PATH = orig_rls   # the real (freshly generated) RLS sub-proof
+            rlsp = tmp / "rls_v2.json"
+            rlsp.write_text(json.dumps(build_valid_v2_rls()), encoding="utf-8")
+            GAR.TENANT_RLS_EVIDENCE_PATH = rlsp
         else:
             GAR.TENANT_RLS_EVIDENCE_PATH = tmp / "absent.json"
         return GAR._tenant_authorization_probe()[0]
@@ -314,28 +467,8 @@ def _probe_with(v3_payload, *, rls_valid=True):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _readiness_ids() -> list[str]:
-    """Every readiness id referenced by the registry's delegated controls (favourable-input map)."""
-    ids: set[str] = set()
-    try:
-        registry = GAR.load_registry()
-        for entry in registry.get("controls", registry.get("entries", [])) or []:
-            for rid in (entry.get("readiness_checks") or entry.get("readiness_ids") or []):
-                ids.add(str(rid))
-    except Exception:  # noqa: BLE001
-        pass
-    # Union with the known readiness surface so delegated controls are never "missing".
-    ids.update({"demo_seed_removed", "parser_fixture_evals", "golden_fixture_coverage",
-                "reviewed_fixture_attestation", "client_mode", "state_path_configured",
-                "storage_root_configured", "export_root_configured", "api_key_configured",
-                "signed_url_secret", "upload_size_limit", "archive_limits", "retention_policy",
-                "hosted_fallback_disabled", "postgres_repository", "redis_queue", "local_llm_runtime"})
-    return sorted(ids)
-
-
 def _probe_cases():
     valid = build_valid_v3()
-    rls_ok = GAR._tenant_rls_evidence_reasons() == []
 
     cases = [
         ("EP01-no-evidence", "no tenant evidence -> BLOCKED", "probe", None, "BLOCKED"),
@@ -361,16 +494,17 @@ def _probe_cases():
         observed = _probe_with(payload)
         rec(cid, desc, cat, expected, observed, observed == expected)
 
-    # valid v3 -> PASS (only meaningful when the real RLS sub-proof is present and valid)
+    # valid v3 (with a VALID RLS sub-proof in place) MUST flip the control to PASS -- this is the
+    # anti-vacuity anchor: if it were BLOCKED, every other probe case would be non-discriminating.
     observed = _probe_with(valid)
-    if rls_ok:
-        rec("EP02-valid-v3", "a valid v3 artifact on the current clean tree -> tenant authorization PASS",
-            "probe", "PASS", observed, observed == "PASS")
-    else:
-        rec("EP02-valid-v3",
-            "a valid v3 artifact still BLOCKS while the RLS sub-proof artifact is absent/invalid "
-            "(both proofs are required; run audit:tenant-rls-enforcement to complete it)",
-            "probe", "BLOCKED", observed, observed == "BLOCKED")
+    rec("EP02-valid-v3", "a valid v3 artifact on the current clean tree -> tenant authorization PASS",
+        "probe", "PASS", observed, observed == "PASS")
+    # and the SAME setup with v3 removed must BLOCK -> proves the v3 gate is what moved it
+    observed_without = _probe_with(None)
+    rec("EP02b-v3-is-load-bearing",
+        "with the identical valid RLS sub-proof but NO v3 artifact the control is BLOCKED, proving the "
+        "v3 gate (not the RLS sub-proof) is what flips it", "probe", "BLOCKED", observed_without,
+        observed_without == "BLOCKED")
 
     # ---- unrelated controls must not move BECAUSE tenant v3 is present (differential) ----
     # A realistic demo readiness map (mirrors the accepted GA integrity guard's shape). The test is a
@@ -390,6 +524,10 @@ def _probe_cases():
         absent = tmp / "absent.json"
         present = tmp / "v3.json"
         present.write_text(json.dumps(valid), encoding="utf-8")
+        rlsp = tmp / "rls_v2.json"
+        rlsp.write_text(json.dumps(build_valid_v2_rls()), encoding="utf-8")
+        orig_rls_path = GAR.TENANT_RLS_EVIDENCE_PATH
+        GAR.TENANT_RLS_EVIDENCE_PATH = rlsp
 
         GAR.TENANT_AUTHORIZATION_EVIDENCE_PATH = absent
         without = {b["id"]: b["disposition"] for b in GAR.evaluate_blockers(readiness_demo, forge_report=None)}
@@ -397,11 +535,14 @@ def _probe_cases():
         with_v3 = {b["id"]: b["disposition"] for b in GAR.evaluate_blockers(readiness_demo, forge_report=None)}
 
         changed = sorted(k for k in set(without) | set(with_v3) if without.get(k) != with_v3.get(k))
-        only_tenant = all(k == "ga_tenant_authorization" for k in changed)
+        # NON-DEGENERATE: the tenant control MUST actually move (else the differential proves nothing),
+        # and nothing else may move.
+        only_tenant = changed == ["ga_tenant_authorization"]
         rec("EP10-only-tenant-control-moves",
-            "introducing tenant evidence v3 changes NO control other than tenant-authorization "
-            f"(changed={changed or 'none'})", "unrelated-control",
-            "only ga_tenant_authorization may change", ",".join(changed) or "none", only_tenant)
+            "introducing tenant evidence v3 moves EXACTLY the tenant-authorization control and nothing "
+            f"else (changed={changed or 'none'}); an empty change-set is treated as a FAILED "
+            "(degenerate) differential", "unrelated-control",
+            "exactly ['ga_tenant_authorization']", ",".join(changed) or "none", only_tenant)
 
         for cid, control in (("EP11-migration-validity", "ga_migration_validity"),
                              ("EP12-postgres-adapter", "ga_postgres_adapter")):
@@ -430,6 +571,10 @@ def _probe_cases():
             "unrelated-control", "evaluated", "ERROR", False)
     finally:
         GAR.TENANT_AUTHORIZATION_EVIDENCE_PATH = orig
+        try:
+            GAR.TENANT_RLS_EVIDENCE_PATH = orig_rls_path
+        except NameError:
+            pass
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 

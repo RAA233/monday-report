@@ -60,6 +60,37 @@ BOUND_IMPLEMENTATIONS = (
     "scripts/dual_backend_ui_scenarios.mjs",
     "scripts/dual_backend_ui_guard.py",
     "scripts/dual_backend_ui_faults_guard.py",
+    # the producer of the embedded RLS sub-proof, plus this contract and its generator: all three can
+    # change what the artifact means, so drift in any of them must fail the artifact closed.
+    "scripts/tenant_rls_enforcement_guard.py",
+    "backend/app/tenant_authorization_evidence.py",
+    "scripts/generate_tenant_authorization_evidence.py",
+)
+
+# Categories the generator PATTERN-SCANS. Anything disclosed by design (schema-level policy metadata)
+# is recorded separately in the artifact rather than silently counted as "scanned".
+PATTERN_SCANNED_CATEGORIES = (
+    "DSN", "database password", "audit key", "signing key", "raw signed token", "credential",
+    "raw verification nonce", "idempotency key", "run-scoped role name", "absolute path",
+    "host:port pair", "Docker/volume id",
+)
+DISCLOSED_BY_DESIGN = (
+    "RLS policy inventory carries schema-level principals (table owner, policy roles such as PUBLIC "
+    "and the NOLOGIN group) because Part I requires the exact policy inventory; these are published "
+    "schema facts, not credentials. Run-scoped role names, DSNs, hosts, ports and container ids are "
+    "never emitted."
+)
+COMPOSITION_NOTE = (
+    "Each accepted child proof declares eligible_for_tenant_evidence=false for ITSELF: no single child "
+    "is tenant evidence. This artifact is the composition that binds them together with the RLS "
+    "sub-proof, the commit/tree, and the implementation hashes; the composition -- not any child -- is "
+    "what the tenant-authorization control consumes."
+)
+HASH_LIMITATION = (
+    "canonical_payload_hash is an UNKEYED SHA-256 integrity digest over recomputable content: it "
+    "detects corruption and tampering-in-place, and binds the artifact to a commit/tree and to the "
+    "SHA-256 of every accepted proof implementation. It is not an authentication token and does not "
+    "prove the artifact was produced by a particular execution."
 )
 
 PROOF_SCOPE_STATEMENT = (
@@ -158,6 +189,20 @@ def _int_or_none(value):
         return None
 
 
+def _claim(section, field, reasons, prefix) -> None:
+    """A derived claim must be a provenance object {status, proven_by}: the artifact may never assert a
+    bare literal for something it did not itself observe -- it must name the accepted command that
+    proves it."""
+    value = section.get(field)
+    if not isinstance(value, dict):
+        reasons.append(f"{prefix}.{field} is not a provenance object (bare literals are not evidence)")
+        return
+    if value.get("status") != "passed":
+        reasons.append(f"{prefix}.{field} status is not 'passed'")
+    if not str(value.get("proven_by") or "").startswith("audit:"):
+        reasons.append(f"{prefix}.{field} does not name the accepted command that proves it")
+
+
 def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
     """Return a list of reasons the artifact must NOT satisfy tenant authorization. Empty == valid.
 
@@ -192,6 +237,10 @@ def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
         reasons.append("evidence is stale: the tree changed after it was generated")
     if payload.get("worktree_clean") is not True:
         reasons.append("evidence was not captured from a clean worktree")
+    elif not worktree_is_clean():
+        # the flag is self-asserted; the tracked tree must ALSO be clean when the evidence is consumed,
+        # otherwise an unbound file (store.py, main.py, ...) could be edited after generation
+        reasons.append("the tracked worktree is dirty now: evidence no longer describes this tree")
 
     # ---- canonical hash (self-verifying, excludes only the hash + generation metadata) ----
     stored = payload.get("canonical_payload_hash")
@@ -265,10 +314,14 @@ def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
             reasons.append("ui_certification scenario count per backend is not 10")
         if _int_or_none(ui.get("fault_check_count")) != REQUIRED_TOTALS["ui_faults"]:
             reasons.append("ui_certification fault check count is not 28")
-        for key in ("console_error_count", "uncaught_exception_count", "failed_business_request_count",
-                    "normal_HTTP_423_count", "normal_HTTP_500_count", "normal_HTTP_503_count"):
-            if _int_or_none((ui.get("counters") or {}).get(key)) != 0:
-                reasons.append(f"ui_certification counter {key} is missing or nonzero")
+        ui_counters = ui.get("counters")
+        if not isinstance(ui_counters, dict):
+            reasons.append("ui_certification counters are missing or malformed")
+        else:
+            for key in ("console_error_count", "uncaught_exception_count", "failed_business_request_count",
+                        "normal_HTTP_423_count", "normal_HTTP_500_count", "normal_HTTP_503_count"):
+                if _int_or_none(ui_counters.get(key)) != 0:
+                    reasons.append(f"ui_certification counter {key} is missing or nonzero")
 
     # ---- PostgreSQL environment + migrations ----
     pg = payload.get("postgres_environment")
@@ -384,8 +437,7 @@ def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
                       "tenant_spoof_rejection", "cross_tenant_report_denial", "cross_tenant_correction_denial",
                       "cross_tenant_validation_denial", "cross_tenant_idempotency_denial",
                       "cross_tenant_export_denial", "cross_tenant_signed_reference_denial"):
-            if ta.get(field) != "passed":
-                reasons.append(f"tenant_authorization.{field} is not 'passed'")
+            _claim(ta, field, reasons, "tenant_authorization")
         for delta in ("cross_tenant_target_mutation_delta", "cross_tenant_business_audit_delta",
                       "cross_tenant_idempotency_delta", "cross_tenant_content_disclosure"):
             if _int_or_none(ta.get(delta)) != 0:
@@ -401,8 +453,7 @@ def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
                       "exact_replay", "lost_response_replay", "changed_body", "changed_operation",
                       "changed_actor", "changed_tenant", "changed_target", "missing_key",
                       "malformed_key", "concurrency_race_handling"):
-            if mu.get(field) != "passed":
-                reasons.append(f"mutations.{field} is not 'passed'")
+            _claim(mu, field, reasons, "mutations")
         for delta in ("duplicate_business_mutations", "duplicate_business_audits",
                       "duplicate_idempotency_rows", "unexpected_revision_advances"):
             if _int_or_none(mu.get(delta)) != 0:
@@ -424,8 +475,7 @@ def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
                       "worker_process_boundary_tenant_isolation", "worker_retry_failure_isolation",
                       "import_assess", "import_dry_run", "import_execute", "import_verify",
                       "import_tenant_scoped_digests_markers"):
-            if op.get(field) != "passed":
-                reasons.append(f"operational.{field} is not 'passed'")
+            _claim(op, field, reasons, "operational")
         if op.get("worker_model") != WORKER_MODEL:
             reasons.append("operational does not describe the one-shot single-tenant-per-process worker")
         if op.get("worker_isolation_model") != WORKER_ISOLATION_MODEL:
@@ -439,8 +489,7 @@ def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
         for field in ("boundary_use_audit_ordering", "business_audit_ordering", "hmac_verification",
                       "chain_verification", "tamper_detection", "actor_attribution",
                       "tenant_attribution", "operation_attribution"):
-            if au.get(field) != "passed":
-                reasons.append(f"audit_integrity.{field} is not 'passed'")
+            _claim(au, field, reasons, "audit_integrity")
 
     # ---- privacy ----
     pv = payload.get("privacy")
@@ -449,9 +498,11 @@ def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
     else:
         if pv.get("secret_scan") != "clean":
             reasons.append(f"secret scan is {pv.get('secret_scan')!r}, not 'clean'")
-        cats = pv.get("scanned_categories")
-        if not isinstance(cats, list) or len(cats) < len(SECRET_SCAN_CATEGORIES):
-            reasons.append("privacy scan does not enumerate every required secret category")
+        cats = pv.get("pattern_scanned_categories")
+        if not isinstance(cats, list) or sorted(str(c) for c in cats) != sorted(PATTERN_SCANNED_CATEGORIES):
+            reasons.append("privacy section does not enumerate exactly the categories actually pattern-scanned")
+        if str(pv.get("disclosed_by_design", "")).strip() != DISCLOSED_BY_DESIGN:
+            reasons.append("privacy section does not disclose the schema-level principals it emits by design")
 
     # ---- normal-counter gates + required FAIL/SKIP ----
     ct = payload.get("counters")
@@ -479,6 +530,37 @@ def validate(payload, *, current_commit=None, current_tree=None) -> list[str]:
                     reasons.append(f"bound implementation changed since generation: {rel}")
             except Exception:  # noqa: BLE001
                 reasons.append(f"bound implementation is unreadable: {rel}")
+
+    # ---- integrity-digest honesty ----
+    if str(payload.get("hash_limitation", "")).strip() != HASH_LIMITATION:
+        reasons.append("artifact does not disclose that the canonical hash is an unkeyed integrity digest")
+
+    # ---- children's own scope declarations must be carried, not silently promoted ----
+    sd = payload.get("source_declarations")
+    if not isinstance(sd, dict) or not sd:
+        reasons.append("source_declarations section is missing (children's own scope declarations)")
+    else:
+        for cmd, decl in sd.items():
+            if not isinstance(decl, dict):
+                reasons.append(f"source_declarations.{cmd} is malformed")
+                continue
+            if decl.get("eligible_for_tenant_evidence") is not False:
+                reasons.append(f"source_declarations.{cmd} does not record the child's own "
+                               "eligible_for_tenant_evidence=false declaration")
+    if str(payload.get("composition_note", "")).strip() != COMPOSITION_NOTE:
+        reasons.append("artifact does not record how child proofs compose into tenant evidence")
+
+    # ---- execution attestation: every proof executed by the generating run ----
+    ge = payload.get("generation_execution")
+    if not isinstance(ge, dict):
+        reasons.append("generation_execution attestation is missing")
+    else:
+        if ge.get("all_proofs_executed_this_run") is not True:
+            reasons.append("generation_execution does not attest that every proof ran in the generating run")
+        if ge.get("rls_artifact_regenerated_this_run") is not True:
+            reasons.append("generation_execution does not attest the RLS sub-proof was regenerated this run")
+        if ge.get("stale_capture_reuse") is not False:
+            reasons.append("generation_execution admits reuse of a stale capture")
 
     # ---- accepted totals ----
     totals = payload.get("check_totals")
