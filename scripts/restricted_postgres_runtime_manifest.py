@@ -76,7 +76,9 @@ FUNCTIONAL = [
      "script": "scripts/restricted_postgres_runtime_worker_import_guard.py",
      "claim_scope": "restricted-runtime-worker-import-only", "expected_count": 29,
      "required_counters": HTTP_COUNTERS + WORKER_COUNTERS,
-     "sha256": "faba42d12e296097e700a6c3323a8f694a8d1007d216e6b5adfa4d67b30de6af"},
+     # re-frozen after the repository LF-normalization policy (see RE_FREEZE_RECORD below);
+     # superseded CRLF-era digest: faba42d12e296097e700a6c3323a8f694a8d1007d216e6b5adfa4d67b30de6af
+     "sha256": "fc7ed77632768838a949c22406d25a2ff9aaf86432d61d0ff70d30afcfdb52a9"},
 ]
 
 # ---- ACCEPTED FUNCTIONAL-FAULT CHILDREN -------------------------------------------------------------
@@ -107,6 +109,28 @@ FAULT = [
      "required_counters": [],
      "sha256": "ee91deba001ba566f2d3bceb32405646696493ee597421ce5a234ef010e6ff72"},
 ]
+
+# ---- re-freeze record (repository line-ending normalization) ---------------------------------------
+# The accepted child digests above are computed over RAW FILE BYTES. Before commit 409df0d the
+# repository had no eol policy for source formats, so with core.autocrlf=true a fresh checkout
+# materialized CRLF and these digests only verified inside one developer working tree. Commit 409df0d
+# pins eol=lf for the digest-bound formats; checkout materialization now equals the committed blob
+# everywhere, and exactly ONE child digest changed as a result (the only child whose developer-tree
+# bytes had been smudged to CRLF). No child check id, expected count, claim scope, eligibility flag,
+# parity flag, migration-principal classification, counter requirement or behaviour changed.
+RE_FREEZE_RECORD = {
+    "reason": "repository line-ending normalization",
+    "policy_commit": "409df0dcc0d7b96be8c85f73b2e5e172b79e7455",
+    "semantic_change": False,
+    "previous_hashes_superseded": True,
+    "new_hashes_reproducible_from_pristine_checkout": True,
+    "children_re_frozen": ["worker-import"],
+    "children_unchanged": ["core", "mutations", "exports", "isolation", "core-faults",
+                           "mutations-faults", "exports-faults", "isolation-faults",
+                           "worker-import-faults"],
+    "superseded": {"worker-import":
+                   "faba42d12e296097e700a6c3323a8f694a8d1007d216e6b5adfa4d67b30de6af"},
+}
 
 EXPECTED_FUNCTIONAL_TOTAL = sum(c["expected_count"] for c in FUNCTIONAL)  # 266
 EXPECTED_FAULT_TOTAL = sum(c["expected_count"] for c in FAULT)            # 144
