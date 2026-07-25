@@ -35,10 +35,19 @@ is no third state):
     (``"postgres"``), and ``store.create_store`` correspondingly builds ``LocalStateStore`` or
     ``PostgresStateStore``.
 
-The axes are independent: ``create_store`` does not read the client-data mode, and
-``readiness.evaluate_client_data_readiness`` takes the mode and the active repository backend as
-separate inputs, so all 2x2 combinations are representable and startable. The Cartesian product is
-therefore four, and the inventory is the product -- not a number chosen in advance.
+The axes are independent: ``create_store`` selects the store class from
+``requested_repository_backend()`` and ``database_url()`` alone -- it never branches on the
+client-data mode -- and ``readiness.evaluate_client_data_readiness(store)`` derives the mode from
+the environment and the active repository backend from the store object, i.e. from the two axes
+separately. All 2x2 combinations are therefore representable and startable, and the Cartesian
+product is four: the inventory is the product, not a number chosen in advance.
+
+One asymmetry is worth stating rather than glossing: on the PostgreSQL path ``create_store``
+re-raises ``TenantRuntimeRoleError``, and ``tenant_rls.enforce_runtime_role()`` only enforces in
+client mode. So ``client-postgres`` carries a runtime-role safety precondition that
+``demo-postgres`` does not. That is a precondition on starting, not a mode-dependent choice of
+store class, so the axes remain independent -- but "all four are startable" means "given a safe
+runtime role".
 
 The queue backend (``inline_worker`` / ``redis``) is deliberately **not** a third axis. No accepted
 evidence exists for the Redis path, ``production-queue-adapter`` is BLOCKED in every context, and
@@ -62,7 +71,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from typing import Any, Iterable, Sequence
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping, Sequence
 
 SCHEMA_VERSION = "readiness-context-inventory.v1"
 IMPLEMENTATION_VERSION = "1.0.0"
@@ -77,7 +87,8 @@ SUPPORTED_REPOSITORY_BACKENDS: tuple[str, ...] = ("local_json", "postgres")
 
 #: context_id slug for each repository backend; context ids are stable and independent of the
 #: display names, so renaming a display name can never silently reuse an id.
-_BACKEND_SLUG: dict[str, str] = {"local_json": "local", "postgres": "postgres"}
+#: Read-only: a caller that rewrote this mapping would silently change every context id.
+_BACKEND_SLUG: Mapping[str, str] = MappingProxyType({"local_json": "local", "postgres": "postgres"})
 
 #: Canonical, stable context ordering. The canonical hash is order-sensitive.
 CANONICAL_CONTEXT_ORDER: tuple[str, ...] = (
@@ -168,9 +179,11 @@ POSTGRES_EVIDENCE_CONTROLS: frozenset[str] = frozenset({
 #: AND was produced in exactly that context. Everything else is BLOCKED until executed.
 #: Tenant-authorization evidence v3 was generated and accepted under client mode on the restricted
 #: PostgreSQL runtime, i.e. the ``client-postgres`` context and no other.
-ACCEPTED_CONTEXT_EVIDENCE: dict[str, frozenset[str]] = {
+#: Read-only: this is the single place a PASS can originate, so a caller must not be able to add
+#: an allowance at runtime (which would mint a predicted PASS for any control in any context).
+ACCEPTED_CONTEXT_EVIDENCE: Mapping[str, frozenset[str]] = MappingProxyType({
     "client-postgres": frozenset({"tenant-authorization-enforcement"}),
-}
+})
 
 #: A predicted PASS is contingent on this precondition being met at execution time. The accepted v3
 #: artifact is bound to the commit and tree that produced it; any later commit invalidates the

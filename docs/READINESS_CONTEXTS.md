@@ -20,7 +20,7 @@ This is the distinction the rest of the document depends on.
 | | Contract definition | Context execution |
 |---|---|---|
 | What it produces | the four contexts, as data | real readiness dispositions |
-| Status | **implemented and accepted** | **not started** |
+| Status | **implemented and verified** | **not started** |
 | Verified by | `audit:readiness-context-inventory`, `audit:readiness-context-inventory-faults` | nothing yet |
 | Needs Docker | no | yes |
 | Verdict | `FOUR_READINESS_CONTEXT_CONTRACT_ACCEPTED` | `FOUR_READINESS_CONTEXTS_NOT_ACCEPTED` |
@@ -59,15 +59,36 @@ exactly `LOCAL_REPOSITORY_BACKEND` (`"local_json"`) or `POSTGRES_REPOSITORY_BACK
 (`"postgres"`), and `store.create_store()` correspondingly builds `LocalStateStore` or
 `PostgresStateStore`.
 
-The axes are **independent**: `create_store()` does not read the client-data mode, and
-`readiness.evaluate_client_data_readiness()` takes the mode and the active repository backend as
-separate inputs. So all 2×2 combinations are representable and startable, and the product is four.
+The axes are **independent**: `create_store()` selects the store class from
+`requested_repository_backend()` and `database_url()` alone and never branches on the client-data
+mode, while `readiness.evaluate_client_data_readiness(store)` derives the mode from the environment
+and the active repository backend from the store object — the two axes separately. So all 2×2
+combinations are representable and startable, and the product is four.
+
+One asymmetry is worth stating rather than glossing: on the PostgreSQL path `create_store()`
+re-raises `TenantRuntimeRoleError`, and `tenant_rls.enforce_runtime_role()` only enforces in client
+mode. `client-postgres` therefore carries a runtime-role safety **precondition** that
+`demo-postgres` does not. That is a precondition on starting, not a mode-dependent choice of store
+class, so the axes remain independent — but "all four are startable" means *given a safe runtime
+role*.
 
 `audit:readiness-context-inventory` re-derives both axes from those real modules on every run and
-requires the inventory to equal the product. If the implementation ever drops an axis value or
-grows a third, the product stops being four and **the guard fails closed** rather than certifying
-an inventory the implementation cannot justify. The fault battery proves this by patching the
-implementation down to one backend and confirming refusal.
+requires the inventory to equal their product. The two axes are derived differently, for a reason:
+
+- **client-data mode** is derived *dynamically* — the guard drives the real `client_data_mode()`
+  across 14 inputs, including unrecognised ones, and asserts the observed range is exactly the
+  declared axis;
+- **repository backend** is derived *statically* — reaching the PostgreSQL branch of
+  `detect_active_repository_backend()` requires a live database, which a Docker-free guard must not
+  start. So the guard parses the real function and resolves **every `return` statement** against
+  the live module namespace, and refuses outright if any return value cannot be resolved to a
+  string constant.
+
+If the implementation ever drops an axis value or grows a third, the product stops being four and
+**the guard fails closed** rather than certifying an inventory the implementation cannot justify.
+The fault battery proves both directions: it patches the implementation down to one backend, and
+separately gives `detect_active_repository_backend()` a faithful third branch, and confirms refusal
+in each case.
 
 ### Why the queue backend is not a third axis
 
@@ -148,6 +169,23 @@ outside the repository.
 Both context guards are therefore Docker-free by construction. `audit:readiness-context-inventory-faults`
 verifies this over the parsed AST of both files: neither imports a process launcher, database
 driver, browser driver, or TestClient, so neither *can* start Docker even by accident.
+
+## What the guards do and do not prove
+
+Stated plainly, because a green guard is easy to over-read:
+
+- the inventory guard's completeness pin catches gate **deletion**. It does not catch a gate
+  *neutered in place*, nor a gate deleted together with its own pin entry. Those are caught by the
+  fault battery, which pins the gate list **cross-file** and re-runs the real guard once per
+  mutation — so a silent weakening requires editing two files in concert;
+- each mutation names the specific gate that must catch it and only counts as caught when that gate
+  fails. A non-zero exit alone is not accepted, so the frozen-hash pin cannot stand in for the gate
+  that is supposed to reason about the change;
+- the fault battery drives the **real** guard rather than a reimplementation, and asserts this over
+  its own parsed AST rather than by scanning its source for a string that appears in the assertion
+  itself;
+- none of this is evidence that any control actually passes in any context. Nothing has been
+  executed.
 
 ## What must happen after capacity is restored
 

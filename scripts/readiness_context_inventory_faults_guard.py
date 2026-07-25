@@ -41,6 +41,64 @@ import readiness_context_inventory_guard as G  # noqa: E402
 
 checks: list[dict] = []
 
+#: Cross-file pin of the inventory guard's own gate list. Its EXPECTED_CHECK_IDS catches gate
+#: DELETION; pinning it from a second file also catches a gate deleted together with its entry.
+PINNED_INVENTORY_GATES = [
+    "CX01", "CX02", "CX03", "CX04", "CX05",
+    "CI01", "CI02", "CI03", "CI04", "CI05", "CI06", "CI07", "CI08", "CI09", "CI10", "CI11", "CI12",
+    "CS01", "CS02", "CS03", "CS04", "CS05", "CS06", "CS07", "CS08",
+    "CD01", "CD02", "CD03", "CD04", "CD05", "CD06", "CD07",
+    "CF01", "CF02", "CF03", "CF04",
+    "CH01", "CH02", "CH03", "CH04", "CH05", "CH06",
+    "CR01", "CR02", "CR03", "CR04", "CR05", "CR06",
+]
+
+#: Cross-file pin of the blocker set CD04 ranges over -- a guard-side constant outside the
+#: canonical hash, which could otherwise be trimmed without any gate noticing.
+PINNED_PRODUCTION_BLOCKERS = [
+    "production-database-adapter",
+    "production-queue-adapter",
+    "production-configuration",
+    "backup-restore-drill",
+    "client-organizational-approval",
+]
+
+#: Every check this battery must emit -- the same completeness discipline the inventory guard has,
+#: so a mutation cannot be quietly deleted from the battery.
+EXPECTED_CHECK_IDS = [
+    "FB00",
+    "MC01 context-omitted", "MC02 fifth-context-added", "MC03 duplicate-context-id",
+    "MC04 duplicate-axis-combination", "MC05 unsupported-mode", "MC06 unsupported-backend",
+    "MC07 renamed-name-id-reused", "MC08 required-field-omitted", "MC09 undeclared-field-added",
+    "MC10 context-order-changed", "MC11 unknown-context-substituted", "MC12 canonical-context-missing",
+    "MC13 schema-version-changed", "MC14 unstable-ordering", "MC15 id-equals-display-name",
+    "MS01 demo-claims-client-auth", "MS02 demo-ui-promoted-to-client-auth", "MS03 local-claims-rls",
+    "MS04 postgres-claims-production-parity", "MS05 pg-adapter-reclassified-as-production",
+    "MS06 v3-satisfies-migration-validity", "MS07 v3-satisfies-database-adapter",
+    "MS08 v3-satisfies-queue-adapter", "MS09 scope-statements-stripped",
+    "MS10 v3-implies-client-data-ready",
+    "MR01 client-data-ready-true", "MR02 release-candidate-ready-true", "MR03 ga-ready-true",
+    "MR04 production-parity-true-everywhere",
+    "MD01 unknown-disposition-value", "MD02 unpredictable-disposition-value",
+    "MD03 unknown-control-added", "MD04 required-blocker-removed", "MD05 production-blocker-passed",
+    "MD06 extra-pass-predicted", "MD07 pass-without-precondition", "MD08 registry-drift",
+    "MD09 accepted-evidence-conflicts-with-scope",
+    "MA01 axis-product-no-longer-four", "MA02 mode-axis-not-total",
+    "MA03 backend-axis-diverges-from-implementation", "MA04 backend-axis-grows-third-branch",
+    "MA05 store-classes-no-longer-two", "MA06 create-store-branches-on-mode",
+    "MX01 runner-reports-executed-pass", "MX02 runner-emits-simulated-disposition",
+    "MX03 unknown-context-id-accepted", "MX04 run-input-not-isolated",
+    "MX05 nondeterministic-canonical-hash", "MX06 hash-payload-carries-timestamp",
+    "MX07 hash-disagrees-with-independent-recompute", "MX08 hash-not-lowercase-sha256",
+    "MX09 hash-insensitive-to-order", "MX10 runner-all-contexts-reports-executed",
+    "MX11 seeded-order-ignores-seed",
+    "MZ01 suppressed-gate-caught-by-completeness",
+    "FS01 drives-the-real-guard", "FS02 docker-free", "FS03 non-execution-disclosed",
+    "FS04 no-stub-pass-results", "FS05 expected-gate-required",
+    "FP01 inventory-gate-list-pinned", "FP02 production-blockers-pinned",
+    "FZ01 guard-restored",
+]
+
 
 def rec(cid, ok, desc, level="schema predicate mutation", extra=None):
     checks.append({"check_id": cid, "ok": bool(ok), "result": "PASS" if ok else "FAIL",
@@ -112,6 +170,43 @@ def by_id(contexts, cid):
     return next(c for c in contexts if c["context_id"] == cid)
 
 
+# --- stand-in implementations for the axis-support regressions. Defined at module level so
+# inspect.getsource() (which the real guard uses to derive the axes) can read them.
+
+def detector_with_third_backend():  # pragma: no cover - parsed, never executed
+    """A faithful third branch: the implementation would then support THREE backends."""
+    if requested_repository_backend() == POSTGRES_REPOSITORY_BACKEND and postgres_probe().ready:  # noqa: F821
+        return POSTGRES_REPOSITORY_BACKEND  # noqa: F821
+    if requested_repository_backend() == "mysql":  # noqa: F821
+        return "mysql"
+    return LOCAL_REPOSITORY_BACKEND  # noqa: F821
+
+
+def create_store_single_class():  # pragma: no cover - parsed, never executed
+    """A create_store that no longer realises the repository axis with two store classes."""
+    return LocalStateStore()  # noqa: F821
+
+
+def _alternating_inventory():
+    """A canonical_inventory() whose ORDER alternates between calls -- i.e. not stable."""
+    base = RC.canonical_inventory
+    state = {"n": 0}
+
+    def alternating():
+        state["n"] += 1
+        contexts = base()
+        return contexts if state["n"] % 2 else list(reversed(contexts))
+
+    return alternating
+
+
+def create_store_branching_on_mode():  # pragma: no cover - parsed, never executed
+    """A create_store that chooses the store class from the client-data mode: axes NOT independent."""
+    if client_data_mode() == "client" and requested_repository_backend() == POSTGRES_REPOSITORY_BACKEND:  # noqa: F821
+        return PostgresStateStore(database_url())  # noqa: F821
+    return LocalStateStore()  # noqa: F821
+
+
 def run() -> int:
     # ---------------------------------------------------------------- baseline (not always-fail)
     rc, failed = run_real_guard()
@@ -155,6 +250,23 @@ def run() -> int:
     refuses("MC10 context-order-changed", "CI03",
             "reordering the canonical contexts is refused, and the canonical hash is order-sensitive",
             lambda cs: list(reversed(cs)), level="inventory integration")
+    refuses("MC11 unknown-context-substituted", "CI06",
+            "substituting a canonical context for an unknown one is refused as an UNKNOWN context",
+            lambda cs: by_id(cs, "demo-local").__setitem__("context_id", "demo-oracle"))
+    refuses("MC12 canonical-context-missing", "CI05",
+            "the same substitution is independently refused as a MISSING canonical context",
+            lambda cs: by_id(cs, "demo-local").__setitem__("context_id", "demo-oracle"))
+    refuses_patched("MC13 schema-version-changed", "CI01",
+                    "silently changing the schema version is refused",
+                    RC, SCHEMA_VERSION="readiness-context-inventory.v2")
+    refuses_patched("MC14 unstable-ordering", "CI11",
+                    "an inventory whose order is not stable across repeated builds is refused",
+                    RC, level="inventory integration",
+                    canonical_inventory=_alternating_inventory())
+    refuses("MC15 id-equals-display-name", "CI12",
+            "a context whose id is just its display name is refused -- ids must be independent of "
+            "display names",
+            lambda cs: by_id(cs, "demo-local").__setitem__("context_name", "demo-local"))
 
     # ---------------------------------------------------------------- scope overclaims (Part F)
     refuses("MS01 demo-claims-client-auth", "CS01",
@@ -191,6 +303,10 @@ def run() -> int:
     refuses("MS09 scope-statements-stripped", "CS08",
             "stripping the non-transferable scope statements from a context is refused",
             lambda cs: by_id(cs, "demo-local").__setitem__("non_transferable_scope", []))
+    refuses("MS10 v3-implies-client-data-ready", "CS07",
+            "letting valid tenant evidence v3 imply client_data_ready is refused by the scope gate "
+            "as well as by the readiness-flag gate",
+            lambda cs: by_id(cs, "client-postgres").__setitem__("expected_client_data_ready", True))
 
     # ---------------------------------------------------------------- readiness flag overclaims
     refuses("MR01 client-data-ready-true", "CF02",
@@ -262,9 +378,25 @@ def run() -> int:
                     "axis is no longer total and the guard refuses",
                     G.READINESS, client_data_mode=lambda: "staging")
     refuses_patched("MA03 backend-axis-diverges-from-implementation", "CX02",
-                    "when the declared backend axis stops matching the implementation constants "
-                    "the guard refuses (axes are derived from code, not from env-var names)",
+                    "when the declared backend axis stops matching the implementation the guard "
+                    "refuses (axes are derived from code, not from env-var names)",
                     RC, SUPPORTED_REPOSITORY_BACKENDS=("local_json", "cockroach"))
+    refuses_patched("MA04 backend-axis-grows-third-branch", "CX02",
+                    "when the REAL detect_active_repository_backend() grows a faithful third "
+                    "branch, the implementation supports six configurations and the guard FAILS "
+                    "CLOSED instead of certifying four -- the decisive derivation property, and "
+                    "the reason the axis is resolved from actual return values rather than from "
+                    "two constant names",
+                    G.RB, level="implementation derivation",
+                    detect_active_repository_backend=detector_with_third_backend)
+    refuses_patched("MA05 store-classes-no-longer-two", "CX03",
+                    "when create_store() stops realising the axis with two store classes the guard "
+                    "refuses",
+                    G.STORE, create_store=create_store_single_class)
+    refuses_patched("MA06 create-store-branches-on-mode", "CX04",
+                    "when create_store() selects the store class from the client-data mode the "
+                    "axes are no longer independent and the guard refuses",
+                    G.STORE, create_store=create_store_branching_on_mode)
 
     # ---------------------------------------------------------------- runner cannot fabricate
     def fake_pass_runner(context_id, **_kw):
@@ -318,17 +450,70 @@ def run() -> int:
                     "is refused",
                     RC, canonical_json=lambda *_a, **_kw: json.dumps(
                         {"generated_at": "2026-07-25T00:00:00Z", "contexts": []}, sort_keys=True))
+    refuses_patched("MX07 hash-disagrees-with-independent-recompute", "CH02",
+                    "a canonical hash that is stable but does NOT match the guard's independent "
+                    "recomputation is refused",
+                    RC, level="inventory integration",
+                    canonical_hash=lambda *_a, **_kw: "0" * 64)
+    refuses_patched("MX08 hash-not-lowercase-sha256", "CH03",
+                    "a canonical hash that is not a full lowercase SHA-256 hex digest is refused",
+                    RC, canonical_hash=lambda *_a, **_kw: "ABC123")
+    refuses_patched("MX09 hash-insensitive-to-order", "CH05",
+                    "a canonical hash that is INSENSITIVE to context order is refused",
+                    RC, level="inventory integration",
+                    canonical_hash=lambda *_a, **_kw: G.independent_canonical_hash(
+                        list(reversed(RC.canonical_inventory()))))
+    refuses_patched("MX10 runner-all-contexts-reports-executed", "CR02",
+                    "a run_all_contexts() that reports executed=true is refused",
+                    RC, run_all_contexts=lambda **_kw: {
+                        "schema_version": RC.SCHEMA_VERSION, "canonical_inventory_hash": "x",
+                        "requested_context_ids": list(RC.CANONICAL_CONTEXT_ORDER),
+                        "certification": "unavailable", "accepted": False, "executed": True,
+                        "results": [], "reason": ""})
+    refuses_patched("MX11 seeded-order-ignores-seed", "CR05",
+                    "an execution_order() that ignores its seed (so a 'deterministic random' order "
+                    "is not actually seeded) is refused",
+                    RC, level="inventory integration",
+                    execution_order=lambda reverse=False, seed=None: (
+                        list(reversed(RC.CANONICAL_CONTEXT_ORDER)) if reverse
+                        else list(RC.CANONICAL_CONTEXT_ORDER)))
+
+    # The completeness pin itself must be load-bearing: suppressing a gate's rec() call while
+    # leaving everything else intact has to be caught.
+    original_rec = G.rec
+
+    def suppressing_rec(cid, *args, **kwargs):
+        if cid == "CD05":
+            return None
+        return original_rec(cid, *args, **kwargs)
+
+    refuses_patched("MZ01 suppressed-gate-caught-by-completeness", "CZ00 completeness",
+                    "silently suppressing a gate is caught by the inventory guard's completeness "
+                    "pin, which fails the run with the gate's id reported missing",
+                    G, level="inventory integration", rec=suppressing_rec)
 
     # ---------------------------------------------------------------- structural source checks
     inv_src = (ROOT / "scripts" / "readiness_context_inventory_guard.py").read_text(encoding="utf-8")
     fault_src = Path(__file__).read_text(encoding="utf-8")
     mod_src = (ROOT / "backend" / "app" / "readiness_contexts.py").read_text(encoding="utf-8")
 
-    rec("FS01 drives-the-real-guard",
-        "import readiness_context_inventory_guard as G" in fault_src and "G.run()" in fault_src,
-        "this battery drives the REAL inventory guard (imports it and calls run()); it does not "
-        "reimplement the gates it claims to test",
-        level="structural source check")
+    # Checked over the parsed AST, never by scanning for a literal: a text scan for
+    # "import readiness_context_inventory_guard as G" would match the scan's own needle and can
+    # never be false -- the exact self-referential vacuity this battery exists to catch.
+    fault_ast = ast.parse(fault_src)
+    imports_guard = any(
+        isinstance(n, ast.Import) and any(a.name == "readiness_context_inventory_guard"
+                                          for a in n.names)
+        for n in ast.walk(fault_ast))
+    calls_guard_run = any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "run"
+        and isinstance(n.func.value, ast.Name) and n.func.value.id == "G"
+        for n in ast.walk(fault_ast))
+    rec("FS01 drives-the-real-guard", imports_guard and calls_guard_run,
+        "this battery drives the REAL inventory guard: the parsed AST contains a real import of "
+        "the guard module and a real call to G.run(); it does not reimplement the gates it tests",
+        level="structural source check",
+        extra={"imports_guard": imports_guard, "calls_guard_run": calls_guard_run})
     # Docker-free by CONSTRUCTION. Checked over the parsed AST, not over raw source text: a
     # text scan would match the token list in this very check (and the honest ``docker_used:
     # false`` disclosure), which is exactly the kind of self-referential vacuity this battery
@@ -368,19 +553,41 @@ def run() -> int:
         "the contract module's execution entry points return a controlled unavailable result with "
         "no results, rather than stub results that report PASS",
         level="structural source check")
-    rec("FS05 expected-gate-required",
-        "expect_check in failed" in fault_src,
-        "each mutation requires its SPECIFIC semantic gate to fail, so a mutation caught only by "
-        "the canonical-hash pin does not count as caught",
-        level="structural source check")
+    # Also AST-checked: assert the real `refuses`/`refuses_patched` bodies contain a membership
+    # test of expect_check against the failed-gate list, rather than scanning for that phrase in
+    # source text (which would match this very check).
+    def couples_expected_gate(fn_name: str) -> bool:
+        for node in ast.walk(fault_ast):
+            if isinstance(node, ast.FunctionDef) and node.name == fn_name:
+                return any(
+                    isinstance(sub, ast.Compare) and any(isinstance(o, ast.In) for o in sub.ops)
+                    and isinstance(sub.left, ast.Name) and sub.left.id == "expect_check"
+                    for sub in ast.walk(node))
+        return False
+
+    coupled = [fn for fn in ("refuses", "refuses_patched") if couples_expected_gate(fn)]
+    rec("FS05 expected-gate-required", len(coupled) == 2,
+        "each mutation requires its SPECIFIC semantic gate to fail: both mutation drivers contain "
+        "a real membership test of the expected gate against the failed-gate list (AST-verified), "
+        "so a mutation caught only by the canonical-hash pin does not count as caught",
+        level="structural source check", extra={"coupled_drivers": coupled})
+
+    # ---- cross-file pins: the inventory guard's own gate list and blocker list are constants that
+    # live OUTSIDE the canonical hash and outside every mutation above, so trimming either would
+    # silently narrow the guard. Pinning them here forces the two files to be edited in concert.
+    rec("FP01 inventory-gate-list-pinned", list(G.EXPECTED_CHECK_IDS) == PINNED_INVENTORY_GATES,
+        "the inventory guard's EXPECTED_CHECK_IDS is pinned here cross-file: deleting a gate "
+        "together with its own pin entry still fails, because this file must be edited too",
+        level="structural source check",
+        extra={"expected_gate_count": len(PINNED_INVENTORY_GATES),
+               "observed_gate_count": len(G.EXPECTED_CHECK_IDS)})
+    rec("FP02 production-blockers-pinned", list(G.PRODUCTION_BLOCKERS) == PINNED_PRODUCTION_BLOCKERS,
+        "the inventory guard's PRODUCTION_BLOCKERS list is pinned here cross-file: silently "
+        "dropping a blocker from CD04's scope fails",
+        level="structural source check",
+        extra={"pinned": PINNED_PRODUCTION_BLOCKERS, "observed": list(G.PRODUCTION_BLOCKERS)})
 
     # ---------------------------------------------------------------- integrity of the battery
-    ids = [c["check_id"] for c in checks]
-    dupes = sorted({cid for cid in ids if ids.count(cid) > 1})
-    if dupes:
-        rec("FZ00 duplicate-check-ids", False, "check ids must be unique",
-            level="structural source check", extra={"duplicates": dupes})
-
     # the real guard must be restored and passing again after every mutation
     rc_after, failed_after = run_real_guard()
     rec("FZ01 guard-restored", rc_after == 0 and not failed_after,
@@ -388,15 +595,31 @@ def run() -> int:
         "leaked into the contract",
         level="inventory integration", extra={"guard_exit": rc_after, "failed_gates": failed_after})
 
+    emitted = [c["check_id"] for c in checks]
+    missing = [cid for cid in EXPECTED_CHECK_IDS if cid not in emitted]
+    unknown = [cid for cid in emitted if cid not in EXPECTED_CHECK_IDS and cid != "FZ00 completeness"]
+    dupes = sorted({cid for cid in emitted if emitted.count(cid) > 1})
+    if missing or unknown or dupes:
+        rec("FZ00 completeness", False,
+            "the emitted check set must equal the expected set exactly -- a mutation cannot be "
+            "quietly deleted from the battery",
+            level="structural source check",
+            extra={"missing": missing, "unknown": unknown, "duplicates": dupes})
+
     passed = sum(1 for c in checks if c["ok"])
     failed_n = len(checks) - passed
+    # Count ONLY real mutations: the baseline (FB00), the restoration check, the structural source
+    # checks and the cross-file pins are not mutations and must not be advertised as such.
+    mutation_ids = [c["check_id"] for c in checks
+                    if c["check_id"][:2] in ("MC", "MS", "MR", "MD", "MA", "MX", "MZ")]
     summary = {
         "guard": "readiness-context-inventory-faults",
         "claim_scope": "readiness-context-inventory-faults-only",
         "passed": passed, "failed": failed_n, "skipped": 0,
         "certification": "passed" if failed_n == 0 else "not_passed",
         "fault_battery": "passed" if failed_n == 0 else "not_passed",
-        "mutations": sum(1 for c in checks if c["execution_level"] != "structural source check"),
+        "mutations": len(mutation_ids),
+        "non_mutation_checks": len(checks) - len(mutation_ids),
         "canonical_inventory_hash": RC.canonical_hash(),
         "contexts_executed": False,
         "readiness_dispositions_produced": False,
@@ -405,6 +628,7 @@ def run() -> int:
         "eligible_for_tenant_evidence": False,
         "production_parity": False,
         "execution_verdict": "FOUR_READINESS_CONTEXTS_NOT_ACCEPTED",
+        "release_recommendation": "GA_BLOCKED",
     }
     print(json.dumps({"summary": summary, "checks": checks}, indent=2))
     return 0 if failed_n == 0 else 1

@@ -29,11 +29,13 @@ contexts_executed = false; eligible_for_readiness = false; production_parity = f
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import inspect
 import json
 import os
 import sys
+import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,8 +67,13 @@ PRODUCTION_BLOCKERS = (
     "client-organizational-approval",
 )
 
-#: Every check this guard must emit. A deleted gate leaves its id missing and fails the run, so the
-#: battery cannot be quietly reduced to a green subset.
+#: Every check this guard must emit. A deleted gate leaves its id missing and fails the run.
+#:
+#: Precise scope, because this pin is weaker than it looks: it catches gate DELETION only. Deleting
+#: a gate together with its entry here, or neutering a predicate while still emitting its id, is
+#: not caught by this list -- those are caught by audit:readiness-context-inventory-faults, which
+#: pins this list cross-file and re-runs the real guard per mutation. The two files must be edited
+#: in concert for a weakening to go unnoticed.
 EXPECTED_CHECK_IDS = [
     "CX01", "CX02", "CX03", "CX04", "CX05",
     "CI01", "CI02", "CI03", "CI04", "CI05", "CI06", "CI07", "CI08", "CI09", "CI10", "CI11", "CI12",
@@ -119,6 +126,37 @@ def independent_canonical_hash(contexts) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
+def reachable_repository_backends() -> set[str] | None:
+    """Derive the repository-backend axis from the IMPLEMENTATION's actual reachable values.
+
+    ``detect_active_repository_backend()`` cannot simply be driven the way ``client_data_mode()``
+    can: reaching its PostgreSQL branch requires a live database, which this Docker-free guard must
+    not start. So the range is derived statically instead -- every ``return`` in the real function
+    is resolved against the real module namespace and collected.
+
+    Returns ``None`` (a refusal, never an optimistic guess) if any return value cannot be resolved
+    to a string constant, so an added branch returning something dynamic fails closed rather than
+    being silently ignored.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(RB.detect_active_repository_backend)))
+    values: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Return):
+            continue
+        if node.value is None:
+            return None
+        if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            values.add(node.value.value)
+        elif isinstance(node.value, ast.Name):
+            resolved = getattr(RB, node.value.id, None)
+            if not isinstance(resolved, str):
+                return None
+            values.add(resolved)
+        else:
+            return None
+    return values or None
+
+
 def observed_client_data_modes() -> set[str]:
     """Drive the REAL readiness.client_data_mode() across recognised and unrecognised inputs."""
     observed = set()
@@ -148,12 +186,14 @@ def run() -> int:
         f"values (observed {sorted(observed_modes)} across 14 raw inputs incl. unrecognised ones)",
         level="implementation derivation", extra={"observed_modes": sorted(observed_modes)})
 
-    impl_backends = {RB.LOCAL_REPOSITORY_BACKEND, RB.POSTGRES_REPOSITORY_BACKEND}
-    rec("CX02", impl_backends == set(RC.SUPPORTED_REPOSITORY_BACKENDS),
-        "the repository-backend axis values equal the implementation constants "
-        f"({sorted(impl_backends)}) -- not environment-variable names",
+    impl_backends = reachable_repository_backends()
+    rec("CX02", impl_backends is not None and impl_backends == set(RC.SUPPORTED_REPOSITORY_BACKENDS),
+        "the repository-backend axis equals the set of values the REAL "
+        "detect_active_repository_backend() can actually return (every return statement resolved "
+        f"against the live module: {sorted(impl_backends) if impl_backends else None}) -- so a "
+        "branch added for a third backend makes this fail rather than pass on constant names",
         level="implementation derivation",
-        extra={"implementation_backends": sorted(impl_backends),
+        extra={"reachable_backends": sorted(impl_backends) if impl_backends else None,
                "declared_backends": sorted(RC.SUPPORTED_REPOSITORY_BACKENDS)})
 
     detect_src = inspect.getsource(RB.detect_active_repository_backend)
@@ -166,19 +206,35 @@ def run() -> int:
         "exactly the two declared constants",
         level="structural source check")
 
-    # Axis independence: create_store() must not branch on the client-data mode, otherwise the
-    # combinations are not free and the Cartesian product would be unjustified.
+    # Axis independence: create_store() must not SELECT A STORE CLASS from the client-data mode,
+    # otherwise the combinations are not free and the Cartesian product would be unjustified.
+    #
+    # Scope of this check, stated precisely because the honest claim is narrower than "all four
+    # start unconditionally": create_store() branches only on requested_repository_backend() and
+    # database_url(). The client-data mode does reach the PostgreSQL path transitively --
+    # tenant_rls.enforce_runtime_role() enforces in client mode and create_store re-raises
+    # TenantRuntimeRoleError -- so client-postgres carries a runtime-role safety PRECONDITION that
+    # demo-postgres does not. A precondition on starting is not a mode-dependent choice of store,
+    # so the axes stay independent; "all four are startable" means "given a safe runtime role".
     rec("CX04",
-        "client_data_mode" not in create_src and "CLIENT_DATA_MODE" not in create_src,
-        "the axes are INDEPENDENT: create_store() does not read the client-data mode, so every "
-        "mode/backend combination is startable (this is what justifies a Cartesian product)",
+        "client_data_mode" not in create_src and "CLIENT_DATA_MODE" not in create_src
+        and "requested_repository_backend()" in create_src and "database_url()" in create_src,
+        "the axes are INDEPENDENT: create_store() selects the store class from the requested "
+        "repository backend and database URL alone, never from the client-data mode. The mode "
+        "affects only a runtime-role safety precondition on the PostgreSQL path, so all four "
+        "combinations are startable given a safe runtime role",
         level="structural source check")
 
-    product = {(m, b) for m in RC.SUPPORTED_CLIENT_DATA_MODES for b in RC.SUPPORTED_REPOSITORY_BACKENDS}
-    rec("CX05", len(product) == 4 and len(RC.CANONICAL_CONTEXT_ORDER) == 4,
-        f"the Cartesian product of the implementation-derived axes has exactly {len(product)} "
-        "members, so exactly four canonical contexts are justified -- the number is derived, "
-        "not assumed",
+    # The product is computed from the OBSERVED implementation ranges (CX01's driven values and
+    # CX02's resolved return values), not from the contract's own declared tuples -- otherwise this
+    # would be contract-vs-contract and could not justify the number four at all.
+    product = {(m, b) for m in observed_modes for b in (impl_backends or set())}
+    rec("CX05", len(product) == 4 and len(RC.CANONICAL_CONTEXT_ORDER) == 4
+        and product == {(m, b) for m in RC.SUPPORTED_CLIENT_DATA_MODES
+                        for b in RC.SUPPORTED_REPOSITORY_BACKENDS},
+        f"the Cartesian product of the IMPLEMENTATION-OBSERVED axes has exactly {len(product)} "
+        "members and equals the declared product, so exactly four canonical contexts are "
+        "justified -- the number is derived from the implementation, not assumed",
         level="implementation derivation", extra={"product_size": len(product)})
 
     # ------------------------------------------------------------------ build the inventory
@@ -198,7 +254,8 @@ def run() -> int:
         level="inventory integration", extra={"context_ids": ids})
     rec("CI04", lambda: len(set(ids)) == len(ids) and len(ids) > 0, "no duplicate context ids")
     rec("CI05", lambda: not (set(RC.CANONICAL_CONTEXT_ORDER) - set(ids)), "no canonical context is missing")
-    rec("CI06", lambda: not (set(ids) - set(RC.CANONICAL_CONTEXT_ORDER)), "no unknown context is present")
+    rec("CI06", lambda: bool(ids) and not (set(ids) - set(RC.CANONICAL_CONTEXT_ORDER)),
+        "no unknown context is present")
     rec("CI07", lambda: bool(inv) and all(c["client_data_mode"] in RC.SUPPORTED_CLIENT_DATA_MODES
                                           and c["repository_backend"] in RC.SUPPORTED_REPOSITORY_BACKENDS
                                           for c in inv),
@@ -299,12 +356,13 @@ def run() -> int:
         extra={"predicted_passes": sorted({(c.get("context_id"), k) for c in inv
                                            for k, v in c.get("expected_control_dispositions", {}).items()
                                            if v == "PASS"})})
-    rec("CD06", lambda: bool(inv) and all(
-        c["accepted_evidence_precondition"] for c in inv
-        if any(v == "PASS" for v in c["expected_control_dispositions"].values())),
+    # Non-vacuous by construction: requires at least one PASS-predicting context to exist, so this
+    # gate cannot pass by having nothing to check.
+    rec("CD06", lambda: _precondition_stated(inv),
         "any context predicting a PASS states the precondition that PASS is contingent on "
-        "(commit-bound evidence regenerated at the executed tree)")
-    rec("CD07", lambda: not [
+        "(commit-bound evidence regenerated at the executed tree), and at least one such context "
+        "exists so the gate is not vacuous")
+    rec("CD07", lambda: bool(inv) and bool(RC.ACCEPTED_CONTEXT_EVIDENCE) and not [
         cid for cid, controls in RC.ACCEPTED_CONTEXT_EVIDENCE.items()
         for c in inv if c["context_id"] == cid
         and ((c["client_data_mode"] == "demo" and controls & RC.CLIENT_IDENTITY_CONTROLS)
@@ -403,9 +461,16 @@ def run() -> int:
         "eligible_for_tenant_evidence": False,
         "production_parity": False,
         "execution_verdict": "FOUR_READINESS_CONTEXTS_NOT_ACCEPTED",
+        "release_recommendation": "GA_BLOCKED",
     }
     print(json.dumps({"summary": summary, "checks": checks}, indent=2))
     return 0 if failed == 0 else 1
+
+
+def _precondition_stated(inv) -> bool:
+    predicting = [c for c in inv
+                  if any(v == "PASS" for v in c["expected_control_dispositions"].values())]
+    return bool(predicting) and all(c["accepted_evidence_precondition"] for c in predicting)
 
 
 def _safe_hash() -> str | None:
