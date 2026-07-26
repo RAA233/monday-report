@@ -217,9 +217,18 @@ def validate(payload) -> list[str]:
     return Q.validate(payload, current_commit=COMMIT, current_tree=TREE, now=_now())
 
 
-def rejects(mutate, *, rehash_after=True) -> tuple[bool, list[str]]:
-    reasons = validate(mutated(mutate, rehash_after=rehash_after))
-    return bool(reasons), reasons
+def rejects(mutate, *, rehash_after=True) -> tuple[bool, list[str], str]:
+    """``(rejected, reasons, mutation_fingerprint)``.
+
+    The fingerprint is a hash of the MUTATED artifact. The faults battery requires all of them to be
+    distinct, which is what actually catches a mutation whose body was replaced by a copy of another
+    mutation's -- while still permitting two mutations that exercise the same rule through genuinely
+    different input shapes (``retry_limit=0`` vs ``retry_limit=True`` defeat different guards).
+    """
+    payload = mutated(mutate, rehash_after=rehash_after)
+    reasons = validate(payload)
+    mfp = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    return bool(reasons), reasons, mfp
 
 
 def probe_with(artifact) -> str:
@@ -372,12 +381,13 @@ def run() -> int:
          lambda p: p.__setitem__("implementation_version", "0.0.1"),
          "an implementation_version drifting from the contract module is rejected"),
     ):
-        ok, reasons = rejects(mutate)
-        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
+        ok, reasons, mfp = rejects(mutate)
+        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
 
-    ok, _ = rejects(lambda p: p.__setitem__("canonical_payload_hash", "a" * 64), rehash_after=False)
+    ok, _, mfp = rejects(lambda p: p.__setitem__("canonical_payload_hash", "a" * 64), rehash_after=False)
     rec("MS08 wrong-canonical-hash", ok, "a canonical hash not matching the body is rejected")
-    ok, _ = rejects(lambda p: p.pop("canonical_payload_hash"), rehash_after=False)
+    ok, _, mfp = rejects(lambda p: p.pop("canonical_payload_hash"), rehash_after=False)
     rec("MS09 missing-canonical-hash", ok, "a missing canonical hash is rejected")
     rec("MS11 artifact-stale-absolute",
         bool(Q.validate(build_valid_artifact(), current_commit=COMMIT, current_tree=TREE,
@@ -423,8 +433,9 @@ def run() -> int:
          lambda p: p["target"].pop("service_identity_fingerprint"),
          "a missing service identity fingerprint is rejected"),
     ):
-        ok, reasons = rejects(mutate)
-        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
+        ok, reasons, mfp = rejects(mutate)
+        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
 
     # ------------------------------------------------------------------ identities
     def ident(field, value):
@@ -448,8 +459,9 @@ def run() -> int:
         ("MI07 local-fallback-permitted", ident("local_fallback_prevented", False),
          "permitting silent fallback to a local/in-memory queue is rejected"),
     ):
-        ok, reasons = rejects(mutate)
-        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
+        ok, reasons, mfp = rejects(mutate)
+        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
 
     # ------------------------------------------------------------------ delivery semantics
     def dlv(field, value):
@@ -478,25 +490,28 @@ def run() -> int:
          "at-least-once delivery without OBSERVED compatibility with the application idempotency "
          "contract is rejected"),
     ):
-        ok, reasons = rejects(mutate)
-        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
+        ok, reasons, mfp = rejects(mutate)
+        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
 
     def to_at_most_once(p, loss_window: bool):
         p["delivery"]["model"] = "at-most-once"
         p["delivery"]["loss_window_disclosed"] = loss_window
         p["proof_domains"].pop("idempotency_interaction", None)
 
-    ok, reasons = rejects(lambda p: to_at_most_once(p, False))
+    ok, reasons, mfp = rejects(lambda p: to_at_most_once(p, False))
     rec("MV09 at-most-once-without-loss-window", ok,
         "at-most-once delivery without disclosing the loss window and its compensating "
         "re-derivation mechanism is rejected -- which is what the current LPOP-before-processing "
         "implementation actually is",
-        extra={"first_reason": reasons[0] if reasons else None})
-    ok, reasons = rejects(lambda p: to_at_most_once(p, True) or p["proof_domains"].__setitem__(
+        extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
+    ok, reasons, mfp = rejects(lambda p: to_at_most_once(p, True) or p["proof_domains"].__setitem__(
         "idempotency_interaction", domain("idempotency_interaction")))
     rec("MV10 conditional-domain-without-model", ok,
         "the conditional idempotency domain present WITHOUT declaring at-least-once is rejected",
-        extra={"first_reason": reasons[0] if reasons else None})
+        extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
 
     # ------------------------------------------------------------------ proof domains
     attestation = "signed_operator_attestation"
@@ -575,8 +590,9 @@ def run() -> int:
          lambda p: p["proof_domains"].__setitem__("invented_domain", domain("nope")),
          "an unknown proof domain is rejected"),
     ):
-        ok, reasons = rejects(mutate)
-        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
+        ok, reasons, mfp = rejects(mutate)
+        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
 
     # ------------------------------------------------------------------ disclosure / parity / privacy
     for cid, mutate, desc in (
@@ -613,8 +629,9 @@ def run() -> int:
          lambda p: p["target"].__setitem__("note", "q1.cache.amazonaws.com"),
          "a raw provider hostname in the artifact is rejected"),
     ):
-        ok, reasons = rejects(mutate)
-        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
+        ok, reasons, mfp = rejects(mutate)
+        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
 
     # ------------------------------------------------------------------ delivery (review round 2)
     def no_disclosures(p):
@@ -623,11 +640,12 @@ def run() -> int:
         p["delivery"].pop("idempotency_contract_compatibility_observed", None)
         p["proof_domains"].pop("idempotency_interaction", None)
 
-    ok, reasons = rejects(no_disclosures)
+    ok, reasons, mfp = rejects(no_disclosures)
     rec("MV11 exactly-once-not-claimed-escapes-implications", ok,
         "'exactly-once-not-claimed' cannot escape BOTH delivery implications. Keying them on the "
         "model let a third value satisfy neither, voiding the contract's two primary delivery rules",
-        extra={"first_reason": reasons[0] if reasons else None})
+        extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
     for cid, mutate, desc in (
         ("MV12 retry-limit-bool", lambda p: p["delivery"].__setitem__("retry_limit", True),
          "retry_limit=True is rejected: isinstance(True, int) is True, so a bool would otherwise "
@@ -660,8 +678,9 @@ def run() -> int:
          "an unknown top-level key is rejected, so an artifact cannot smuggle in an "
          "authoritative-looking field"),
     ):
-        ok, reasons = rejects(mutate)
-        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
+        ok, reasons, mfp = rejects(mutate)
+        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None,
+                     "mutation_fingerprint": mfp})
 
     # ------------------------------------------------------------------ robustness
     hostile = [None, 7, "s", [], {}, {"schema_version": Q.SCHEMA_VERSION},

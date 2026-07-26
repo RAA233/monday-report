@@ -50,6 +50,9 @@ PINNED_CONTRACT_HASH = "45bc335f8066576ee1694ba07d47e2c6d97ad74ac4fab69374e9202a
 #: file (see FC02/FC03).
 PINNED_EVIDENCE_ID_SET_HASH = "4ab1c76ee947a29dd3ff45226aebd97dcb9d540ccdec8e4ee06d86520bc38893"
 PINNED_EVIDENCE_CHECK_COUNT = 104
+#: Floor on how many mutations carry an input fingerprint, so the distinctness check
+#: cannot be defeated by simply stopping to record them.
+PINNED_EVIDENCE_MIN_FINGERPRINTED = 60
 
 EXPECTED_CHECK_IDS = [
     "FC00 contract-hash-pinned", "FC01 baseline-accepts-valid",
@@ -86,7 +89,7 @@ EXPECTED_CHECK_IDS = [
     "CE03 tenant-evidence-cannot-promote", "CE04 ui-evidence-cannot-promote",
     "CE05 worker-evidence-cannot-promote", "CE06 database-evidence-cannot-promote",
     "CE07 delegation-defect-reintroduced-fails", "CE08 registry-untouched",
-    "FC02 evidence-battery-id-set-pinned", "FC03 evidence-mutations-reject-distinctly",
+    "FC02 evidence-battery-id-set-pinned", "FC03 evidence-mutations-are-distinct-inputs",
     "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
 EXPECTED_TOTAL_CHECKS = 56
@@ -433,18 +436,27 @@ def run() -> int:
         extra={"observed_id_set_hash": id_set_hash[:16] + "...", "observed_count": len(ev_ids)})
 
     ev_mutations = [c for c in ev_checks if c["check_id"][:2] in EG.MUTATION_PREFIXES]
-    reasons_seen: dict[str, list[str]] = {}
+    # Distinct mutation INPUTS, not distinct reasons. Two mutations may legitimately exercise the
+    # same rule through different shapes -- retry_limit=0 and retry_limit=True defeat different
+    # guards -- so requiring distinct reasons was over-strict and flagged real coverage as
+    # redundant. What must never happen is a mutation whose BODY is a copy of another's, which is
+    # exactly what an identical mutated artifact means.
+    fps: dict[str, list[str]] = {}
     for c in ev_mutations:
-        first = c.get("first_reason")
-        if isinstance(first, str):
-            reasons_seen.setdefault(first, []).append(c["check_id"])
-    collisions = {r: ids for r, ids in reasons_seen.items() if len(ids) > 1}
-    rec("FC03 evidence-mutations-reject-distinctly", not collisions,
-        "no two evidence-battery mutations reject for the IDENTICAL first reason, so substituting an "
-        "already-covered rejection for a mutation's body -- which leaves the id list and counts "
-        "untouched -- is caught",
+        f = c.get("mutation_fingerprint")
+        if isinstance(f, str):
+            fps.setdefault(f, []).append(c["check_id"])
+    duplicated = {f: ids for f, ids in fps.items() if len(ids) > 1}
+    covered = sum(len(ids) for ids in fps.values())
+    rec("FC03 evidence-mutations-are-distinct-inputs",
+        not duplicated and covered >= PINNED_EVIDENCE_MIN_FINGERPRINTED,
+        "every evidence-battery mutation applies a DISTINCT mutated artifact, so substituting an "
+        "already-covered rejection for a mutation's body -- which leaves the id list and both counts "
+        "untouched -- is caught. Distinct inputs rather than distinct reasons: two mutations may "
+        "legitimately exercise one rule through different shapes",
         level="structural source check",
-        extra={"colliding_reasons": {r[:60]: ids for r, ids in list(collisions.items())[:3]}})
+        extra={"fingerprinted_mutations": covered,
+               "duplicate_bodies": {f[:12]: ids for f, ids in list(duplicated.items())[:3]}})
 
     # ------------------------------------------------------------------ completeness
     mutations_so_far = [c["check_id"] for c in checks if c["check_id"][:2] in MUTATION_PREFIXES]
