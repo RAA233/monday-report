@@ -68,10 +68,13 @@ EXPECTED_CHECK_IDS = [
     # privacy / robustness
     "MP01 private-path-inserted", "MP02 dsn-inserted", "MP03 malformed-artifact-crashes",
     "FZ00 completeness", "FZ01 battery-size-pinned", "FZ02 id-set-hash-pinned",
-    "FZ03 mutations-are-distinct-inputs",
+    "FZ03 mutations-are-distinct-inputs", "FZ04 drift-guard-check-set-pinned",
 ]
 EXPECTED_TOTAL_CHECKS = 44
 EXPECTED_MUTATION_COUNT = 38
+PINNED_DRIFT_ID_SET_HASH = "ded52c497ff1235a74a066a5c176afbe88ba44be2e4e8af0c88713437360c60b"
+PINNED_DRIFT_CHECK_COUNT = 47
+#: Self-switchable by design -- it is a tripwire against carelessness, not a bind against intent.
 PINNED_ID_SET_HASH = "e7529a77e457327adf0e99087907648c108e82adce2a45c4c5533753c18741b8"
 
 MUTATION_FINGERPRINTS: dict[str, str] = {}
@@ -309,6 +312,22 @@ def run() -> int:
         level="structural source check",
         extra={"fingerprinted": len(MUTATION_FINGERPRINTS),
                "duplicate_bodies": {k[:12]: v for k, v in list(dup.items())[:3]}})
+    # Cross-pin the DRIFT guard's own check set. Without it four of its checks -- GA21, GA42, GA70,
+    # GA71 -- could each be deleted with this battery still green.
+    GG.checks.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        GG.run()
+    drift_ids = sorted(c["check_id"] for c in GG.checks)
+    GG.checks.clear()
+    drift_hash = hashlib.sha256("
+".join(drift_ids).encode("utf-8")).hexdigest()
+    rec("FZ04 drift-guard-check-set-pinned",
+        drift_hash == PINNED_DRIFT_ID_SET_HASH and len(drift_ids) == PINNED_DRIFT_CHECK_COUNT,
+        "the drift guard's emitted check-id set is hashed and pinned HERE, so one of its checks "
+        "cannot be deleted with this battery still reporting green",
+        level="structural source check",
+        extra={"observed": drift_hash[:16] + "...", "count": len(drift_ids)})
+
     rec("FZ01 battery-size-pinned",
         len(EXPECTED_CHECK_IDS) == EXPECTED_TOTAL_CHECKS
         and len(MUTATION_FINGERPRINTS) == EXPECTED_MUTATION_COUNT,

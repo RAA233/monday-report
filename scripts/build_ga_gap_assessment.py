@@ -33,6 +33,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 import subprocess
 import sys
 from pathlib import Path
@@ -47,7 +50,8 @@ OUTPUT_PATH = ROOT / "docs" / "GA_GAP_ASSESSMENT.v1.json"
 
 SCHEMA_VERSION = "ga-gap-assessment.v2"
 #: v1 is superseded: it carried no source bindings, no canonical hash and no artifact
-#: classification, so a reader could not tell a generated status report from evidence.
+#: classification, so a reader could not tell a generated status report from evidence. Exported for
+#: the drift guard rather than duplicated there.
 SUPERSEDED_SCHEMA_VERSIONS = ("ga-gap-assessment.v1",)
 
 # Measurement classes -- how a disposition was actually arrived at.
@@ -390,6 +394,29 @@ def _git(args: list[str]) -> str:
         return "unknown"
 
 
+def _all_evidence_paths() -> list:
+    """Every gitignored ``output/`` artifact the evaluator consults.
+
+    Hiding only the migration artifact made the "fresh checkout" context a lie: an independent
+    review showed at least three other local artifacts leaking into the generated prose, and at
+    exact head they would move dispositions themselves. Read from the evaluator module so a newly
+    added evidence path cannot be silently omitted.
+    """
+    import backend.app.ga_readiness as _g
+    paths, seen = [], set()
+    for name in dir(_g):
+        if not name.endswith("_PATH") and "EVIDENCE" not in name:
+            continue
+        value = getattr(_g, name, None)
+        if isinstance(value, Path) and "output" in value.as_posix() and value not in seen:
+            seen.add(value)
+            paths.append(value)
+    for extra in (EVIDENCE_PATH,):
+        if extra not in seen:
+            paths.append(extra)
+    return paths
+
+
 def _dispositions() -> tuple[dict[str, str], dict[str, str], str, str, bool]:
     """Return (fresh, verified, ga_fresh, ga_verified, evidence_present).
 
@@ -402,24 +429,43 @@ def _dispositions() -> tuple[dict[str, str], dict[str, str], str, str, bool]:
     """
     import backend.app.ga_readiness as G
 
+    _CAPTURED.clear()
+
     def snap() -> tuple[dict[str, str], str]:
         checks = G.evaluate_blockers({})
+        _CAPTURED["reasons"] = {c["id"]: str(c.get("detail") or "") for c in checks}
         status, _ = G.decide_ga(mode="client", parity_ok=True, checks=checks,
                                 commands_skipped=False, commands_passed=True, worktree_clean=True)
         return {c["id"]: c["disposition"] for c in checks}, status
 
-    hidden = EVIDENCE_PATH.with_suffix(".json.gap-assessment-hidden")
-    had = EVIDENCE_PATH.exists()
-    if had:
-        EVIDENCE_PATH.rename(hidden)
+    # Move every local evidence artifact into a private temp directory, not to a fixed sibling
+    # name: a fixed target raises FileExistsError on a leftover from an interrupted run, and an
+    # interrupted run would otherwise strand the developer's real artifacts.
+    stash = Path(tempfile.mkdtemp(prefix="gap-assessment-hidden-"))
+    moved = []
     try:
+        for index, path in enumerate(_all_evidence_paths()):
+            if path.exists():
+                target = stash / f"{index}-{path.name}"
+                os.replace(path, target)
+                moved.append((path, target))
         fresh, ga_fresh = snap()
     finally:
-        if had:
-            hidden.rename(EVIDENCE_PATH)
+        for path, target in moved:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(target, path)
+        shutil.rmtree(stash, ignore_errors=True)
+    # The blocking reasons that go into the canonical body are the HERMETIC ones, captured while
+    # every local artifact was hidden. Capturing them afterwards made the canonical hash a function
+    # of an untracked file's CONTENTS -- an independent review changed the hash by planting garbage.
+    _CAPTURED["hermetic_reasons"] = dict(_CAPTURED.get("reasons") or {})
+    had = bool(moved)
     verified, ga_verified = snap() if had else (fresh, ga_fresh)
     return fresh, verified, ga_fresh, ga_verified, had
 
+
+#: Scratch space for the hermetic snapshot's blocking reasons.
+_CAPTURED: dict = {}
 
 #: Controls whose disposition is driven by an evidence artifact that must be bound to the CURRENT
 #: head. Absent or stale evidence keeps them BLOCKED; nothing here may report otherwise.
@@ -438,7 +484,10 @@ def _evidence_status(check_id: str, probe_type: str | None, fresh_disposition: s
     exists in the tracked repository. A locally present, gitignored artifact is NOT repository state
     and never yields ``present`` -- see ``local_evidence_artifact`` in the payload.
     """
-    if check_id not in _EVIDENCE_DRIVEN and probe_type != PROBE_EVIDENCE:
+    # Only an EVIDENCE-DRIVEN probe can have an artifact at all. A behavioural probe that passes has
+    # no evidence artifact, and reporting present_exact_head for it was false -- an independent
+    # review found two such controls in the shipped artifact.
+    if probe_type != PROBE_EVIDENCE:
         return "not_evidence_driven"
     return "present_exact_head" if fresh_disposition == "PASS" else "absent"
 
@@ -493,14 +542,33 @@ def _source_bindings(registry_bytes: bytes) -> dict:
     return bindings
 
 
-#: Excluded from the canonical hash: the hash itself and explicitly declared generation metadata.
+#: Excluded from the canonical hash: the hash itself, and the MACHINE-LOCAL observations. Everything
+#: else -- including the fresh-checkout context and its tallies -- is covered.
+#:
+#: `contexts` was previously excluded wholesale, which let a GA_BLOCKED artifact and a GA_READY /
+#: 28-PASS artifact share a canonical hash. Only the verified-environment half, which depends on
+#: gitignored local artifacts, is excluded now.
 NON_CANONICAL_KEYS = frozenset({"canonical_payload_hash", "local_evidence_artifact",
-                                "contexts"})
+                                "local_evidence_artifact_present"})
+NON_CANONICAL_CONTEXT_KEYS = frozenset({"verified_environment_with_evidence"})
+NON_CANONICAL_CONTROL_KEYS = frozenset({"current_disposition_verified_environment"})
+
+
+def canonical_body(payload: dict) -> dict:
+    """The hermetic, tracked-repository-only content of the assessment."""
+    body = {k: v for k, v in payload.items() if k not in NON_CANONICAL_KEYS}
+    if isinstance(body.get("contexts"), dict):
+        body["contexts"] = {k: v for k, v in body["contexts"].items()
+                            if k not in NON_CANONICAL_CONTEXT_KEYS}
+    if isinstance(body.get("controls"), list):
+        body["controls"] = [{k: v for k, v in c.items() if k not in NON_CANONICAL_CONTROL_KEYS}
+                            for c in body["controls"] if isinstance(c, dict)]
+    return body
 
 
 def canonical_json(payload: dict) -> str:
-    body = {k: v for k, v in payload.items() if k not in NON_CANONICAL_KEYS}
-    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return json.dumps(canonical_body(payload), sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True)
 
 
 def canonical_hash(payload: dict) -> str:
@@ -511,13 +579,7 @@ def build() -> dict:
     registry_bytes = REGISTRY_PATH.read_bytes()
     registry = json.loads(registry_bytes.decode("utf-8"))
     fresh, verified, ga_fresh, ga_verified, evidence_present = _dispositions()
-    blocking_reasons = {}
-    try:
-        import backend.app.ga_readiness as _g
-        for check in _g.evaluate_blockers({}):
-            blocking_reasons[check["id"]] = str(check.get("detail") or "")
-    except Exception:  # noqa: BLE001
-        pass
+    blocking_reasons = dict(_CAPTURED.get("hermetic_reasons") or {})
 
     controls = []
     for entry in sorted(registry["blockers"], key=lambda b: b["check_id"]):
@@ -528,7 +590,11 @@ def build() -> dict:
         # checkout. When the live disposition is not PASS the control was not
         # actually measured here (its evidence artifact is absent), so downgrade
         # rather than overstate.
-        live = verified.get(cid)
+        # Downgrade against the AUTHORITATIVE fresh context, not the machine-local verified one:
+        # a curated BEHAVIORALLY_PROVEN class must not survive on the strength of a gitignored
+        # artifact. This left migration-runner recorded PROVEN while its fresh disposition was
+        # BLOCKED.
+        live = fresh.get(cid)
         if klass == BEHAVIOURALLY_PROVEN and live != "PASS":
             klass = NOT_EVALUABLE
         controls.append({

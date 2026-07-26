@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -55,8 +56,13 @@ STALE_DELEGATION = ("_delegate(postgres_repository)", "_delegate(redis_queue)",
 
 #: Shapes that must never appear anywhere in a tracked status report.
 LEAK_PATTERNS = (
-    (r"[A-Za-z]:\\\\Users\\\\", "a Windows user path"),
-    (r"/(?:home|Users)/[a-z]", "a POSIX home path"),
+    (r"(?i)[a-z]:[\\\\/]users[\\\\/]", "a Windows user path"),
+    (r"(?i)/(?:home|users)/[a-z]", "a POSIX home path"),
+    (r"\\\\\\\\[A-Za-z0-9_.-]+\\\\", "a UNC path"),
+    (r"(?i)\\bhost\\s*=\\s*\\S+|\\bsslmode\\s*=", "a libpq keyword DSN"),
+    (r"(?i)\\bBearer\\s+[A-Za-z0-9._-]{12,}", "a bearer token"),
+    (r"(?i)\\b[a-z0-9-]+\\.(?:internal|local|lan)\\b", "an internal hostname"),
+    (r"(?i)\\bmonday_report_[a-z_]*(?:runtime|restricted|admin)\\b", "a database role name"),
     (r"postgres(?:ql)?://", "a database URL"),
     (r"redis(?:s)?://", "a queue URL"),
     (r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "an IP address"),
@@ -82,15 +88,23 @@ def live_dispositions() -> dict[str, str]:
     The authoritative context is the fresh checkout -- an empty readiness map with no local evidence
     artifact -- because that is what is reproducible from the tracked repository alone.
     """
-    hidden = GEN.EVIDENCE_PATH.with_suffix(".json.gap-guard-hidden")
-    had = GEN.EVIDENCE_PATH.exists()
-    if had:
-        GEN.EVIDENCE_PATH.rename(hidden)
+    import os
+    import shutil
+    import tempfile
+    stash = Path(tempfile.mkdtemp(prefix="gap-guard-hidden-"))
+    moved = []
     try:
+        for index, path in enumerate(GEN._all_evidence_paths()):
+            if path.exists():
+                target = stash / f"{index}-{path.name}"
+                os.replace(path, target)
+                moved.append((path, target))
         return {c["id"]: c["disposition"] for c in GA.evaluate_blockers({})}
     finally:
-        if had:
-            hidden.rename(GEN.EVIDENCE_PATH)
+        for path, target in moved:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(target, path)
+        shutil.rmtree(stash, ignore_errors=True)
 
 
 def git_rev(ref: str) -> str:
@@ -108,10 +122,28 @@ def run() -> int:
         _emit(1)
         return 1
 
+    if not isinstance(artifact, dict):
+        rec("GA00b artifact-is-object", False,
+            "the assessment must be a JSON OBJECT; a null/list/string/number payload is refused "
+            "rather than crashing the guard",
+            level="structural source check", extra={"type": type(artifact).__name__})
+        _emit(1)
+        return 1
+    rec("GA00b artifact-is-object", True, "the assessment is a JSON object",
+        level="structural source check")
+
     registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
     reg_by_id = {b["id"]: b for b in registry["blockers"]}
-    controls = artifact.get("controls") or []
-    art_by_id = {c.get("id"): c for c in controls if isinstance(c, dict)}
+    controls = artifact.get("controls")
+    controls = controls if isinstance(controls, list) else []
+    art_by_id = {}
+    for c in controls:
+        if isinstance(c, dict) and isinstance(c.get("id"), (str, type(None))):
+            art_by_id[c.get("id")] = c
+    rec("GA00c control-entries-well-formed",
+        len(art_by_id) == len([c for c in controls if isinstance(c, dict)]),
+        "every control entry is an object with a hashable id",
+        level="structural source check")
     live = live_dispositions()
 
     # ---------------------------------------------------------------- schema / shape
@@ -180,10 +212,13 @@ def run() -> int:
             f"the production {label} adapter is BLOCKED both live and as recorded",
             level="evaluator integration",
             extra={"live": live.get(check), "recorded": art.get("current_disposition_fresh_checkout")})
+        # Parenthesised. `A and B or C` parsed as `(A and B) or C`, so C alone satisfied it and
+        # probe_type was never constrained -- an independent review set it to four different values,
+        # and deleted it, with the check still passing.
         rec(f"GA21-{label} adapter-evidence-driven",
             art.get("probe_type") == GEN.PROBE_EVIDENCE
-            and module.SCHEMA_VERSION.split(".")[0] in str(art.get("probe_location", ""))
-            or module.__name__.rsplit(".", 1)[-1] in str(art.get("probe_location", "")),
+            and (module.SCHEMA_VERSION.split(".")[0] in str(art.get("probe_location", ""))
+                 or module.__name__.rsplit(".", 1)[-1] in str(art.get("probe_location", ""))),
             f"the {label} adapter is recorded as an evidence-driven probe pointing at its contract "
             "module, not as a delegated readiness check",
             extra={"probe_type": art.get("probe_type"),
@@ -198,11 +233,13 @@ def run() -> int:
             f"the {label} adapter entry carries no delegated-readiness-check language",
             extra={"found": [m for m in STALE_DELEGATION if m in blob]})
 
+    verdicts = artifact.get("execution_verdicts")
+    verdicts = verdicts if isinstance(verdicts, dict) else {}
     rec("GA24 static-contract-is-not-execution",
         artifact.get("static_contract_acceptance_is_not_execution_acceptance") is True
-        and artifact.get("execution_verdicts", {}).get("production_database_adapter")
+        and verdicts.get("production_database_adapter")
         == "PRODUCTION_DATABASE_ADAPTER_NOT_ACCEPTED"
-        and artifact.get("execution_verdicts", {}).get("production_queue_adapter")
+        and verdicts.get("production_queue_adapter")
         == "PRODUCTION_QUEUE_ADAPTER_NOT_ACCEPTED",
         "the artifact states plainly that an accepted static contract is not adapter acceptance, and "
         "records both execution verdicts as NOT_ACCEPTED")
@@ -216,7 +253,7 @@ def run() -> int:
         extra={"live": live.get("ga_tenant_authorization")})
     rec("GA31 contexts-not-executed",
         artifact.get("four_contexts_executed_at_this_head") is False
-        and artifact.get("execution_verdicts", {}).get("four_readiness_contexts")
+        and verdicts.get("four_readiness_contexts")
         == "FOUR_READINESS_CONTEXTS_NOT_ACCEPTED",
         "the four contexts are recorded as NOT executed at this head, and contract/harness "
         "acceptance is not converted into execution acceptance")
@@ -231,11 +268,12 @@ def run() -> int:
         level="evaluator integration")
     rec("GA41 local-artifact-disclosed",
         isinstance(artifact.get("local_evidence_artifact"), dict)
-        and artifact["local_evidence_artifact"].get("tracked") is False,
+        and artifact["local_evidence_artifact"].get("tracked") is False
+        and artifact["local_evidence_artifact"].get("matches_current_head") is not True,
         "any machine-local evidence artifact is disclosed as untracked, so a gitignored file cannot "
         "silently be read as repository state",
         extra={k: v for k, v in (artifact.get("local_evidence_artifact") or {}).items()
-               if k != "note"})
+               if k != "note"} if isinstance(artifact.get("local_evidence_artifact"), dict) else {})
     rec("GA42 authoritative-context-is-fresh",
         artifact.get("authoritative_context") == "fresh_checkout_no_local_evidence",
         "the authoritative context is the fresh checkout -- the one reproducible from the tracked "
@@ -244,6 +282,45 @@ def run() -> int:
         rec(f"GA43 {key}-false", artifact.get(key) is False, f"{key} is false")
     rec("GA44 ga-blocked", artifact.get("release_recommendation") == "GA_BLOCKED",
         "the release recommendation is GA_BLOCKED")
+
+    # ---------------------------------------------------------------- contexts (Part K)
+    contexts = artifact.get("contexts")
+    contexts = contexts if isinstance(contexts, dict) else {}
+    fresh_ctx = contexts.get("fresh_checkout_no_local_evidence")
+    fresh_ctx = fresh_ctx if isinstance(fresh_ctx, dict) else {}
+    rec("GA45 fresh-context-ga-blocked", fresh_ctx.get("ga") == "GA_BLOCKED",
+        "the authoritative fresh-checkout context reports GA_BLOCKED. This block was previously "
+        "excluded from the canonical hash AND unchecked, which let a GA_BLOCKED artifact and a "
+        "GA_READY / 28-PASS artifact share a hash")
+    recorded_tally = fresh_ctx.get("tally")
+    computed_tally: dict = {}
+    for c in controls:
+        if isinstance(c, dict):
+            value = c.get("current_disposition_fresh_checkout")
+            computed_tally[value] = computed_tally.get(value, 0) + 1
+    rec("GA46 fresh-tally-reconciles",
+        isinstance(recorded_tally, dict)
+        and dict(sorted(recorded_tally.items())) == dict(sorted(computed_tally.items())),
+        "the fresh-checkout tally reconciles exactly with the per-control fresh dispositions",
+        extra={"recorded": recorded_tally, "computed": dict(sorted(computed_tally.items()))})
+    verified_ctx = contexts.get("verified_environment_with_evidence")
+    verified_ctx = verified_ctx if isinstance(verified_ctx, dict) else {}
+    rec("GA47 verified-context-also-blocked", verified_ctx.get("ga") == "GA_BLOCKED",
+        "even the machine-local verified-environment context reports GA_BLOCKED")
+    rec("GA48 evidence-status-only-for-evidence-probes",
+        all(c.get("evidence_status") != "present_exact_head"
+            for c in controls
+            if isinstance(c, dict) and c.get("probe_type") != GEN.PROBE_EVIDENCE),
+        "no behaviourally-probed control claims present_exact_head evidence: a passing behavioural "
+        "probe has no artifact at all",
+        extra={"offenders": [c.get("id") for c in controls if isinstance(c, dict)
+                             and c.get("probe_type") != GEN.PROBE_EVIDENCE
+                             and c.get("evidence_status") == "present_exact_head"]})
+    rec("GA49 measurement-class-consistent",
+        all(c.get("measurement_class") != "BEHAVIORALLY_PROVEN"
+            or c.get("current_disposition_fresh_checkout") == "PASS"
+            for c in controls if isinstance(c, dict)),
+        "no control is recorded BEHAVIORALLY_PROVEN while its fresh disposition is not PASS")
 
     # ---------------------------------------------------------------- bindings / hash
     head = git_rev("HEAD")
@@ -270,7 +347,8 @@ def run() -> int:
         extra={"bound_commit": str(bound)[:12], "head": head[:12], "commits_behind": behind})
     rec("GA50b worktree-clean-attested", artifact.get("worktree_clean") is True,
         "the assessment attests a clean TRACKED worktree at generation")
-    bindings = artifact.get("source_bindings") or {}
+    bindings = artifact.get("source_bindings")
+    bindings = bindings if isinstance(bindings, dict) else {}
     rec("GA51 registry-sha-current",
         bindings.get("registry_sha256")
         == hashlib.sha256(REGISTRY_PATH.read_bytes()).hexdigest(),
@@ -304,11 +382,12 @@ def run() -> int:
         level="structural source check", extra={"found": found})
 
     # ---------------------------------------------------------------- inventory non-rebind (Part N)
-    rec("GA70 inventory-not-registry-prose-bound", _inventory_not_prose_bound(),
-        "changing ONLY description / policy_reference / resolution_condition on the registry leaves "
-        "the canonical readiness-context inventory hash unchanged -- proved here by mutating a "
-        "scratch copy, not assumed",
-        level="structural source check")
+    prose_ok, prose_detail = _inventory_not_prose_bound()
+    rec("GA70 inventory-not-registry-prose-bound", prose_ok,
+        "the readiness-context contract performs NO file I/O, so its canonical body cannot depend on "
+        "registry prose. Proved structurally on the parsed module rather than by rewriting the "
+        "tracked registry, which the first cut did 38 times per fault run",
+        level="structural source check", extra={"detail": prose_detail})
     rec("GA71 inventory-does-move-on-real-change", _inventory_moves_on_real_change(),
         "a REAL context-contract change DOES move the inventory hash, so GA70 is not vacuously true",
         level="structural source check")
@@ -316,25 +395,31 @@ def run() -> int:
     return _emit(0 if all(c["ok"] for c in checks) else 1)
 
 
-def _inventory_not_prose_bound() -> bool:
-    """Mutate registry prose on a scratch copy; the inventory hash must not move."""
-    before = RC.canonical_hash()
-    original = REGISTRY_PATH.read_bytes()
+def _inventory_not_prose_bound() -> tuple[bool, str]:
+    """Prove STRUCTURALLY that the inventory cannot depend on registry prose.
+
+    The first cut rewrote the TRACKED registry 28 entries at a time, once per guard run and 38 times
+    per fault-battery run, restored only by a ``finally`` -- so an interrupt left "PROSE-MUTATED"
+    content in a tracked file. It was also decorative: ``readiness_contexts`` performs no file I/O at
+    all, so the mutation could not have affected it. The property is proved by parsing the contract
+    module instead: no file read, no registry reference, and its canonical payload references only
+    module constants.
+    """
+    source = (ROOT / "backend" / "app" / "readiness_contexts.py").read_text(encoding="utf-8")
     try:
-        data = json.loads(original.decode("utf-8"))
-        for entry in data["blockers"]:
-            entry["description"] = "PROSE-MUTATED"
-            entry["policy_reference"] = "PROSE-MUTATED"
-            entry["resolution_condition"] = "PROSE-MUTATED"
-        REGISTRY_PATH.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        import importlib
-        importlib.reload(RC)
-        after = RC.canonical_hash()
-    finally:
-        REGISTRY_PATH.write_bytes(original)
-        import importlib
-        importlib.reload(RC)
-    return before == after == RC.canonical_hash()
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False, "contract module does not parse"
+    readers = {"read_text", "read_bytes", "open", "load", "loads_file"}
+    file_reads = [n.func.attr for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                  and n.func.attr in readers]
+    opens = [n.func.id for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "open"]
+    mentions_registry = "blocker_registry" in source and "REGISTRY" in source.upper().replace(
+        "REGISTRY (", "")
+    ok = not file_reads and not opens
+    return ok, f"file_reads={file_reads} opens={opens} mentions_registry_path={mentions_registry}"
 
 
 def _inventory_moves_on_real_change() -> bool:
