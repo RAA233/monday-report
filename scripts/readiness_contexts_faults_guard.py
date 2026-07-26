@@ -800,17 +800,23 @@ def run() -> int:
         "sufficient",
         level="structural source check")
 
-    # Not a self-reported literal: require that a PASS can exist at all (so the disposition pipeline
-    # is real) and that a hardcoded table would be caught. ME06/MC01 depend on a real PASS appearing.
-    anchor_pass = disp_a.get(tenant_check) == "PASS"
-    all_blocked_without = all(d != "PASS" for d in disp_b.values())
+    # Behavioural, not a self-reported literal. Two properties a hardcoded disposition table could
+    # not reproduce together: the evaluator emits a genuinely VARIED range of dispositions from real
+    # artifacts, and one specific control tracks the presence of one specific artifact.
+    #
+    # Deliberately NOT asserting "nothing passes without v3": three controls really do PASS from
+    # other on-disk evidence (migration-runner, rbac-role-separation, verified-reviewer-identity).
+    # Claiming otherwise would be false, and would have made this check fail for the right reason.
+    varied = len({d for d in disp_a.values()}) >= 3
+    tracks_artifact = disp_a.get(tenant_check) == "PASS" and disp_b.get(tenant_check) != "PASS"
     rec("FS05 no-simulated-dispositions",
         base.get("dispositions_source") == "backend.app.ga_readiness.evaluate_blockers"
-        and anchor_pass and all_blocked_without,
-        "dispositions are produced by the real evaluator, demonstrated behaviourally: a PASS appears "
-        "only when a valid artifact is present and NO control passes without one -- a hardcoded "
-        "disposition table could not reproduce both halves",
-        level="structural source check")
+        and varied and tracks_artifact,
+        "dispositions come from the real evaluator, shown behaviourally: the emitted range spans "
+        "several distinct dispositions driven by real artifacts, and one control tracks the presence "
+        "of one artifact -- a hardcoded table could not do both",
+        level="structural source check",
+        extra={"distinct_dispositions": sorted({d for d in disp_a.values()})})
 
     # ---------------------------------------------------------------- completeness
     # Pin the SIZE as well as the membership, and record it BEFORE the membership gate so the gate
