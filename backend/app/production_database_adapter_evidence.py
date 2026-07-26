@@ -117,6 +117,30 @@ NON_PROVING_OBSERVATION_CLASSES: tuple[str, ...] = (
     "unspecified",
 )
 
+#: Per-domain provenance requirements. Without these, one uniform rule applied to all domains, so a
+#: restore test, a failover test and point-in-time recovery could all be satisfied by a signed
+#: attestation that nobody ever ran anything -- which an independent review demonstrated. Recovery
+#: and availability properties are only established by ACTUALLY DOING THEM; a live/control-plane
+#: observation is required where the property is a current configuration rather than an event.
+DOMAIN_OBSERVATION_REQUIREMENTS: dict[str, tuple[str, ...]] = {
+    "restore_test": ("executed_drill",),
+    "failover_behavior": ("executed_drill",),
+    "point_in_time_recovery": ("executed_drill",),
+    "backup_policy": ("live_target_observation", "provider_control_plane_response"),
+    "monitoring_and_alerting": ("live_target_observation", "provider_control_plane_response"),
+    "capacity_and_disk_thresholds": ("live_target_observation", "provider_control_plane_response"),
+    "tls_configuration": ("live_target_observation",),
+    "network_boundary": ("live_target_observation", "provider_control_plane_response"),
+    "postgresql_version_and_extensions": ("live_target_observation",),
+    "rls_and_force_policy_inventory": ("live_target_observation",),
+    "connection_limits_and_timeouts": ("live_target_observation",),
+    "runtime_api_identity": ("live_target_observation",),
+    "runtime_worker_identity": ("live_target_observation",),
+    "runtime_import_identity": ("live_target_observation",),
+    "migration_identity_and_least_privilege": ("live_target_observation",),
+    "secret_scan": ("executed_drill", "live_target_observation"),
+}
+
 #: Fields every proof domain must carry. A domain that is a bare bool/str/number is rejected.
 REQUIRED_DOMAIN_FIELDS: tuple[str, ...] = (
     "status", "proven_by", "observation_class", "observed_at", "binding_fingerprint",
@@ -139,7 +163,11 @@ PROVIDER_CLASSIFICATIONS: tuple[str, ...] = (
 REJECTED_PROVIDER_CLASSIFICATIONS: tuple[str, ...] = ("unknown",)
 
 ENVIRONMENT_CLASSIFICATIONS: tuple[str, ...] = ("production", "staging", "test", "development")
-REJECTED_ENVIRONMENTS: tuple[str, ...] = ("test", "development")
+#: ``staging`` is rejected too: this control certifies the PRODUCTION adapter, and a staging target
+#: is by definition not the one serving client data. An independent review found a staging artifact
+#: certifying the production control, which is exactly the class of overclaim this contract exists
+#: to prevent.
+REJECTED_ENVIRONMENTS: tuple[str, ...] = ("staging", "test", "development")
 
 ENDPOINT_CLASSIFICATIONS: tuple[str, ...] = (
     "private-network", "public-with-allowlist", "loopback", "docker-bridge", "unknown",
@@ -256,18 +284,36 @@ def contract_hash() -> str:
             "endpoints": list(REJECTED_ENDPOINT_CLASSIFICATIONS),
             "storage": list(REJECTED_STORAGE_CLASSIFICATIONS),
         },
+        # The ALLOWED enums must be covered too, not only the rejected ones. An independent review
+        # widened the allowed sets with "sandbox" / "container-network", which produced an accepted
+        # artifact and a PASS control while this hash stayed byte-identical.
+        "allowed_provider_classifications": list(PROVIDER_CLASSIFICATIONS),
+        "allowed_environment_classifications": list(ENVIRONMENT_CLASSIFICATIONS),
+        "allowed_endpoint_classifications": list(ENDPOINT_CLASSIFICATIONS),
+        "allowed_storage_classifications": list(STORAGE_CLASSIFICATIONS),
+        "domain_statuses": list(DOMAIN_STATUSES),
+        "domain_observation_requirements": {k: list(v) for k, v in
+                                            sorted(DOMAIN_OBSERVATION_REQUIREMENTS.items())},
+        "leak_patterns": [pattern for pattern, _ in _LEAK_PATTERNS],
     }, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
 
 
 # --------------------------------------------------------------------------------- git helpers
 
+#: Sentinel returned when git cannot be consulted. Distinguished from a real empty result so the
+#: validator can FAIL CLOSED: an independent review showed that returning "" for both made an
+#: unavailable git report a clean worktree and skip the commit/tree comparison entirely, so a forged
+#: binding was accepted.
+GIT_UNAVAILABLE = "\x00git-unavailable"
+
+
 def _git(args: list[str]) -> str:
     try:
         out = subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, text=True,
                              timeout=30)
-        return out.stdout.strip() if out.returncode == 0 else ""
+        return out.stdout.strip() if out.returncode == 0 else GIT_UNAVAILABLE
     except Exception:  # noqa: BLE001 - absence of git is a rejection, never a crash
-        return ""
+        return GIT_UNAVAILABLE
 
 
 def git_rev(ref: str) -> str:
@@ -276,7 +322,10 @@ def git_rev(ref: str) -> str:
 
 def worktree_is_clean() -> bool:
     """Tracked-only cleanliness: untracked files (e.g. partner documents that must not be touched)
-    do not make the evidence wrong about the tree it describes."""
+    do not make the evidence wrong about the tree it describes.
+
+    An unavailable git is NOT clean -- it is unknown, and unknown fails closed.
+    """
     return _git(["status", "--porcelain", "--untracked-files=no"]) == ""
 
 
@@ -337,6 +386,15 @@ def _check_domain(name: str, domain: Any, reasons: list[str], generated: datetim
                        "fixture is not evidence about a production target")
         return
 
+    # Per-domain requirement: a recovery/availability property is proven by executing it, not by
+    # attesting that it would work.
+    required_classes = DOMAIN_OBSERVATION_REQUIREMENTS.get(name)
+    if required_classes and observation_class not in required_classes:
+        reasons.append(f"proof domain {name!r} claims PASS from observation_class "
+                       f"{observation_class!r}, but this domain requires one of "
+                       f"{', '.join(required_classes)}")
+        return
+
     proven_by = domain.get("proven_by")
     if not isinstance(proven_by, str) or len(proven_by.strip()) < 12:
         reasons.append(f"proof domain {name!r} claims PASS without a substantive proven_by")
@@ -361,7 +419,7 @@ def _check_domain(name: str, domain: Any, reasons: list[str], generated: datetim
 # --------------------------------------------------------------------------------- validator
 
 def validate(payload: Any, *, current_commit: str | None = None,
-             current_tree: str | None = None) -> list[str]:
+             current_tree: str | None = None, now: datetime | None = None) -> list[str]:
     """Return a list of rejection reasons. Empty list == valid. NEVER raises.
 
     A malformed artifact must degrade the control to BLOCKED, not crash the readiness evaluator.
@@ -370,6 +428,9 @@ def validate(payload: Any, *, current_commit: str | None = None,
     try:
         if not isinstance(payload, dict):
             return ["production database-adapter evidence is not a JSON object"]
+        # Wall clock by default; injectable so a guard can pin a deterministic epoch.
+        if now is None:
+            now = datetime.now(timezone.utc)
 
         # ---- schema identity ----
         schema = payload.get("schema_version")
@@ -391,9 +452,17 @@ def validate(payload: Any, *, current_commit: str | None = None,
             reasons.append("git_tree is missing or not a full 40-character SHA")
         expected_commit = current_commit if current_commit is not None else git_rev("HEAD")
         expected_tree = current_tree if current_tree is not None else git_rev("HEAD^{tree}")
-        if expected_commit and commit != expected_commit:
+        # Fail closed on an unverifiable binding: no git, no verdict.
+        if not expected_commit or expected_commit == GIT_UNAVAILABLE or not _is_full_sha(
+                expected_commit):
+            reasons.append("the current commit could not be determined, so the evidence binding "
+                           "cannot be verified")
+        elif commit != expected_commit:
             reasons.append("evidence is stale: git_commit does not match the current commit")
-        if expected_tree and tree != expected_tree:
+        if not expected_tree or expected_tree == GIT_UNAVAILABLE or not _is_full_sha(expected_tree):
+            reasons.append("the current tree could not be determined, so the evidence binding "
+                           "cannot be verified")
+        elif tree != expected_tree:
             reasons.append("evidence is stale: git_tree does not match the current tree")
         if payload.get("worktree_clean") is not True:
             reasons.append("evidence does not attest a clean worktree")
@@ -413,6 +482,16 @@ def validate(payload: Any, *, current_commit: str | None = None,
         generated = _parse_ts(payload.get("generated_at"))
         if generated is None:
             reasons.append("generated_at is missing or unparseable")
+        elif now is not None:
+            # An ABSOLUTE recency bound. Without it the staleness limit was measured only against the
+            # artifact's own self-declared generated_at, so an artifact claiming generation in 2021
+            # with 2020 observations validated -- the limit was self-referential.
+            artifact_age_days = (now - generated).total_seconds() / 86400.0
+            if artifact_age_days > MAX_OBSERVATION_AGE_DAYS:
+                reasons.append(f"the artifact itself is stale: generated {artifact_age_days:.0f} "
+                               f"days ago (limit {MAX_OBSERVATION_AGE_DAYS})")
+            elif artifact_age_days < -1:
+                reasons.append("the artifact is dated in the future")
 
         # ---- target classification ----
         target = payload.get("target")
@@ -471,6 +550,17 @@ def validate(payload: Any, *, current_commit: str | None = None,
             policies = runtime.get("policy_inventory")
             if not isinstance(policies, list) or not policies:
                 reasons.append("runtime_roles omits a non-empty policy_inventory")
+            else:
+                # Non-emptiness alone carried no information: [0], [None], [{}] all passed.
+                malformed = [i for i, entry in enumerate(policies)
+                             if not isinstance(entry, dict)
+                             or not isinstance(entry.get("table_classification"), str)
+                             or not isinstance(entry.get("policy_count"), int)
+                             or entry.get("policy_count", 0) < 1
+                             or entry.get("forced") is not True]
+                if malformed:
+                    reasons.append(f"policy_inventory has {len(malformed)} entry/entries without a "
+                                   "table classification, a positive policy count and forced=true")
 
         # ---- non-qualifying evidence disclosure ----
         disclosure = payload.get("non_qualifying_evidence_disclosure")

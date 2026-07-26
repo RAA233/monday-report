@@ -72,6 +72,9 @@ EXPECTED_CHECK_IDS = [
     "MD03 non-proving-observation-class", "MD04 stale-observation",
     "MD05 domain-not-pass", "MD06 fingerprint-not-sha256", "MD07 proven-by-insubstantial",
     "MD08 unknown-proof-domain", "MD09 pitr-claimed-without-proof",
+    "MD10 restore-drill-by-attestation", "MD11 failover-by-attestation",
+    "MD12 monitoring-by-attestation", "MD13 artifact-stale-in-absolute-time",
+    "MD14 readiness-pass-without-artifact",
     # disclosure / parity / privacy
     "MP01 disclosure-missing", "MP02 disclosure-altered",
     "MP03 non-qualifying-list-incomplete", "MP04 non-qualifying-source-promoted",
@@ -88,8 +91,8 @@ EXPECTED_CHECK_IDS = [
     "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
 
-EXPECTED_TOTAL_CHECKS = 65
-EXPECTED_MUTATION_COUNT = 51
+EXPECTED_TOTAL_CHECKS = 70
+EXPECTED_MUTATION_COUNT = 56
 
 
 def rec(cid, ok, desc, level="predicate/unit mutation", extra=None):
@@ -157,7 +160,15 @@ def build_valid_artifact() -> dict:
             "non_qualifying_sources": list(P.NON_QUALIFYING_EVIDENCE),
             "promoted_sources": [],
         },
-        "proof_domains": {name: domain(name) for name in P.REQUIRED_PROOF_DOMAINS},
+        # Each domain declares the observation class ITS OWN requirement demands (a restore test and
+        # a failover test must be executed drills, not attestations), so the fixture tracks the
+        # contract rather than assuming one uniform class.
+        "proof_domains": {
+            name: domain(name,
+                         observation_class=P.DOMAIN_OBSERVATION_REQUIREMENTS.get(
+                             name, ("live_target_observation",))[0])
+            for name in P.REQUIRED_PROOF_DOMAINS
+        },
         "secret_scan_clean": True,
         "production_parity": True,
     }
@@ -181,7 +192,7 @@ def mutated(mutate, *, rehash_after=True) -> dict:
 def rejects(mutate, *, rehash_after=True) -> tuple[bool, list[str]]:
     """The REAL validator must return at least one reason for this mutation."""
     reasons = P.validate(mutated(mutate, rehash_after=rehash_after),
-                         current_commit=COMMIT, current_tree=TREE)
+                         current_commit=COMMIT, current_tree=TREE, now=_now())
     return bool(reasons), reasons
 
 
@@ -223,10 +234,14 @@ def run() -> int:
     valid = build_valid_artifact()
 
     # ------------------------------------------------------------------ anti-vacuity anchors
-    baseline_reasons = P.validate(valid, current_commit=COMMIT, current_tree=TREE)
+    baseline_reasons = P.validate(valid, current_commit=COMMIT, current_tree=TREE,
+                                 now=_now())
     rec("FA00 synthetic-valid-artifact-passes", baseline_reasons == [],
         "ANCHOR: a complete synthetic artifact validates, so every rejection below is "
-        "discriminating rather than an always-fail validator",
+        "discriminating rather than an always-fail validator. Scope: the contract validates "
+        "DECLARATIONS -- structure, provenance class, binding and freshness. It cannot verify that a "
+        "declared observation really happened, so this fixture proves parser/accept-path coverage "
+        "only and is never evidence about any real adapter",
         level="evaluator integration", extra={"reasons": baseline_reasons[:4]})
 
     disp_valid = dispositions_with(valid)
@@ -270,8 +285,11 @@ def run() -> int:
     ):
         foreign = rehash({**copy.deepcopy(valid), "schema_version": other_schema})
         rec(cid, probe_with(foreign) == "BLOCKED",
-            f"an accepted {label} artifact placed at the production-adapter path is BLOCKED: it is "
-            "evidence about a different thing and cannot satisfy this control",
+            f"an artifact bearing the {label} schema id at the production-adapter path is BLOCKED. "
+            "Scope note: this is a schema-identity test on a relabelled payload, not a real "
+            f"{label} artifact -- the genuine cross-evidence isolation test is CE02 in the "
+            "contract-faults battery, which places a VALID tenant v3 plus RLS sub-proof at their "
+            "own real paths",
             level="evaluator integration")
 
     # ------------------------------------------------------------------ schema identity / binding
@@ -391,6 +409,23 @@ def run() -> int:
         ("MD08 unknown-proof-domain",
          lambda p: p["proof_domains"].__setitem__("made_up_domain", domain("nope")),
          "an unknown proof domain is rejected"),
+        ("MD10 restore-drill-by-attestation",
+         lambda p: p["proof_domains"].__setitem__(
+             "restore_test",
+             domain("restore", observation_class="signed_operator_attestation")),
+         "a restore test claimed by signed attestation rather than an EXECUTED drill is rejected: "
+         "recovery is proven by doing it, not by attesting that it would work"),
+        ("MD11 failover-by-attestation",
+         lambda p: p["proof_domains"].__setitem__(
+             "failover_behavior",
+             domain("failover", observation_class="signed_operator_attestation")),
+         "failover claimed by attestation rather than an executed drill is rejected"),
+        ("MD12 monitoring-by-attestation",
+         lambda p: p["proof_domains"].__setitem__(
+             "monitoring_and_alerting",
+             domain("monitoring", observation_class="signed_operator_attestation")),
+         "monitoring claimed by attestation rather than an observed alerting configuration is "
+         "rejected"),
         ("MD09 pitr-claimed-without-proof",
          lambda p: p.__setitem__("claims_point_in_time_recovery", True),
          "claiming point-in-time recovery without the corresponding proof domain is rejected"),
@@ -430,13 +465,55 @@ def run() -> int:
         ok, reasons = rejects(mutate)
         rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
 
+    # ------------------------------------------------------------------ regression pin (HIGH)
+    # THE check this battery most needs. An independent review reintroduced the original defect --
+    # a readiness fallback that promotes the adapter when postgres_repository passes -- and BOTH
+    # batteries stayed green at 65/65 and 37/37, because every helper here pinned
+    # postgres_repository="fail" and nothing ever asked the decisive question: readiness passes,
+    # artifact absent, is the control still BLOCKED? It goes through the REAL evaluate_blockers
+    # dispatch, not the probe helper, because the dispatch is what decides the control.
+    def adapter_via_dispatch(readiness: dict, artifact=None) -> str:
+        original = GA.PRODUCTION_DATABASE_ADAPTER_EVIDENCE_PATH
+        tmp = Path(tempfile.mkdtemp(prefix="pdae-dispatch-"))
+        try:
+            target = tmp / "artifact.json"
+            if artifact is not None:
+                target.write_text(json.dumps(artifact), encoding="utf-8")
+            GA.PRODUCTION_DATABASE_ADAPTER_EVIDENCE_PATH = target
+            return {c["id"]: c["disposition"]
+                    for c in GA.evaluate_blockers(dict(readiness), forge_report=None)}[
+                        ADAPTER_CONTROL]
+        finally:
+            GA.PRODUCTION_DATABASE_ADAPTER_EVIDENCE_PATH = original
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    all_readiness_pass = {"postgres_repository": "pass", "redis_queue": "pass",
+                          "local_llm_runtime": "pass", "demo_seed_removed": "pass",
+                          "client_mode": "pass"}
+    without_artifact = adapter_via_dispatch(all_readiness_pass, None)
+    rec("MD14 readiness-pass-without-artifact", without_artifact == "BLOCKED",
+        "REGRESSION PIN: with EVERY client-data readiness check passing -- including "
+        "postgres_repository, which a disposable Docker container over loopback satisfies -- and NO "
+        "production artifact, the control is BLOCKED. Evaluated through the real evaluate_blockers "
+        "dispatch, so reintroducing a readiness fallback fails here",
+        level="evaluator integration", extra={"disposition": without_artifact})
+
+    ok, reasons = rejects(lambda p: None)  # unmutated, but validated far in the future
+    stale_reasons = P.validate(build_valid_artifact(), current_commit=COMMIT, current_tree=TREE,
+                               now=_now() + timedelta(days=400))
+    rec("MD13 artifact-stale-in-absolute-time", bool(stale_reasons),
+        "an artifact is rejected once it is old in ABSOLUTE time, not merely relative to its own "
+        "self-declared generation date -- the staleness limit is not self-referential",
+        extra={"first_reason": stale_reasons[0] if stale_reasons else None})
+
     # ------------------------------------------------------------------ robustness / isolation
     hostile = [None, 42, "a string", [], {"schema_version": P.SCHEMA_VERSION},
                {"proof_domains": "not-a-dict"}, {"target": 7}, {"runtime_roles": []}]
     crashed = []
     for item in hostile:
         try:
-            result = P.validate(item, current_commit=COMMIT, current_tree=TREE)
+            result = P.validate(item, current_commit=COMMIT, current_tree=TREE,
+                                now=_now())
             if not isinstance(result, list) or not result:
                 crashed.append(repr(item)[:30])
         except Exception as exc:  # noqa: BLE001
@@ -531,8 +608,11 @@ def run() -> int:
     contract_src = (ROOT / "backend" / "app" / "production_database_adapter_evidence.py") \
         .read_text(encoding="utf-8")
     contract_ast = ast.parse(contract_src)
+    # NOT a "touches nothing" claim: the module imports subprocess and validating an artifact really
+    # does spawn `git rev-parse` / `git status` to check the commit/tree binding. What is asserted is
+    # narrower and true -- no database driver, cloud SDK, HTTP client or socket library.
     infra_modules = {"psycopg", "psycopg2", "sqlalchemy", "docker", "boto3", "requests",
-                     "httpx", "urllib", "socket", "redis"}
+                     "httpx", "urllib", "socket", "redis", "paramiko", "asyncpg"}
     imported: list[str] = []
     for node in ast.walk(contract_ast):
         if isinstance(node, ast.Import):
@@ -541,8 +621,9 @@ def run() -> int:
             imported.append(node.module.split(".")[0])
     touched = sorted(set(imported) & infra_modules)
     rec("FS04 contract-touches-no-infrastructure", touched == [],
-        "the contract module imports no database driver, cloud SDK, HTTP or socket library, so "
-        "validating an artifact cannot reach any infrastructure",
+        "the contract module imports no database driver, cloud SDK, HTTP client or socket library, "
+        "so validating an artifact cannot reach a database or a provider API. It DOES use git "
+        "(via subprocess) to verify the commit/tree binding -- that is disclosed, not denied",
         level="structural source check", extra={"infrastructure_imports": touched})
 
     # ------------------------------------------------------------------ completeness

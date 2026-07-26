@@ -4,14 +4,18 @@ The evidence guard proves the validator rejects bad *artifacts*. This battery pr
 cannot be quietly weakened, which is the other half: a requirement deleted from the contract would
 make every artifact-level test pass while the bar silently dropped.
 
-Each mutation weakens one contract constant and asserts BOTH:
+Two kinds of check, and the difference is worth stating plainly rather than blurring:
 
-  1. the weakening is **detectable** -- the pinned contract hash changes; and
-  2. the constant is **load-bearing** -- with it weakened, the real validator stops rejecting an
-     artifact it rejected before (or the readiness probe stops blocking).
+* **Constant mutations** (``CD01-08``, ``CT01-06``, ``CB04`` -- 15 of the 33) weaken one contract
+  constant and assert BOTH that the weakening is *detectable* (the pinned contract hash changes) and
+  that the constant is *load-bearing* (weakening it eliminates a specific rejection reason). (2)
+  matters as much as (1): a constant no code consults would satisfy a hash pin while proving nothing.
+* **Artifact mutations** (``CR01-05``, ``CP01-05``, ``CB01-03``, ``CE01-05`` -- the other 18) assert
+  only that the real validator refuses. They carry no hash assertion because the rule they exercise
+  lives in ``validate()``'s body rather than in a constant, and several deliberately overlap the
+  evidence battery: the same rule is worth pinning from both sides.
 
-(2) matters as much as (1): a constant that no code consults would satisfy a hash pin while proving
-nothing. Every predicate here comes from the real contract module -- ``P.validate`` and the real
+Every predicate here comes from the real contract module -- ``P.validate`` and the real
 ``ga_readiness`` probe -- never from a local copy of the rules.
 
 No production infrastructure, database, container or network target is contacted. Artifacts are
@@ -44,7 +48,7 @@ MUTATION_PREFIXES = ("CD", "CT", "CR", "CB", "CP", "CE")
 
 #: The contract hash at acceptance. Pinned as a LITERAL so a weakening is detectable without
 #: re-deriving the contract from itself.
-PINNED_CONTRACT_HASH = "7b17dcda69a4f81d1b95aade635d67871862c30f3896bcb5ff124305f7a2aff3"
+PINNED_CONTRACT_HASH = "19c5cf0715dfae42bc288c87c98566e5efcff532313e209f7cd05b1eaeb06d8b"
 
 EXPECTED_CHECK_IDS = [
     "FC00 contract-hash-pinned", "FC01 baseline-rejects-nothing-valid",
@@ -322,12 +326,14 @@ def run() -> int:
                     "full_functional_matrix": "passed", "passed": 266, "failed": 0}
     rec("CE03 ui-evidence-cannot-promote",
         EG.probe_with(ui_like) == "BLOCKED",
-        "a passing dual-backend UI certification cannot satisfy the database-adapter control",
+        "a passing dual-backend UI certification cannot satisfy the database-adapter control. Scope "
+        "note: this is a stub payload, so it is a weak form of the test -- CE02 is the strong one",
         level="evaluator integration")
     rec("CE04 runtime-functional-cannot-promote",
         EG.probe_with(runtime_like) == "BLOCKED",
         "a passing restricted-runtime functional matrix (266/0) cannot satisfy the database-adapter "
-        "control -- functional behaviour in disposable infrastructure is not production evidence",
+        "control -- functional behaviour in disposable infrastructure is not production evidence. "
+        "Scope note: a stub payload, so weaker than CE02",
         level="evaluator integration")
 
     registry = GA.load_registry()
