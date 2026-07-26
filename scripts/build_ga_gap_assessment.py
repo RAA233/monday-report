@@ -31,6 +31,7 @@ The artifact contains no credentials, DSNs, absolute paths, or client data.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -44,7 +45,10 @@ REGISTRY_PATH = ROOT / "evals" / "ga" / "blocker_registry.v1.json"
 EVIDENCE_PATH = ROOT / "output" / "migrations" / "migration-evidence.v1.json"
 OUTPUT_PATH = ROOT / "docs" / "GA_GAP_ASSESSMENT.v1.json"
 
-SCHEMA_VERSION = "ga-gap-assessment.v1"
+SCHEMA_VERSION = "ga-gap-assessment.v2"
+#: v1 is superseded: it carried no source bindings, no canonical hash and no artifact
+#: classification, so a reader could not tell a generated status report from evidence.
+SUPERSEDED_SCHEMA_VERSIONS = ("ga-gap-assessment.v1",)
 
 # Measurement classes -- how a disposition was actually arrived at.
 BEHAVIOURALLY_PROVEN = "BEHAVIORALLY_PROVEN"
@@ -202,27 +206,51 @@ _ASSESSMENT: dict[str, dict] = {
                "requires NORMALIZED persistence, so a transactional snapshot cannot close it."),
     ),
     "ga_postgres_adapter": dict(
-        probe_type=PROBE_DELEGATED, probe_location=f"{_EVAL} -> _delegate(postgres_repository)",
-        measurement_class=NOT_EVALUABLE, effort="SMALL",
+        probe_type=PROBE_EVIDENCE,
+        probe_location=f"{_EVAL} -> _postgres_adapter_probe -> "
+                       "backend/app/production_database_adapter_evidence.py",
+        measurement_class=ABSENT, effort="LARGE",
         implemented_capability=(
-            "A functional PostgresStateStore exists with RLS enabled/forced on the snapshot table "
-            "and a tenant_slug GUC policy."),
+            "An ACCEPTED static evidence contract (production-database-adapter-evidence.v1) with a "
+            "fail-closed validator and an isolated readiness consumer. A functional PostgresStateStore "
+            "exists with RLS enabled and forced, proven on the accepted restricted runtime."),
         missing_capability=(
-            "Requires a reachable PostgreSQL configured as the ACTIVE adapter to evaluate at all. "
-            "Two latent defects: readiness reads boot-time store attributes, so the 'live probe' is "
-            "live only at process construction; and the Postgres SQL path has no test coverage -- "
-            "no guard ever instantiates PostgresStateStore against a database."),
-        technical_dependencies=[], external_dependencies=["provisioned PostgreSQL"], sequence=4,
-        notes="",
+            "No production database-adapter evidence artifact exists at any commit. The control now "
+            "requires one: a named production target that is not loopback/docker-bridge, not a "
+            "test/staging/development environment and not ephemeral storage, with verified TLS, "
+            "credential rotation, least-privilege runtime roles, executed backup/restore and "
+            "failover drills, monitoring and capacity thresholds. A disposable PostgreSQL, the "
+            "restricted runtime functional matrix, tenant-authorization evidence and the "
+            "dual-backend UI proof are each explicitly non-qualifying."),
+        technical_dependencies=[],
+        external_dependencies=["provisioned PRODUCTION PostgreSQL", "operational evidence collection"],
+        sequence=4,
+        notes=("Static contract ACCEPTED; production execution NOT accepted. Contract acceptance is "
+               "not adapter acceptance."),
     ),
     "ga_redis_adapter": dict(
-        probe_type=PROBE_DELEGATED, probe_location=f"{_EVAL} -> _delegate(redis_queue)",
-        measurement_class=NOT_EVALUABLE, effort="SMALL",
-        implemented_capability="A Redis queue backend exists as an advisory filter over the snapshot.",
+        probe_type=PROBE_EVIDENCE,
+        probe_location=f"{_EVAL} -> _queue_adapter_probe -> "
+                       "backend/app/production_queue_adapter_evidence.py",
+        measurement_class=ABSENT, effort="LARGE",
+        implemented_capability=(
+            "An ACCEPTED static evidence contract (production-queue-adapter-evidence.v1) with a "
+            "fail-closed validator and an isolated readiness consumer. The queue itself is a "
+            "best-effort index over authoritative store state."),
         missing_capability=(
-            "Requires a reachable Redis to evaluate. No ack, visibility timeout, retry or DLQ "
-            "semantics, so it does not mitigate the lost-update problem."),
-        technical_dependencies=[], external_dependencies=["provisioned Redis"], sequence=8, notes="",
+            "No production queue-adapter evidence artifact exists at any commit, and the present "
+            "queue cannot satisfy the contract: delivery is at-most-once, enqueue is a non-atomic "
+            "SADD+RPUSH, dequeue is an LPOP with no lease or acknowledgement, the loss window is "
+            "PERMANENT because the dedupe-set entry blocks re-derivation, and there is no retry "
+            "counter, dead-letter queue or per-tenant namespace in the queue keys. Queue "
+            "reachability (a liveness ping), a disposable Docker Redis, the restricted worker "
+            "matrix, tenant-authorization evidence, the dual-backend UI proof and production "
+            "DATABASE-adapter evidence are each explicitly non-qualifying."),
+        technical_dependencies=[],
+        external_dependencies=["provisioned PRODUCTION queue service", "operational evidence collection"],
+        sequence=8,
+        notes=("Static contract ACCEPTED; production execution NOT accepted. Contract acceptance is "
+               "not adapter acceptance."),
     ),
     "ga_backup_restore_drill": dict(
         probe_type=PROBE_NONE, probe_location=f"{_EVAL} default branch",
@@ -393,9 +421,103 @@ def _dispositions() -> tuple[dict[str, str], dict[str, str], str, str, bool]:
     return fresh, verified, ga_fresh, ga_verified, had
 
 
+#: Controls whose disposition is driven by an evidence artifact that must be bound to the CURRENT
+#: head. Absent or stale evidence keeps them BLOCKED; nothing here may report otherwise.
+_EVIDENCE_DRIVEN = {
+    "ga_postgres_adapter", "ga_redis_adapter", "ga_tenant_authorization",
+    "ga_migration_runner", "ga_migration_validity", "ga_persistence_locking",
+    "ga_correction_cross_process_atomicity", "ga_audit_keyed_integrity",
+    "ga_verified_reviewer_identity", "ga_rbac_role_separation",
+}
+
+
+def _evidence_status(check_id: str, probe_type: str | None, fresh_disposition: str | None) -> str:
+    """How this control's evidence stands AT THE CURRENT HEAD.
+
+    ``absent`` is the honest answer for every evidence-driven control here: no exact-head artifact
+    exists in the tracked repository. A locally present, gitignored artifact is NOT repository state
+    and never yields ``present`` -- see ``local_evidence_artifact`` in the payload.
+    """
+    if check_id not in _EVIDENCE_DRIVEN and probe_type != PROBE_EVIDENCE:
+        return "not_evidence_driven"
+    return "present_exact_head" if fresh_disposition == "PASS" else "absent"
+
+
+def _local_evidence_binding() -> dict:
+    """Disclose the machine-local migration artifact's binding, if one is present.
+
+    It is gitignored, so it is NOT part of the repository state this assessment describes. Recording
+    its commit binding makes a stale local artifact visible instead of silently flipping a control.
+    """
+    if not EVIDENCE_PATH.exists():
+        return {"present": False, "tracked": False, "bound_to_commit": None,
+                "matches_current_head": False,
+                "note": "no local migration evidence artifact on this machine"}
+    try:
+        payload = json.loads(EVIDENCE_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {"present": True, "tracked": False, "bound_to_commit": None,
+                "matches_current_head": False, "note": "local artifact unreadable"}
+    bound = payload.get("git_commit")
+    head = _git(["rev-parse", "HEAD"])
+    return {
+        "present": True,
+        "tracked": False,
+        "bound_to_commit": bound,
+        "matches_current_head": bound == head,
+        "note": ("This artifact is gitignored and is NOT repository state. It is bound to a "
+                 "different commit than the current head, so the verified-environment context it "
+                 "produces is a MACHINE-LOCAL observation, not a repository fact."
+                 if bound != head else
+                 "Local artifact is bound to the current head."),
+    }
+
+
+def _source_bindings(registry_bytes: bytes) -> dict:
+    """Hashes of the sources this assessment is derived from, so drift is detectable."""
+    bindings = {"registry_sha256": hashlib.sha256(registry_bytes).hexdigest()}
+    try:
+        from backend.app import readiness_contexts as _rc
+        bindings["readiness_context_inventory_hash"] = _rc.canonical_hash()
+    except Exception:  # noqa: BLE001
+        bindings["readiness_context_inventory_hash"] = None
+    for name, module_path in (("production_database_adapter_contract_hash",
+                               "production_database_adapter_evidence"),
+                              ("production_queue_adapter_contract_hash",
+                               "production_queue_adapter_evidence")):
+        try:
+            module = __import__(f"backend.app.{module_path}", fromlist=["contract_hash"])
+            bindings[name] = module.contract_hash()
+        except Exception:  # noqa: BLE001
+            bindings[name] = None
+    return bindings
+
+
+#: Excluded from the canonical hash: the hash itself and explicitly declared generation metadata.
+NON_CANONICAL_KEYS = frozenset({"canonical_payload_hash", "local_evidence_artifact",
+                                "contexts"})
+
+
+def canonical_json(payload: dict) -> str:
+    body = {k: v for k, v in payload.items() if k not in NON_CANONICAL_KEYS}
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def canonical_hash(payload: dict) -> str:
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
 def build() -> dict:
-    registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    registry_bytes = REGISTRY_PATH.read_bytes()
+    registry = json.loads(registry_bytes.decode("utf-8"))
     fresh, verified, ga_fresh, ga_verified, evidence_present = _dispositions()
+    blocking_reasons = {}
+    try:
+        import backend.app.ga_readiness as _g
+        for check in _g.evaluate_blockers({}):
+            blocking_reasons[check["id"]] = str(check.get("detail") or "")
+    except Exception:  # noqa: BLE001
+        pass
 
     controls = []
     for entry in sorted(registry["blockers"], key=lambda b: b["check_id"]):
@@ -422,6 +544,8 @@ def build() -> dict:
             "probe_location": a.get("probe_location", f"{_EVAL} default branch"),
             "measurement_class": klass,
             "behaviorally_measured": a.get("probe_type") in {PROBE_BEHAVIOURAL, PROBE_EVIDENCE},
+            "evidence_status": _evidence_status(cid, a.get("probe_type"), fresh.get(cid)),
+            "blocking_reason": (blocking_reasons.get(cid) or "")[:400],
             "implemented_capability": a.get("implemented_capability", ""),
             "missing_capability": a.get("missing_capability", ""),
             "technical_dependencies": a.get("technical_dependencies", []),
@@ -445,6 +569,39 @@ def build() -> dict:
         "registry_version": registry.get("registry_version"),
         "registry_path": "evals/ga/blocker_registry.v1.json",
         "control_count": len(controls),
+        # What this artifact IS. It carries source bindings and a canonical hash, but it is a
+        # generated STATUS REPORT derived from current code and registry state -- not an acceptance
+        # artifact and not evidence of anything.
+        "artifact_class": "generated_status_assessment",
+        "is_acceptance_artifact": False,
+        "is_evidence": False,
+        "authoritative_context": "fresh_checkout_no_local_evidence",
+        "authoritative_context_note": (
+            "The fresh-checkout context is authoritative because it is reproducible from the TRACKED "
+            "repository alone. The verified-environment context depends on a gitignored machine-local "
+            "artifact and is disclosed, not relied upon."),
+        "source_bindings": _source_bindings(registry_bytes),
+        "local_evidence_artifact": _local_evidence_binding(),
+        "execution_verdicts": {
+            "production_database_adapter": "PRODUCTION_DATABASE_ADAPTER_NOT_ACCEPTED",
+            "production_queue_adapter": "PRODUCTION_QUEUE_ADAPTER_NOT_ACCEPTED",
+            "four_readiness_contexts": "FOUR_READINESS_CONTEXTS_NOT_ACCEPTED",
+        },
+        "static_contracts_accepted": {
+            "production_database_adapter_contract": True,
+            "production_queue_adapter_contract": True,
+            "readiness_context_contract": True,
+            "readiness_context_execution_harness": True,
+            "tenant_authorization_evidence_contract": True,
+        },
+        "static_contract_acceptance_is_not_execution_acceptance": True,
+        "exact_head_tenant_evidence_present": False,
+        "four_contexts_executed_at_this_head": False,
+        "capacity_gate": "blocked",
+        "client_data_ready": False,
+        "release_candidate_ready": False,
+        "ga_ready": False,
+        "release_recommendation": "GA_BLOCKED",
         "measurement_class_legend": {
             BEHAVIOURALLY_PROVEN: "A probe executed and the control's condition was met.",
             BEHAVIOURALLY_FAILED: "A probe executed and the control's condition was NOT met.",
@@ -476,6 +633,7 @@ def build() -> dict:
 
 def main() -> int:
     payload = build()
+    payload["canonical_payload_hash"] = canonical_hash(payload)
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -488,6 +646,10 @@ def main() -> int:
     print(f"verified env    : {payload['contexts']['verified_environment_with_evidence']['ga']} "
           f"{payload['contexts']['verified_environment_with_evidence']['tally']}")
     print("measurement     :", dict(sorted(counts.items())))
+    print(f"canonical hash  : {payload['canonical_payload_hash']}")
+    print(f"registry sha256 : {payload['source_bindings']['registry_sha256']}")
+    print(f"artifact class  : {payload['artifact_class']} "
+          f"(is_evidence={payload['is_evidence']})")
     print(f"wrote           : {OUTPUT_PATH.relative_to(ROOT).as_posix()}")
     return 0
 
