@@ -62,7 +62,7 @@ EXPECTED_CHECK_IDS = [
     # bindings
     "MB01 resolution-condition-stale", "MB02 registry-sha-stale",
     "MB03 inventory-hash-stale", "MB04 adapter-contract-hash-stale",
-    "MB05 commit-tree-stale", "MB06 canonical-hash-tampered",
+    "MB05 commit-tree-stale", "MB05b worktree-clean-false", "MB06 canonical-hash-tampered",
     "MB07 superseded-schema", "MB08 classified-as-evidence",
     "MB09 local-artifact-claimed-tracked",
     # privacy / robustness
@@ -70,9 +70,9 @@ EXPECTED_CHECK_IDS = [
     "FZ00 completeness", "FZ01 battery-size-pinned", "FZ02 id-set-hash-pinned",
     "FZ03 mutations-are-distinct-inputs",
 ]
-EXPECTED_TOTAL_CHECKS = 43
-EXPECTED_MUTATION_COUNT = 37
-PINNED_ID_SET_HASH = "5e7dd2312ca4863b2e61a08dc9e528b1bd9c26d66dad731a92d4b5fef9ea6ebf"
+EXPECTED_TOTAL_CHECKS = 44
+EXPECTED_MUTATION_COUNT = 38
+PINNED_ID_SET_HASH = "e7529a77e457327adf0e99087907648c108e82adce2a45c4c5533753c18741b8"
 
 MUTATION_FINGERPRINTS: dict[str, str] = {}
 
@@ -255,6 +255,9 @@ def run() -> int:
             lambda a: a.__setitem__("generated_from_commit", "3" * 40),
             "an assessment left bound to a different commit is refused -- the drift that started "
             "this increment")
+    refuses("MB05b worktree-clean-false",
+            lambda a: a.__setitem__("worktree_clean", False),
+            "an assessment generated from a dirty tracked worktree is refused")
     refuses("MB06 canonical-hash-tampered",
             lambda a: a.__setitem__("canonical_payload_hash", "4" * 64),
             "a canonical hash that does not match the body is refused", rehash_after=False)

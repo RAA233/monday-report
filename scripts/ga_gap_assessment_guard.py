@@ -42,6 +42,10 @@ REGISTRY_PATH = ROOT / "evals" / "ga" / "blocker_registry.v1.json"
 SUPPORTED_SCHEMA = "ga-gap-assessment.v2"
 SUPERSEDED_SCHEMAS = ("ga-gap-assessment.v1",)
 
+#: How far behind HEAD the recorded generation commit may be. One commit is the normal case: the
+#: artifact is generated, then committed. More than that means it was not regenerated this round.
+MAX_COMMITS_BEHIND = 1
+
 DB_CONTROL, QUEUE_CONTROL = "production-database-adapter", "production-queue-adapter"
 DB_CHECK, QUEUE_CHECK = "ga_postgres_adapter", "ga_redis_adapter"
 
@@ -242,14 +246,30 @@ def run() -> int:
         "the release recommendation is GA_BLOCKED")
 
     # ---------------------------------------------------------------- bindings / hash
-    head, tree = git_rev("HEAD"), git_rev("HEAD^{tree}")
-    rec("GA50 commit-tree-bound",
-        artifact.get("generated_from_commit") == head
-        and artifact.get("generated_from_tree") == tree,
-        "the assessment is bound to the current commit and tree -- the drift that started this was "
-        "an artifact left bound to a commit four increments old",
-        extra={"bound_commit": str(artifact.get("generated_from_commit"))[:12],
-               "head": head[:12]})
+    head = git_rev("HEAD")
+    bound = artifact.get("generated_from_commit")
+    # A TRACKED artifact cannot record the commit that contains it: writing it changes the tree, so
+    # the commit it names is always the one it was generated FROM. Requiring equality with HEAD
+    # would make the artifact permanently self-inconsistent. What must hold is that the recorded
+    # commit is an ANCESTOR of HEAD (not a fork or a stale branch) and -- the part that actually
+    # detects drift -- that every SOURCE binding below is current. The stale artifact that started
+    # this increment failed both: bound to a commit four increments back with stale sources.
+    ancestor = False
+    if isinstance(bound, str) and re.fullmatch(r"[0-9a-f]{40}", bound or ""):
+        ancestor = subprocess.run(["git", "merge-base", "--is-ancestor", bound, "HEAD"],
+                                  cwd=str(ROOT), capture_output=True).returncode == 0
+    behind = ""
+    if ancestor:
+        behind = subprocess.run(["git", "rev-list", "--count", f"{bound}..HEAD"],
+                                cwd=str(ROOT), capture_output=True, text=True).stdout.strip()
+    rec("GA50 commit-binding-is-ancestor",
+        ancestor and behind.isdigit() and int(behind) <= MAX_COMMITS_BEHIND,
+        f"the recorded commit is an ancestor of HEAD and at most {MAX_COMMITS_BEHIND} commits "
+        "behind. A tracked artifact cannot name the commit that contains it, so the source-binding "
+        "checks below carry the drift detection",
+        extra={"bound_commit": str(bound)[:12], "head": head[:12], "commits_behind": behind})
+    rec("GA50b worktree-clean-attested", artifact.get("worktree_clean") is True,
+        "the assessment attests a clean TRACKED worktree at generation")
     bindings = artifact.get("source_bindings") or {}
     rec("GA51 registry-sha-current",
         bindings.get("registry_sha256")

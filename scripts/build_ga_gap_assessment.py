@@ -565,7 +565,10 @@ def build() -> dict:
         "schema_version": SCHEMA_VERSION,
         "generated_from_commit": _git(["rev-parse", "HEAD"]),
         "generated_from_tree": _git(["rev-parse", "HEAD^{tree}"]),
-        "worktree_clean": _git(["status", "--porcelain"]) == "",
+        # TRACKED-only. Bare porcelain counts untracked files, so the untracked partner documents
+        # made this permanently false -- the artifact accused itself of a dirty tree on a clean
+        # checkout.
+        "worktree_clean": _git(["status", "--porcelain", "--untracked-files=no"]) == "",
         "registry_version": registry.get("registry_version"),
         "registry_path": "evals/ga/blocker_registry.v1.json",
         "control_count": len(controls),
