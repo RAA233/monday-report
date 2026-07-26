@@ -25,7 +25,7 @@ measured failure would be incorrect, so each entry carries an explicit
 ``measurement_class``.
 
 Run: ``python scripts/build_ga_gap_assessment.py``
-Writes: ``docs/GA_GAP_ASSESSMENT.v1.json``
+Writes: ``docs/GA_GAP_ASSESSMENT.v2.json``
 
 The artifact contains no credentials, DSNs, absolute paths, or client data.
 """
@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pathlib
 import os
 import shutil
 import tempfile
@@ -46,7 +47,10 @@ if str(ROOT) not in sys.path:
 
 REGISTRY_PATH = ROOT / "evals" / "ga" / "blocker_registry.v1.json"
 EVIDENCE_PATH = ROOT / "output" / "migrations" / "migration-evidence.v1.json"
-OUTPUT_PATH = ROOT / "docs" / "GA_GAP_ASSESSMENT.v1.json"
+OUTPUT_PATH = ROOT / "docs" / "GA_GAP_ASSESSMENT.v2.json"
+#: Legacy path. It must NOT exist: two files either of which could be read as current is
+#: exactly the ambiguity this increment removes.
+LEGACY_ARTIFACT_PATH = ROOT / "docs" / "GA_GAP_ASSESSMENT.v1.json"
 
 SCHEMA_VERSION = "ga-gap-assessment.v2"
 #: v1 is superseded: it carried no source bindings, no canonical hash and no artifact
@@ -492,6 +496,40 @@ def _evidence_status(check_id: str, probe_type: str | None, fresh_disposition: s
     return "present_exact_head" if fresh_disposition == "PASS" else "absent"
 
 
+#: The only notes ``_local_evidence_binding`` may emit. Hoisted to a closed set because the block is
+#: excluded from the canonical hash: a review replaced the note with "Production adapter evidence
+#: collected and accepted at this head." and the forgery still collided with the honest hash.
+LOCAL_EVIDENCE_NOTES = (
+    "no local migration evidence artifact on this machine",
+    "local artifact unreadable",
+    "This artifact is gitignored and is NOT repository state. It is bound to a different commit "
+    "than the current head, so the verified-environment context it produces is a MACHINE-LOCAL "
+    "observation, not a repository fact.",
+    "Local artifact is bound to the current head.",
+)
+
+#: The only notes the verified-environment context may carry, for the same reason.
+VERIFIED_CONTEXT_NOTES = (
+    "Measured against the local evidence artifact.",
+    "NOT MEASURED: this checkout has no local evidence artifact, so this context is identical to "
+    "the fresh-checkout context. Regenerate evidence to measure it.",
+)
+
+#: Verbatim disclosure of what the curated prose is and is not. See ``_ASSESSMENT``.
+CURATED_PROSE_DISCLOSURE = (
+    "implemented_capability, missing_capability, estimated_effort, technical_dependencies, "
+    "external_dependencies and notes are AUTHOR-SUPPLIED commentary. They are not derived from any "
+    "evaluator and no guard can verify them, because there is no source of truth to check them "
+    "against. The authoritative, machine-derived fields are current_disposition_fresh_checkout and "
+    "blocking_reason, both produced by ga_readiness.evaluate_blockers; where the commentary and "
+    "those fields disagree, the derived fields govern."
+)
+
+#: Exact key set of the local-evidence block.
+LOCAL_EVIDENCE_KEYS = frozenset({"present", "tracked", "bound_to_commit", "matches_current_head",
+                                 "note"})
+
+
 def _local_evidence_binding() -> dict:
     """Disclose the machine-local migration artifact's binding, if one is present.
 
@@ -501,12 +539,12 @@ def _local_evidence_binding() -> dict:
     if not EVIDENCE_PATH.exists():
         return {"present": False, "tracked": False, "bound_to_commit": None,
                 "matches_current_head": False,
-                "note": "no local migration evidence artifact on this machine"}
+                "note": LOCAL_EVIDENCE_NOTES[0]}
     try:
         payload = json.loads(EVIDENCE_PATH.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return {"present": True, "tracked": False, "bound_to_commit": None,
-                "matches_current_head": False, "note": "local artifact unreadable"}
+                "matches_current_head": False, "note": LOCAL_EVIDENCE_NOTES[1]}
     bound = payload.get("git_commit")
     head = _git(["rev-parse", "HEAD"])
     return {
@@ -514,11 +552,7 @@ def _local_evidence_binding() -> dict:
         "tracked": False,
         "bound_to_commit": bound,
         "matches_current_head": bound == head,
-        "note": ("This artifact is gitignored and is NOT repository state. It is bound to a "
-                 "different commit than the current head, so the verified-environment context it "
-                 "produces is a MACHINE-LOCAL observation, not a repository fact."
-                 if bound != head else
-                 "Local artifact is bound to the current head."),
+        "note": LOCAL_EVIDENCE_NOTES[2] if bound != head else LOCAL_EVIDENCE_NOTES[3],
     }
 
 
@@ -573,6 +607,63 @@ def canonical_json(payload: dict) -> str:
 
 def canonical_hash(payload: dict) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def assessment_keys() -> set:
+    """Check ids the curated ``_ASSESSMENT`` block covers.
+
+    Exposed so the guard can require it to equal the registry's check-id set exactly: silently
+    dropping a control from ``_ASSESSMENT`` blanked that control's whole assessment and went
+    undetected.
+    """
+    return set(_ASSESSMENT)
+
+
+def registry_inventory() -> dict:
+    """``{registry id: check id}`` loaded from the REAL registry.
+
+    The single authority for which controls exist. Nothing in this repository maintains a second
+    hand-authored list of the 28, and no editable constant may redefine the expected set.
+    """
+    registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    return {entry["id"]: entry["check_id"] for entry in registry["blockers"]}
+
+
+def registry_inventory_fingerprint() -> str:
+    """A REPORTING fingerprint derived from the loaded registry.
+
+    Emitted for humans and diffs. It is computed from the registry, never compared against a stored
+    literal, and it does not define the expected set -- a pin that can be edited alongside the thing
+    it protects is not an authority.
+    """
+    inventory = registry_inventory()
+    return hashlib.sha256(
+        json.dumps(sorted(inventory.items()), separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def source_file_hashes() -> dict:
+    """SHA-256 of every file this assessment is derived from, so drift is detectable per file."""
+    sources = {
+        # The generator carries the curated _ASSESSMENT prose -- implemented/missing capability,
+        # measurement class, effort. An independent review edited it to claim an executed
+        # backup/restore drill with approved RPO/RTO and BOTH guards certified, because this file
+        # was absent from the hash set. It is the most important source of all.
+        "scripts/build_ga_gap_assessment.py": pathlib.Path(__file__).resolve(),
+        "evals/ga/blocker_registry.v1.json": REGISTRY_PATH,
+        "backend/app/ga_readiness.py": ROOT / "backend" / "app" / "ga_readiness.py",
+        "backend/app/readiness_contexts.py": ROOT / "backend" / "app" / "readiness_contexts.py",
+        "backend/app/production_database_adapter_evidence.py":
+            ROOT / "backend" / "app" / "production_database_adapter_evidence.py",
+        "backend/app/production_queue_adapter_evidence.py":
+            ROOT / "backend" / "app" / "production_queue_adapter_evidence.py",
+    }
+    out = {}
+    for label, path in sources.items():
+        try:
+            out[label] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except Exception:  # noqa: BLE001
+            out[label] = None
+    return out
 
 
 def build() -> dict:
@@ -649,7 +740,18 @@ def build() -> dict:
             "The fresh-checkout context is authoritative because it is reproducible from the TRACKED "
             "repository alone. The verified-environment context depends on a gitignored machine-local "
             "artifact and is disclosed, not relied upon."),
+        # A tracked artifact cannot contain the commit that first introduces it: writing it changes
+        # the tree. The model is therefore explicit -- the recorded commit is the immediate PARENT of
+        # the commit that carries this artifact, and the per-file source hashes below are what
+        # actually detect drift.
+        "artifact_generation_model": "tracked-derived-assessment",
+        "source_commit_relationship": "immediate-parent-of-artifact-commit",
         "source_bindings": _source_bindings(registry_bytes),
+        "source_file_hashes": source_file_hashes(),
+        "registry_inventory_fingerprint": registry_inventory_fingerprint(),
+        "registry_inventory_fingerprint_note": (
+            "Derived from the loaded registry for reporting and diffing only. It does NOT define the "
+            "expected control set; the registry itself does."),
         "local_evidence_artifact": _local_evidence_binding(),
         "execution_verdicts": {
             "production_database_adapter": "PRODUCTION_DATABASE_ADAPTER_NOT_ACCEPTED",
@@ -681,6 +783,11 @@ def build() -> dict:
             NOT_EVALUABLE: "A prerequisite (service, evidence artifact, configuration) is unavailable.",
             EXTERNAL: "Resolution is owned outside engineering and must never be self-approved.",
         },
+        # An author who edits the curated block and regenerates produces a self-consistent
+        # artifact: there is no oracle for authored commentary, so no guard can verify it. A review
+        # proved this by rewording a claim to evade the phrase floor. The limitation is therefore
+        # DISCLOSED in the artifact rather than papered over.
+        "curated_prose_disclosure": CURATED_PROSE_DISCLOSURE,
         "local_evidence_artifact_present": evidence_present,
         "contexts": {
             "fresh_checkout_no_local_evidence": {"ga": ga_fresh, "tally": tally(fresh)},
@@ -688,12 +795,8 @@ def build() -> dict:
                 "ga": ga_verified,
                 "tally": tally(verified),
                 "measured": evidence_present,
-                "note": (
-                    "Measured against the local evidence artifact."
-                    if evidence_present else
-                    "NOT MEASURED: this checkout has no local evidence artifact, so this context is "
-                    "identical to the fresh-checkout context. Regenerate evidence to measure it."
-                ),
+                "note": (VERIFIED_CONTEXT_NOTES[0] if evidence_present
+                         else VERIFIED_CONTEXT_NOTES[1]),
             },
         },
         "controls": controls,

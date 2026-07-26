@@ -4,9 +4,11 @@ Every mutation writes a hostile assessment to a temp file, points the REAL drift
 requires refusal. Nothing is re-implemented: the predicates under test are the drift guard's own,
 driven end to end. The tracked artifact is proved byte-identical afterwards.
 
-Carries the protections earlier increments were caught lacking: a pinned declared-id-set hash so a
-mutation cannot be deleted together with its id and both counts, and a fingerprint of every mutated
-artifact so one mutation's body cannot be replaced by a copy of another's.
+Completeness is carried by gates whose removal is a large, obvious, reviewable edit rather than a one-word change: FZ00
+(emitted == declared), FZ01 (size), FZ03 (every mutation applies a DISTINCT artifact), FZ04 (a
+cross-FILE pin of the drift guard's own check set) and FZ05 (the expected CONTROL inventory is loaded
+from the real registry). A self-pinned id-set hash was removed as an acceptance authority: it is
+editable alongside the very list it protects, so it proves nothing against intent.
 
 Docker-free. No container, database, queue or process is contacted; no evidence is generated.
 
@@ -31,11 +33,12 @@ for candidate in (ROOT, ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
+from backend.app import ga_readiness as GA_MOD  # noqa: E402
 import build_ga_gap_assessment as GEN  # noqa: E402
 import ga_gap_assessment_guard as GG  # noqa: E402
 
 checks: list[dict] = []
-MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP")
+MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP", "MV", "MI", "MG", "MX")
 
 DB_ID, QUEUE_ID = "production-database-adapter", "production-queue-adapter"
 
@@ -67,17 +70,46 @@ EXPECTED_CHECK_IDS = [
     "MB09 local-artifact-claimed-tracked",
     # privacy / robustness
     "MP01 private-path-inserted", "MP02 dsn-inserted", "MP03 malformed-artifact-crashes",
-    "FZ00 completeness", "FZ01 battery-size-pinned", "FZ02 id-set-hash-pinned",
+    # v2 identity
+    "MV02 legacy-v1-file-present",
+    "MV03 generator-path-reverted-to-v1", "MV04 legacy-constant-collapsed-onto-current",
+    # registry-derived inventory
+    "MI01 registry-control-removed", "MI02 registry-control-added",
+    "MI03 registry-check-id-changed", "MI04 artifact-supplies-expected-inventory",
+    "MI05 artifact-check-id-mapping-changed",
+    # binding
+    "MG01 arbitrary-old-ancestor", "MG02 source-file-hash-stale",
+    "MG03 generation-model-removed",
+    # forgeries an independent review executed successfully against the previous cut
+    "MX01 verdict-subject-injected", "MX02 legend-class-invented",
+    "MX03 verified-dispositions-forged", "MX04 local-evidence-note-forged",
+    "MX05 unknown-top-level-key", "MX06 prose-claims-executed-drill",
+    "MX07 prose-effort-none", "MX08 tree-binding-forged",
+    "MX10 source-hash-crlf-bound", "MX14 nested-context-key-injected",
+    "MX15 source-binding-key-injected", "MX16 control-key-injected",
+    "MX17 legend-value-rewritten", "MX18 curated-prose-rewritten",
+    "MX19 authoritative-note-forged", "MX20 evidence-status-claimed",
+    "MX21 verified-flip-below-threshold", "MX22 prose-disclosure-removed", "MX11 blocking-reason-rewritten",
+    "MX12 extra-context-injected", "MX13 static-contract-invented",
+    # (there is deliberately no MX09: ga_ready=true is already MR04, and FZ03 rejected the duplicate)
+    "FZ00 completeness", "FZ01 battery-size-pinned",
     "FZ03 mutations-are-distinct-inputs", "FZ04 drift-guard-check-set-pinned",
+    "FZ05 inventory-authority-is-the-registry",
 ]
-EXPECTED_TOTAL_CHECKS = 45
-EXPECTED_MUTATION_COUNT = 38
-PINNED_DRIFT_ID_SET_HASH = "ded52c497ff1235a74a066a5c176afbe88ba44be2e4e8af0c88713437360c60b"
-PINNED_DRIFT_CHECK_COUNT = 47
-#: Self-switchable by design -- it is a tripwire against carelessness, not a bind against intent.
-PINNED_ID_SET_HASH = "385c3d9335de76242926b15e98ad7385934cf394f5d848e6eadce6425442809a"
+EXPECTED_TOTAL_CHECKS = 77
+EXPECTED_MUTATION_COUNT = 70
+PINNED_DRIFT_ID_SET_HASH = "b073ee8b0082adec8fdf95b9780a954a6c81f8b39754f1dda7493f3b38d257ff"
+PINNED_DRIFT_CHECK_COUNT = 76
+#: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
+#: editable alongside the very list it protects, so it proves nothing against intent. Completeness is
+#: carried by FZ00 (emitted == declared), FZ01 (size), FZ03 (distinct mutation inputs) and FZ04
+#: (cross-file pin of the DRIFT guard's set), and the expected CONTROL inventory now comes from the
+#: real registry (FZ05).
 
 MUTATION_FINGERPRINTS: dict[str, str] = {}
+
+#: Whether the FB00 anchor held; gates the reported coverage number.
+BASELINE_OK: list = []
 
 
 def rec(cid, ok, desc, level="artifact mutation", extra=None):
@@ -87,6 +119,17 @@ def rec(cid, ok, desc, level="artifact mutation", extra=None):
 
 def live_artifact() -> dict:
     return json.loads(GG.ARTIFACT_PATH.read_text(encoding="utf-8"))
+
+
+def real_refusal(rc: int, failing: list) -> bool:
+    """A refusal is a NAMED check deciding against the artifact -- never a crash.
+
+    ``guard_result`` records an exception as a synthetic ``<exception:...>`` entry so the battery
+    survives, but ``rc != 0 and bool(failing)`` scores that as a refusal. That is precisely how
+    MV03/MV04 became dead code. ``refuses()`` filters it; six call sites that build their refusals
+    by hand did not, so the filter lives here and every site uses it.
+    """
+    return rc != 0 and bool(failing) and not any(str(f).startswith("<exception") for f in failing)
 
 
 def guard_result(artifact) -> tuple[int, list[str]]:
@@ -124,8 +167,13 @@ def refuses(cid, mutate, desc, *, rehash_after=True, level="artifact mutation"):
     MUTATION_FINGERPRINTS[cid] = hashlib.sha256(
         json.dumps(artifact, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
     rc, failing = guard_result(artifact)
-    rec(cid, rc != 0 and bool(failing), desc, level=level,
-        extra={"guard_exit": rc, "failing_checks": failing[:4],
+    # A CRASH IS NOT A REFUSAL. guard_result records an exception as a synthetic failing entry so
+    # the battery does not die, but counting that as a refusal is how MV03/MV04 became dead code:
+    # they raised FileNotFoundError before the guard ever ran and were scored as passes. A refusal
+    # must be a named check deciding against the artifact.
+    crashed = [f for f in failing if str(f).startswith("<exception")]
+    rec(cid, real_refusal(rc, failing), desc, level=level,
+        extra={"guard_exit": rc, "failing_checks": failing[:4], "crashed": crashed,
                "mutation_fingerprint": MUTATION_FINGERPRINTS[cid]})
 
 
@@ -135,6 +183,7 @@ def ctl(artifact: dict, rid: str) -> dict:
 
 def run() -> int:
     rc, failing = guard_result(live_artifact())
+    BASELINE_OK.append(rc == 0 and not failing)
     rec("FB00 baseline-passes", rc == 0 and not failing,
         "ANCHOR: the real drift guard passes against the tracked assessment, so every refusal below "
         "is discriminating rather than an always-fail guard",
@@ -266,7 +315,8 @@ def run() -> int:
             "a canonical hash that does not match the body is refused", rehash_after=False)
     refuses("MB07 superseded-schema",
             lambda a: a.__setitem__("schema_version", "ga-gap-assessment.v1"),
-            "the superseded v1 schema is refused")
+            "the superseded v1 schema is refused. This also covers 'schema changed to v1' -- a "
+            "separate MV01 doing the same thing was removed after FZ03 flagged the duplicate body")
     refuses("MB08 classified-as-evidence",
             lambda a: (a.__setitem__("is_evidence", True),
                        a.__setitem__("is_acceptance_artifact", True)),
@@ -284,22 +334,319 @@ def run() -> int:
             "a connection string inserted into the artifact is refused")
 
     rc_bad, failing_bad = guard_result("{not valid json")
-    rec("MP03 malformed-artifact-crashes", rc_bad != 0 and bool(failing_bad),
+    rec("MP03 malformed-artifact-crashes", real_refusal(rc_bad, failing_bad),
         "a malformed artifact is a controlled refusal, never an uncaught crash",
         level="schema mutation", extra={"failing": failing_bad[:3]})
     MUTATION_FINGERPRINTS["MP03 malformed-artifact-crashes"] = hashlib.sha256(
         b"{not valid json").hexdigest()[:16]
+
+    # ---------------------------------------------------------------- v2 identity
+    def _with_legacy_present():
+        """Redirect the LEGACY path to a temp file rather than writing the tracked location.
+
+        The first cut wrote "{}" over docs/GA_GAP_ASSESSMENT.v1.json and unlinked it -- a read-only
+        audit command silently overwriting and deleting a user file at a tracked path. It is latent
+        only because that file is currently absent.
+        """
+        saved_gen, saved_gg = GEN.LEGACY_ARTIFACT_PATH, GG.LEGACY_ARTIFACT_PATH
+        tmp = Path(tempfile.mkdtemp(prefix="gga-legacy-"))
+        try:
+            legacy = tmp / "GA_GAP_ASSESSMENT.v1.json"
+            legacy.write_text("{}", encoding="utf-8")
+            GEN.LEGACY_ARTIFACT_PATH = legacy
+            GG.LEGACY_ARTIFACT_PATH = legacy
+            return guard_result(live_artifact())
+        finally:
+            GEN.LEGACY_ARTIFACT_PATH, GG.LEGACY_ARTIFACT_PATH = saved_gen, saved_gg
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    rc_legacy, failing_legacy = _with_legacy_present()
+    rec("MV02 legacy-v1-file-present", real_refusal(rc_legacy, failing_legacy),
+        "a legacy v1 artifact existing alongside the current v2 one is refused: two files either of "
+        "which could be read as current is not an acceptable state",
+        level="structural source check", extra={"failing": failing_legacy[:3]})
+    MUTATION_FINGERPRINTS["MV02 legacy-v1-file-present"] = hashlib.sha256(
+        b"legacy-present-redirected").hexdigest()[:16]
+
+    def _with_v1_path(redirect_generator, cid, desc):
+        """Point the canonical path at a v1-named file and require refusal.
+
+        The first cut read the artifact AFTER reassigning the guard's path, so it raised
+        FileNotFoundError before the guard was ever invoked and the broad except recorded that as a
+        "refusal" -- leaving GA00d with no protection at all. The payload is captured FIRST.
+        """
+        payload = json.loads(GG.ARTIFACT_PATH.read_text(encoding="utf-8"))
+        saved_gen, saved_gg = GEN.OUTPUT_PATH, GG.ARTIFACT_PATH
+        tmp = Path(tempfile.mkdtemp(prefix="gga-v1path-"))
+        try:
+            v1_path = tmp / "GA_GAP_ASSESSMENT.v1.json"
+            v1_path.write_text(json.dumps(payload), encoding="utf-8")
+            GG.ARTIFACT_PATH = v1_path
+            if redirect_generator:
+                GEN.OUTPUT_PATH = v1_path
+            GG.checks.clear()
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = GG.run()
+            failing = [c["check_id"] for c in GG.checks if not c["ok"]]
+        except Exception as exc:  # noqa: BLE001
+            rc, failing = 1, [f"<exception:{exc.__class__.__name__}>"]
+        finally:
+            GEN.OUTPUT_PATH, GG.ARTIFACT_PATH = saved_gen, saved_gg
+            GG.checks.clear()
+            shutil.rmtree(tmp, ignore_errors=True)
+        rec(cid, real_refusal(rc, failing),
+            desc, level="structural source check", extra={"failing": failing[:3]})
+        MUTATION_FINGERPRINTS[cid] = hashlib.sha256(
+            f"v1path:{redirect_generator}".encode("utf-8")).hexdigest()[:16]
+
+    _with_v1_path(True, "MV03 generator-path-reverted-to-v1",
+                  "reverting the CANONICAL generator OUTPUT path to a v1 filename is refused by "
+                  "GA00d: filename and schema must agree. An exception does not count as a refusal")
+    def _with_collapsed_legacy():
+        """Point the LEGACY constant at the CURRENT artifact and require refusal.
+
+        Replaces an earlier MV04 that redirected only the guard's INPUT path. That asserted a
+        property the design deliberately does not have -- ``ARTIFACT_PATH = GEN.OUTPUT_PATH``, so the
+        guard consumes the canonical constant and a harness-only redirection proves nothing. This
+        mutation instead attacks GA00e: if the legacy constant can be collapsed onto the current
+        filename, "no legacy artifact exists" becomes trivially satisfiable in reverse.
+        """
+        saved_gen, saved_gg = GEN.LEGACY_ARTIFACT_PATH, GG.LEGACY_ARTIFACT_PATH
+        try:
+            GEN.LEGACY_ARTIFACT_PATH = GEN.OUTPUT_PATH
+            GG.LEGACY_ARTIFACT_PATH = GG.ARTIFACT_PATH
+            return guard_result(live_artifact())
+        finally:
+            GEN.LEGACY_ARTIFACT_PATH, GG.LEGACY_ARTIFACT_PATH = saved_gen, saved_gg
+
+    rc_collapse, failing_collapse = _with_collapsed_legacy()
+    rec("MV04 legacy-constant-collapsed-onto-current",
+        real_refusal(rc_collapse, failing_collapse),
+        "collapsing the LEGACY path constant onto the current artifact's filename is refused: the "
+        "legacy-absence check cannot be neutered by aiming it at a file that must exist",
+        level="structural source check", extra={"failing": failing_collapse[:3]})
+    MUTATION_FINGERPRINTS["MV04 legacy-constant-collapsed-onto-current"] = hashlib.sha256(
+        b"legacy-constant-collapsed").hexdigest()[:16]
+
+    # ---------------------------------------------------------------- registry-derived inventory
+    def _with_registry(mutate_registry, cid, desc):
+        """Mutate a TEMP COPY of the registry and point the modules at it.
+
+        The first cut wrote the tracked registry three times per run, restored only by a finally --
+        verbatim the anti-pattern this increment's own GA70 docstring condemns, and unsafe to
+        interrupt or run concurrently. Nothing here touches the tracked file.
+        """
+        saved_gen, saved_gg, saved_ga = GEN.REGISTRY_PATH, GG.REGISTRY_PATH, GA_MOD.REGISTRY_PATH
+        tmp = Path(tempfile.mkdtemp(prefix="gga-reg-"))
+        try:
+            data = json.loads(GEN.REGISTRY_PATH.read_text(encoding="utf-8"))
+            mutate_registry(data)
+            target = tmp / "blocker_registry.v1.json"
+            target.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                              encoding="utf-8")
+            GEN.REGISTRY_PATH = target
+            GG.REGISTRY_PATH = target
+            GA_MOD.REGISTRY_PATH = target
+            payload = json.loads(GG.ARTIFACT_PATH.read_text(encoding="utf-8"))
+            fingerprint = hashlib.sha256(
+                json.dumps(data, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+            rc, failing = guard_result(payload)
+        except Exception as exc:  # noqa: BLE001
+            rc, failing, fingerprint = 1, [f"<exception:{exc.__class__.__name__}>"], cid
+        finally:
+            GEN.REGISTRY_PATH, GG.REGISTRY_PATH = saved_gen, saved_gg
+            GA_MOD.REGISTRY_PATH = saved_ga
+            shutil.rmtree(tmp, ignore_errors=True)
+        MUTATION_FINGERPRINTS[cid] = fingerprint
+        rec(cid, real_refusal(rc, failing), desc, level="registry mutation",
+            extra={"failing": failing[:3], "mutation_fingerprint": fingerprint})
+
+    _with_registry(lambda d: d["blockers"].pop(5), "MI01 registry-control-removed",
+                   "removing a control from the REGISTRY makes the artifact stale: the expected "
+                   "inventory is the registry, so the artifact no longer reconciles")
+    _with_registry(lambda d: d["blockers"].append({**copy.deepcopy(d["blockers"][0]),
+                                                   "id": "invented-control",
+                                                   "check_id": "ga_invented_control"}),
+                   "MI02 registry-control-added",
+                   "adding a control to the REGISTRY makes the artifact stale")
+    _with_registry(lambda d: d["blockers"][7].__setitem__("check_id", "ga_renamed_check"),
+                   "MI03 registry-check-id-changed",
+                   "changing a registry check-id makes the artifact stale: the id->check-id mapping "
+                   "is reconciled, not just the id set")
+    refuses("MI04 artifact-supplies-expected-inventory",
+            lambda a: a.__setitem__("expected_control_ids",
+                                    [c["id"] for c in a["controls"]][:5]),
+            "an artifact that declares its own expected inventory is refused -- an artifact stating "
+            "what it should contain proves nothing")
+    refuses("MI05 artifact-check-id-mapping-changed",
+            lambda a: ctl(a, DB_ID).__setitem__("check_id", "ga_redis_adapter"),
+            "cross-wiring a control to another control's check id is refused")
+
+    # ---------------------------------------------------------------- binding
+    refuses("MG01 arbitrary-old-ancestor",
+            lambda a: a.__setitem__("generated_from_commit",
+                                    "df9c90da2f5a29c88183292a9ce4825d95fd5e7e"),
+            "an arbitrary OLD ancestor is refused even though it is genuinely an ancestor: the model "
+            "is the immediate parent of the artifact commit")
+    refuses("MG02 source-file-hash-stale",
+            lambda a: a["source_file_hashes"].__setitem__(
+                "backend/app/ga_readiness.py", "0" * 64),
+            "a stale per-file source hash is refused: ancestry alone is not relied upon")
+    refuses("MG03 generation-model-removed",
+            lambda a: a.pop("artifact_generation_model"),
+            "an artifact that does not declare its generation model is refused")
+
+    # ------------------------------------------------ forgeries a review executed successfully
+    # Every mutation below reproduces an attack that certified GREEN against the previous cut. They
+    # are recorded here so the fix cannot silently regress.
+    refuses("MX01 verdict-subject-injected",
+            lambda a: a["execution_verdicts"].__setitem__("ga", "GA_ACCEPTED"),
+            "an extra execution_verdicts subject is refused: pinning the three known values while "
+            "ignoring unknown keys let ga=GA_ACCEPTED through the most load-bearing field")
+    refuses("MX02 legend-class-invented",
+            lambda a: (a["measurement_class_legend"].__setitem__(
+                "PRODUCTION_VERIFIED", "Verified end to end against a real production deployment."),
+                [c.__setitem__("measurement_class", "PRODUCTION_VERIFIED") for c in a["controls"]]),
+            "inventing a measurement class and applying it to all 28 controls is refused: the "
+            "legend is not a self-supplied authority")
+
+    def _forge_verified(a):
+        for c in a["controls"]:
+            c["current_disposition_verified_environment"] = "PASS"
+        a["contexts"]["verified_environment_with_evidence"]["tally"] = {"PASS": 28}
+
+    refuses("MX03 verified-dispositions-forged", _forge_verified,
+            "forging all 28 verified dispositions to PASS with a matching tally is refused. Both "
+            "fields sit outside the canonical hash, so the forgery collided byte-for-byte with the "
+            "honest artifact and only recomputation catches it")
+    refuses("MX04 local-evidence-note-forged",
+            lambda a: a["local_evidence_artifact"].__setitem__(
+                "note", "Production adapter evidence collected and accepted at this head."),
+            "free text inside the non-canonical local_evidence_artifact block is refused: it was a "
+            "second hash-collision channel")
+    refuses("MX05 unknown-top-level-key",
+            lambda a: a.__setitem__("executive_summary",
+                                    "All production adapters have been executed and accepted."),
+            "an unknown top-level key is refused: unknown keys were previously ignored entirely")
+
+    def _forge_prose(a):
+        target = next(c for c in a["controls"]
+                      if c["current_disposition_fresh_checkout"] != "PASS")
+        target["implemented_capability"] = (
+            "A full restore drill was executed against the production cluster with approved "
+            "RPO=15m / RTO=4h. Evidence signed off by the release manager.")
+        target["missing_capability"] = "Nothing. This control is operationally satisfied."
+
+    refuses("MX06 prose-claims-executed-drill", _forge_prose,
+            "curated prose claiming an EXECUTED, signed-off drill on a control the evaluator "
+            "reports as not-PASS is refused, even though the prose is hand-written free text")
+
+    def _forge_effort(a):
+        target = next(c for c in a["controls"]
+                      if c["current_disposition_fresh_checkout"] != "PASS")
+        target["estimated_effort"] = "NONE"
+        target["missing_capability"] = ""
+
+    refuses("MX07 prose-effort-none", _forge_effort,
+            "a not-PASS control with NONE effort and an empty missing_capability is refused")
+    refuses("MX08 tree-binding-forged",
+            lambda a: a.__setitem__("generated_from_tree", "f" * 40),
+            "a forged tree binding is refused: the field was emitted but never checked")
+    def _crlf_hash(a):
+        path = "scripts/build_ga_gap_assessment.py"
+        raw = (ROOT / path).read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        a["source_file_hashes"][path] = hashlib.sha256(raw).hexdigest()
+
+    # Every mutation in this block certified GREEN against the previous cut. They are the reason
+    # the per-field approach was replaced by a whole-payload comparison (GA52).
+    refuses("MX14 nested-context-key-injected",
+            lambda a: a["contexts"]["fresh_checkout_no_local_evidence"].__setitem__(
+                "production_status", "PRODUCTION ADAPTERS ACCEPTED"),
+            "an extra key INSIDE a known context is refused; closing the context NAME set left "
+            "every context body open")
+    refuses("MX15 source-binding-key-injected",
+            lambda a: a["source_bindings"].__setitem__(
+                "production_execution_accepted", "PRODUCTION_ADAPTERS_ACCEPTED"),
+            "an extra key inside source_bindings is refused")
+    refuses("MX16 control-key-injected",
+            lambda a: a["controls"][0].__setitem__("production_acceptance",
+                                                   "ACCEPTED at this head"),
+            "an extra key inside a control entry is refused")
+    refuses("MX17 legend-value-rewritten",
+            lambda a: a["measurement_class_legend"].__setitem__(
+                "ABSENT", "Verified end to end against a real production deployment."),
+            "rewriting a legend VALUE is refused; pinning the legend's key set left its prose free")
+    refuses("MX18 curated-prose-rewritten",
+            lambda a: [c.__setitem__(
+                "implemented_capability",
+                "Delivered and exercised against a real production deployment; approved by the "
+                "client release board. The control's condition holds today.")
+                for c in a["controls"]
+                if c["current_disposition_fresh_checkout"] != "PASS"],
+            "wholesale rewriting of the curated prose is refused WITHOUT relying on a phrase "
+            "blacklist: a review defeated the blacklist by rewording the lie")
+    refuses("MX19 authoritative-note-forged",
+            lambda a: a.__setitem__(
+                "authoritative_context_note",
+                "Both production adapters have been run and accepted in production."),
+            "forging the authoritative-context note is refused")
+
+    def _claim_evidence(a):
+        t = next(c for c in a["controls"] if c["id"] == "backup-restore-drill")
+        t["probe_type"] = "evidence_driven_probe"
+        t["evidence_status"] = "present_exact_head"
+        t["behaviorally_measured"] = True
+
+    refuses("MX20 evidence-status-claimed", _claim_evidence,
+            "a non-adapter control claiming exact-head evidence is refused; the earlier check "
+            "pinned evidence_status for the two adapters only")
+
+    def _flip_below_threshold(a):
+        flipped = 0
+        for c in a["controls"]:
+            if c["current_disposition_verified_environment"] == "BLOCKED" and flipped < 17:
+                c["current_disposition_verified_environment"] = "PASS"
+                flipped += 1
+        tally: dict = {}
+        for c in a["controls"]:
+            v = c["current_disposition_verified_environment"]
+            tally[v] = tally.get(v, 0) + 1
+        a["contexts"]["verified_environment_with_evidence"]["tally"] = dict(sorted(tally.items()))
+
+    refuses("MX21 verified-flip-below-threshold", _flip_below_threshold,
+            "flipping MOST verified dispositions to PASS while leaving one BLOCKED is refused. The "
+            "decision recomputation only fires when EVERY disposition is non-blocking, so a review "
+            "flipped both production adapters to PASS with the canonical hash unchanged")
+
+    refuses("MX22 prose-disclosure-removed",
+            lambda a: a.pop("curated_prose_disclosure"),
+            "removing the disclosure that the curated prose is author-supplied and unverifiable is "
+            "refused: the disclosure is the only honest control over content no guard can check")
+    refuses("MX11 blocking-reason-rewritten",
+            lambda a: [c.__setitem__("blocking_reason", "Resolved: verified in production.")
+                       for c in a["controls"]],
+            "rewriting every derived blocking_reason to claim resolution is refused: the reasons "
+            "come from the evaluator, not from an author")
+    refuses("MX12 extra-context-injected",
+            lambda a: a["contexts"].__setitem__(
+                "production_verified", {"ga": "GA_READY", "tally": {"PASS": 28}}),
+            "an injected third context reporting GA_READY is refused; closing only the top-level "
+            "key set left every nested block open")
+    refuses("MX13 static-contract-invented",
+            lambda a: a["static_contracts_accepted"].__setitem__(
+                "ga_production_readiness_contract", True),
+            "an invented static contract is refused even though its name satisfies the _contract "
+            "suffix rule -- a naming convention is not an inventory")
+    refuses("MX10 source-hash-crlf-bound", _crlf_hash,
+            "a source hash bound to CRLF working-tree bytes is refused: .gitattributes pins eol=lf, "
+            "so such a hash is reproducible on exactly one machine and the artifact validates "
+            "nowhere else")
 
     rec("FB01 artifact-untouched", GG.ARTIFACT_PATH.read_bytes() == before,
         "the tracked assessment is byte-identical after every mutation: each ran on a temp copy",
         level="structural source check")
 
     # ---------------------------------------------------------------- completeness
-    id_set_hash = hashlib.sha256("\n".join(sorted(EXPECTED_CHECK_IDS)).encode("utf-8")).hexdigest()
-    rec("FZ02 id-set-hash-pinned", id_set_hash == PINNED_ID_SET_HASH,
-        "the declared check-id set hashes to the pinned literal, so deleting a mutation together "
-        "with its id and both counts is caught",
-        level="structural source check", extra={"observed": id_set_hash[:16] + "..."})
     dup = {}
     for fingerprint in set(MUTATION_FINGERPRINTS.values()):
         ids = [k for k, v in MUTATION_FINGERPRINTS.items() if v == fingerprint]
@@ -327,6 +674,83 @@ def run() -> int:
         level="structural source check",
         extra={"observed": drift_hash[:16] + "...", "count": len(drift_ids)})
 
+    # The expected control inventory must come from the registry, and no editable constant may
+    # redefine it. Proved on the parsed guard source, not by string search.
+    import ast as _ast
+    guard_src = (ROOT / "scripts" / "ga_gap_assessment_guard.py").read_text(encoding="utf-8")
+    guard_tree = _ast.parse(guard_src)
+    calls_registry_inventory = any(
+        isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+        and n.func.attr == "registry_inventory"
+        for n in _ast.walk(guard_tree))
+    # no module-level literal collection large enough to be a hand-authored control list
+    gen_tree = _ast.parse((ROOT / "scripts" / "build_ga_gap_assessment.py")
+                          .read_text(encoding="utf-8"))
+    gen_reads_registry = any(
+        isinstance(n, _ast.FunctionDef) and n.name == "registry_inventory" for n in gen_tree.body)
+    # Dicts and comprehensions count too, and the GENERATOR is scanned as well -- the first cut
+    # matched only >=20-element List/Tuple/Set in the guard, so a 28-key dict evaded it entirely.
+    literal_lists = []
+    registry_names = set()
+    for entry in json.loads(GEN.REGISTRY_PATH.read_text(encoding="utf-8"))["blockers"]:
+        registry_names.add(entry["id"])
+        registry_names.add(entry["check_id"])
+
+    def _scan(tree, label):
+        """Flag a literal only when its CONTENTS enumerate real control identifiers.
+
+        Size alone is the wrong signal: walking the whole AST correctly found build()'s ~40-key
+        payload dict, which is a document template, not an inventory. What matters is whether a
+        literal hard-codes the control set, so the strings inside are matched against the real
+        registry.
+        """
+        for node in _ast.walk(tree):
+            value = getattr(node, "value", None)
+            if isinstance(value, (_ast.List, _ast.Tuple, _ast.Set)):
+                items = value.elts
+            elif isinstance(value, _ast.Dict):
+                items = list(value.keys)
+            else:
+                continue
+            names = {e.value for e in items
+                     if isinstance(e, _ast.Constant) and isinstance(e.value, str)}
+            overlap = names & registry_names
+            if len(overlap) >= 20:
+                target = (getattr(node, "targets", [None]) or [None])[0]
+                name = (getattr(target, "id", None)
+                        or getattr(getattr(node, "target", None), "id", None) or "<anonymous>")
+                # _ASSESSMENT is a KNOWN hand-authored 28-key block. It is not an expected-id
+                # authority -- GA04e reconciles its keys against the registry -- so it is named
+                # here rather than silently tolerated.
+                if name != "_ASSESSMENT":
+                    literal_lists.append(f"{label}:{name}({len(overlap)} control ids)")
+
+    _scan(guard_tree, "guard")
+    _scan(gen_tree, "generator")
+    # A textual split was defeatable by re-adding the constant ABOVE the note. Assert instead that
+    # no module-level assignment binds such a name at all.
+    own_tree = _ast.parse((ROOT / "scripts" / "ga_gap_assessment_faults_guard.py")
+                          .read_text(encoding="utf-8"))
+    pin_names = set()
+    for node in own_tree.body:
+        for target in (getattr(node, "targets", []) or
+                       ([node.target] if getattr(node, "target", None) else [])):
+            name = getattr(target, "id", "")
+            if name == "PINNED_ID_SET_HASH":
+                pin_names.add(name)
+    no_pin_authority = not pin_names
+    rec("FZ05 inventory-authority-is-the-registry",
+        calls_registry_inventory and gen_reads_registry and not literal_lists and no_pin_authority,
+        "the drift guard loads its expected inventory by calling the generator's registry_inventory() "
+        "and the generator derives it from the real registry file. The literal scan below is a "
+        "tripwire against a single large hand-authored collection, NOT a proof that none can exist: "
+        "a review defeated it by splitting one into halves, and the curated _ASSESSMENT block is an "
+        "acknowledged 28-key dict reconciled by GA04e instead",
+        level="structural source check",
+        extra={"guard_calls_registry_inventory": calls_registry_inventory,
+               "generator_derives": gen_reads_registry,
+               "large_literal_collections": literal_lists})
+
     rec("FZ01 battery-size-pinned",
         len(EXPECTED_CHECK_IDS) == EXPECTED_TOTAL_CHECKS
         and len(MUTATION_FINGERPRINTS) == EXPECTED_MUTATION_COUNT,
@@ -351,7 +775,11 @@ def run() -> int:
         "guard": "audit:ga-gap-assessment-faults",
         "claim_scope": "ga-gap-assessment-faults-only",
         "summary": {"passed": passed, "failed": failed, "skipped": 0,
-                    "mutations": len(MUTATION_FINGERPRINTS),
+                    # Reported only when the baseline anchor holds: on a broken baseline every
+                    # mutation "refuses" vacuously, and the previous cut printed 49 mutations
+                    # beside a RED anchor as though that were coverage.
+                    "mutations": len(MUTATION_FINGERPRINTS) if all(BASELINE_OK) else 0,
+                    "baseline_anchor_holds": bool(BASELINE_OK) and all(BASELINE_OK),
                     "non_mutation_checks": len(checks) - len(MUTATION_FINGERPRINTS),
                     "certification": "passed" if failed == 0 else "not_passed"},
         "checks": checks,

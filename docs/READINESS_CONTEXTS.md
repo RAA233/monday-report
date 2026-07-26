@@ -376,13 +376,14 @@ the file — they do not reach a consumer of the evaluator's output. The operato
 (loopback / docker-bridge / ephemeral / test / staging / development, TLS, rotation, least-privilege
 identities) are stated *there* and not only in the description.
 
-**`docs/GA_GAP_ASSESSMENT.v1.json` is now stale.** That tracked artifact embeds every control's
-`resolution_condition` verbatim and still records the pre-correction text for both adapters, plus
-`probe_type: delegated_readiness_check` and a `probe_location` naming the removed `_delegate` calls.
-Its generator (`scripts/build_ga_gap_assessment.py`) also still hardcodes the delegated probe class
-for both controls. Nothing enforces the artifact, so nothing breaks — but it is divergent and is
-listed here rather than left for a reader to discover. Regenerating it is deferred with the rest of
-the capacity-blocked work.
+**`docs/GA_GAP_ASSESSMENT.v2.json` is regenerated and drift-guarded.** That tracked artifact
+embeds every control's `resolution_condition`, so it went stale when the adapter metadata was
+corrected. It is now regenerated from current sources, renamed to match its schema, and
+reconciled on every run by `audit:ga-gap-assessment` against the real registry, the live
+evaluator and both adapter contracts. Its expected control inventory is loaded from
+`evals/ga/blocker_registry.v1.json` -- there is no second hand-authored list of the 28 and no
+editable pin that could redefine them. It remains a generated STATUS REPORT:
+`artifact_class=generated_status_assessment`, `is_evidence=false`.
 
 ### Still unavailable
 
