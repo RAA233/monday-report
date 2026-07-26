@@ -1,7 +1,7 @@
 {
   "schema_version": "ga-gap-assessment.v2",
-  "generated_from_commit": "699ff504f870d580387a316e42f9994425a99de5",
-  "generated_from_tree": "7a7d6f1a360c0208d9f3ba5a734c65f4d5d3c2dd",
+  "generated_from_commit": "89b0ad7958824a22ec644fbfceb71127e89bc39f",
+  "generated_from_tree": "5f897ddada8dc1ec7a2345e40a6ae3c03741d668",
   "worktree_clean": true,
   "registry_version": "v1",
   "registry_path": "evals/ga/blocker_registry.v1.json",
@@ -89,7 +89,7 @@
       "probe_location": "backend/app/ga_readiness.py:evaluate_blockers -> _audit_keyed_integrity_probe",
       "measurement_class": "NOT_EVALUABLE",
       "behaviorally_measured": true,
-      "evidence_status": "absent",
+      "evidence_status": "not_evidence_driven",
       "blocking_reason": "Keyed audit integrity is implemented but the control is BLOCKED because no active managed HMAC key is configured (audit events are legacy/unkeyed). Configure a >=32-byte managed audit secret the state-file writer does not control.",
       "implemented_capability": "Versioned HMAC-SHA256 audit chain with key rotation and retained verification-only keys; the probe signs a fresh event and requires a public-SHA forgery to be rejected. Backed by an 86-check behavioural guard. Evaluates PASS whenever an active key is set.",
       "missing_capability": "No code gap. The control reads BLOCKED only when the evaluated environment has no MONDAY_REPORT_AUDIT_HMAC_KEY. The resolution phrase 'a state-file writer cannot forge' additionally assumes key custody separate from the state file, which env-var injection on the same host does not by itself establish.",
@@ -242,8 +242,8 @@
       "probe_location": "backend/app/ga_readiness.py:evaluate_blockers default branch",
       "measurement_class": "ABSENT",
       "behaviorally_measured": false,
-      "evidence_status": "absent",
-      "blocking_reason": "Correction atomicity not proven: evidence is bound to a different commit; evidence is stale: the tree changed after it was generated",
+      "evidence_status": "not_evidence_driven",
+      "blocking_reason": "Correction atomicity not proven: no normalized-persistence evidence artifact.",
       "implemented_capability": "Correction lineage is enforced only by an in-process lock. There is no field_corrections table at all.",
       "missing_capability": "A normalized corrections table with row/advisory locking or a uniqueness constraint on the active lineage.",
       "technical_dependencies": [
@@ -394,10 +394,10 @@
       "current_disposition_verified_environment": "PASS",
       "probe_type": "evidence_driven_probe",
       "probe_location": "backend/app/ga_readiness.py:evaluate_blockers -> _migration_runner_probe",
-      "measurement_class": "BEHAVIORALLY_PROVEN",
+      "measurement_class": "NOT_EVALUABLE",
       "behaviorally_measured": true,
       "evidence_status": "absent",
-      "blocking_reason": "A deterministic, idempotent migration runner applies db/migrations/ under a session-level advisory lock with per-migration transactions, tracked by a schema_migrations version table; committed real-PostgreSQL evidence proves fresh apply, idempotent rerun, partial upgrades, failure rollback, concurrency serialization, and checksum-drift refusal.",
+      "blocking_reason": "Migration runner not proven: no migration evidence artifact (output/migrations/migration-evidence.v1.json)",
       "implemented_capability": "Deterministic runner with schema_migrations metadata, session advisory lock, per-migration transactions, checksum-drift refusal; proven on real PostgreSQL 16.14.",
       "missing_capability": "None. PASS requires the local evidence artifact to be present.",
       "technical_dependencies": [],
@@ -422,7 +422,7 @@
       "measurement_class": "BEHAVIORALLY_FAILED",
       "behaviorally_measured": true,
       "evidence_status": "absent",
-      "blocking_reason": "Static validation still reports broken FK dependencies: [{'version': 3, 'filename': '0003_benchmarking.sql', 'missing_target': 'projects'}, {'version': 3, 'filename': '0003_benchmarking.sql', 'missing_target': 'projects'}, {'version': 3, 'filename': '0003_benchmarking.sql', 'missing_target': 'projects'}, {'version': 3, 'filename': '0003_benchmarking.sql', 'missing_target': 'reports'}]",
+      "blocking_reason": "Migration validity not proven: no migration evidence artifact (output/migrations/migration-evidence.v1.json)",
       "implemented_capability": "Corrected fresh-install baseline in db/baseline/ applies cleanly on real PostgreSQL.",
       "missing_capability": "The immutable legacy sequence remains un-appliable: 0003 references projects(id) and reports(id), which no earlier legacy migration creates. Fails on real PostgreSQL at version 3 with 'relation \"projects\" does not exist'.",
       "technical_dependencies": [],
@@ -517,8 +517,8 @@
       "probe_location": "backend/app/ga_readiness.py:evaluate_blockers default branch",
       "measurement_class": "ABSENT",
       "behaviorally_measured": false,
-      "evidence_status": "absent",
-      "blocking_reason": "Persistence locking not proven: evidence is bound to a different commit; evidence is stale: the tree changed after it was generated",
+      "evidence_status": "not_evidence_driven",
+      "blocking_reason": "Persistence locking not proven: no atomicity evidence artifact.",
       "implemented_capability": "Nothing for application mutations. The universal pattern is refresh() -> mutate in memory -> save() rewriting the entire payload. The local store's tmp-file + replace is atomic FILE replacement only; it prevents torn files, not lost updates. PostgresStateStore.save() is a single-statement whole-payload upsert whose preceding read uses a separate connection and therefore a separate transaction.",
       "missing_capability": "No SELECT FOR UPDATE, no advisory lock, no revision/CAS column, no conflict retry, no idempotency key. The only advisory lock in the repository belongs to the migration runner, which this control explicitly excludes. Three in-process RLocks concede last-writer-wins across processes in their own comments.",
       "technical_dependencies": [
@@ -618,7 +618,7 @@
       "probe_location": "backend/app/ga_readiness.py:evaluate_blockers -> _rbac_role_separation_probe",
       "measurement_class": "BEHAVIORALLY_PROVEN",
       "behaviorally_measured": true,
-      "evidence_status": "present_exact_head",
+      "evidence_status": "not_evidence_driven",
       "blocking_reason": "Distinct least-privilege roles (ADMIN=all; ENGINEER/VALIDATOR/MANAGER proper subsets; VIEWER unactivated) evaluate default-deny, and every route enforces a per-user permission (route policy fully enforced). Route authorization checks the request identity's roles, not a single configured all-role user.",
       "implemented_capability": "Route-level RBAC with complete route coverage, proven by probe.",
       "missing_capability": "None.",
@@ -715,8 +715,8 @@
       "probe_location": "backend/app/ga_readiness.py:evaluate_blockers -> _tenant_authorization_probe",
       "measurement_class": "BEHAVIORALLY_FAILED",
       "behaviorally_measured": true,
-      "evidence_status": "absent",
-      "blocking_reason": "API-layer per-request tenant ownership enforcement is implemented and verified, but database-enforced tenant isolation is not proven: evidence is bound to a different commit; evidence is stale: the tree changed after it was generated.",
+      "evidence_status": "not_evidence_driven",
+      "blocking_reason": "API-layer per-request tenant ownership enforcement is implemented and verified, but database-enforced tenant isolation is not proven: no tenant-RLS-enforcement evidence artifact.",
       "implemented_capability": "API-layer per-request tenant ownership is enforced and proven: every resource-scoped route carries a tenant-ownership dependency, the ownership graph fails closed on a contradictory chain, cross-tenant access is an existence-hiding 404, and list aggregates are tenant-filtered before counting.",
       "missing_capability": "The resolution condition also requires Postgres RLS active over the normalized store. The Postgres adapter stores one JSONB snapshot per tenant_slug, and the normalized migration leaves every tenant_isolation policy commented out.",
       "technical_dependencies": [
@@ -743,7 +743,7 @@
       "probe_location": "backend/app/ga_readiness.py:evaluate_blockers -> _verified_reviewer_probe",
       "measurement_class": "BEHAVIORALLY_PROVEN",
       "behaviorally_measured": true,
-      "evidence_status": "present_exact_head",
+      "evidence_status": "not_evidence_driven",
       "blocking_reason": "Behavioral evidence (isolated client-mode store): an eligible authenticated reviewer records a correction with verified attribution matching the keyed audit actor; a second reviewer reverts (reverter distinct); a terminal validation outcome attributes the reviewer; an administrative reopen creates no verified evidence; a system actor is rejected before mutation; the outcome/audit consistency verif",
       "implemented_capability": "Terminal validation outcomes attribute a verified authenticated human.",
       "missing_capability": "None.",
@@ -777,5 +777,5 @@
       "notes": ""
     }
   ],
-  "canonical_payload_hash": "422468b2c1dcbd6c3b3021dfdbacf8c4c47df40ab81dc799f3673a58a0b8b141"
+  "canonical_payload_hash": "deaa49984e75d7d1dc8160e8492d2eccfd0ddd9d24e8641cd93d83d2662af5b6"
 }
