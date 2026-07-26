@@ -355,6 +355,46 @@ def _tenant_authorization_v3_reasons() -> list[str]:
         return [f"tenant-authorization evidence could not be evaluated: {exc.__class__.__name__}"]
 
 
+def _production_database_adapter_reasons() -> list[str]:
+    """Fail-closed validation of the production database-adapter evidence artifact.
+
+    Delegates to the versioned contract module. A missing, unreadable, malformed, stale, dirty,
+    hash-tampered, test-scoped or parity-false artifact yields reasons -> BLOCKED. Nothing here
+    raises: a malformed artifact degrades the control, it does not crash the evaluator.
+    """
+    try:
+        from . import production_database_adapter_evidence as _pdae
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return [f"production database-adapter contract unavailable: {exc.__class__.__name__}"]
+    try:
+        return _pdae.load_and_validate(PRODUCTION_DATABASE_ADAPTER_EVIDENCE_PATH)
+    except Exception as exc:  # noqa: BLE001 - fail closed, never crash the evaluator
+        return [f"production database-adapter evidence could not be evaluated: "
+                f"{exc.__class__.__name__}"]
+
+
+def _postgres_adapter_probe() -> tuple[str, str]:
+    """Evidence-driven probe for the production-database-adapter control.
+
+    This control previously delegated to the client-data readiness check ``postgres_repository``,
+    which passes whenever the requested and active repository backend are both PostgreSQL and a
+    database URL is set. That is satisfied by a runner-owned DISPOSABLE Docker container reached over
+    loopback -- so the accepted restricted-runtime proof could promote a *production* adapter control.
+    It now requires a valid production database-adapter evidence artifact, and nothing else can
+    satisfy it: not the restricted runtime, not tenant evidence v3, not the demo-mode UI proof.
+    """
+    reasons = _production_database_adapter_reasons()
+    if not reasons:
+        return "PASS", ("Production database-adapter evidence "
+                        f"({_PRODUCTION_ADAPTER_SCHEMA}) is present, exact-head and independently "
+                        "valid across every required proof domain.")
+    shown = "; ".join(reasons[:3])
+    more = f" (+{len(reasons) - 3} more)" if len(reasons) > 3 else ""
+    return "BLOCKED", (
+        "No valid production database-adapter evidence. A functional PostgreSQL runtime in "
+        f"disposable test infrastructure does not establish a production adapter: {shown}{more}")
+
+
 def _tenant_rls_evidence_reasons() -> list[str]:
     """Fail-closed validation of the tenant-RLS-enforcement evidence artifact.
 
@@ -856,6 +896,13 @@ TENANT_AUTHORIZATION_EVIDENCE_PATH = (
     ROOT / "output" / "tenant-authorization" / "tenant-authorization-evidence.v3.json"
 )
 TENANT_RLS_EVIDENCE_SCHEMA = "tenant-rls-enforcement-evidence.v2"
+# Production database-adapter evidence lives at its OWN path with its OWN schema id. The restricted
+# runtime proof cannot satisfy it (see backend/app/production_database_adapter_evidence.py).
+# Patchable for hermetic guard runs.
+_PRODUCTION_ADAPTER_SCHEMA = "production-database-adapter-evidence.v1"
+PRODUCTION_DATABASE_ADAPTER_EVIDENCE_PATH = (
+    ROOT / "output" / "production-database-adapter" / f"{_PRODUCTION_ADAPTER_SCHEMA}.json"
+)
 
 
 def _correction_atomicity_probe() -> tuple[str, str]:
@@ -1172,7 +1219,7 @@ def evaluate_blockers(
         check_id = entry["check_id"]
         evidence_reference: str | None = None
         if check_id == "ga_postgres_adapter":
-            disposition, detail = _delegate(readiness_by_id, ("postgres_repository",))
+            disposition, detail = _postgres_adapter_probe()
         elif check_id == "ga_redis_adapter":
             disposition, detail = _delegate(readiness_by_id, ("redis_queue",))
         elif check_id == "ga_local_ai_runtime":
