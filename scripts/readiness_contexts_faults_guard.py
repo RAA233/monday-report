@@ -545,16 +545,23 @@ def run() -> int:
     mapping = R.control_check_ids()
     db_check = mapping["production-database-adapter"]
     q_check = mapping["production-queue-adapter"]
+    # Asserts the PROPERTY, not a mechanism. Two independent defences now hold this control down:
+    # the evaluator itself refuses it without production adapter evidence, and this runner demotes a
+    # PASS it cannot evaluate. Requiring the demotion specifically would fail the moment the root
+    # cause was fixed upstream -- which is exactly what happened -- so the check records which
+    # defence applied instead of mandating one.
+    demoted_here = db_check in {d["check_id"] for d in pg_promote.get("demoted_controls", [])}
     rec("MC04b postgres-context-promotes-database-adapter",
         pg_promote.get("result") == "evaluated"
-        and pg_promote["control_dispositions"].get(db_check) != "PASS"
-        and db_check in {d["check_id"] for d in pg_promote.get("demoted_controls", [])},
+        and pg_promote["control_dispositions"].get(db_check) != "PASS",
         "a PostgreSQL context observing an ACTIVE PostgreSQL repository -- which the accepted "
         "restricted runtime really does report -- still does not promote "
-        "production-database-adapter: the restricted runtime is not a production adapter, so the "
-        "control is forced BLOCKED and the demotion recorded",
+        "production-database-adapter: the restricted runtime is not a production adapter",
         level="execution integration",
-        extra={"disposition": pg_promote["control_dispositions"].get(db_check)})
+        extra={"disposition": pg_promote["control_dispositions"].get(db_check),
+               "held_by": ("evaluator refusal (production adapter evidence required)"
+                           if not demoted_here else "runner applicability/never-promotable demotion"),
+               "runner_demotion_also_applied": demoted_here})
     rec("MC05b inline-context-promotes-queue-adapter",
         evaluated("client-postgres")["control_dispositions"].get(q_check) != "PASS",
         "production-queue-adapter can never PASS in any context: every context runs the inline "
