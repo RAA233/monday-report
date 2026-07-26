@@ -49,21 +49,40 @@ TARGETS: dict[str, dict] = {
 }
 ALLOWED_FIELDS = frozenset({"description", "policy_reference", "resolution_condition"})
 
+#: Language asserting that something RESOLVES the control. A stale marker in a sentence that also
+#: asserts sufficiency is stale however many disclaimers surround it.
+SUFFICIENCY_PATTERNS: tuple[str, ...] = (
+    r"\bis sufficient\b", r"\bare sufficient\b", r"\bsuffices\b", r"\bis enough\b",
+    r"\bresolves? this\b", r"\bsatisf(?:ies|y) this\b", r"\bwill resolve\b",
+    r"\bcertifies this\b", r"\bunblocks? this\b",
+)
+
 #: Language that describes the REMOVED delegation. Its presence means the metadata is stale again.
 STALE_MARKERS: dict[str, tuple[str, ...]] = {
     "ga_postgres_adapter": ("postgres_repository", "requested==active", "requested == active",
-                            "active adapter is postgres", "live probe"),
-    "ga_redis_adapter": ("redis_queue", "PING", "ping", "active worker is redis", "live probe"),
+                            "active adapter is postgres", "live probe", "reachable postgres"),
+    "ga_redis_adapter": ("redis_queue", "ping", "active worker is redis", "live probe",
+                         "reachable redis"),
 }
 
 #: Patterns that would assert the evidence already exists, or that parity/acceptance is achieved.
 #: Regexes, not fixed substrings: the first cut listed "evidence is present" and was defeated by
 #: "evidence artifact is present" -- caught by this guard's own fault battery (MX05).
+#: Wording that would state the requirements are NOT required. A presence-of-keywords test is
+#: satisfied by its own negation, which an independent review demonstrated.
+NEGATION_PATTERNS: tuple[str, ...] = (
+    r"\bno\b[^.]{0,120}?\bis (?:required|needed)\b",
+    r"\b(?:not|never) required\b",
+    r"\bany (?:file|artifact|value) (?:will do|suffices|is acceptable)\b",
+    r"\bwithout (?:a |any )?(?:valid |verified )?(?:artifact|evidence|binding)\b",
+)
+
 EXISTENCE_CLAIM_PATTERNS: tuple[str, ...] = (
-    r"(?:evidence|artifact)\b[^.]{0,60}?\b(?:exists|is present|is available|is in place|"
-    r"has been (?:generated|produced|accepted|verified))",
+    r"(?:evidence|artifact)\b[^.]{0,80}?\b(?:exists|is present|is available|is in place|"
+    r"(?:has been|was|were|have been) (?:generated|produced|accepted|verified|created|supplied))",
     r"\b(?:is|are|has been|have been)\s+(?:currently\s+)?valid\b",
-    r"production parity\b[^.]{0,40}?\b(?:has been|is)\s+(?:achieved|met|established|true)",
+    r"production parity\b[^.]{0,60}?\b(?:has been|is|was)\s+(?:already\s+)?"
+    r"(?:achieved|met|established|demonstrated|reached|true)",
     r"adapter is\s+(?:accepted|production[- ]ready|ready for production)",
     r"\bthis control (?:passes|is satisfied)\b",
 )
@@ -80,8 +99,15 @@ def load_registry() -> dict:
     return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
 
 
-def base_registry(ref: str = "origin/main") -> dict | None:
-    """The registry as of the base commit, for the only-allowed-fields comparison."""
+#: The commit whose registry this correction is measured against: the head immediately BEFORE the
+#: correction. Pinned as a literal rather than tracking `origin/main`, because a moving ref makes
+#: this guard one-shot -- once the branch merges, origin/main contains the change, the diff becomes
+#: empty and RM04 fails forever. An independent review demonstrated exactly that.
+PINNED_PRE_CORRECTION_COMMIT = "e74416750b2506e12b6faab899bc73a50ca8a04a"
+
+
+def base_registry(ref: str = PINNED_PRE_CORRECTION_COMMIT) -> dict | None:
+    """The registry as of the pinned pre-correction commit."""
     out = subprocess.run(["git", "show", f"{ref}:evals/ga/blocker_registry.v1.json"],
                          cwd=str(ROOT), capture_output=True, text=True)
     if out.returncode != 0:
@@ -126,7 +152,10 @@ def run() -> int:
     rec("RM01 control-count-28", len(registry["blockers"]) == 28,
         "the registry still declares exactly 28 controls",
         extra={"count": len(registry["blockers"])})
-    rec("RM02 exactly-two-targets", set(TARGETS) <= set(entries),
+    rec("RM02 exactly-two-targets",
+        set(TARGETS) <= set(entries)
+        and {b["id"] for b in registry["blockers"] if b["check_id"] in TARGETS}
+        == {spec["registry_id"] for spec in TARGETS.values()},
         "both target controls exist under their expected check ids",
         extra={"targets": sorted(TARGETS)})
     rec("RM03 registry-ids-intact",
@@ -200,8 +229,10 @@ def run() -> int:
             level="structural source check", extra={"resolved_module": resolved})
 
         # the metadata must cite the schema id the contract module actually declares
+        other = Q if module is DB else DB
         rec(f"RM11-{short} resolution-cites-real-schema",
-            module.SCHEMA_VERSION in entry.get("resolution_condition", ""),
+            module.SCHEMA_VERSION in entry.get("resolution_condition", "")
+            and other.SCHEMA_VERSION not in entry.get("resolution_condition", ""),
             f"the resolution condition cites the schema id the contract module declares "
             f"({module.SCHEMA_VERSION}) -- taken from the module, not from expected prose")
         rec(f"RM12-{short} description-cites-real-schema",
@@ -210,16 +241,39 @@ def run() -> int:
 
         # policy_reference must resolve to a committed file, and to the module the consumer uses
         ref = entry.get("policy_reference", "")
-        referenced = [tok.strip().rstrip(";,") for tok in ref.split()
-                      if tok.strip().rstrip(";,").endswith(".py")]
+        # Split `path.py::function` before the suffix test: the first cut collected only tokens
+        # ENDING in .py, so a `::function` reference was excluded entirely and could name the wrong
+        # probe -- or one that does not exist -- with every check still passing.
+        referenced, functions = [], []
+        for token in ref.split():
+            token = token.strip().rstrip(";,")
+            path_part, _, fn_part = token.partition("::")
+            if path_part.endswith(".py"):
+                referenced.append(path_part)
+                if fn_part:
+                    functions.append((path_part, fn_part))
         existing = [p for p in referenced if (ROOT / p).is_file()]
+        bad_functions = []
+        for path_part, fn in functions:
+            try:
+                fn_tree = ast.parse((ROOT / path_part).read_text(encoding="utf-8"))
+                names = {n.name for n in ast.walk(fn_tree)
+                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            except Exception:  # noqa: BLE001
+                names = set()
+            if fn not in names:
+                bad_functions.append(f"{path_part}::{fn} (absent)")
+            elif fn != spec["probe"]:
+                bad_functions.append(f"{path_part}::{fn} (not this control's probe)")
         rec(f"RM13-{short} policy-reference-resolves",
             bool(referenced) and len(existing) == len(referenced)
-            and spec["module_file"] in existing,
-            "every file named by policy_reference exists in the repository, and the contract module "
-            "the consumer actually uses is among them",
+            and spec["module_file"] in existing and not bad_functions,
+            "every file named by policy_reference exists, the contract module the consumer actually "
+            "uses is among them, and every `path.py::function` reference names a function that "
+            "exists in that module AND is this control's own probe",
             level="structural source check",
-            extra={"referenced": referenced, "missing": sorted(set(referenced) - set(existing))})
+            extra={"referenced": referenced, "missing": sorted(set(referenced) - set(existing)),
+                   "bad_function_refs": bad_functions})
 
         # The removed delegation must not be described as SUFFICIENT any more. Naming it as
         # non-qualifying is the opposite of stale and is valuable to a reader, so the rule is
@@ -227,12 +281,29 @@ def run() -> int:
         # control, and in the description only inside a sentence that marks them non-qualifying.
         blob = " ".join(str(entry.get(f, "")) for f in ALLOWED_FIELDS)
         resolving = f"{entry.get('resolution_condition', '')} {entry.get('policy_reference', '')}"
-        in_resolving = [m for m in STALE_MARKERS[cid] if m in resolving]
-        sentences = [s for s in str(entry.get("description", "")).replace("; ", ". ").split(". ")]
-        unqualified = sorted({
-            m for s in sentences for m in STALE_MARKERS[cid]
-            if m in s and "non-qualifying" not in s.lower()
-        })
+        in_resolving = [m for m in STALE_MARKERS[cid] if m.lower() in resolving.lower()]
+        # PROXIMITY, case-insensitively. A sentence-based rule with case-sensitive markers was
+        # defeated three ways by an independent review: a comma-joined clause carrying stale
+        # language into a sentence that merely contained the token, a title-case "Ping", and a
+        # title-case "Ping" with no qualifying token at all. A marker must sit within
+        # QUALIFIER_WINDOW characters of an explicit non-qualifying phrase.
+        # Sentence-scoped, case-insensitive, AND sufficiency-aware. Proximity alone is not enough:
+        # a long legitimate description puts a "non-qualifying" token within any reasonable window
+        # of an appended sufficiency claim, so the token's mere presence cannot be the test. A
+        # sentence carrying a stale marker must BOTH mark it non-qualifying and contain no
+        # sufficiency language.
+        desc_l = str(entry.get("description", "")).lower()
+        sentences = re.split(r"(?<=[.;])\s+", desc_l)
+        unqualified = []
+        for sentence in sentences:
+            hits = [m for m in STALE_MARKERS[cid] if m.lower() in sentence]
+            if not hits:
+                continue
+            qualified = "non-qualifying" in sentence
+            asserts_sufficiency = any(re.search(p, sentence) for p in SUFFICIENCY_PATTERNS)
+            if not qualified or asserts_sufficiency:
+                unqualified.extend(hits)
+        unqualified = sorted(set(unqualified))
         rec(f"RM14-{short} delegation-not-described-as-sufficient",
             not in_resolving and not unqualified,
             "the removed delegation (the readiness check name, a live probe, reachability) appears "
@@ -245,14 +316,18 @@ def run() -> int:
         # substance: the resolution condition must require the bindings the validator enforces
         required_substance = ("commit", "tree", "clean-worktree", "canonical", "parity",
                               "secret scan", "domain")
+        condition_text = str(entry.get("resolution_condition", ""))
         missing_substance = [t for t in required_substance
-                             if t.lower() not in entry.get("resolution_condition", "").lower()]
+                             if t.lower() not in condition_text.lower()]
+        # A keyword list is satisfied by its own NEGATION ("No commit, tree ... is required").
+        negations = [p for p in NEGATION_PATTERNS if re.search(p, condition_text, re.IGNORECASE)]
         rec(f"RM15-{short} resolution-matches-validator",
-            not missing_substance,
+            not missing_substance and not negations
+            and module.SCHEMA_VERSION in condition_text,
             "the resolution condition names each binding the real validator enforces: full "
             "commit/tree binding, clean worktree, canonical hash, production parity, proof domains "
             "and a clean secret scan",
-            extra={"missing": missing_substance})
+            extra={"missing": missing_substance, "negations_found": negations})
 
         # no claim that the evidence exists, and no parity overclaim
         found_claims = [p for p in EXISTENCE_CLAIM_PATTERNS
@@ -287,8 +362,9 @@ def run() -> int:
         level="evaluator integration",
         extra={cid: live.get(cid) for cid in TARGETS})
     rec("RM21 remediation-now-matches-metadata",
-        all(next(c for c in GA.evaluate_blockers(dict(readiness), forge_report=None)
-                 if c["id"] == cid)["remediation"] == entries[cid]["resolution_condition"]
+        all(next((c for c in GA.evaluate_blockers(dict(readiness), forge_report=None)
+                  if c["id"] == cid), {}).get("remediation")
+            == entries.get(cid, {}).get("resolution_condition")
             for cid in TARGETS),
         "the remediation the evaluator emits is exactly the corrected resolution condition, so an "
         "operator is no longer told to satisfy a condition that cannot resolve the control",

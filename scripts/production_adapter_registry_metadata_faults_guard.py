@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import shutil
@@ -57,10 +58,18 @@ EXPECTED_CHECK_IDS = [
     # consumer / disposition consistency
     "MC01 consumer-and-metadata-disagree", "MC02 dispositions-must-not-change",
     "MC03 inventory-hash-must-not-move",
+    "FZ02 id-set-hash-pinned", "FZ03 mutations-are-distinct-inputs",
     "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 32
-EXPECTED_MUTATION_COUNT = 28
+EXPECTED_TOTAL_CHECKS = 34
+#: Mutations counted by what ACTUALLY mutates a registry -- i.e. entries in MUTATION_FINGERPRINTS --
+#: not by id prefix. The first cut keyed on the prefix and counted two plain assertions (MC02, MC03)
+#: as mutations, overstating the total by two.
+EXPECTED_MUTATION_COUNT = 26
+
+#: Hash of this battery's own declared id set, pinned as a literal. Without it a mutation can be
+#: deleted together with its declared id AND both pins, leaving the battery green at a smaller size.
+PINNED_ID_SET_HASH = "50c684f7053ad3511caaff8aef1305baf1f46beec58e72d78b8028b5e8023cc3"
 
 
 def rec(cid, ok, desc, level="registry mutation", extra=None):
@@ -96,12 +105,21 @@ def guard_result(registry: dict) -> tuple[int, list[str]]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+#: Fingerprints of every mutated registry, so a mutation body replaced by a copy of another's is
+#: detectable. Ported from the accepted queue battery (FC03), which this file lacked.
+MUTATION_FINGERPRINTS: dict[str, str] = {}
+
+
 def refuses(cid, mutate, desc, *, level="registry mutation"):
     registry = copy.deepcopy(live_registry())
     mutate(registry)
+    fingerprint = hashlib.sha256(
+        json.dumps(registry, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+    MUTATION_FINGERPRINTS[cid] = fingerprint
     rc, failing = guard_result(registry)
     rec(cid, rc != 0 and bool(failing), desc, level=level,
-        extra={"guard_exit": rc, "failing_checks": failing[:4]})
+        extra={"guard_exit": rc, "failing_checks": failing[:4],
+               "mutation_fingerprint": fingerprint})
 
 
 def entry(registry: dict, check_id: str) -> dict:
@@ -281,8 +299,31 @@ def run() -> int:
         "the live registry file is byte-identical after every mutation: each ran against a temp copy",
         level="structural source check")
 
+    # ---------------------------------------------------------------- cross-file / distinctness
+    id_set_hash = hashlib.sha256(
+        "\n".join(sorted(EXPECTED_CHECK_IDS)).encode("utf-8")).hexdigest()
+    rec("FZ02 id-set-hash-pinned", id_set_hash == PINNED_ID_SET_HASH,
+        "the declared check-id set hashes to the pinned literal, so deleting a mutation together "
+        "with its declared id and both counts is caught",
+        level="structural source check", extra={"observed_id_set_hash": id_set_hash[:16] + "..."})
+
+    duplicated = {}
+    for fingerprint, ids in {
+        f: [k for k, v in MUTATION_FINGERPRINTS.items() if v == f]
+        for f in set(MUTATION_FINGERPRINTS.values())
+    }.items():
+        if len(ids) > 1:
+            duplicated[fingerprint] = sorted(ids)
+    rec("FZ03 mutations-are-distinct-inputs",
+        not duplicated and len(MUTATION_FINGERPRINTS) == EXPECTED_MUTATION_COUNT,
+        "every mutation applies a DISTINCT mutated registry, so replacing one mutation's body with "
+        "a copy of another's -- which leaves the id list and both counts untouched -- is caught",
+        level="structural source check",
+        extra={"fingerprinted": len(MUTATION_FINGERPRINTS),
+               "duplicate_bodies": {k[:12]: v for k, v in list(duplicated.items())[:3]}})
+
     # ---------------------------------------------------------------- completeness
-    mutations_so_far = [c["check_id"] for c in checks if c["check_id"][:2] in MUTATION_PREFIXES]
+    mutations_so_far = list(MUTATION_FINGERPRINTS)
     rec("FZ01 battery-size-pinned",
         len(EXPECTED_CHECK_IDS) == EXPECTED_TOTAL_CHECKS
         and len(mutations_so_far) == EXPECTED_MUTATION_COUNT,
@@ -303,7 +344,7 @@ def run() -> int:
 
     passed_n = sum(1 for c in checks if c["ok"])
     failed_n = len(checks) - passed_n
-    mutation_ids = [c["check_id"] for c in checks if c["check_id"][:2] in MUTATION_PREFIXES]
+    mutation_ids = list(MUTATION_FINGERPRINTS)
 
     print(json.dumps({
         "guard": "audit:production-adapter-registry-metadata-faults",

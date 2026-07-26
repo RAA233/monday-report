@@ -358,11 +358,31 @@ SHA-256, which is not pinned as a literal by any tracked guard.
 
 ### A metadata correction changes no disposition
 
-Verified with identical hermetic readiness inputs, before and after: all 28 dispositions unchanged,
-the blocking-control id set unchanged, and the only outputs that moved are the two targets'
-`detail` / `remediation` text. Both adapter controls remain BLOCKED even with every readiness check
+Verified with identical hermetic readiness inputs, before and after: all 28 dispositions unchanged
+and the blocking-control id set unchanged. The emitted fields that moved are exactly
+`policy_reference`, `remediation` and `resolution_condition` on the two targets — `detail` comes from
+the probes and did **not** move. Both adapter controls remain BLOCKED even with every readiness check
 passing, and all four contexts keep their expected counts — 22/6, 24/4, 25/3, and 27 BLOCKED with the
 single conditional tenant-authorization PASS.
+
+### Two limitations worth stating
+
+**`description` is not emitted for these two controls.** `evaluate_blockers` surfaces `description`
+only through its fallback branch (`detail = f"Unresolved control: {entry['description']}"`), and both
+adapters take explicit probe branches. So the non-qualifying enumeration, the durability disclosure
+and the functional-vs-production distinction live in the registry as documentation for a reader of
+the file — they do not reach a consumer of the evaluator's output. The operator-facing field is
+`resolution_condition`, emitted verbatim as `remediation`, which is why the anti-disposable bindings
+(loopback / docker-bridge / ephemeral / test / staging / development, TLS, rotation, least-privilege
+identities) are stated *there* and not only in the description.
+
+**`docs/GA_GAP_ASSESSMENT.v1.json` is now stale.** That tracked artifact embeds every control's
+`resolution_condition` verbatim and still records the pre-correction text for both adapters, plus
+`probe_type: delegated_readiness_check` and a `probe_location` naming the removed `_delegate` calls.
+Its generator (`scripts/build_ga_gap_assessment.py`) also still hardcodes the delegated probe class
+for both controls. Nothing enforces the artifact, so nothing breaks — but it is divergent and is
+listed here rather than left for a reader to discover. Regenerating it is deferred with the rest of
+the capacity-blocked work.
 
 ### Still unavailable
 
