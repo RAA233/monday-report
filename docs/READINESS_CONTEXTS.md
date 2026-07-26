@@ -308,3 +308,64 @@ fingerprints, the requested order).
 Until then the execution verdict stays `FOUR_READINESS_CONTEXTS_NOT_ACCEPTED`. The PostgreSQL
 observer delegates to the accepted restricted-PostgreSQL foundation and, being capacity-gated, has
 **not** been exercised — that is declared in the code, not glossed.
+
+---
+
+## Adapter registry metadata and the inventory binding
+
+The two production-adapter controls (`production-database-adapter` / `ga_postgres_adapter` and
+`production-queue-adapter` / `ga_redis_adapter`) once delegated to client-data readiness checks:
+`postgres_repository` and `redis_queue`. Both are satisfiable by *disposable test infrastructure* — a
+throwaway PostgreSQL over loopback, a Redis answering `PING` — so each control could report PASS on
+evidence that says nothing about production. Both consumers were rewired to require a valid,
+exact-head production evidence artifact.
+
+Their **registry metadata was left describing the removed delegation**, and `evaluate_blockers` emits
+`resolution_condition` verbatim as `remediation`. So each control reported BLOCKED beside
+instructions that provably could not resolve it. That metadata is now corrected:
+
+- **`description`** — states that PASS requires the evidence artifact, distinguishes the *functional*
+  restricted-runtime / worker proof from the *production operations* proof this control certifies,
+  and names every non-qualifying source. The queue description also states plainly that the present
+  implementation is **not durable or recoverable**.
+- **`policy_reference`** — points at the committed contract module and the consumer function.
+- **`resolution_condition`** — names each binding the real validator enforces: full commit/tree
+  binding, clean worktree, canonical hash, production parity supported by observations, every
+  required proof domain with domain-appropriate provenance, and a clean secret scan.
+
+**Neither adapter is accepted.** The metadata says what *would* satisfy the control; no such artifact
+exists at any commit.
+
+### The inventory hash was NOT rebound — and that was determined, not assumed
+
+The natural assumption is that editing the registry changes the canonical readiness-context inventory
+and forces a rebind. It does not, and the question was settled empirically before any edit: all six
+fields were changed on a scratch copy and the canonical hash recomputed.
+
+```text
+inventory hash before metadata change = b9d78ad9…7d44
+inventory hash after  metadata change = b9d78ad9…7d44   (identical)
+```
+
+The canonical body carries the schema/implementation/registry **versions**, the two axes, and the four
+contexts — and each context's `expected_control_dispositions` is keyed by control **id** with a
+disposition value. It contains no registry prose and no registry digest. Registry *identity* enters
+the inventory through control ids only, which this correction does not touch.
+
+So the accepted hash `b9d78ad9…7d44` **stands unchanged**, no rebind record is warranted, and
+manufacturing one would have misrepresented the contract. What does change is the registry file's own
+SHA-256, which is not pinned as a literal by any tracked guard.
+
+### A metadata correction changes no disposition
+
+Verified with identical hermetic readiness inputs, before and after: all 28 dispositions unchanged,
+the blocking-control id set unchanged, and the only outputs that moved are the two targets'
+`detail` / `remediation` text. Both adapter controls remain BLOCKED even with every readiness check
+passing, and all four contexts keep their expected counts — 22/6, 24/4, 25/3, and 27 BLOCKED with the
+single conditional tenant-authorization PASS.
+
+### Still unavailable
+
+Four-context execution remains blocked on environment capacity. Exact-head tenant-authorization
+evidence v3 and both production adapter artifacts are absent or stale for this commit and **must be
+regenerated before any future execution**; regenerating them is capacity-gated and was not attempted.
