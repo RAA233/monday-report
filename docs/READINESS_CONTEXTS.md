@@ -20,10 +20,14 @@ This is the distinction the rest of the document depends on.
 | | Contract definition | Context execution |
 |---|---|---|
 | What it produces | the four contexts, as data | real readiness dispositions |
-| Status | **implemented and verified** | **not started** |
-| Verified by | `audit:readiness-context-inventory`, `audit:readiness-context-inventory-faults` | nothing yet |
-| Needs Docker | no | yes |
+| Status | **implemented and verified** | **harness implemented and verified; never run** |
+| Verified by | `audit:readiness-context-inventory`, `audit:readiness-context-inventory-faults` | `audit:readiness-contexts-faults` (decision logic, Docker-free); `audit:readiness-contexts` is the certifier and is capacity-gated |
+| Needs Docker | no | yes, for the two PostgreSQL contexts |
 | Verdict | `FOUR_READINESS_CONTEXT_CONTRACT_ACCEPTED` | `FOUR_READINESS_CONTEXTS_NOT_ACCEPTED` |
+
+"Harness implemented, never run" is the honest middle state: the machinery exists and its decision
+logic is mutation-tested, but **no context has been executed and no readiness disposition has been
+produced**. See [Executing the contexts](#executing-the-contexts-the-harness) below.
 
 Defining a context says what a configuration *is* and what its result *may not be read as*. It
 says nothing about what any control actually evaluates to — that requires running the contexts,
@@ -31,8 +35,10 @@ which has not happened. Every `expected_*` field in the inventory is a **falsifi
 contract commits to in advance**, not an observation. Execution may contradict them; that is the
 point of writing them down first.
 
-Accordingly the runner entry points (`run_context`, `run_all_contexts`) are deliberately inert.
-They validate their arguments and return a controlled result:
+Accordingly the *contract module's* own entry points (`readiness_contexts.run_context`,
+`run_all_contexts`) are deliberately inert — the contract defines contexts and must never appear to
+execute them. Real execution lives in a separate module, `scripts/readiness_contexts_runner.py`.
+These validate their arguments and return a controlled result:
 
 ```text
 certification = "unavailable"
@@ -224,3 +230,81 @@ pnpm run audit:readiness-context-inventory-faults
 ```
 
 Both are Docker-free, deterministic, and safe to run at any time.
+
+---
+
+## Executing the contexts (the harness)
+
+Defining a context and executing one are separate things, and the repository keeps them in separate
+files so they cannot be confused:
+
+| | Definition | Execution |
+|---|---|---|
+| Module | `backend/app/readiness_contexts.py` | `scripts/readiness_contexts_runner.py` |
+| Schema | `readiness-context-inventory.v1` | `readiness-context-execution.v1` |
+| Command | — | `pnpm run ga:readiness-contexts` |
+| Certification | `audit:readiness-context-inventory` | `audit:readiness-contexts` |
+| Non-vacuity | `audit:readiness-context-inventory-faults` | `audit:readiness-contexts-faults` |
+
+The runner **imports** the canonical inventory. It never restates the four contexts, the axes or the
+control ids — a structural check (`FS01`) parses the runner and fails if it assigns any of them.
+
+### Two halves, split on purpose
+
+- `evaluate_context(run_input, observations)` is **pure**: observations in, canonical result out. No
+  processes, no filesystem writes, no clock.
+- `collect_observations(run_input)` is the **only** process-launching path.
+
+That split is what makes the harness testable while execution is blocked: the fault battery drives
+the pure half with synthetic observations, and says so — `observations_are_synthetic: true`,
+`contexts_executed: false`. Those checks are classified `predicate/unit mutation`, never as an
+executed readiness context.
+
+### The runner never accepts a disposition
+
+Callers supply *observations* (`readiness_by_id`, `forge_report`, counters). Dispositions are
+computed here by the real evaluator `ga_readiness.evaluate_blockers`. Handing the runner a
+`control_dispositions` or `expected_control_dispositions` map — for instance the contract's own
+predictions — is **refused**. "Static expectations reported as executed results" is therefore
+structurally impossible rather than merely discouraged.
+
+### Two fail-closed gates the evaluator itself does not provide
+
+1. **Applicability demotion.** `evaluate_blockers` is context-*blind*: its probes read repository
+   artifacts, so one accepted artifact would produce the same PASS in all four contexts — precisely
+   the cross-context leakage the context concept exists to prevent. A PASS on a control the
+   configuration cannot evaluate is **demoted to BLOCKED** and recorded in `demoted_controls`.
+   Demotion is the fail-closed direction: it can only ever remove a claim.
+2. **Axis consistency.** A local-JSON context whose observed readiness reports an active PostgreSQL
+   repository is not a local context; accepting it would let the production database-adapter control
+   be promoted by a run that never had a database. Such an observation is refused, as is a Redis
+   queue in an inline-worker context.
+
+### Capacity gate and unavailable semantics
+
+Execution requires `free bytes >= 40 GiB` **and** `free percentage >= 15%`. The gate is read-only and
+is evaluated *before* the observer is ever called — verified positionally on the parsed source
+(`FS03`) and behaviourally by a tripwire observer that must record zero invocations (`MK02`).
+
+Below the gate the harness emits a complete controlled summary — `certification: unavailable`,
+`accepted: false`, `dispositions_produced: false`, `results: []`, `GA_BLOCKED` — and **exits
+non-zero**. `--inspect` may exit zero, but only while reporting `inspection_only: true`,
+`contexts_executed: false` and `accepted: false`. No simulated disposition is ever emitted.
+
+### Deterministic output
+
+Execution order is not load-bearing: results are always serialised in canonical inventory order, so
+canonical, reverse and seeded-random runs produce a byte-identical body and the same
+`canonical_result_hash`. The hash excludes only run metadata (measured capacity, per-run
+fingerprints, the requested order).
+
+### What still has to happen after capacity is restored
+
+1. Regenerate tenant-authorization evidence v3 at the executed commit — the accepted artifact is
+   commit-bound and is **stale** for any later head.
+2. `pnpm run ga:readiness-contexts` twice, then `pnpm run audit:readiness-contexts`.
+3. Rerun the accepted proof suites the context inputs depend on.
+
+Until then the execution verdict stays `FOUR_READINESS_CONTEXTS_NOT_ACCEPTED`. The PostgreSQL
+observer delegates to the accepted restricted-PostgreSQL foundation and, being capacity-gated, has
+**not** been exercised — that is declared in the code, not glossed.
