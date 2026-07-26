@@ -60,7 +60,7 @@ LEAK_PATTERNS = (
     # `/Users/` and a literal backslash pair, so `C:/Users/Ralba` and UNC paths slipped past.
     (r"(?i)[a-z]:[\\/]users[\\/]", "a Windows user path"),
     (r"(?i)/(?:home|users)/[a-z]", "a POSIX home path"),
-    (r"\\\\[A-Za-z0-9_.-]+\\", "a UNC path"),
+    (r"[\\]{2}[A-Za-z0-9_.-]+[\\]", "a UNC path"),
     (r"(?i)\bhost\s*=\s*\S+|\bsslmode\s*=", "a libpq keyword DSN"),
     (r"(?i)\bBearer\s+[A-Za-z0-9._-]{12,}", "a bearer token"),
     (r"(?i)\b[a-z0-9-]+\.(?:internal|local|lan)\b", "an internal hostname"),
