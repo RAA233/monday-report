@@ -395,6 +395,48 @@ def _postgres_adapter_probe() -> tuple[str, str]:
         f"disposable test infrastructure does not establish a production adapter: {shown}{more}")
 
 
+def _production_queue_adapter_reasons() -> list[str]:
+    """Fail-closed validation of the production queue-adapter evidence artifact.
+
+    Delegates to the versioned contract module. Never raises: a malformed artifact degrades the
+    control to BLOCKED rather than crashing the evaluator.
+    """
+    try:
+        from . import production_queue_adapter_evidence as _pqae
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return [f"production queue-adapter contract unavailable: {exc.__class__.__name__}"]
+    try:
+        return _pqae.load_and_validate(PRODUCTION_QUEUE_ADAPTER_EVIDENCE_PATH)
+    except Exception as exc:  # noqa: BLE001 - fail closed, never crash the evaluator
+        return [f"production queue-adapter evidence could not be evaluated: "
+                f"{exc.__class__.__name__}"]
+
+
+def _queue_adapter_probe() -> tuple[str, str]:
+    """Evidence-driven probe for the production-queue-adapter control.
+
+    This control previously delegated to the client-data readiness check ``redis_queue``, which
+    passes when the requested and active queue backend are both Redis with a URL configured -- and
+    ``detect_active_queue_backend()`` decides "active" from a successful **PING**. A disposable Docker
+    Redis answering PING therefore promoted a *production* queue-adapter control, the same defect
+    class already closed for the database adapter.
+
+    Reachability is not durability. It now requires a valid production queue-adapter artifact, and
+    nothing else can satisfy it: not ``redis_queue``, not the worker functional proof, not tenant
+    evidence v3, not the UI proof, and not the production DATABASE artifact.
+    """
+    reasons = _production_queue_adapter_reasons()
+    if not reasons:
+        return "PASS", ("Production queue-adapter evidence "
+                        f"({_PRODUCTION_QUEUE_SCHEMA}) is present, exact-head and independently "
+                        "valid across every required proof domain.")
+    shown = "; ".join(reasons[:3])
+    more = f" (+{len(reasons) - 3} more)" if len(reasons) > 3 else ""
+    return "BLOCKED", (
+        "No valid production queue-adapter evidence. A reachable queue in disposable test "
+        f"infrastructure does not establish a production queue adapter: {shown}{more}")
+
+
 def _tenant_rls_evidence_reasons() -> list[str]:
     """Fail-closed validation of the tenant-RLS-enforcement evidence artifact.
 
@@ -903,6 +945,13 @@ _PRODUCTION_ADAPTER_SCHEMA = "production-database-adapter-evidence.v1"
 PRODUCTION_DATABASE_ADAPTER_EVIDENCE_PATH = (
     ROOT / "output" / "production-database-adapter" / f"{_PRODUCTION_ADAPTER_SCHEMA}.json"
 )
+# Production QUEUE-adapter evidence: its own path, its own schema id, its own consumer. Kept separate
+# from the database artifact so neither adapter's evidence can move the other's control.
+# Patchable for hermetic guard runs.
+_PRODUCTION_QUEUE_SCHEMA = "production-queue-adapter-evidence.v1"
+PRODUCTION_QUEUE_ADAPTER_EVIDENCE_PATH = (
+    ROOT / "output" / "production-queue-adapter" / f"{_PRODUCTION_QUEUE_SCHEMA}.json"
+)
 
 
 def _correction_atomicity_probe() -> tuple[str, str]:
@@ -1221,7 +1270,7 @@ def evaluate_blockers(
         if check_id == "ga_postgres_adapter":
             disposition, detail = _postgres_adapter_probe()
         elif check_id == "ga_redis_adapter":
-            disposition, detail = _delegate(readiness_by_id, ("redis_queue",))
+            disposition, detail = _queue_adapter_probe()
         elif check_id == "ga_local_ai_runtime":
             disposition, detail = _delegate(readiness_by_id, ("local_llm_runtime",))
         elif check_id == "ga_production_configuration":
