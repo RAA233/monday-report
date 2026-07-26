@@ -1,10 +1,36 @@
 {
   "registry_version": "v1",
   "description": "Committed, policy-grounded registry of General Availability (GA) blockers for Monday Report. The GA readiness gate emits exactly one check per entry and derives blocker counts from these categories, so a known-but-unimplemented control is a declared BLOCKED entry that keeps GA red rather than an invisible gap. No waiver can resolve a blocker in this version (verified per-user identity and signature verification do not yet exist).",
-  "categories": ["software", "configuration", "infrastructure", "security_review", "data_review_evidence", "client_approval"],
-  "severities": ["blocker", "high", "medium", "low"],
-  "owner_types": ["engineering", "security", "platform", "operations", "data_review", "client_organization"],
-  "dispositions": ["PASS", "FAIL", "BLOCKED", "SKIPPED", "NOT_APPLICABLE", "REVIEW_REQUIRED"],
+  "categories": [
+    "software",
+    "configuration",
+    "infrastructure",
+    "security_review",
+    "data_review_evidence",
+    "client_approval"
+  ],
+  "severities": [
+    "blocker",
+    "high",
+    "medium",
+    "low"
+  ],
+  "owner_types": [
+    "engineering",
+    "security",
+    "platform",
+    "operations",
+    "data_review",
+    "client_organization"
+  ],
+  "dispositions": [
+    "PASS",
+    "FAIL",
+    "BLOCKED",
+    "SKIPPED",
+    "NOT_APPLICABLE",
+    "REVIEW_REQUIRED"
+  ],
   "blockers": [
     {
       "id": "per-user-identity",
@@ -293,12 +319,12 @@
       "severity": "blocker",
       "owner_type": "platform",
       "policy_source": "readiness_doc",
-      "policy_reference": "backend/app/readiness.py postgres_repository (requested==active==postgres + URL)",
+      "policy_reference": "backend/app/production_database_adapter_evidence.py (production-database-adapter-evidence.v1); consumer backend/app/ga_readiness.py::_postgres_adapter_probe",
       "check_id": "ga_postgres_adapter",
-      "resolution_condition": "The requested repository backend is postgres, the active adapter is postgres via a live probe, and a database URL is configured.",
+      "resolution_condition": "A production-database-adapter-evidence.v1 artifact validates against the contract module: full 40-character commit and tree binding to the evaluated head, a strict clean-worktree attestation re-checked at validation time, a verified canonical payload hash, production_parity=true supported by recorded observations rather than a literal, every required production proof domain accepted with domain-appropriate provenance (recovery and availability domains require an executed drill), and a clean secret scan.",
       "allow_not_applicable": false,
       "manual_review_required": false,
-      "description": "Delegates to the postgres_repository readiness check: env vars alone cannot certify readiness; a reachable Postgres must be the active adapter."
+      "description": "Requires an independently valid, exact-head production database-adapter evidence artifact (production-database-adapter-evidence.v1). The accepted restricted PostgreSQL runtime proves FUNCTIONAL behaviour and tenant isolation in disposable test infrastructure; this control certifies PRODUCTION OPERATIONS -- availability, identity provisioning, network boundary, TLS, backup, restore, capacity, monitoring and recovery -- which that proof does not establish. A postgres repository backend, a reachable or disposable PostgreSQL, the restricted runtime functional matrix, tenant-authorization evidence, the dual-backend UI certification and the test-only bootstrap migration administrator are each explicitly non-qualifying, alone or together."
     },
     {
       "id": "production-queue-adapter",
@@ -307,12 +333,12 @@
       "severity": "blocker",
       "owner_type": "platform",
       "policy_source": "readiness_doc",
-      "policy_reference": "backend/app/readiness.py redis_queue (requested==active==redis + URL)",
+      "policy_reference": "backend/app/production_queue_adapter_evidence.py (production-queue-adapter-evidence.v1); consumer backend/app/ga_readiness.py::_queue_adapter_probe",
       "check_id": "ga_redis_adapter",
-      "resolution_condition": "The requested queue backend is redis, the active worker is redis via a live probe, and a Redis URL is configured.",
+      "resolution_condition": "A production-queue-adapter-evidence.v1 artifact validates against the contract module: full 40-character commit and tree binding to the evaluated head, a strict clean-worktree attestation re-checked at validation time, a verified canonical payload hash, an explicitly declared delivery model with its loss window and idempotency compatibility both observed, production_parity=true supported by recorded observations rather than a literal, every required production queue proof domain accepted with domain-appropriate provenance (failover, recovery, retry, poison-message and duplicate-delivery domains require an executed drill), and a clean secret scan.",
       "allow_not_applicable": false,
       "manual_review_required": false,
-      "description": "Delegates to the redis_queue readiness check: a reachable Redis must be the active queue backend."
+      "description": "Requires an independently valid, exact-head production queue-adapter evidence artifact (production-queue-adapter-evidence.v1). The accepted worker and disposable-queue tests prove controlled SOFTWARE behaviour -- tenant boundaries, retry handling and fail-closed operation; this control certifies PRODUCTION QUEUE availability, durability, identity provisioning and operations, which those tests do not establish. Queue reachability (a PING), redis_queue readiness, a disposable Docker Redis, the restricted worker functional matrix, tenant-authorization evidence, the dual-backend UI certification and production DATABASE-adapter evidence are each explicitly non-qualifying, alone or together. The queue implementation in this repository is not durable or recoverable: delivery is at-most-once, enqueue is a non-atomic SADD+RPUSH, dequeue is an LPOP with no lease or acknowledgement, the resulting loss window is permanent because the dedupe-set entry blocks re-derivation, and there is no retry counter, dead-letter queue or per-tenant namespace in the queue keys."
     },
     {
       "id": "production-configuration",
