@@ -435,8 +435,24 @@ def _dispositions() -> tuple[dict[str, str], dict[str, str], str, str, bool]:
 
     _CAPTURED.clear()
 
-    def snap() -> tuple[dict[str, str], str]:
-        checks = G.evaluate_blockers({})
+    def snap(hermetic_env: bool = False) -> tuple[dict[str, str], str]:
+        """Evaluate the registry. ``hermetic_env`` additionally hides MONDAY_REPORT_* variables.
+
+        The artifact asserts that the fresh-checkout context "is reproducible from the TRACKED
+        repository alone". That was FALSE while only local FILES were hidden: an exact-head review
+        showed that exporting MONDAY_REPORT_AUDIT_HMAC_KEY/_ID/_VERSION flips
+        ga_audit_keyed_integrity from BLOCKED to PASS, so the authoritative context silently
+        depended on the operator's shell. Environment is machine-local state exactly as the
+        gitignored artifacts are, so the fresh snapshot hides both.
+        """
+        saved = {}
+        if hermetic_env:
+            for key in [k for k in os.environ if k.startswith("MONDAY_REPORT_")]:
+                saved[key] = os.environ.pop(key)
+        try:
+            checks = G.evaluate_blockers({})
+        finally:
+            os.environ.update(saved)
         _CAPTURED["reasons"] = {c["id"]: str(c.get("detail") or "") for c in checks}
         status, _ = G.decide_ga(mode="client", parity_ok=True, checks=checks,
                                 commands_skipped=False, commands_passed=True, worktree_clean=True)
@@ -453,7 +469,7 @@ def _dispositions() -> tuple[dict[str, str], dict[str, str], str, str, bool]:
                 target = stash / f"{index}-{path.name}"
                 os.replace(path, target)
                 moved.append((path, target))
-        fresh, ga_fresh = snap()
+        fresh, ga_fresh = snap(hermetic_env=True)
     finally:
         for path, target in moved:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -788,13 +804,29 @@ def build() -> dict:
         # proved this by rewording a claim to evade the phrase floor. The limitation is therefore
         # DISCLOSED in the artifact rather than papered over.
         "curated_prose_disclosure": CURATED_PROSE_DISCLOSURE,
+        # Kept consistent with local_evidence_artifact.present by construction. A review set this
+        # to false / to prose / to null / to {"ga": "GA_READY"} and every variant certified green
+        # with a BYTE-IDENTICAL canonical hash, because no check read it at all.
         "local_evidence_artifact_present": evidence_present,
         "contexts": {
-            "fresh_checkout_no_local_evidence": {"ga": ga_fresh, "tally": tally(fresh)},
+            "fresh_checkout_no_local_evidence": {
+                "ga": ga_fresh,
+                "tally": tally(fresh),
+                # The only context reproducible from the tracked repository alone -- now genuinely
+                # so, since the fresh snapshot hides MONDAY_REPORT_* as well as the local files.
+                "informational_only": False,
+                "authoritative_for_release": True,
+            },
             "verified_environment_with_evidence": {
                 "ga": ga_verified,
                 "tally": tally(verified),
                 "measured": evidence_present,
+                # Machine-local observation, NOT repository state and NOT exact-head evidence.
+                # Declared in machine-readable form: the distinction previously lived only in a
+                # prose note, so a consumer reading the structure could mistake this for the
+                # authoritative context.
+                "informational_only": True,
+                "authoritative_for_release": False,
                 "note": (VERIFIED_CONTEXT_NOTES[0] if evidence_present
                          else VERIFIED_CONTEXT_NOTES[1]),
             },

@@ -53,7 +53,9 @@ SUPERSEDED_SCHEMAS = GEN.SUPERSEDED_SCHEMA_VERSIONS
 MAX_COMMITS_BEHIND = 1
 
 #: Fields deliberately excluded from the canonical hash because they are MACHINE-LOCAL. Every one of
-#: them is recomputed below and compared (GA47c/GA51b). Reconciling such a field only against
+#: them is either recomputed, reconciled or closed to a known shape below -- NOT all three, and the
+#: comment previously overstated it: the verified dispositions are BOUNDED (GA47f), not recomputed.
+#: Reconciling such a field only against
 #: another equally forgeable field is not enough: an independent review set all 28 verified
 #: dispositions to PASS, set the tally to {"PASS": 28} to match, and the forgery still collided
 #: byte-for-byte with the honest canonical hash.
@@ -79,6 +81,22 @@ def live_payload() -> dict:
 #: reports as not-PASS may not carry any of these. An independent review edited the generator's
 #: curated block to claim an EXECUTED backup/restore drill with approved RPO/RTO beside a
 #: blocking_reason saying no such drill exists, regenerated, and both guards certified green.
+#: What this run actually validated, recorded where the artifact IS in scope and read by _emit().
+VALIDATED_IDENTITY: dict = {}
+
+#: Meaning the curated-prose disclosure MUST carry, pinned in the consumer rather than compared
+#: against the generator constant it is supposed to police (see GA04k).
+DISCLOSURE_REQUIRED_TERMS = (
+    "author-supplied", "no guard can verify", "current_disposition_fresh_checkout",
+    "blocking_reason", "govern",
+)
+
+#: Claims the disclosure may never make about itself.
+DISCLOSURE_FORBIDDEN_TERMS = (
+    "independently verified", "has been verified", "reconciled with the live evaluator",
+    "reviewed engineering position", "commentary reflects",
+)
+
 #: Scanned in ``implemented_capability`` and ``notes`` -- fields that describe what EXISTS.
 COMPLETION_CLAIMS = (
     "was executed", "were executed", "has been executed", "drill was", "signed off",
@@ -95,8 +113,8 @@ NOTHING_MISSING_CLAIMS = (
 )
 
 #: Reciprocal cross-file pin of the FAULTS battery's declared check set (see GA80).
-PINNED_FAULTS_ID_SET_HASH = "d2a0c75160e02fe8efc67002f14cccc4c9fffc6982a791b25e7e2e7e0d40efff"
-PINNED_FAULTS_CHECK_COUNT = 77
+PINNED_FAULTS_ID_SET_HASH = "58f3c24aa3111d00f4bbc50420896cc7de3aa0c607f765b290b06c7eadf96f30"
+PINNED_FAULTS_CHECK_COUNT = 82
 
 DB_CONTROL, QUEUE_CONTROL = "production-database-adapter", "production-queue-adapter"
 DB_CHECK, QUEUE_CHECK = "ga_postgres_adapter", "ga_redis_adapter"
@@ -193,6 +211,23 @@ def run() -> int:
     for c in controls:
         if isinstance(c, dict) and isinstance(c.get("id"), (str, type(None))):
             art_by_id[c.get("id")] = c
+    # Every control entry must be an object BEFORE any later check indexes into it. A review fed a
+    # str/int control, a dict `controls`, and a str `controls`, and the guard died with an
+    # AttributeError and ZERO stdout -- no JSON, no named failure. A malformed artifact is a
+    # refusal, never a crash.
+    if not isinstance(artifact.get("controls"), list) or not all(
+            isinstance(c, dict) for c in artifact.get("controls") or []):
+        rec("GA00c control-entries-well-formed", False,
+            "controls must be a LIST of OBJECTS; any other shape is refused with a structured "
+            "result rather than an uncaught exception",
+            level="structural source check",
+            extra={"controls_type": type(artifact.get("controls")).__name__,
+                   "bad_entries": sum(1 for c in (artifact.get("controls") or [])
+                                      if not isinstance(c, dict))
+                   if isinstance(artifact.get("controls"), list) else None})
+        _emit(1)
+        return 1
+
     rec("GA00c control-entries-well-formed",
         len(art_by_id) == len([c for c in controls if isinstance(c, dict)]),
         "every control entry is an object with a hashable id",
@@ -200,6 +235,8 @@ def run() -> int:
     live = live_dispositions()
 
     # ---------------------------------------------------------------- schema / shape
+    VALIDATED_IDENTITY.update({"schema_version": artifact.get("schema_version"),
+                               "path": ARTIFACT_PATH.name})
     rec("GA00 artifact-readable", True, "the tracked assessment parses as JSON",
         level="structural source check")
     # The CANONICAL path constant, not ARTIFACT_PATH: the fault battery redirects the latter to a
@@ -210,6 +247,16 @@ def run() -> int:
         "a v2 schema is the ambiguity this increment removes",
         level="structural source check",
         extra={"canonical_filename": GEN.OUTPUT_PATH.name, "schema": SUPPORTED_SCHEMA})
+    # The path is pinned HERE as well. GA00d is defended by a guard-side policy literal; GA00e was
+    # not, so aiming the generator's LEGACY constant at a decoy that can never exist let a real
+    # docs/GA_GAP_ASSESSMENT.v1.json sit beside the v2 one with both guards green -- and MV02/MV04
+    # simultaneously reporting that the disabled check was discriminating.
+    rec("GA00e2 legacy-path-is-the-v1-artifact",
+        LEGACY_ARTIFACT_PATH.name == "GA_GAP_ASSESSMENT.v1.json"
+        and LEGACY_ARTIFACT_PATH.parent == GEN.OUTPUT_PATH.parent,
+        "the legacy path the absence check consults is the real v1 artifact beside the current one, "
+        "not an author-chosen decoy",
+        extra={"legacy": LEGACY_ARTIFACT_PATH.name, "canonical": GEN.OUTPUT_PATH.name})
     rec("GA00e legacy-artifact-absent", not LEGACY_ARTIFACT_PATH.exists(),
         "the legacy v1 artifact does not exist: two files either of which could be read as current "
         "is not an acceptable state",
@@ -512,6 +559,24 @@ def run() -> int:
 
     local_block = artifact.get("local_evidence_artifact")
     local_block = local_block if isinstance(local_block, dict) else {}
+    present_flag = artifact.get("local_evidence_artifact_present")
+    rec("GA47g machine-local-presence-agrees",
+        isinstance(present_flag, bool) and present_flag == local_block.get("present"),
+        "the top-level presence flag is a BOOLEAN and equals the block's own present field. It sat "
+        "outside the canonical hash and was read by no check at all, so setting it to false, to "
+        "prose, to null or to an object all certified green with a byte-identical hash",
+        extra={"top_level": present_flag, "block": local_block.get("present")})
+    VERIFIED_CTX_KEYS = {"ga", "tally", "measured", "note",
+                         "informational_only", "authoritative_for_release"}
+    rec("GA47h verified-context-closed",
+        set(verified_ctx) == VERIFIED_CTX_KEYS
+        and isinstance(verified_ctx.get("measured"), bool)
+        and verified_ctx.get("measured") == present_flag,
+        "the machine-local context carries exactly its known keys and its measured flag is a "
+        "boolean consistent with evidence presence. The whole subtree was popped from the deep "
+        "comparison, so arbitrary keys and values could be injected into it undetected",
+        extra={"unexpected": sorted(set(verified_ctx) - VERIFIED_CTX_KEYS),
+               "measured": verified_ctx.get("measured")})
     rec("GA47d machine-local-prose-is-a-closed-set",
         set(local_block) == set(GEN.LOCAL_EVIDENCE_KEYS)
         and local_block.get("note") in GEN.LOCAL_EVIDENCE_NOTES
@@ -536,7 +601,25 @@ def run() -> int:
                 or str(c.get("estimated_effort") or "").strip().upper() in {"NONE", ""}:
             prose_offenders.append({"id": c.get("id"), "claims": hit[:3],
                                     "effort": c.get("estimated_effort")})
-    rec("GA04k curated-prose-is-disclosed",
+    # Comparing the artifact against GEN.CURATED_PROSE_DISCLOSURE is invariant under any generator
+    # edit, because the constant and the prose it describes live in the SAME file. A review emptied
+    # the disclosure, then INVERTED it to claim the commentary had been "independently verified",
+    # regenerated, and both guards stayed green. The required meaning is therefore pinned HERE, in
+    # the consumer, as content that must be present and content that must never appear.
+    disclosure = str(artifact.get("curated_prose_disclosure") or "")
+    low = disclosure.lower()
+    missing_terms = [t for t in DISCLOSURE_REQUIRED_TERMS if t not in low]
+    contra_terms = [t for t in DISCLOSURE_FORBIDDEN_TERMS if t in low]
+    rec("GA04k curated-prose-disclosure-says-what-it-must",
+        len(disclosure) >= 200 and not missing_terms and not contra_terms
+        and artifact.get("curated_prose_disclosure") == GEN.CURATED_PROSE_DISCLOSURE,
+        "the disclosure is non-trivial, states that the commentary is author-supplied and "
+        "unverified, names the derived fields that govern, and asserts NOTHING about the "
+        "commentary having been verified. Equality with the generator constant alone proved "
+        "nothing: both sides move together in one edit",
+        extra={"length": len(disclosure), "missing_required": missing_terms,
+               "forbidden_present": contra_terms})
+    rec("GA04k2 curated-prose-disclosure-matches-generator",
         artifact.get("curated_prose_disclosure") == GEN.CURATED_PROSE_DISCLOSURE,
         "the artifact states verbatim that its capability/effort/notes prose is author-supplied, "
         "unverifiable, and subordinate to the derived disposition and blocking_reason. An author "
@@ -693,6 +776,10 @@ def run() -> int:
     for key in sorted(set(art_view) | set(live_view)):
         if art_view.get(key) != live_view.get(key):
             if key == "controls":
+                a_order = [str((c or {}).get("check_id")) for c in art_view.get("controls") or []]
+                l_order = [str((c or {}).get("check_id")) for c in live_view.get("controls") or []]
+                if a_order != l_order:
+                    deep_diff.append("controls[].order")
                 a_by = {str((c or {}).get("check_id")): c for c in art_view.get("controls") or []}
                 l_by = {str((c or {}).get("check_id")): c for c in live_view.get("controls") or []}
                 for cid in sorted(set(a_by) | set(l_by)):
@@ -701,7 +788,7 @@ def run() -> int:
                             deep_diff.append(f"controls[{cid}].{f}")
             else:
                 deep_diff.append(key)
-    rec("GA52 payload-deep-equals-regeneration",
+    rec("GA56 payload-deep-equals-regeneration",
         not deep_diff,
         "every code-derived field equals a complete regeneration of the payload, compared wholesale "
         "rather than field by field. Curated prose, legend values, nested context and binding keys, "
@@ -720,8 +807,28 @@ def run() -> int:
         ver_d = c.get("current_disposition_verified_environment")
         if ver_d == fresh_d:
             continue
-        if c.get("probe_type") != GEN.PROBE_EVIDENCE or not local_block.get("present"):
+        # Bound on the REAL evidence-driven set, not the curated probe_type. The curated block
+        # marks 4 controls evidence_driven_probe while GEN._EVIDENCE_DRIVEN holds 10, so an
+        # HONESTLY regenerated artifact carrying persistence or tenant-authorization evidence was
+        # refused by its own guard -- pushing the author toward hand-editing the very half that is
+        # least policed. The presence gate is dropped for the same reason: it reflected only the
+        # migration artifact, while seven gitignored artifacts drive this half.
+        if str(c.get("check_id")) not in GEN._EVIDENCE_DRIVEN:
             unbounded.append(f"{c.get('id')}:{fresh_d}->{ver_d}")
+    rec("GA45c contexts-declare-their-authority",
+        fresh_ctx.get("authoritative_for_release") is True
+        and fresh_ctx.get("informational_only") is False
+        and verified_ctx.get("authoritative_for_release") is False
+        and verified_ctx.get("informational_only") is True
+        and artifact.get("authoritative_context") == "fresh_checkout_no_local_evidence",
+        "both contexts classify themselves in MACHINE-READABLE form: the fresh checkout is "
+        "authoritative for release, the machine-local verified environment is informational only. "
+        "The distinction previously existed only in a prose note",
+        extra={"fresh": {k: fresh_ctx.get(k) for k in
+                         ("informational_only", "authoritative_for_release")},
+               "verified": {k: verified_ctx.get(k) for k in
+                            ("informational_only", "authoritative_for_release")}})
+
     rec("GA47f verified-half-is-bounded",
         not unbounded,
         "a verified-environment disposition may differ from the fresh one ONLY for an "
@@ -756,8 +863,29 @@ def run() -> int:
         "behind. A tracked artifact cannot name the commit that contains it, so the source-binding "
         "checks below carry the drift detection",
         extra={"bound_commit": str(bound)[:12], "head": head[:12], "commits_behind": behind})
-    rec("GA50b worktree-clean-attested", artifact.get("worktree_clean") is True,
-        "the assessment attests a clean TRACKED worktree at generation")
+    # The attestation is self-asserted, so it is RE-CHECKED here, matching the pattern this
+    # repository already uses in tenant_authorization_evidence.py,
+    # production_database_adapter_evidence.py and production_queue_adapter_evidence.py -- two of
+    # which this artifact itself hashes, and whose standard the artifact demands of the adapters
+    # ("a strict clean-worktree attestation re-checked at validation time") while not meeting it.
+    #
+    # Why re-checking is not optional: only SIX files are in source_file_hashes, but the
+    # dispositions come from evaluate_blockers, which imports store, main, permissions, audit_keys,
+    # migrations, identity and schemas -- all UNBOUND. GA56 cannot catch an edit to those because
+    # it regenerates from the same dirty tree. An exact-head review dirtied permissions.py,
+    # regenerated (honestly getting worktree_clean=false), flipped the one boolean, rehashed, and
+    # both guards certified a set of dispositions that NO clean checkout of this commit reproduces.
+    tracked_dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                                   capture_output=True, text=True, cwd=ROOT)
+    dirty_paths = [ln[3:] for ln in tracked_dirty.stdout.splitlines() if ln.strip()]
+    rec("GA50b worktree-clean-attested-and-rechecked",
+        artifact.get("worktree_clean") is True
+        and tracked_dirty.returncode == 0 and not dirty_paths,
+        "the assessment attests a clean TRACKED worktree at generation AND the tracked tree is "
+        "independently re-measured as clean now. The attestation alone is a self-report: flipping "
+        "it and rehashing certified a payload computed from uncommitted code",
+        extra={"attested": artifact.get("worktree_clean"),
+               "dirty_now": dirty_paths[:5], "dirty_count": len(dirty_paths)})
     bindings = artifact.get("source_bindings")
     bindings = bindings if isinstance(bindings, dict) else {}
     rec("GA51 registry-sha-current",
@@ -868,6 +996,10 @@ def _emit(rc: int) -> int:
     print(json.dumps({
         "guard": "audit:ga-gap-assessment",
         "claim_scope": "ga-gap-assessment-drift-only",
+        # Which schema and file this run actually validated: the envelope named neither, so a
+        # reader could not tell a v1 run from a v2 run from the output alone.
+        "assessment_schema_version": VALIDATED_IDENTITY.get("schema_version"),
+        "assessment_path": VALIDATED_IDENTITY.get("path"),
         "summary": {"passed": passed, "failed": failed, "skipped": 0,
                     "certification": "passed" if failed == 0 else "not_passed"},
         "checks": checks,

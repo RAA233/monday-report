@@ -89,17 +89,18 @@ EXPECTED_CHECK_IDS = [
     "MX15 source-binding-key-injected", "MX16 control-key-injected",
     "MX17 legend-value-rewritten", "MX18 curated-prose-rewritten",
     "MX19 authoritative-note-forged", "MX20 evidence-status-claimed",
-    "MX21 verified-flip-below-threshold", "MX22 prose-disclosure-removed", "MX11 blocking-reason-rewritten",
+    "MX21 verified-flip-below-threshold", "MX23 presence-flag-forged",
+    "MX24 verified-context-key-injected", "MX25 controls-reordered", "MX26 context-authority-flipped", "MX22 prose-disclosure-removed", "MX11 blocking-reason-rewritten",
     "MX12 extra-context-injected", "MX13 static-contract-invented",
     # (there is deliberately no MX09: ga_ready=true is already MR04, and FZ03 rejected the duplicate)
     "FZ00 completeness", "FZ01 battery-size-pinned",
     "FZ03 mutations-are-distinct-inputs", "FZ04 drift-guard-check-set-pinned",
-    "FZ05 inventory-authority-is-the-registry",
+    "FZ05 inventory-authority-is-the-registry", "FZ06 mutations-trip-the-gate-they-protect",
 ]
-EXPECTED_TOTAL_CHECKS = 77
-EXPECTED_MUTATION_COUNT = 70
-PINNED_DRIFT_ID_SET_HASH = "b073ee8b0082adec8fdf95b9780a954a6c81f8b39754f1dda7493f3b38d257ff"
-PINNED_DRIFT_CHECK_COUNT = 76
+EXPECTED_TOTAL_CHECKS = 82
+EXPECTED_MUTATION_COUNT = 74
+PINNED_DRIFT_ID_SET_HASH = "c1d23b6667dd4e7cce8e522a0f58ed8dfba014ecbfc6180ab55dec0d362da906"
+PINNED_DRIFT_CHECK_COUNT = 81
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
 #: editable alongside the very list it protects, so it proves nothing against intent. Completeness is
 #: carried by FZ00 (emitted == declared), FZ01 (size), FZ03 (distinct mutation inputs) and FZ04
@@ -107,6 +108,52 @@ PINNED_DRIFT_CHECK_COUNT = 76
 #: real registry (FZ05).
 
 MUTATION_FINGERPRINTS: dict[str, str] = {}
+
+#: What each mutation actually TRIPPED, so coverage can be reconciled (see FZ06).
+MUTATION_TRIPPED: dict[str, list] = {}
+
+#: The drift check every listed mutation exists to protect. Nothing previously bound a mutation to
+#: a gate: FZ03 proves mutations are distinct INPUTS, FZ04/GA80 hash only id SETS, FZ00/FZ01 only
+#: count. An exact-head review neutered GA47f (1 edit) and then re-bodied MX21 to attack a
+#: different field (1 more edit, no pin changes) -- both guards stayed fully green while GA47f had
+#: ZERO coverage. A mutation that no longer trips its own gate is now a failure.
+EXPECTED_TRIP = {
+    "MX01 verdict-subject-injected": "GA24b",
+    "MX02 legend-class-invented": "GA04h",
+    "MX03 verified-dispositions-forged": "GA47c",
+    "MX04 local-evidence-note-forged": "GA47d",
+    "MX05 unknown-top-level-key": "GA51b",
+    "MX06 prose-claims-executed-drill": "GA04i",
+    "MX07 prose-effort-none": "GA04i",
+    "MX08 tree-binding-forged": "GA50h",
+    "MX10 source-hash-crlf-bound": "GA50g",
+    "MX11 blocking-reason-rewritten": "GA47e",
+    "MX12 extra-context-injected": "GA45b",
+    "MX13 static-contract-invented": "GA04j",
+    "MX14 nested-context-key-injected": "GA56",
+    "MX15 source-binding-key-injected": "GA56",
+    "MX16 control-key-injected": "GA56",
+    "MX17 legend-value-rewritten": "GA56",
+    "MX18 curated-prose-rewritten": "GA56",
+    "MX19 authoritative-note-forged": "GA56",
+    "MX20 evidence-status-claimed": "GA56",
+    "MX21 verified-flip-below-threshold": "GA47f",
+    "MX22 prose-disclosure-removed": "GA04k",
+    "MX26 context-authority-flipped": "GA45c",
+    "MX23 presence-flag-forged": "GA47g",
+    "MX24 verified-context-key-injected": "GA47h",
+    "MX25 controls-reordered": "GA56",
+    "MV02 legacy-v1-file-present": "GA00e",
+    "MV03 generator-path-reverted-to-v1": "GA00d",
+    "MV04 legacy-constant-collapsed-onto-current": "GA00e",
+    "MR02 client-data-ready-true": "GA43a",
+    "MR03 release-candidate-ready-true": "GA43b",
+    "MR04 ga-ready-true": "GA43c",
+    "MB05b worktree-clean-false": "GA50b",
+    "MB06 canonical-hash-tampered": "GA54",
+    "MB07 superseded-schema": "GA02",
+    "MB08 classified-as-evidence": "GA55",
+}
 
 #: Whether the FB00 anchor held; gates the reported coverage number.
 BASELINE_OK: list = []
@@ -172,6 +219,7 @@ def refuses(cid, mutate, desc, *, rehash_after=True, level="artifact mutation"):
     # they raised FileNotFoundError before the guard ever ran and were scored as passes. A refusal
     # must be a named check deciding against the artifact.
     crashed = [f for f in failing if str(f).startswith("<exception")]
+    MUTATION_TRIPPED[cid] = list(failing)
     rec(cid, real_refusal(rc, failing), desc, level=level,
         extra={"guard_exit": rc, "failing_checks": failing[:4], "crashed": crashed,
                "mutation_fingerprint": MUTATION_FINGERPRINTS[cid]})
@@ -361,12 +409,15 @@ def run() -> int:
             shutil.rmtree(tmp, ignore_errors=True)
 
     rc_legacy, failing_legacy = _with_legacy_present()
+    MUTATION_TRIPPED["MV02 legacy-v1-file-present"] = list(failing_legacy)
     rec("MV02 legacy-v1-file-present", real_refusal(rc_legacy, failing_legacy),
         "a legacy v1 artifact existing alongside the current v2 one is refused: two files either of "
         "which could be read as current is not an acceptable state",
         level="structural source check", extra={"failing": failing_legacy[:3]})
+    # Fingerprint the ACTUAL redirected path, not a hand-written label: a constant asserts
+    # distinctness of the name rather than of the input.
     MUTATION_FINGERPRINTS["MV02 legacy-v1-file-present"] = hashlib.sha256(
-        b"legacy-present-redirected").hexdigest()[:16]
+        f"legacy-present:{GEN.LEGACY_ARTIFACT_PATH.name}:{{}}".encode("utf-8")).hexdigest()[:16]
 
     def _with_v1_path(redirect_generator, cid, desc):
         """Point the canonical path at a v1-named file and require refusal.
@@ -394,6 +445,7 @@ def run() -> int:
             GEN.OUTPUT_PATH, GG.ARTIFACT_PATH = saved_gen, saved_gg
             GG.checks.clear()
             shutil.rmtree(tmp, ignore_errors=True)
+        MUTATION_TRIPPED[cid] = list(failing)
         rec(cid, real_refusal(rc, failing),
             desc, level="structural source check", extra={"failing": failing[:3]})
         MUTATION_FINGERPRINTS[cid] = hashlib.sha256(
@@ -420,13 +472,14 @@ def run() -> int:
             GEN.LEGACY_ARTIFACT_PATH, GG.LEGACY_ARTIFACT_PATH = saved_gen, saved_gg
 
     rc_collapse, failing_collapse = _with_collapsed_legacy()
+    MUTATION_TRIPPED["MV04 legacy-constant-collapsed-onto-current"] = list(failing_collapse)
     rec("MV04 legacy-constant-collapsed-onto-current",
         real_refusal(rc_collapse, failing_collapse),
         "collapsing the LEGACY path constant onto the current artifact's filename is refused: the "
         "legacy-absence check cannot be neutered by aiming it at a file that must exist",
         level="structural source check", extra={"failing": failing_collapse[:3]})
     MUTATION_FINGERPRINTS["MV04 legacy-constant-collapsed-onto-current"] = hashlib.sha256(
-        b"legacy-constant-collapsed").hexdigest()[:16]
+        f"legacy-collapsed:{GEN.OUTPUT_PATH.name}".encode("utf-8")).hexdigest()[:16]
 
     # ---------------------------------------------------------------- registry-derived inventory
     def _with_registry(mutate_registry, cid, desc):
@@ -458,6 +511,7 @@ def run() -> int:
             GA_MOD.REGISTRY_PATH = saved_ga
             shutil.rmtree(tmp, ignore_errors=True)
         MUTATION_FINGERPRINTS[cid] = fingerprint
+        MUTATION_TRIPPED[cid] = list(failing)
         rec(cid, real_refusal(rc, failing), desc, level="registry mutation",
             extra={"failing": failing[:3], "mutation_fingerprint": fingerprint})
 
@@ -622,6 +676,27 @@ def run() -> int:
             lambda a: a.pop("curated_prose_disclosure"),
             "removing the disclosure that the curated prose is author-supplied and unverifiable is "
             "refused: the disclosure is the only honest control over content no guard can check")
+    refuses("MX26 context-authority-flipped",
+            lambda a: (a["contexts"]["verified_environment_with_evidence"].__setitem__(
+                "authoritative_for_release", True),
+                a["contexts"]["verified_environment_with_evidence"].__setitem__(
+                    "informational_only", False)),
+            "promoting the machine-local context to authoritative is refused: the classification is "
+            "machine-readable precisely so it cannot be quietly inverted")
+    refuses("MX23 presence-flag-forged",
+            lambda a: a.__setitem__("local_evidence_artifact_present",
+                                    {"ga": "GA_READY", "note": "adapters accepted"}),
+            "an arbitrary value in the top-level presence flag is refused; it was read by NO check, "
+            "so false / prose / null / an object all certified green with an identical hash")
+    refuses("MX24 verified-context-key-injected",
+            lambda a: a["contexts"]["verified_environment_with_evidence"].__setitem__(
+                "executive_summary", "Both production adapters were exercised and accepted."),
+            "an injected key inside the machine-local context is refused; the whole subtree was "
+            "popped from the deep comparison and accepted anything")
+    refuses("MX25 controls-reordered",
+            lambda a: a.__setitem__("controls", list(reversed(a["controls"]))),
+            "a reordered controls array is refused: the generator emits them sorted by check_id, so "
+            "a different order is not a regeneration even though every entry matches")
     refuses("MX11 blocking-reason-rewritten",
             lambda a: [c.__setitem__("blocking_reason", "Resolved: verified in production.")
                        for c in a["controls"]],
@@ -739,6 +814,21 @@ def run() -> int:
             if name == "PINNED_ID_SET_HASH":
                 pin_names.add(name)
     no_pin_authority = not pin_names
+    missing_trip = []
+    for mid, expected in sorted(EXPECTED_TRIP.items()):
+        tripped = MUTATION_TRIPPED.get(mid)
+        if tripped is None:
+            missing_trip.append(f"{mid}:NOT-RUN")
+        elif not any(expected in str(t) for t in tripped):
+            missing_trip.append(f"{mid}:expected {expected}, tripped {tripped[:2]}")
+    rec("FZ06 mutations-trip-the-gate-they-protect",
+        not missing_trip,
+        "every mutation with a declared target trips THAT drift check, not merely some check. "
+        "Without this a gate could be neutered and its mutation re-bodied to attack a different "
+        "field, leaving the gate with zero coverage and every completeness counter green",
+        level="structural source check",
+        extra={"declared": len(EXPECTED_TRIP), "broken": missing_trip[:5]})
+
     rec("FZ05 inventory-authority-is-the-registry",
         calls_registry_inventory and gen_reads_registry and not literal_lists and no_pin_authority,
         "the drift guard loads its expected inventory by calling the generator's registry_inventory() "
