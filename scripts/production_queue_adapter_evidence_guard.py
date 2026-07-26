@@ -67,7 +67,7 @@ EXPECTED_CHECK_IDS = [
     "MI01 runtime-administrative-identity", "MI02 runtime-default-user",
     "MI03 runtime-unauthenticated", "MI04 admin-not-separated",
     "MI05 tenant-namespace-unbound", "MI06 payload-tenant-override-trusted",
-    "MI07 local-fallback-permitted",
+    "MI07 local-fallback-permitted", "MI08 admin-identity-unauthenticated",
     # delivery semantics
     "MV01 delivery-model-missing", "MV02 exactly-once-claimed",
     "MV03 retry-limit-absent", "MV04 retry-limit-non-positive",
@@ -75,6 +75,9 @@ EXPECTED_CHECK_IDS = [
     "MV07 dead-letter-required-but-absent",
     "MV08 at-least-once-without-idempotency-observation",
     "MV09 at-most-once-without-loss-window", "MV10 conditional-domain-without-model",
+    "MV11 exactly-once-not-claimed-escapes-implications", "MV12 retry-limit-bool",
+    "MV13 retry-limit-unbounded", "MV14 duplicate-behavior-falsy",
+    "MV15 dead-letter-self-switched",
     # proof domains
     "MD01 missing-proof-domain", "MD02 bare-literal-domain",
     "MD03 non-proving-observation-class", "MD04 queue-ping-as-proof",
@@ -85,12 +88,14 @@ EXPECTED_CHECK_IDS = [
     "MD13 capacity-by-attestation", "MD14 stale-observation",
     "MD15 future-dated-observation", "MD16 domain-not-pass",
     "MD17 fingerprint-not-sha256", "MD18 unknown-proof-domain",
+    "MD19 observable-domain-by-attestation", "MD20 latency-without-load-result",
     # disclosure / parity / privacy
     "MP01 disclosure-missing", "MP02 worker-disclosure-altered",
     "MP03 static-scope-disclosure-altered", "MP04 non-qualifying-list-incomplete",
     "MP05 non-qualifying-source-promoted", "MP06 secret-scan-not-clean",
     "MP07 production-parity-false", "MP08 raw-connection-string-leaked",
     "MP09 raw-queue-key-leaked", "MP10 raw-provider-host-leaked",
+    "MP11 unknown-top-level-key",
     # robustness / isolation
     "MO01 malformed-never-crashes", "MO02 not-an-object", "MO03 unreadable-artifact",
     "MO04 absent-artifact", "MO05 canonical-hash-deterministic",
@@ -98,14 +103,15 @@ EXPECTED_CHECK_IDS = [
     "MO08 runner-refuses-without-target",
     # regression pins (the lesson from the database increment)
     "MH01 readiness-pass-without-artifact", "MH02 delegation-reintroduced-is-caught",
-    "MH03 database-consumer-unchanged",
+    "MH03 database-consumer-unchanged", "MH04 pass-is-necessarily-artifact-derived",
+    "MH05 hostile-environment-and-sibling-evidence",
     # structural
     "FS01 consumer-requires-artifact", "FS02 consumer-no-longer-delegates",
     "FS03 guard-drives-real-validator", "FS04 contract-touches-no-queue",
     "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 94
-EXPECTED_MUTATION_COUNT = 78
+EXPECTED_TOTAL_CHECKS = 105
+EXPECTED_MUTATION_COUNT = 89
 
 
 def rec(cid, ok, desc, level="predicate/unit mutation", extra=None):
@@ -177,7 +183,7 @@ def build_valid_artifact() -> dict:
             "dead_letter_required": True,
             "dead_letter_disposition": "quarantined to a dead-letter stream after the retry limit",
             "idempotency_contract_compatibility_observed": True,
-            "loss_window_disclosed": False,
+            "loss_window_disclosed": True,
         },
         "non_qualifying_evidence_disclosure": {
             "worker_test_disclosure": Q.WORKER_TEST_DISCLOSURE,
@@ -320,15 +326,18 @@ def run() -> int:
         probe_with({"schema_version": "dual-backend-ui-certification.v1", "certification": "passed",
                     "local_backend_certified": True,
                     "restricted_postgres_backend_certified": True}) == "BLOCKED",
-        "a passing dual-backend UI certification cannot satisfy the queue-adapter control "
-        "(stub payload, so a weaker form of the test than FA05)",
+        "a payload bearing the dual-backend UI schema id cannot satisfy the queue-adapter control. "
+        "SCOPE, verified by gutting the validator: this is a schema-IDENTITY test and would still "
+        "pass with every domain rule deleted. FA05 and FA08, which place VALID sibling artifacts at "
+        "their own real paths, are the discriminating cross-evidence tests",
         level="evaluator integration")
     rec("FA07 worker-evidence-alone-blocks",
         probe_with({"schema_version": "restricted-postgres-runtime-worker-import.v1",
                     "certification": "passed", "passed": 29, "failed": 0,
                     "normal_worker_process_failures": 0}) == "BLOCKED",
-        "a passing restricted worker/import functional matrix cannot satisfy the queue-adapter "
-        "control -- worker behaviour in test infrastructure is not queue production evidence",
+        "a payload bearing the worker/import schema id cannot satisfy the queue-adapter control. "
+        "SCOPE: like FA06 this is a schema-identity test, not a discriminating one -- no valid "
+        "worker-evidence builder exists to place at a real path. FA05/FA08 carry that weight",
         level="evaluator integration")
     rec("FA08 database-artifact-alone-blocks",
         dispatch_with(BASE_READINESS, None,
@@ -605,6 +614,58 @@ def run() -> int:
         ok, reasons = rejects(mutate)
         rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
 
+    # ------------------------------------------------------------------ delivery (review round 2)
+    def no_disclosures(p):
+        p["delivery"]["model"] = "exactly-once-not-claimed"
+        p["delivery"].pop("loss_window_disclosed", None)
+        p["delivery"].pop("idempotency_contract_compatibility_observed", None)
+        p["proof_domains"].pop("idempotency_interaction", None)
+
+    ok, reasons = rejects(no_disclosures)
+    rec("MV11 exactly-once-not-claimed-escapes-implications", ok,
+        "'exactly-once-not-claimed' cannot escape BOTH delivery implications. Keying them on the "
+        "model let a third value satisfy neither, voiding the contract's two primary delivery rules",
+        extra={"first_reason": reasons[0] if reasons else None})
+    for cid, mutate, desc in (
+        ("MV12 retry-limit-bool", lambda p: p["delivery"].__setitem__("retry_limit", True),
+         "retry_limit=True is rejected: isinstance(True, int) is True, so a bool would otherwise "
+         "pass as 'a positive integer'"),
+        ("MV13 retry-limit-unbounded",
+         lambda p: p["delivery"].__setitem__("retry_limit", 10 ** 12),
+         "an effectively unbounded retry budget is rejected: it is not a retry policy"),
+        ("MV14 duplicate-behavior-falsy",
+         lambda p: p["delivery"].__setitem__("duplicate_delivery_behavior", "   "),
+         "a whitespace-only / falsy / case-variant duplicate-delivery declaration is rejected"),
+        ("MV15 dead-letter-self-switched",
+         lambda p: (p["delivery"].__setitem__("dead_letter_required", False),
+                    p["delivery"].__setitem__("dead_letter_disposition", None)),
+         "an artifact cannot switch off its own dead-letter requirement; the disposition is required "
+         "unconditionally and its absence fails CLOSED"),
+        ("MI08 admin-identity-unauthenticated",
+         lambda p: p["identities"].__setitem__("administrative_identity_classification",
+                                               "unauthenticated"),
+         "an unauthenticated ADMINISTRATIVE identity is rejected: exempting that role from the "
+         "rejection list left a hole that separating it from the runtime identity does not mitigate"),
+        ("MD19 observable-domain-by-attestation",
+         lambda p: p["proof_domains"].__setitem__(
+             "credential_rotation", domain("rotation",
+                                           observation_class="signed_operator_attestation")),
+         "a directly observable domain (credential rotation) claimed by attestation is rejected -- "
+         "ten domains were unmapped in the first cut and certified on an attestation alone"),
+        ("MD20 latency-without-load-result",
+         lambda p: p["proof_domains"].__setitem__(
+             "latency_objectives", domain("latency",
+                                          observation_class="live_target_observation")),
+         "a latency OBJECTIVE claimed from an idle live observation is rejected: it needs a load "
+         "result"),
+        ("MP11 unknown-top-level-key",
+         lambda p: p.__setitem__("queue_adapter_accepted", True),
+         "an unknown top-level key is rejected, so an artifact cannot smuggle in an "
+         "authoritative-looking field"),
+    ):
+        ok, reasons = rejects(mutate)
+        rec(cid, ok, desc, extra={"first_reason": reasons[0] if reasons else None})
+
     # ------------------------------------------------------------------ robustness
     hostile = [None, 7, "s", [], {}, {"schema_version": Q.SCHEMA_VERSION},
                {"proof_domains": "x"}, {"target": 1}, {"identities": []}, {"delivery": "no"}]
@@ -673,6 +734,64 @@ def run() -> int:
         "no _delegate call in the consumer passes 'redis_queue': reintroducing the delegation is "
         "caught structurally as well as behaviourally (MH01)",
         level="structural source check")
+    # An independent review promoted the control two ways this battery was blind to: an env-var
+    # override and a fallback on an unrelated evidence path. Both left it 94/78 green, because every
+    # check only ever pinned the three ENUMERATED alternatives. These two pin the property instead.
+    probe_fn = next((n for n in consumer_ast.body
+                     if isinstance(n, ast.FunctionDef) and n.name == "_queue_adapter_probe"), None)
+    pass_returns = []
+    if probe_fn is not None:
+        for node in ast.walk(probe_fn):
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant) \
+                    and node.value.value == "PASS":
+                pass_returns.append(node)
+            elif isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple) \
+                    and node.value.elts and isinstance(node.value.elts[0], ast.Constant) \
+                    and node.value.elts[0].value == "PASS":
+                pass_returns.append(node)
+    guarded_by_reasons = False
+    if len(pass_returns) == 1 and probe_fn is not None:
+        for node in ast.walk(probe_fn):
+            if isinstance(node, ast.If) and any(pass_returns[0] is sub for sub in ast.walk(node)):
+                test = node.test
+                # the sole PASS must sit under `if not reasons:`
+                if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not) \
+                        and isinstance(test.operand, ast.Name) and test.operand.id == "reasons":
+                    guarded_by_reasons = True
+    rec("MH04 pass-is-necessarily-artifact-derived",
+        len(pass_returns) == 1 and guarded_by_reasons,
+        "the consumer has EXACTLY ONE path that returns PASS and it is reachable only from "
+        "`not reasons` -- so a PASS is necessarily artifact-derived. Any additional promotion route "
+        "(an env-var override, a fallback on an unrelated evidence path) fails this check",
+        level="structural source check",
+        extra={"pass_returns": len(pass_returns), "guarded_by_not_reasons": guarded_by_reasons})
+
+    import os as _os
+    hostile_env = {k: "1" for k in (
+        "MONDAY_REPORT_QUEUE_ADAPTER_CERTIFIED", "MONDAY_REPORT_PRODUCTION_QUEUE_READY",
+        "MONDAY_REPORT_QUEUE_BACKEND", "MONDAY_REPORT_REDIS_URL", "REDIS_URL",
+        "MONDAY_REPORT_PRODUCTION_PARITY")}
+    saved_env = {k: _os.environ.get(k) for k in hostile_env}
+    try:
+        _os.environ.update(hostile_env)
+        sibling = dispatch_with(
+            ALL_PASS_READINESS, None,
+            TENANT_AUTHORIZATION_EVIDENCE_PATH=TAEG.build_valid_v3(),
+            TENANT_RLS_EVIDENCE_PATH=TAEG.build_valid_v2_rls(),
+            PRODUCTION_DATABASE_ADAPTER_EVIDENCE_PATH=PDAEG.build_valid_artifact(),
+        ).get(QUEUE_CONTROL)
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
+    rec("MH05 hostile-environment-and-sibling-evidence", sibling == "BLOCKED",
+        "NEGATIVE CONTROL: with every readiness check passing, a hostile environment asserting queue "
+        "certification, and VALID tenant-v3 + RLS + production-database artifacts all present at "
+        "their real paths, the queue control is still BLOCKED -- nothing but this artifact moves it",
+        level="evaluator integration", extra={"disposition": sibling})
+
     rec("MH03 database-consumer-unchanged",
         dispatch_with(ALL_PASS_READINESS, valid).get(DB_CONTROL) == "BLOCKED",
         "a valid QUEUE artifact does not move the DATABASE-adapter control: the two consumers stay "
@@ -680,8 +799,6 @@ def run() -> int:
         level="evaluator integration")
 
     # ------------------------------------------------------------------ structural
-    probe_fn = next((n for n in consumer_ast.body
-                     if isinstance(n, ast.FunctionDef) and n.name == "_queue_adapter_probe"), None)
     rec("FS01 consumer-requires-artifact",
         probe_fn is not None and any(
             isinstance(n, ast.Call) and isinstance(n.func, ast.Name)

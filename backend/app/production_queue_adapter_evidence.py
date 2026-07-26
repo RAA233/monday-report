@@ -12,20 +12,36 @@ Read ``backend/app/queue_backend.py`` before believing anything about durability
   MULTI, no Lua -- so a crash between them marks the job queued while nothing is listed;
 * dequeue is ``LPOP`` then ``SREM``. There is **no claim, no lease, no visibility timeout and no
   acknowledgement**: the id leaves Redis *before* the job is processed, so a worker that dies mid-job
-  loses that delivery. Recovery is not a queue property here -- it is ``sync_processing_queue()``
-  re-deriving the list from the store;
-* the queue holds a bare job UUID and **one globally shared key**. There is no per-tenant namespace,
-  and the tenant is never read from the payload (it comes from the worker process environment), so
-  payload-driven tenant override is structurally impossible -- which is a genuine strength;
-* there is no retry counter, no dead-letter list, no backoff, no pooling and no TLS configuration in
-  the client (``redis.Redis.from_url`` with timeouts, created fresh per call);
+  loses that delivery;
+* **the loss is permanent, and this is worth stating precisely because the obvious assumption is
+  wrong.** ``sync_processing_queue()`` does NOT recover it. ``enqueue_processing_job`` gates the
+  ``RPUSH`` on ``if client.sadd(set_key, job_value):``, which returns 0 when the id is already a set
+  member. After a crash between ``SADD`` and ``RPUSH``, or between ``LPOP`` and ``SREM``, the id
+  remains in the dedupe set, so every later re-sync gets ``SADD -> 0`` and skips the ``RPUSH``
+  forever. Nothing else removes it, and this contract requires ``noeviction``, so the tombstone never
+  expires. An independent review established this; an earlier revision of this docstring claimed
+  store re-derivation as the compensating mechanism, which was false;
+* the queue uses **two global keys** (a list and a dedupe set, both environment-overridable) and holds
+  a bare job UUID. There is no per-tenant namespace. The tenant is never read from the payload -- it
+  comes from the worker process environment -- so payload-driven tenant override is structurally
+  impossible, which is a real strength of the design even though the shared namespace is not;
+* there is no retry counter, no dead-letter list and no backoff. A connection pool is always
+  constructed by ``redis.Redis.from_url``, but none is *reused*: the client is rebuilt per call. No
+  ``ssl_*`` options are passed, though TLS is reachable via a ``rediss://`` URL;
 * when the backend is not Redis every queue function is a no-op: the ``inline_worker`` path has no
   queue at all.
 
-So the honest delivery model of the current implementation is **at-most-once from the queue**, with
-store re-derivation as the compensating mechanism. This contract therefore does not assume a broker:
-it makes the artifact *declare* its delivery model and then demands the evidence that model implies.
-Claiming exactly-once is rejected outright -- nothing here implements it.
+So the honest delivery model of the current implementation is **at-most-once from the queue, with no
+working compensating mechanism**. This contract therefore does not assume a broker: it makes the
+artifact *declare* its delivery model and then demands the evidence that model implies. Claiming
+exactly-once is rejected outright -- nothing here implements it.
+
+A consequence worth being explicit about: the current implementation **cannot** truthfully satisfy
+this contract. It cannot attest a working loss-window compensation, a bound tenant namespace, or
+poison-message isolation, because it has none of them. That is the correct outcome -- the contract
+describes what a production queue adapter must be, not what this queue is -- and it is why
+``production_parity=false`` and GA remain blocked. A future generator must not paper over the gap by
+declaring these true.
 
 Design rules
 ------------
@@ -168,8 +184,8 @@ DOMAIN_OBSERVATION_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "acl_or_authorization_model": ("observed_authenticated_server_identity",),
     "monitoring_and_alerting": ("observed_alert_delivery_test",),
     "capacity_and_throughput_thresholds": ("observed_threshold_plus_load_result",),
-    "latency_objectives": ("observed_threshold_plus_load_result",
-                           "live_target_observation"),
+    # A latency OBJECTIVE needs a load result: an idle observation cannot establish it.
+    "latency_objectives": ("observed_threshold_plus_load_result",),
     "durability_or_persistence_model": ("live_target_observation",
                                         "provider_control_plane_response"),
     "replication": ("live_target_observation", "provider_control_plane_response"),
@@ -187,8 +203,35 @@ DOMAIN_OBSERVATION_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "claim_or_lease_semantics": ("live_target_observation",),
     "acknowledgement_semantics": ("live_target_observation",),
     "delivery_guarantee": ("live_target_observation", "executed_delivery_retry_test"),
-    "secret_scan": ("executed_delivery_retry_test", "live_target_observation"),
+    # A delivery-retry test proves nothing about a secret scan; that entry was a copy-paste of the
+    # line above and an independent review caught it.
+    "secret_scan": ("live_target_observation",),
+    # Directly observable on a live target, so an attestation is not enough. These were unmapped in
+    # the first cut, which meant ten domains -- including credential rotation and the payload trust
+    # boundary -- certified on a signed attestation alone.
+    "platform_and_service_identity": ("live_target_observation",
+                                      "provider_control_plane_response"),
+    "provider_and_environment_classification": ("live_target_observation",
+                                                "provider_control_plane_response"),
+    "credential_source": ("live_target_observation", "provider_control_plane_response"),
+    "credential_rotation": ("live_target_observation", "provider_control_plane_response"),
+    "payload_trust_boundary": ("live_target_observation",),
+    "ordering_guarantees": ("live_target_observation", "executed_delivery_retry_test"),
+    "concurrency_behavior": ("live_target_observation", "observed_threshold_plus_load_result"),
+    "retention_and_deletion_policy": ("live_target_observation",
+                                      "provider_control_plane_response"),
 }
+
+#: Domains that are genuinely PROCESS properties, not observable target state. A signed operator
+#: attestation is the appropriate proof for these, and that is a deliberate decision rather than an
+#: oversight -- stated explicitly so the asymmetry is auditable.
+ATTESTATION_APPROPRIATE_DOMAINS: tuple[str, ...] = (
+    "maintenance_and_upgrade_process",
+    "incident_and_rollback_process",
+)
+
+#: An effectively unbounded retry budget is not a retry policy.
+MAX_DECLARED_RETRY_LIMIT = 1000
 
 REQUIRED_DOMAIN_FIELDS: tuple[str, ...] = (
     "status", "proven_by", "observation_class", "observed_at", "binding_fingerprint",
@@ -239,6 +282,17 @@ QUEUE_IDENTITY_CLASSIFICATIONS: tuple[str, ...] = (
     "unauthenticated",
 )
 REJECTED_RUNTIME_IDENTITIES: tuple[str, ...] = ("administrative", "default-user", "unauthenticated")
+#: Unacceptable for EVERY role, administrative included.
+NEVER_ACCEPTABLE_IDENTITIES: tuple[str, ...] = ("default-user", "unauthenticated")
+
+#: Top-level keys the schema knows about. Anything else is rejected, so an artifact cannot smuggle in
+#: an authoritative-looking field such as ``queue_adapter_accepted`` or ``release_recommendation``.
+KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset({
+    "schema_version", "implementation_version", "evidence_type", "git_commit", "git_tree",
+    "worktree_clean", "generated_at", "canonical_payload_hash", "generation_metadata",
+    "target", "identities", "delivery", "non_qualifying_evidence_disclosure", "proof_domains",
+    "secret_scan_clean", "production_parity",
+})
 
 # --------------------------------------------------------------------------------------------
 NON_QUALIFYING_EVIDENCE: tuple[str, ...] = (
@@ -343,6 +397,13 @@ def contract_hash() -> str:
         "unsafe_eviction_policies": list(UNSAFE_EVICTION_POLICIES),
         "queue_identity_classifications": list(QUEUE_IDENTITY_CLASSIFICATIONS),
         "rejected_runtime_identities": list(REJECTED_RUNTIME_IDENTITIES),
+        "never_acceptable_identities": list(NEVER_ACCEPTABLE_IDENTITIES),
+        "known_top_level_keys": sorted(KNOWN_TOP_LEVEL_KEYS),
+        "attestation_appropriate_domains": list(ATTESTATION_APPROPRIATE_DOMAINS),
+        "max_declared_retry_limit": MAX_DECLARED_RETRY_LIMIT,
+        # Carries the capacity-gate and no-auto-discovery disclosure, so a weakening of it must be
+        # detectable too.
+        "runner_unavailable_reason": RUNNER_UNAVAILABLE_REASON,
         "non_qualifying_evidence": list(NON_QUALIFYING_EVIDENCE),
         "worker_test_disclosure": WORKER_TEST_DISCLOSURE,
         "static_validation_disclosure": STATIC_VALIDATION_DISCLOSURE,
@@ -371,6 +432,18 @@ def worktree_is_clean() -> bool:
     """Tracked-only cleanliness. An unavailable git is not clean -- it is unknown, and unknown fails
     closed."""
     return _git(["status", "--porcelain", "--untracked-files=no"]) == ""
+
+
+def _is_substantive(value: Any) -> bool:
+    """A declaration that actually says something.
+
+    Guards against the whole family an independent review walked through: ``0``, ``False``, ``[]``,
+    ``{}``, whitespace-only strings, and case variants of the "not declared" sentinels.
+    """
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return len(text) >= 4 and text.casefold() not in {"none", "n/a", "na", "unspecified", "unknown"}
 
 
 def _is_full_sha(value: Any) -> bool:
@@ -559,6 +632,14 @@ def validate(payload: Any, *, current_commit: str | None = None,
                 value = identities.get(f"{role}_identity_classification")
                 if value not in QUEUE_IDENTITY_CLASSIFICATIONS:
                     reasons.append(f"unknown {role} identity classification {value!r}")
+                    continue
+                # Never acceptable for ANY role, including the administrative one. The first cut
+                # exempted "administrative" from the whole rejection list, which let the admin
+                # principal be declared unauthenticated -- a hole on a production queue that
+                # separating it from the runtime identity does not mitigate.
+                if value in NEVER_ACCEPTABLE_IDENTITIES:
+                    reasons.append(f"the {role} identity is {value!r}, which is never acceptable on "
+                                   "a production queue")
                 elif role != "administrative" and value in REJECTED_RUNTIME_IDENTITIES:
                     reasons.append(f"the {role} runtime identity is {value!r}: a runtime principal "
                                    "must not be administrative, default or unauthenticated")
@@ -585,25 +666,38 @@ def validate(payload: Any, *, current_commit: str | None = None,
                                "implements it")
             elif model not in DELIVERY_MODELS:
                 reasons.append(f"delivery model is missing or unknown ({model!r})")
-            if delivery.get("retry_limit") is None:
+            retry_limit = delivery.get("retry_limit")
+            if retry_limit is None:
                 reasons.append("no retry limit is declared")
-            elif not isinstance(delivery.get("retry_limit"), int) or delivery["retry_limit"] < 1:
+            elif type(retry_limit) is not int or retry_limit < 1:
+                # `type(...) is not int` on purpose: isinstance(True, int) is True, so a bool would
+                # otherwise sail through as "a positive integer".
                 reasons.append("the declared retry limit is not a positive integer")
-            if delivery.get("duplicate_delivery_behavior") in (None, "", "unspecified"):
-                reasons.append("duplicate-delivery behavior is not declared")
+            elif retry_limit > MAX_DECLARED_RETRY_LIMIT:
+                reasons.append(f"the declared retry limit exceeds {MAX_DECLARED_RETRY_LIMIT}: an "
+                               "effectively unbounded retry budget is not a retry policy")
+            if not _is_substantive(delivery.get("duplicate_delivery_behavior")):
+                reasons.append("duplicate-delivery behavior is not substantively declared")
             if delivery.get("poison_message_isolated") is not True:
                 reasons.append("poison-message isolation is not declared: one bad job must not block "
                                "the queue")
-            if delivery.get("dead_letter_required") is True and \
-                    delivery.get("dead_letter_disposition") in (None, "", "none"):
-                reasons.append("a dead-letter disposition is required but not declared")
-            if model == "at-least-once" and \
-                    delivery.get("idempotency_contract_compatibility_observed") is not True:
-                reasons.append("at-least-once delivery is declared without observed compatibility "
-                               "with the application idempotency contract")
-            if model == "at-most-once" and delivery.get("loss_window_disclosed") is not True:
-                reasons.append("at-most-once delivery is declared without disclosing the loss "
-                               "window and its compensating re-derivation mechanism")
+            # Unconditional. An earlier revision keyed this on `dead_letter_required is True`, which
+            # let the artifact switch its own requirement off -- and failed OPEN for every value
+            # other than True, including an absent field.
+            if not _is_substantive(delivery.get("dead_letter_disposition")):
+                reasons.append("a dead-letter disposition is not substantively declared")
+
+            # Both implications apply to EVERY model. Keying them on `model ==` let a third value
+            # ("exactly-once-not-claimed") satisfy neither, which voided the contract's two primary
+            # delivery rules -- an independent review accepted such an artifact.
+            if delivery.get("idempotency_contract_compatibility_observed") is not True:
+                reasons.append("delivery is declared without observed compatibility with the "
+                               "application idempotency contract; a redelivery is only safe if the "
+                               "application absorbs it, whatever the declared model")
+            if delivery.get("loss_window_disclosed") is not True:
+                reasons.append("delivery is declared without disclosing the loss window and its "
+                               "compensating mechanism; every model has one (at-most-once loses on "
+                               "consumer death, at-least-once loses nothing but duplicates)")
 
         # ---- non-qualifying disclosure ----
         disclosure = payload.get("non_qualifying_evidence_disclosure")
@@ -649,6 +743,10 @@ def validate(payload: Any, *, current_commit: str | None = None,
                              - set(CONDITIONAL_PROOF_DOMAINS))
             if unknown:
                 reasons.append(f"unknown proof domain(s): {', '.join(unknown)}")
+
+        unknown_top = sorted(set(payload) - KNOWN_TOP_LEVEL_KEYS)
+        if unknown_top:
+            reasons.append(f"unknown top-level key(s): {', '.join(unknown_top)}")
 
         if payload.get("secret_scan_clean") is not True:
             reasons.append("the artifact does not attest a clean secret scan")

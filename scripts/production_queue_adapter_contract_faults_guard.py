@@ -44,7 +44,12 @@ import production_queue_adapter_evidence_guard as EG  # noqa: E402
 checks: list[dict] = []
 MUTATION_PREFIXES = ("CD", "CT", "CI", "CV", "CB", "CP", "CE")
 
-PINNED_CONTRACT_HASH = "49473ad33fa3172eb5d6bc8b625578408f318c861b0a28ea5d4916c464af2997"
+PINNED_CONTRACT_HASH = "45bc335f8066576ee1694ba07d47e2c6d97ad74ac4fab69374e9202ad16e7afb"
+
+#: Cross-file pins of the EVIDENCE battery, so its coverage cannot be reduced by editing only that
+#: file (see FC02/FC03).
+PINNED_EVIDENCE_ID_SET_HASH = "62d89fb412af01c4a03d6ebeabcf97e5e1a3b54f181929c7fa079f0868c016bd"
+PINNED_EVIDENCE_CHECK_COUNT = 105
 
 EXPECTED_CHECK_IDS = [
     "FC00 contract-hash-pinned", "FC01 baseline-accepts-valid",
@@ -81,9 +86,10 @@ EXPECTED_CHECK_IDS = [
     "CE03 tenant-evidence-cannot-promote", "CE04 ui-evidence-cannot-promote",
     "CE05 worker-evidence-cannot-promote", "CE06 database-evidence-cannot-promote",
     "CE07 delegation-defect-reintroduced-fails", "CE08 registry-untouched",
+    "FC02 evidence-battery-id-set-pinned", "FC03 evidence-mutations-reject-distinctly",
     "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 54
+EXPECTED_TOTAL_CHECKS = 56
 EXPECTED_MUTATION_COUNT = 50
 
 
@@ -228,10 +234,16 @@ def run() -> int:
         lambda p: p["identities"].__setitem__("consumer_worker_identity_classification",
                                               "administrative"),
         "allowing an administrative runtime identity is detectable and changes behaviour")
+    # Targets the ADMINISTRATIVE role deliberately. 'default-user' is caught by two independent
+    # gates for a runtime role, so weakening one leaves the other rejecting and the constant looks
+    # non-load-bearing. The admin role is exempt from REJECTED_RUNTIME_IDENTITIES, so only
+    # NEVER_ACCEPTABLE_IDENTITIES holds it -- which is exactly the constant under test.
     detectable_and_load_bearing(
-        "CI02 default-user-accepted", "REJECTED_RUNTIME_IDENTITIES", ("administrative",),
-        lambda p: p["identities"].__setitem__("producer_identity_classification", "default-user"),
-        "allowing a default-user runtime identity is detectable and changes behaviour")
+        "CI02 default-user-accepted", "NEVER_ACCEPTABLE_IDENTITIES", (),
+        lambda p: p["identities"].__setitem__("administrative_identity_classification",
+                                              "default-user"),
+        "allowing a default-user identity for ANY role -- including the administrative one -- is "
+        "detectable and changes behaviour")
 
     # ------------------------------------------------------------------ artifact-level rules
     for cid, mutation, desc in (
@@ -396,6 +408,43 @@ def run() -> int:
         "increment altered the CONSUMER, not the registry. Its metadata is now stale -- recorded as "
         "a deferred correction, deliberately not edited here",
         level="structural source check")
+
+    # ------------------------------------------------------------------ cross-battery pins
+    # An independent review silently removed coverage from the evidence battery two ways that its own
+    # self-referential FZ00/FZ01 could not see: (C) delete a mutation, its declared id AND decrement
+    # both pins -> green; (D) keep the id but replace the body with a duplicate of an already-covered
+    # rejection -> green. Neither battery cross-pinned the other. These two do.
+    import contextlib
+    import hashlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        EG.checks.clear()
+        EG.run()
+    ev_checks = list(EG.checks)
+    ev_ids = [c["check_id"] for c in ev_checks]
+    id_set_hash = hashlib.sha256("\n".join(sorted(ev_ids)).encode("utf-8")).hexdigest()
+    rec("FC02 evidence-battery-id-set-pinned",
+        id_set_hash == PINNED_EVIDENCE_ID_SET_HASH and len(ev_ids) == PINNED_EVIDENCE_CHECK_COUNT,
+        "the evidence battery's emitted check-id set is hashed and pinned HERE, in a different file, "
+        "so deleting a mutation together with its declared id and both of its own pins is caught",
+        level="structural source check",
+        extra={"observed_id_set_hash": id_set_hash[:16] + "...", "observed_count": len(ev_ids)})
+
+    ev_mutations = [c for c in ev_checks if c["check_id"][:2] in EG.MUTATION_PREFIXES]
+    reasons_seen: dict[str, list[str]] = {}
+    for c in ev_mutations:
+        first = c.get("first_reason")
+        if isinstance(first, str):
+            reasons_seen.setdefault(first, []).append(c["check_id"])
+    collisions = {r: ids for r, ids in reasons_seen.items() if len(ids) > 1}
+    rec("FC03 evidence-mutations-reject-distinctly", not collisions,
+        "no two evidence-battery mutations reject for the IDENTICAL first reason, so substituting an "
+        "already-covered rejection for a mutation's body -- which leaves the id list and counts "
+        "untouched -- is caught",
+        level="structural source check",
+        extra={"colliding_reasons": {r[:60]: ids for r, ids in list(collisions.items())[:3]}})
 
     # ------------------------------------------------------------------ completeness
     mutations_so_far = [c["check_id"] for c in checks if c["check_id"][:2] in MUTATION_PREFIXES]

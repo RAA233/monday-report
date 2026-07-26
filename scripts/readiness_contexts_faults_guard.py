@@ -562,10 +562,18 @@ def run() -> int:
                "held_by": ("evaluator refusal (production adapter evidence required)"
                            if not demoted_here else "runner applicability/never-promotable demotion"),
                "runner_demotion_also_applied": demoted_here})
+    q_eval = evaluated("client-postgres")
+    q_demoted = q_check in {d["check_id"] for d in q_eval.get("demoted_controls", [])}
     rec("MC05b inline-context-promotes-queue-adapter",
-        evaluated("client-postgres")["control_dispositions"].get(q_check) != "PASS",
-        "production-queue-adapter can never PASS in any context: every context runs the inline "
-        "worker, so it is forced BLOCKED")
+        q_eval["control_dispositions"].get(q_check) != "PASS",
+        "production-queue-adapter never PASSes in any context. Mechanism-agnostic on purpose (as "
+        "MC04b is): it is now held by the EVALUATOR requiring production queue-adapter evidence, and "
+        "also by this runner's never-promotable list. The earlier rationale -- 'every context runs "
+        "the inline worker' -- became stale when the evaluator consumer was isolated",
+        extra={"disposition": q_eval["control_dispositions"].get(q_check),
+               "held_by": ("evaluator refusal (production queue evidence required)"
+                           if not q_demoted else "runner never-promotable demotion"),
+               "runner_demotion_also_applied": q_demoted})
     rec("MC07 client-mode-claimed-in-demo-context",
         refuses("demo-local",
                 lambda b, r: b["readiness_by_id"].__setitem__("client_mode", "pass")),
