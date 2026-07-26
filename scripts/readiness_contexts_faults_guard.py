@@ -40,6 +40,7 @@ for candidate in (ROOT, ROOT / "scripts"):
 from backend.app import ga_readiness as GA  # noqa: E402
 from backend.app import readiness_contexts as RC  # noqa: E402
 import readiness_contexts_runner as R  # noqa: E402
+import tenant_authorization_evidence_guard as TAEG  # noqa: E402
 
 checks: list[dict] = []
 
@@ -56,7 +57,9 @@ EXPECTED_CHECK_IDS = [
     "MO01 context-omitted", "MO02 fifth-context-added", "MO03 duplicate-context",
     "MO04 partial-output-accepted", "MO05 inventory-hash-changed",
     "MO06 shared-input-leak", "MO07 order-changes-result", "MO08 single-differs-from-all",
-    "MO09 observer-exception-is-pass",
+    "MO09 observer-exception-is-pass", "MO11 module-state-leak",
+    "MO12 inventory-hash-not-pinned", "MO13 fingerprints-dropped",
+    "MO14 aggregate-ready-copied-from-results",
     # evidence binding
     "ME01 v3-omitted", "ME02 v2-artifact-accepted", "ME03 stale-v3-accepted",
     "ME04 wrong-tree-v3-accepted", "ME05 v3-blast-radius", "ME06 v3-differential-anchor",
@@ -64,11 +67,13 @@ EXPECTED_CHECK_IDS = [
     # cross-context claim honesty
     "MC01 demo-promoted-to-client-auth", "MC02 local-claims-rls",
     "MC03 functional-runtime-mode-swapped", "MC04 database-adapter-promoted",
-    "MC05 queue-adapter-promoted", "MC06 production-parity-true",
+    "MC04b postgres-context-promotes-database-adapter", "MC05 queue-adapter-promoted",
+    "MC05b inline-context-promotes-queue-adapter", "MC06 production-parity-true",
+    "MC07 client-mode-claimed-in-demo-context",
     # dispositions
     "MD01 required-control-omitted", "MD02 blocked-treated-as-pass",
     "MD03 evaluator-exception-is-pass", "MD04 static-expectations-as-results",
-    "MD05 precomputed-dispositions-injected",
+    "MD05 precomputed-dispositions-injected", "MD06 forged-forge-report",
     # readiness booleans
     "MP01 client-data-ready-true-despite-blocker",
     "MP02 release-candidate-ready-true-despite-blocker",
@@ -81,9 +86,15 @@ EXPECTED_CHECK_IDS = [
     # structural
     "FS01 runner-imports-canonical-inventory", "FS02 runner-launches-nothing",
     "FS03 capacity-gate-precedes-observation", "FS04 battery-drives-real-harness",
-    "FS05 no-simulated-dispositions",
-    "FZ00 completeness",
+    "FS05 no-simulated-dispositions", "FS06 accepted-hash-pinned-literally",
+    "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
+
+#: Pinned battery size. Without these, deleting a mutation TOGETHER WITH its expected-list entry
+#: leaves the completeness gate satisfied and the battery silently shrinks (the reviewer's V2 probe:
+#: 46 passed / 38 mutations, still certifying).
+EXPECTED_TOTAL_CHECKS = 57
+EXPECTED_MUTATION_COUNT = 47
 
 
 def rec(cid, ok, desc, level="predicate/unit mutation", extra=None):
@@ -190,9 +201,25 @@ def run() -> int:
         "then get discarded",
         level="execution integration", extra={"observer_invocations": tripwire["calls"]})
 
-    ok_err, facts_err = R.capacity_gate({"free_bytes_ok": True})  # missing percentage key
-    rec("MK03 capacity-measurement-error-is-blocked", ok_err is False,
-        "an incomplete/unmeasurable capacity observation is treated as BLOCKED, never as available")
+    # Point at the real `except` branch this check is named for, and at the lie the gate must not
+    # believe: facts whose BOOLEANS claim ok while the numbers say otherwise.
+    real_measure = R.measure_capacity
+    try:
+        R.measure_capacity = lambda *a, **k: (_ for _ in ()).throw(OSError("unmeasurable"))
+        raised_ok, _ = R.capacity_gate()
+    finally:
+        R.measure_capacity = real_measure
+    lying = valid_capacity()
+    lying.update({"filesystem_free_bytes": 1, "filesystem_total_bytes": 1000 * 1024 ** 3,
+                  "free_bytes_ok": True, "free_percentage_ok": True})
+    lie_ok, _ = R.capacity_gate(lying)
+    incomplete_ok, _ = R.capacity_gate({"free_bytes_ok": True})
+    rec("MK03 capacity-measurement-error-is-blocked",
+        raised_ok is False and lie_ok is False and incomplete_ok is False,
+        "the gate is BLOCKED when measurement raises, when facts omit the byte counts, AND when the "
+        "supplied booleans claim ok while the raw numbers say otherwise -- the verdict is re-derived "
+        "from the numbers, never trusted from a caller",
+        extra={"raised": raised_ok, "lying_booleans": lie_ok, "incomplete": incomplete_ok})
 
     unavailable = R._unavailable_summary(blocked_capacity(), list(RC.CANONICAL_CONTEXT_ORDER),
                                         reason="test")
@@ -281,6 +308,60 @@ def run() -> int:
         "an observer exception becomes a controlled refusal for that context, never a PASS",
         level="execution integration")
 
+    # Watching only run_input misses the more damaging leak: an observer that rewrites the CONTRACT
+    # module's control sets silently disables applicability demotion for every later context.
+    def module_leak(bundle, run_input):
+        RC.CLIENT_IDENTITY_CONTROLS = frozenset()
+
+    saved_controls = RC.CLIENT_IDENTITY_CONTROLS
+    try:
+        leaked = R.run_contexts(observer=observer_for(module_leak), capacity=valid_capacity())
+        rec("MO11 module-state-leak",
+            leaked.get("accepted") is False and leaked.get("cross_context_mutation"),
+            "an observer that mutates the CONTRACT module's control sets -- disabling applicability "
+            "demotion for every later context -- is caught by the contract-state fingerprint and "
+            "the run is not accepted",
+            level="execution integration",
+            extra={"detected_contexts": leaked.get("cross_context_mutation")})
+    finally:
+        RC.CLIENT_IDENTITY_CONTROLS = saved_controls
+
+    saved_hash = RC.canonical_hash
+    try:
+        RC.canonical_hash = lambda *a, **k: "f" * 64
+        pinned = R.run_contexts(observer=observer_for(), capacity=valid_capacity())
+        rec("MO12 inventory-hash-not-pinned",
+            pinned.get("accepted") is False,
+            "a mutated contract whose canonical hash differs from the PINNED accepted literal is "
+            "refused -- comparing results against whatever the module computes right now would only "
+            "ever prove self-consistency",
+            level="execution integration",
+            extra={"accepted_literal": R.ACCEPTED_INVENTORY_HASH[:16] + "..."})
+    finally:
+        RC.canonical_hash = saved_hash
+
+    rec("MO13 fingerprints-dropped",
+        R._summarize(valid_capacity(), list(RC.CANONICAL_CONTEXT_ORDER),
+                     full["results"], {})["accepted"] is False,
+        "a run with NO recorded fingerprints is refused; otherwise 'no cross-context mutation' is "
+        "vacuously true whenever recording is dropped",
+        level="schema mutation")
+
+    tampered = copy.deepcopy(full["results"])
+    for r in tampered:
+        r["client_data_ready"] = True
+        r["ga_ready"] = True
+    agg = R._summarize(valid_capacity(), list(RC.CANONICAL_CONTEXT_ORDER), tampered,
+                       {r["context_id"]: ["x", "x"] for r in tampered})
+    rec("MO14 aggregate-ready-copied-from-results",
+        agg.get("accepted") is False and agg.get("client_data_ready") is False
+        and agg.get("ga_ready") is False and agg.get("self_inconsistent_results"),
+        "results asserting readiness while their own blocking sets are non-empty are flagged "
+        "self-inconsistent AND the aggregate stays false -- the aggregate is derived from the "
+        "blocking sets, never copied from the per-context booleans",
+        level="schema mutation",
+        extra={"self_inconsistent": agg.get("self_inconsistent_results")})
+
     a = R.run_contexts(observer=observer_for(), capacity=valid_capacity())
     b = copy.deepcopy(a)
     b["results"][0]["control_dispositions"]["ga_ci_execution"] = "PASS"
@@ -321,9 +402,19 @@ def run() -> int:
             rec("ME03 stale-v3-accepted",
                 r_stale["control_dispositions"].get(tenant_check) != "PASS",
                 "a v3 artifact bound to a different commit does not satisfy the tenant control")
+            # Its OWN artifact with the CORRECT commit and a wrong tree -- otherwise this merely
+            # re-asserts ME03's expression on an object whose commit is also wrong, isolating nothing.
+            wrong_tree = tmpdir / "wrong_tree.json"
+            wrong_tree.write_text(json.dumps({
+                "schema_version": "tenant-authorization-evidence.v3",
+                "commit": TAEG.COMMIT, "git_commit": TAEG.COMMIT,
+                "tree": "1" * 40, "git_tree": "1" * 40}), encoding="utf-8")
+            GA.TENANT_AUTHORIZATION_EVIDENCE_PATH = wrong_tree
+            r_tree = evaluated("client-postgres")
             rec("ME04 wrong-tree-v3-accepted",
-                r_stale["control_dispositions"].get(tenant_check) != "PASS",
-                "a v3 artifact bound to a different tree does not satisfy the tenant control")
+                r_tree["control_dispositions"].get(tenant_check) != "PASS",
+                "a v3 artifact carrying the CORRECT commit but a wrong tree does not satisfy the "
+                "tenant control -- the tree half of the binding is load-bearing on its own")
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
     finally:
@@ -341,8 +432,6 @@ def run() -> int:
     # artifact -- regeneration requires the accepted proof suites and is capacity-blocked. So this
     # measures the EVALUATOR's blast radius, which is what Part I asks, and claims nothing about the
     # authenticity of any artifact.
-    import tenant_authorization_evidence_guard as TAEG
-
     def _dispositions_with(v3_payload):
         orig_v3, orig_rls = (GA.TENANT_AUTHORIZATION_EVIDENCE_PATH, GA.TENANT_RLS_EVIDENCE_PATH)
         tmp = Path(tempfile.mkdtemp(prefix="rc-diff-"))
@@ -436,6 +525,35 @@ def run() -> int:
                 lambda b, r: b["readiness_by_id"].__setitem__("redis_queue", "pass")),
         "a context classified inline_worker whose observation claims a Redis queue is refused, so "
         "the production queue-adapter control cannot be promoted")
+    # The PG direction of the adapter question. readiness.postgres_repository passes on exactly the
+    # accepted RESTRICTED runtime, which is explicitly not a production adapter -- so a PG context
+    # observing it must NOT promote the universal GA blocker production-database-adapter.
+    pg_promote = evaluated("client-postgres",
+                           lambda b, r: b["readiness_by_id"].__setitem__("postgres_repository",
+                                                                         "pass"))
+    mapping = R.control_check_ids()
+    db_check = mapping["production-database-adapter"]
+    q_check = mapping["production-queue-adapter"]
+    rec("MC04b postgres-context-promotes-database-adapter",
+        pg_promote.get("result") == "evaluated"
+        and pg_promote["control_dispositions"].get(db_check) != "PASS"
+        and db_check in {d["check_id"] for d in pg_promote.get("demoted_controls", [])},
+        "a PostgreSQL context observing an ACTIVE PostgreSQL repository -- which the accepted "
+        "restricted runtime really does report -- still does not promote "
+        "production-database-adapter: the restricted runtime is not a production adapter, so the "
+        "control is forced BLOCKED and the demotion recorded",
+        level="execution integration",
+        extra={"disposition": pg_promote["control_dispositions"].get(db_check)})
+    rec("MC05b inline-context-promotes-queue-adapter",
+        evaluated("client-postgres")["control_dispositions"].get(q_check) != "PASS",
+        "production-queue-adapter can never PASS in any context: every context runs the inline "
+        "worker, so it is forced BLOCKED")
+    rec("MC07 client-mode-claimed-in-demo-context",
+        refuses("demo-local",
+                lambda b, r: b["readiness_by_id"].__setitem__("client_mode", "pass")),
+        "a DEMO context whose observation claims client mode is refused, so a demo run cannot "
+        "promote the production-configuration control through a self-contradictory observation")
+
     parity_ok = all(
         r["production_parity"] is False and r["input_classifications"]["production_parity"] is False
         for r in full["results"])
@@ -469,11 +587,19 @@ def run() -> int:
     try:
         GA.evaluate_blockers = all_pass
         everything = R.run_contexts(observer=observer_for(), capacity=valid_capacity())
-        rec("MD02 blocked-treated-as-pass", everything.get("accepted") is False,
-            "a run in which every blocked control is reported PASS is NOT accepted -- the harness "
-            "refuses to certify a result that claims readiness",
+        never = {mapping[c] for c in R.NEVER_PROMOTABLE_CONTROL_IDS if c in mapping}
+        still_blocked = all(
+            all(r["control_dispositions"].get(cid) == "BLOCKED" for cid in never)
+            for r in everything.get("results", []))
+        rec("MD02 blocked-treated-as-pass",
+            everything.get("ga_ready") is False and everything.get("client_data_ready") is False
+            and everything.get("release_candidate_ready") is False and still_blocked,
+            "even when the evaluator reports EVERY control PASS, the run never claims readiness and "
+            "the never-promotable production-adapter controls remain BLOCKED -- an evaluator that "
+            "treats blocked controls as passing cannot produce a ready result",
             level="execution integration",
-            extra={"aggregate_ga_ready": everything.get("ga_ready")})
+            extra={"aggregate_ga_ready": everything.get("ga_ready"),
+                   "never_promotable_still_blocked": still_blocked})
     finally:
         GA.evaluate_blockers = real_all
 
@@ -497,6 +623,14 @@ def run() -> int:
         refuses("demo-local", lambda b, r: b.__setitem__(
             "control_dispositions", {"ga_ci_execution": "PASS"})),
         "any precomputed disposition map supplied as an observation is refused")
+    # A forge_report is not a disposition, but ga_readiness._forge_probe turns a self-consistent one
+    # into a PASS for parser-coverage -- so it is an artifact-shaped input that MINTS a disposition.
+    forged = {"status": "pass", "generated_at": "2026-01-01T00:00:00Z",
+              "documents": 1, "passed": 1, "failed": 0}
+    rec("MD06 forged-forge-report",
+        refuses("client-postgres", lambda b, r: b.__setitem__("forge_report", forged)),
+        "a caller-supplied forge_report is refused: it is an artifact-shaped observation that would "
+        "mint a parser-coverage PASS with no real evidence")
 
     # ---------------------------------------------------------------- readiness booleans
     def with_ready(flag):
@@ -546,24 +680,84 @@ def run() -> int:
         isinstance(n, ast.ImportFrom) and n.module == "backend.app"
         and any(a.name == "readiness_contexts" for a in n.names)
         for n in runner_ast.body)
-    redefines = any(
-        isinstance(n, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id in
-                ("CANONICAL_CONTEXT_ORDER", "SUPPORTED_CLIENT_DATA_MODES",
-                 "SUPPORTED_REPOSITORY_BACKENDS", "CONTROL_IDS")
-                for t in n.targets)
-        for n in runner_ast.body)
-    rec("FS01 runner-imports-canonical-inventory", imports_rc and not redefines,
-        "the runner imports the accepted canonical inventory at module level and does NOT redefine "
-        "the contexts, the axes or the control ids",
-        level="structural source check")
 
-    launchers = ("subprocess", "docker", "TestClient", "uvicorn", "playwright", "webdriver")
-    found_launchers = sorted(t for t in launchers if t in runner_src)
+    # Cover BOTH assignment forms -- the runner's own style is annotated assignment, so matching only
+    # ast.Assign made the exact restatement this guard exists to catch invisible. Also compare tuple
+    # literals BY VALUE, so restating the four contexts under a different name is caught too.
+    protected_names = ("CANONICAL_CONTEXT_ORDER", "SUPPORTED_CLIENT_DATA_MODES",
+                       "SUPPORTED_REPOSITORY_BACKENDS", "CONTROL_IDS",
+                       "CLIENT_IDENTITY_CONTROLS", "POSTGRES_EVIDENCE_CONTROLS",
+                       "ACCEPTED_CONTEXT_EVIDENCE")
+    redefined: list[str] = []
+    restated: list[str] = []
+    contract_values = {
+        tuple(RC.CANONICAL_CONTEXT_ORDER), tuple(RC.SUPPORTED_CLIENT_DATA_MODES),
+        tuple(RC.SUPPORTED_REPOSITORY_BACKENDS), tuple(RC.CONTROL_IDS),
+    }
+    for node in runner_ast.body:
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            targets = [node.target.id]
+        if not targets:
+            continue
+        if any(t in protected_names for t in targets):
+            redefined.extend(t for t in targets if t in protected_names)
+        value = getattr(node, "value", None)
+        if isinstance(value, (ast.Tuple, ast.List)):
+            try:
+                literal = tuple(ast.literal_eval(value))
+            except Exception:  # noqa: BLE001 - non-literal tuples are not restatements
+                continue
+            if literal in contract_values:
+                restated.extend(targets)
+    rec("FS01 runner-imports-canonical-inventory",
+        imports_rc and not redefined and not restated,
+        "the runner imports the accepted canonical inventory at module level and does NOT restate "
+        "the contexts, the axes or the control ids -- checked for plain AND annotated assignment, "
+        "and by VALUE so an aliased restatement is caught",
+        level="structural source check",
+        extra={"redefined_names": sorted(set(redefined)), "restated_values": sorted(set(restated))})
+
+    # An import-graph/AST check, not a substring scan: `Popen(...)`, `os.popen`, `os.spawnv` and a
+    # dynamically assembled module name all defeat substring matching.
+    launcher_modules = {"subprocess", "multiprocessing", "docker", "uvicorn", "playwright",
+                        "selenium", "webdriver", "fastapi.testclient", "starlette.testclient"}
+    imported: list[str] = []
+    for node in ast.walk(runner_ast):
+        if isinstance(node, ast.Import):
+            imported += [a.name.split(".")[0] for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.append(node.module)
+            if node.module in ("os",):
+                imported += [f"os.{a.name}" for a in node.names]
+    dangerous_calls = [
+        n.func.attr for n in ast.walk(runner_ast)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr in ("popen", "spawnv", "spawnl", "system", "execv", "fork", "Popen",
+                            "check_output", "call")
+    ]
+    dynamic_import = [
+        n.func.attr for n in ast.walk(runner_ast)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr in ("import_module", "__import__")
+    ]
+    found_launchers = sorted({m for m in imported if m.split(".")[0] in launcher_modules}
+                             | set(dangerous_calls) | set(dynamic_import))
     rec("FS02 runner-launches-nothing", found_launchers == [],
-        "the runner source contains no process/container/browser launcher, so a capacity-blocked "
-        "invocation cannot start anything",
+        "the runner imports no process/container/browser module and makes no process-spawning or "
+        "dynamic-import call, so a capacity-blocked invocation cannot start the runtime under test "
+        "(the evaluator it calls may still read git -- see the module docstring)",
         level="structural source check", extra={"launchers_found": found_launchers})
+
+    rec("FS06 accepted-hash-pinned-literally",
+        R.ACCEPTED_INVENTORY_HASH == RC.canonical_hash()
+        and f'"{R.ACCEPTED_INVENTORY_HASH}"' in runner_src,
+        "the accepted canonical inventory hash is pinned as a LITERAL in the runner source and "
+        "currently equals the contract's computed hash, so a contract mutation cannot certify itself",
+        level="structural source check",
+        extra={"pinned": R.ACCEPTED_INVENTORY_HASH[:16] + "..."})
 
     run_contexts_def = next((n for n in runner_ast.body
                              if isinstance(n, ast.FunctionDef) and n.name == "run_contexts"), None)
@@ -595,18 +789,43 @@ def run() -> int:
         and n.func.attr == "evaluate_context" and isinstance(n.func.value, ast.Name)
         and n.func.value.id == "R"
         for n in ast.walk(eval_fn))
-    rec("FS04 battery-drives-real-harness", imports_runner and calls_real,
-        "this battery imports the real runner at module level and drives the real "
-        "evaluate_context; it does not re-implement the decision logic it claims to test",
+    # A dead `evaluated` satisfying the AST predicate is not enough: require that the battery's own
+    # verdicts actually FLOW THROUGH it, by proving the live helper reaches the real runner.
+    live_reaches_runner = evaluated("demo-local").get("dispositions_source") == \
+        "backend.app.ga_readiness.evaluate_blockers"
+    rec("FS04 battery-drives-real-harness",
+        imports_runner and calls_real and live_reaches_runner,
+        "this battery imports the real runner at module level, drives the real evaluate_context, and "
+        "the LIVE helper demonstrably reaches it -- a dead function matching the shape is not "
+        "sufficient",
         level="structural source check")
 
+    # Not a self-reported literal: require that a PASS can exist at all (so the disposition pipeline
+    # is real) and that a hardcoded table would be caught. ME06/MC01 depend on a real PASS appearing.
+    anchor_pass = disp_a.get(tenant_check) == "PASS"
+    all_blocked_without = all(d != "PASS" for d in disp_b.values())
     rec("FS05 no-simulated-dispositions",
-        base.get("dispositions_source") == "backend.app.ga_readiness.evaluate_blockers",
-        "every disposition in an evaluated result is attributed to the real evaluator; the harness "
-        "never synthesises one",
+        base.get("dispositions_source") == "backend.app.ga_readiness.evaluate_blockers"
+        and anchor_pass and all_blocked_without,
+        "dispositions are produced by the real evaluator, demonstrated behaviourally: a PASS appears "
+        "only when a valid artifact is present and NO control passes without one -- a hardcoded "
+        "disposition table could not reproduce both halves",
         level="structural source check")
 
     # ---------------------------------------------------------------- completeness
+    # Pin the SIZE as well as the membership, and record it BEFORE the membership gate so the gate
+    # sees it. Without a size pin, deleting a mutation together with its expected-list entry leaves
+    # completeness satisfied and the battery silently shrinks.
+    mutations_so_far = [c["check_id"] for c in checks if c["check_id"][:2] in MUTATION_PREFIXES]
+    rec("FZ01 battery-size-pinned",
+        len(EXPECTED_CHECK_IDS) == EXPECTED_TOTAL_CHECKS
+        and len(mutations_so_far) == EXPECTED_MUTATION_COUNT,
+        f"the battery is pinned at {EXPECTED_TOTAL_CHECKS} declared checks / "
+        f"{EXPECTED_MUTATION_COUNT} mutations, so a mutation cannot be removed together with its "
+        "expected-list entry",
+        level="structural source check",
+        extra={"declared_ids": len(EXPECTED_CHECK_IDS), "mutations": len(mutations_so_far)})
+
     emitted = [c["check_id"] for c in checks]
     missing = [cid for cid in EXPECTED_CHECK_IDS if cid not in emitted and cid != "FZ00 completeness"]
     unknown = [cid for cid in emitted if cid not in EXPECTED_CHECK_IDS]

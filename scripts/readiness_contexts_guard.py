@@ -153,10 +153,14 @@ def run() -> int:
         "schema": R.EXECUTION_SCHEMA,
         "claim_scope": "readiness-context-execution-only",
         "inventory_hash": RC.canonical_hash(),
-        "readiness_execution_capacity": "available",
+        "readiness_execution_capacity": facts.get("readiness_execution_capacity", "available"),
         "capacity": facts,
-        "contexts_executed": True,
-        "dispositions_produced": True,
+        # Read from the RUN, never hardcoded: the PostgreSQL observer is capacity-gated, so a
+        # gate-passing invocation can still have contexts that refused. Asserting these would claim
+        # an execution that did not happen.
+        "contexts_executed": first.get("contexts_executed") is True,
+        "dispositions_produced": bool(first.get("results")) and all(
+            r.get("result") == "evaluated" for r in first.get("results", [])),
         "summary": {"passed": passed_n, "failed": failed_n, "skipped": 0,
                     "certification": "passed" if accepted else "not_passed"},
         "checks": checks,

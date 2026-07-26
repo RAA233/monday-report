@@ -15,11 +15,18 @@ deliberately built so that the two can never be confused:
 
 Execution model
 ---------------
-``evaluate_context`` is pure: observations in, canonical result out, no processes, no filesystem
-writes, no clock. ``collect_observations`` is the impure half that produces those observations from
-a really-started runtime, and it is the ONLY place a process is launched. Splitting them is what
-makes the harness testable without Docker: the fault battery drives the pure half with synthetic
-observations, and is classified as ``predicate/unit mutation`` rather than as an executed context.
+``evaluate_context`` is *deterministic and self-contained*: observations in, canonical result out,
+no clock, no network, and it launches no container, database, API, worker or browser. It is NOT
+side-effect free, and claiming so would be false: the real evaluator it calls reads repository
+artifacts, shells out to ``git`` to check commit/tree bindings, sets environment variables and
+creates isolated temp state while probing, and caches some results process-wide -- so the first
+context evaluated in a process seeds a cache the others reuse. What matters for this harness is that
+those effects are confined to the evaluator's own probes and cannot start the runtime under test.
+
+``collect_observations`` is the half that produces observations from a really-started runtime, and it
+is the ONLY place *this module* launches a process. Splitting them is what makes the harness testable
+without Docker: the fault battery drives ``evaluate_context`` with synthetic observations, and is
+classified as ``predicate/unit mutation`` rather than as an executed context.
 
 Honest scope: a context result certifies that context's configuration ONLY. This module never
 promotes production database-adapter parity, production queue-adapter parity, production parity,
@@ -68,13 +75,37 @@ REQUIRED_ZERO_COUNTERS: tuple[str, ...] = (
 #: silently make a blocking disposition non-blocking here.
 BLOCKING_DISPOSITIONS: frozenset[str] = frozenset(GA.BLOCKING_DISPOSITIONS)
 
-#: Controls that block GA in EVERY context, whatever the configuration proves. Pinned so a context
-#: cannot quietly drop one by claiming its configuration makes it irrelevant.
-UNIVERSAL_GA_BLOCKERS: tuple[str, ...] = (
-    "ga_postgres_adapter",
-    "ga_redis_adapter",
-    "ga_client_organizational_approval",
+#: The accepted canonical inventory hash. PINNED to a literal on purpose: comparing results against
+#: whatever the contract module computes at run time only ever proves self-consistency, so a mutated
+#: contract would certify happily. A mismatch here refuses the run.
+ACCEPTED_INVENTORY_HASH = "b9d78ad9e8791375a03c1ef437c4c663043b087bf60f80ca72d69a0f41787d44"
+
+#: Registry control ids that can NEVER be PASS in any of the four contexts, whatever a run observes.
+#:
+#: None of the four contexts is a production deployment: the PostgreSQL contexts run the *restricted*
+#: runtime, classified ``restricted_postgres_runtime_not_production_adapter``, and every context runs
+#: the inline worker. But ``readiness.postgres_repository`` passes whenever the requested and active
+#: backend are both PostgreSQL with a database URL -- i.e. precisely on that restricted runtime -- so
+#: without this list the accepted restricted-PG runtime would promote ``production-database-adapter``,
+#: a UNIVERSAL GA blocker, to PASS and the harness would certify the run. Forced BLOCKED instead.
+NEVER_PROMOTABLE_CONTROL_IDS: tuple[str, ...] = (
+    "production-database-adapter",
+    "production-queue-adapter",
 )
+
+
+def universal_ga_blockers() -> tuple[str, ...]:
+    """Evaluator check ids that block GA in EVERY context, DERIVED from the real registry.
+
+    Hand-typing check ids here would drift from the registry (and would itself be a restatement of
+    the control ids the runner claims never to restate).
+    """
+    mapping = control_check_ids()
+    ids = [mapping[control_id] for control_id in NEVER_PROMOTABLE_CONTROL_IDS if control_id in mapping]
+    approval = mapping.get("client-organizational-approval")
+    if approval:
+        ids.append(approval)
+    return tuple(sorted(ids))
 
 
 class ExecutionUnavailable(RuntimeError):
@@ -83,9 +114,13 @@ class ExecutionUnavailable(RuntimeError):
 
 # --------------------------------------------------------------------------- capacity gate (Part B)
 
-def measure_capacity(path: str = "C:/" if os.name == "nt" else "/") -> dict[str, Any]:
-    """Strictly read-only capacity facts. Launches nothing, removes nothing, changes nothing."""
-    total, _used, free = shutil.disk_usage(path)
+def measure_capacity(path: str | None = None) -> dict[str, Any]:
+    """Strictly read-only capacity facts. Launches nothing, removes nothing, changes nothing.
+
+    Measures the volume the repository itself lives on rather than a hardcoded drive letter, so the
+    gate cannot read green off one volume while the volume that actually fills is a different one.
+    """
+    total, _used, free = shutil.disk_usage(str(ROOT) if path is None else path)
     ratio = (free / total) if total else 0.0
     return {
         "filesystem_total_bytes": total,
@@ -105,7 +140,19 @@ def capacity_gate(facts: Mapping[str, Any] | None = None) -> tuple[bool, dict[st
     except Exception as exc:  # noqa: BLE001 - an unmeasurable environment is a blocked gate
         return False, {"measurement_error": exc.__class__.__name__,
                        "free_bytes_ok": False, "free_percentage_ok": False}
-    passed = bool(observed.get("free_bytes_ok")) and bool(observed.get("free_percentage_ok"))
+
+    # Re-DERIVE the verdict from the raw numbers; never trust supplied booleans. Facts that omit the
+    # numbers cannot be judged and are therefore blocked.
+    total = observed.get("filesystem_total_bytes")
+    free = observed.get("filesystem_free_bytes")
+    if not isinstance(total, int) or not isinstance(free, int) or total <= 0 or free < 0:
+        observed.update({"free_bytes_ok": False, "free_percentage_ok": False,
+                         "measurement_error": "capacity facts omit usable byte counts",
+                         "readiness_execution_capacity": "blocked"})
+        return False, observed
+    observed["free_bytes_ok"] = free >= CAPACITY_MIN_FREE_BYTES
+    observed["free_percentage_ok"] = (free / total) >= CAPACITY_MIN_FREE_RATIO
+    passed = bool(observed["free_bytes_ok"]) and bool(observed["free_percentage_ok"])
     observed["readiness_execution_capacity"] = "available" if passed else "blocked"
     return passed, observed
 
@@ -190,6 +237,9 @@ def _input_classifications(run_input: Mapping[str, Any]) -> dict[str, Any]:
 AXIS_BOUND_READINESS: Mapping[str, tuple[str, tuple[str, ...]]] = {
     "postgres_repository": ("repository_backend", ("postgres",)),
     "redis_queue": ("queue_adapter_classification", ()),  # no context declares a Redis queue
+    # The mode axis needs binding too: `client_mode` feeds ga_production_configuration, so a demo
+    # context observing client_mode=pass would promote that control on a self-contradiction.
+    "client_mode": ("client_data_mode", ("client",)),
 }
 
 
@@ -228,9 +278,14 @@ def evaluate_context(run_input: Mapping[str, Any], observations: Mapping[str, An
         return _refusal(run_input, "observations are not from a real execution",
                         detail={"source": observations.get("source")})
 
-    # A caller must NEVER be able to hand us dispositions; we compute them from the real evaluator.
-    for forbidden in ("control_dispositions", "dispositions", "expected_control_dispositions"):
-        if forbidden in observations:
+    # A caller must NEVER be able to hand us dispositions, nor an artifact-shaped input that MINTS
+    # one. ``forge_report`` is exactly such an input: ga_readiness._forge_probe accepts a
+    # self-consistent report and returns PASS for parser-coverage, so a hand-authored report would
+    # promote a control without any real evidence. Refused outright; the probe may read the committed
+    # report itself, but this harness will not carry one in.
+    for forbidden in ("control_dispositions", "dispositions", "expected_control_dispositions",
+                      "forge_report"):
+        if observations.get(forbidden) is not None:
             return _refusal(run_input, "precomputed dispositions were supplied; this harness "
                                        "computes dispositions from the real evaluator only",
                             detail={"rejected_key": forbidden})
@@ -255,9 +310,13 @@ def evaluate_context(run_input: Mapping[str, Any], observations: Mapping[str, An
     if not isinstance(readiness_by_id, Mapping):
         return _refusal(run_input, "no client-data readiness observation was supplied")
 
+    if RC.canonical_hash() != ACCEPTED_INVENTORY_HASH:
+        return _refusal(run_input, "the canonical inventory does not match the accepted hash",
+                        detail={"observed": RC.canonical_hash(),
+                                "accepted": ACCEPTED_INVENTORY_HASH})
+
     try:
-        checks = GA.evaluate_blockers(dict(readiness_by_id),
-                                      forge_report=observations.get("forge_report"))
+        checks = GA.evaluate_blockers(dict(readiness_by_id), forge_report=None)
     except Exception as exc:  # noqa: BLE001 - an evaluator error is a refusal, never a PASS
         return _refusal(run_input, "the readiness evaluator raised",
                         detail={"exception": exc.__class__.__name__})
@@ -284,30 +343,46 @@ def evaluate_context(run_input: Mapping[str, Any], observations: Mapping[str, An
     # cannot evaluate is therefore DEMOTED to BLOCKED. Demotion is the fail-closed direction: it can
     # only ever remove a claim, never create one.
     applicability = _context_applicability(run_input)
+    mapping = control_check_ids()
+    never_promotable = {mapping[c] for c in NEVER_PROMOTABLE_CONTROL_IDS if c in mapping}
     demoted: list[dict[str, str]] = []
     for check_id, disposition in list(dispositions.items()):
-        if disposition == "PASS" and applicability.get(check_id) == "not_evaluable_in_this_context":
+        if disposition != "PASS":
+            continue
+        if applicability.get(check_id) == "not_evaluable_in_this_context":
             dispositions[check_id] = "BLOCKED"
             demoted.append({"check_id": check_id,
                             "observed": "PASS",
                             "recorded": "BLOCKED",
                             "reason": "this configuration cannot evaluate the control; evidence "
                                       "produced elsewhere is not transferable into this context"})
+        elif check_id in never_promotable:
+            dispositions[check_id] = "BLOCKED"
+            demoted.append({"check_id": check_id,
+                            "observed": "PASS",
+                            "recorded": "BLOCKED",
+                            "reason": "none of the four contexts is a production deployment (the "
+                                      "PostgreSQL contexts run the RESTRICTED runtime and every "
+                                      "context runs the inline worker), so a production adapter "
+                                      "control can never PASS here"})
 
     blocking = sorted(cid for cid, d in dispositions.items() if d in BLOCKING_DISPOSITIONS)
+    # Anything neither PASS nor blocking (SKIPPED / NOT_APPLICABLE) is a warning. REVIEW_REQUIRED is
+    # already blocking per the real evaluator, so it deliberately does not appear here.
     warning = sorted(cid for cid, d in dispositions.items()
-                     if d == "REVIEW_REQUIRED" and cid not in blocking)
+                     if d != "PASS" and cid not in blocking)
 
-    # Universal blockers can never be absent from the blocking set while unresolved.
-    unresolved_universal = [cid for cid in UNIVERSAL_GA_BLOCKERS
+    universal = universal_ga_blockers()
+    unresolved_universal = [cid for cid in universal
                             if dispositions.get(cid) != "PASS" and cid not in blocking]
     if unresolved_universal:
         return _refusal(run_input, "an unresolved universal GA blocker is not being counted",
                         detail={"controls": unresolved_universal})
 
-    # Readiness is DERIVED from the blocking set; it is never asserted by a caller.
-    client_data_ready = not blocking and not warning
-    ga_ready = client_data_ready and all(dispositions.get(c) == "PASS" for c in UNIVERSAL_GA_BLOCKERS)
+    # Readiness is DERIVED, and requires EVERY control to be PASS -- not merely "nothing blocking",
+    # which would let a SKIPPED control pass for readiness.
+    client_data_ready = bool(dispositions) and all(d == "PASS" for d in dispositions.values())
+    ga_ready = client_data_ready and all(dispositions.get(c) == "PASS" for c in universal)
 
     result = {
         "context_id": run_input["context_id"],
@@ -462,23 +537,36 @@ def run_contexts(
     fingerprints: dict[str, list[str]] = {}
     for cid in requested:
         run_input = RC.build_run_input(cid)  # a fresh deep copy per context, by construction
-        before = _fingerprint(run_input)
+        # Fingerprint the context input AND the contract module's load-bearing state. Watching only
+        # run_input would miss the more damaging leak: an observer that rewrites the contract's
+        # control sets silently disables applicability demotion for every later context.
+        before = [_fingerprint(run_input), _contract_state_fingerprint()]
         try:
             observations = observer(run_input)
         except ExecutionUnavailable as exc:
             results.append(_refusal(run_input, "observations unavailable",
                                     detail={"reason": str(exc)}))
-            fingerprints[cid] = [before, _fingerprint(run_input)]
-            continue
         except Exception as exc:  # noqa: BLE001 - any observer error is a refusal, never a PASS
             results.append(_refusal(run_input, "the observer raised",
                                     detail={"exception": exc.__class__.__name__}))
-            fingerprints[cid] = [before, _fingerprint(run_input)]
-            continue
-        results.append(evaluate_context(run_input, observations))
-        fingerprints[cid] = [before, _fingerprint(run_input)]
+        else:
+            results.append(evaluate_context(run_input, observations))
+        fingerprints[cid] = ["|".join(before),
+                             "|".join([_fingerprint(run_input), _contract_state_fingerprint()])]
 
     return _summarize(facts, requested, results, fingerprints)
+
+
+def _contract_state_fingerprint() -> str:
+    """Fingerprint of the contract module state this harness's own gates depend on."""
+    return _fingerprint({
+        "inventory_hash": RC.canonical_hash(),
+        "client_identity_controls": sorted(RC.CLIENT_IDENTITY_CONTROLS),
+        "postgres_evidence_controls": sorted(RC.POSTGRES_EVIDENCE_CONTROLS),
+        "accepted_context_evidence": {k: sorted(v)
+                                      for k, v in sorted(RC.ACCEPTED_CONTEXT_EVIDENCE.items())},
+        "canonical_order": list(RC.CANONICAL_CONTEXT_ORDER),
+    })
 
 
 def _fingerprint(obj: Any) -> str:
@@ -525,13 +613,33 @@ def _summarize(capacity_facts: Mapping[str, Any], requested: Sequence[str],
     all_evaluated = bool(ordered) and all(r["result"] == "evaluated" for r in ordered)
     mutated = sorted(cid for cid, pair in fingerprints.items() if pair[0] != pair[1])
     hashes_consistent = len({r["inventory_hash"] for r in ordered}) <= 1
-    inventory_ok = all(r["inventory_hash"] == RC.canonical_hash() for r in ordered)
+    # Bound to the PINNED accepted hash, not to whatever the contract module computes right now --
+    # otherwise a mutated contract certifies its own mutation.
+    inventory_ok = bool(ordered) and all(r["inventory_hash"] == ACCEPTED_INVENTORY_HASH
+                                         for r in ordered)
+    # Every evaluated context must have a recorded fingerprint pair; otherwise "no cross-context
+    # mutation" is vacuously true whenever recording is dropped.
+    fingerprints_complete = set(fingerprints) == {r["context_id"] for r in results}
 
+    # A result whose readiness booleans contradict its OWN blocking set is self-inconsistent: the
+    # booleans were asserted rather than derived. Refuse instead of averaging it away.
+    self_inconsistent = sorted(
+        r["context_id"] for r in ordered
+        if (r["client_data_ready"] or r["release_candidate_ready"] or r["ga_ready"])
+        and r["blocking_controls"])
+
+    # Aggregate readiness is DERIVED from the per-context blocking sets, never copied from the
+    # per-context booleans, so a tampered result cannot raise the aggregate.
+    aggregate_ready = bool(ordered) and all(
+        not r["blocking_controls"] and r["client_data_ready"] for r in ordered)
+    aggregate_ga = aggregate_ready and all(r["ga_ready"] and not r["blocking_controls"]
+                                           for r in ordered)
     any_ready = any(r["client_data_ready"] or r["release_candidate_ready"] or r["ga_ready"]
                     for r in ordered)
 
     accepted = bool(complete and all_evaluated and not mutated and hashes_consistent
-                    and inventory_ok and not any_ready)
+                    and inventory_ok and fingerprints_complete and not self_inconsistent
+                    and not any_ready)
 
     summary = {
         "schema": EXECUTION_SCHEMA,
@@ -546,13 +654,14 @@ def _summarize(capacity_facts: Mapping[str, Any], requested: Sequence[str],
         "complete_inventory": complete,
         "all_contexts_evaluated": all_evaluated,
         "cross_context_mutation": mutated,
+        "fingerprints_complete": fingerprints_complete,
+        "self_inconsistent_results": self_inconsistent,
+        "inventory_hash_matches_accepted": inventory_ok,
         "certification": "passed" if accepted else "not_passed",
         "accepted": accepted,
-        # Aggregate readiness is the AND of per-context readiness and is always false while any
-        # context blocks; it is never asserted independently of the per-context results.
-        "client_data_ready": bool(ordered) and all(r["client_data_ready"] for r in ordered),
-        "release_candidate_ready": bool(ordered) and all(r["release_candidate_ready"] for r in ordered),
-        "ga_ready": bool(ordered) and all(r["ga_ready"] for r in ordered),
+        "client_data_ready": aggregate_ready,
+        "release_candidate_ready": aggregate_ga,
+        "ga_ready": aggregate_ga,
         "production_parity": False,
         "dispositions_produced": all_evaluated and complete,
         "release_recommendation": "GA_BLOCKED",
@@ -620,12 +729,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                            reverse=args.reverse, seed=args.seed)
 
     if args.inspect:
+        # Inspection mode exits zero, so it must not be able to carry ANY accepting signal. Every
+        # field that could read as certification is forced, and the canonical result hash is dropped
+        # rather than left attesting a body that no longer exists.
         summary = dict(summary)
         summary["inspection_only"] = True
         summary["contexts_executed"] = False
+        summary["dispositions_produced"] = False
         summary["accepted"] = False
-        summary["certification"] = "unavailable" if summary.get("certification") != "passed" \
-            else summary["certification"]
+        summary["certification"] = "unavailable"
+        summary["client_data_ready"] = False
+        summary["release_candidate_ready"] = False
+        summary["ga_ready"] = False
+        summary["execution_verdict"] = "FOUR_READINESS_CONTEXTS_NOT_ACCEPTED"
+        summary["release_recommendation"] = "GA_BLOCKED"
+        summary.pop("canonical_result_hash", None)
 
     print(json.dumps(summary, indent=2, sort_keys=True, default=str))
 
