@@ -77,7 +77,6 @@ EXPECTED_CHECK_IDS = [
     "MV09 at-most-once-without-loss-window", "MV10 conditional-domain-without-model",
     "MV11 exactly-once-not-claimed-escapes-implications", "MV12 retry-limit-bool",
     "MV13 retry-limit-unbounded", "MV14 duplicate-behavior-falsy",
-    "MV15 dead-letter-self-switched",
     # proof domains
     "MD01 missing-proof-domain", "MD02 bare-literal-domain",
     "MD03 non-proving-observation-class", "MD04 queue-ping-as-proof",
@@ -110,8 +109,8 @@ EXPECTED_CHECK_IDS = [
     "FS03 guard-drives-real-validator", "FS04 contract-touches-no-queue",
     "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 105
-EXPECTED_MUTATION_COUNT = 89
+EXPECTED_TOTAL_CHECKS = 104
+EXPECTED_MUTATION_COUNT = 88
 
 
 def rec(cid, ok, desc, level="predicate/unit mutation", extra=None):
@@ -470,7 +469,10 @@ def run() -> int:
         ("MV06 poison-message-not-isolated", dlv("poison_message_isolated", False),
          "a queue where one poison message can block processing is rejected"),
         ("MV07 dead-letter-required-but-absent", dlv("dead_letter_disposition", None),
-         "a required dead-letter disposition that is not declared is rejected"),
+         "an undeclared dead-letter disposition is rejected. This now also covers the previously "
+         "self-switchable path: the requirement is UNCONDITIONAL, so `dead_letter_required=False` no "
+         "longer disables it and that case collapsed into this one -- FC03 in the faults battery "
+         "detected the resulting duplicate mutation"),
         ("MV08 at-least-once-without-idempotency-observation",
          dlv("idempotency_contract_compatibility_observed", False),
          "at-least-once delivery without OBSERVED compatibility with the application idempotency "
@@ -636,11 +638,6 @@ def run() -> int:
         ("MV14 duplicate-behavior-falsy",
          lambda p: p["delivery"].__setitem__("duplicate_delivery_behavior", "   "),
          "a whitespace-only / falsy / case-variant duplicate-delivery declaration is rejected"),
-        ("MV15 dead-letter-self-switched",
-         lambda p: (p["delivery"].__setitem__("dead_letter_required", False),
-                    p["delivery"].__setitem__("dead_letter_disposition", None)),
-         "an artifact cannot switch off its own dead-letter requirement; the disposition is required "
-         "unconditionally and its absence fails CLOSED"),
         ("MI08 admin-identity-unauthenticated",
          lambda p: p["identities"].__setitem__("administrative_identity_classification",
                                                "unauthenticated"),

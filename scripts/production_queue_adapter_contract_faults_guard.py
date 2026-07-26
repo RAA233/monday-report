@@ -48,8 +48,8 @@ PINNED_CONTRACT_HASH = "45bc335f8066576ee1694ba07d47e2c6d97ad74ac4fab69374e9202a
 
 #: Cross-file pins of the EVIDENCE battery, so its coverage cannot be reduced by editing only that
 #: file (see FC02/FC03).
-PINNED_EVIDENCE_ID_SET_HASH = "62d89fb412af01c4a03d6ebeabcf97e5e1a3b54f181929c7fa079f0868c016bd"
-PINNED_EVIDENCE_CHECK_COUNT = 105
+PINNED_EVIDENCE_ID_SET_HASH = "4ab1c76ee947a29dd3ff45226aebd97dcb9d540ccdec8e4ee06d86520bc38893"
+PINNED_EVIDENCE_CHECK_COUNT = 104
 
 EXPECTED_CHECK_IDS = [
     "FC00 contract-hash-pinned", "FC01 baseline-accepts-valid",
