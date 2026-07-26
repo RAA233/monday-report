@@ -59,7 +59,7 @@ EXPECTED_CHECK_IDS = [
     "MO06 shared-input-leak", "MO07 order-changes-result", "MO08 single-differs-from-all",
     "MO09 observer-exception-is-pass", "MO11 module-state-leak",
     "MO12 inventory-hash-not-pinned", "MO13 fingerprints-dropped",
-    "MO14 aggregate-ready-copied-from-results",
+    "MO14 aggregate-ready-copied-from-results", "MO15 synthetic-observer-certified",
     # evidence binding
     "ME01 v3-omitted", "ME02 v2-artifact-accepted", "ME03 stale-v3-accepted",
     "ME04 wrong-tree-v3-accepted", "ME05 v3-blast-radius", "ME06 v3-differential-anchor",
@@ -93,8 +93,8 @@ EXPECTED_CHECK_IDS = [
 #: Pinned battery size. Without these, deleting a mutation TOGETHER WITH its expected-list entry
 #: leaves the completeness gate satisfied and the battery silently shrinks (the reviewer's V2 probe:
 #: 46 passed / 38 mutations, still certifying).
-EXPECTED_TOTAL_CHECKS = 57
-EXPECTED_MUTATION_COUNT = 47
+EXPECTED_TOTAL_CHECKS = 58
+EXPECTED_MUTATION_COUNT = 48
 
 
 def rec(cid, ok, desc, level="predicate/unit mutation", extra=None):
@@ -361,6 +361,17 @@ def run() -> int:
         "blocking sets, never copied from the per-context booleans",
         level="schema mutation",
         extra={"self_inconsistent": agg.get("self_inconsistent_results")})
+
+    # This battery's own observations are SYNTHETIC, so no run it performs may ever be certifiable --
+    # otherwise the `observer=` test seam would be a route to an accepted verdict without a real run.
+    rec("MO15 synthetic-observer-certified",
+        full.get("accepted") is False
+        and full.get("observations_from_recognised_observer") is False
+        and full.get("execution_verdict") == "FOUR_READINESS_CONTEXTS_NOT_ACCEPTED",
+        "a run built from SYNTHETIC observations is never accepted, whatever else is consistent: "
+        "certification requires observations from one of the runner's own recognised observers, so "
+        "the mutation-testing seam cannot mint an accepted verdict",
+        level="execution integration", extra={"observers": full.get("observers")})
 
     a = R.run_contexts(observer=observer_for(), capacity=valid_capacity())
     b = copy.deepcopy(a)

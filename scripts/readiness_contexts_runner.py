@@ -108,6 +108,15 @@ def universal_ga_blockers() -> tuple[str, ...]:
     return tuple(sorted(ids))
 
 
+#: Observers this module itself implements. A result is only ever CERTIFIABLE when it came from one
+#: of them: the `observer=` seam exists so the decision logic can be mutation-tested with synthetic
+#: observations, and a synthetic run must never be able to reach an accepted verdict.
+RECOGNISED_OBSERVERS: frozenset[str] = frozenset({
+    "local_json_isolated_root",
+    "restricted_postgres_runtime",
+})
+
+
 class ExecutionUnavailable(RuntimeError):
     """Raised when observations cannot be produced. Never converted into a PASS."""
 
@@ -404,6 +413,7 @@ def evaluate_context(run_input: Mapping[str, Any], observations: Mapping[str, An
         "refusal_reason": None,
         "refusal_detail": None,
         "dispositions_source": "backend.app.ga_readiness.evaluate_blockers",
+        "observer": str(observations.get("observer") or "unspecified"),
     }
     result["contract_reconciliation"] = _reconcile(run_input, dispositions)
     return result
@@ -637,9 +647,14 @@ def _summarize(capacity_facts: Mapping[str, Any], requested: Sequence[str],
     any_ready = any(r["client_data_ready"] or r["release_candidate_ready"] or r["ga_ready"]
                     for r in ordered)
 
+    # Only a run produced by this module's OWN observers is certifiable. The `observer=` seam exists
+    # for mutation-testing the decision logic; a synthetic run must never reach an accepted verdict.
+    real_observations = bool(ordered) and all(
+        r.get("observer") in RECOGNISED_OBSERVERS for r in ordered)
+
     accepted = bool(complete and all_evaluated and not mutated and hashes_consistent
                     and inventory_ok and fingerprints_complete and not self_inconsistent
-                    and not any_ready)
+                    and real_observations and not any_ready)
 
     summary = {
         "schema": EXECUTION_SCHEMA,
@@ -657,6 +672,8 @@ def _summarize(capacity_facts: Mapping[str, Any], requested: Sequence[str],
         "fingerprints_complete": fingerprints_complete,
         "self_inconsistent_results": self_inconsistent,
         "inventory_hash_matches_accepted": inventory_ok,
+        "observations_from_recognised_observer": real_observations,
+        "observers": sorted({str(r.get("observer")) for r in ordered}),
         "certification": "passed" if accepted else "not_passed",
         "accepted": accepted,
         "client_data_ready": aggregate_ready,
