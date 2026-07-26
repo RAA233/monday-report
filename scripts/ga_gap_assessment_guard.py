@@ -56,13 +56,15 @@ STALE_DELEGATION = ("_delegate(postgres_repository)", "_delegate(redis_queue)",
 
 #: Shapes that must never appear anywhere in a tracked status report.
 LEAK_PATTERNS = (
-    (r"(?i)[a-z]:[\\\\/]users[\\\\/]", "a Windows user path"),
+    # Case-insensitive and both separators: the first cut required a lowercase letter after
+    # `/Users/` and a literal backslash pair, so `C:/Users/Ralba` and UNC paths slipped past.
+    (r"(?i)[a-z]:[\\/]users[\\/]", "a Windows user path"),
     (r"(?i)/(?:home|users)/[a-z]", "a POSIX home path"),
-    (r"\\\\\\\\[A-Za-z0-9_.-]+\\\\", "a UNC path"),
-    (r"(?i)\\bhost\\s*=\\s*\\S+|\\bsslmode\\s*=", "a libpq keyword DSN"),
-    (r"(?i)\\bBearer\\s+[A-Za-z0-9._-]{12,}", "a bearer token"),
-    (r"(?i)\\b[a-z0-9-]+\\.(?:internal|local|lan)\\b", "an internal hostname"),
-    (r"(?i)\\bmonday_report_[a-z_]*(?:runtime|restricted|admin)\\b", "a database role name"),
+    (r"\\\\[A-Za-z0-9_.-]+\\", "a UNC path"),
+    (r"(?i)\bhost\s*=\s*\S+|\bsslmode\s*=", "a libpq keyword DSN"),
+    (r"(?i)\bBearer\s+[A-Za-z0-9._-]{12,}", "a bearer token"),
+    (r"(?i)\b[a-z0-9-]+\.(?:internal|local|lan)\b", "an internal hostname"),
+    (r"(?i)\bmonday_report_[a-z_]*(?:runtime|restricted|admin)\b", "a database role name"),
     (r"postgres(?:ql)?://", "a database URL"),
     (r"redis(?:s)?://", "a queue URL"),
     (r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "an IP address"),
