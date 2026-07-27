@@ -18,6 +18,7 @@ FOUR_READINESS_CONTEXTS_NOT_ACCEPTED, GA_BLOCKED.
 """
 from __future__ import annotations
 
+import ast as _ast
 import contextlib
 import copy
 import hashlib
@@ -36,6 +37,7 @@ for candidate in (ROOT, ROOT / "scripts"):
 from backend.app import ga_readiness as GA_MOD  # noqa: E402
 import build_ga_gap_assessment as GEN  # noqa: E402
 import ga_gap_assessment_guard as GG  # noqa: E402
+import ga_gap_assessment_coupling as COUPLING  # noqa: E402
 
 checks: list[dict] = []
 MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP", "MV", "MI", "MG", "MX")
@@ -99,12 +101,14 @@ EXPECTED_CHECK_IDS = [
     "FZ00 completeness", "FZ01 battery-size-pinned",
     "FZ03 mutations-are-distinct-inputs", "FZ04 drift-guard-check-set-pinned",
     "FZ05 inventory-authority-is-the-registry", "FZ06 mutations-trip-the-gate-they-protect",
-    "FZ07 hardened-arms-are-structurally-pinned",
+    "FZ07 protected-gates-are-structurally-load-bearing",
+    "FZ08 gate-hollowing-is-behaviorally-detected",
+    "FZ09 protected-gates-are-actually-emitted",
 ]
-EXPECTED_TOTAL_CHECKS = 87
+EXPECTED_TOTAL_CHECKS = 89
 EXPECTED_MUTATION_COUNT = 78
-PINNED_DRIFT_ID_SET_HASH = "faf171027827dd982286ba9d6031c5141db2305469491f62ac4b1791adadd7c6"
-PINNED_DRIFT_CHECK_COUNT = 89
+PINNED_DRIFT_ID_SET_HASH = "fdc2f72ac3f5125f2a6318254f943d4104d6a315131337981cd5d4ffa62bb303"
+PINNED_DRIFT_CHECK_COUNT = 90
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
 #: editable alongside the very list it protects, so it proves nothing against intent. Completeness is
 #: carried by FZ00 (emitted == declared), FZ01 (size), FZ03 (distinct mutation inputs) and FZ04
@@ -174,6 +178,21 @@ def rec(cid, ok, desc, level="artifact mutation", extra=None):
 
 def live_artifact() -> dict:
     return json.loads(GG.ARTIFACT_PATH.read_text(encoding="utf-8"))
+
+
+def _emitted_drift_checks() -> list:
+    """The drift guard's REAL emitted inventory, from an actual run against the tracked artifact."""
+    saved = list(GG.checks)
+    GG.checks.clear()
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            GG.run()
+        return list(GG.checks)
+    except Exception:  # noqa: BLE001 - reported by the caller as a missing-gate failure
+        return []
+    finally:
+        GG.checks.clear()
+        GG.checks.extend(saved)
 
 
 def real_refusal(rc: int, failing: list) -> bool:
@@ -798,7 +817,60 @@ def run() -> int:
     # The expected control inventory must come from the registry, and no editable constant may
     # redefine it. Proved on the parsed guard source, not by string search.
     import ast as _ast
-    guard_src = (ROOT / "scripts" / "ga_gap_assessment_guard.py").read_text(encoding="utf-8")
+    # ---------------------------------------------------------------- gate coupling
+    # The previous FZ07 asked only ``needle not in guard_src`` -- a substring search over the whole
+    # file, so a comment, a docstring, a dead branch or an unused variable satisfied it while the
+    # predicate it claimed to pin was ``True``. An exact-head review hollowed GA50b, GA04k and
+    # GA47f exactly that way with every needle intact and both batteries stayed green.
+    guard_source = (ROOT / "scripts" / "ga_gap_assessment_guard.py").read_text(encoding="utf-8")
+    structural = COUPLING.verify_coupling(guard_source)
+    rec("FZ07 protected-gates-are-structurally-load-bearing",
+        not structural,
+        "each protected gate's PREDICATE is parsed from the AST and must be non-constant, must read "
+        "the names that make it load-bearing, must be reachable, and must own its check id "
+        "uniquely. Only the predicate subtree is inspected, so comments, docstrings and unused "
+        "strings are invisible to this check",
+        level="structural source check",
+        extra={"gates": sorted(COUPLING.PROTECTED_GATES), "problems": structural[:4]})
+
+    # Behavioral half: actually perform each hollowing on an isolated copy of the guard source and
+    # require the verifier to catch it. A mutation that fails to PARSE is not counted as detected --
+    # that would only prove the mutation was malformed.
+    undetected, unparsed, absent = [], [], []
+    for name, mutated in sorted(COUPLING.mutations(guard_source).items()):
+        if mutated is None:
+            absent.append(name)
+            continue
+        try:
+            _ast.parse(mutated)
+        except SyntaxError:
+            unparsed.append(name)
+            continue
+        problems = COUPLING.verify_coupling(mutated)
+        if not problems or any("does not parse" in p for p in problems):
+            undetected.append(name)
+    mutation_total = len(COUPLING.mutations(guard_source))
+    rec("FZ08 gate-hollowing-is-behaviorally-detected",
+        mutation_total >= 8 and not undetected and not unparsed and not absent,
+        "every hollowing of a protected gate -- constant predicate, same-named no-op, unreachable "
+        "placement, removal from the emitted inventory, and a duplicated id replacing the real "
+        "gate -- is performed for real and detected. Mutations that do not parse, or whose anchor "
+        "is missing, are failures rather than silent passes",
+        level="structural source check",
+        extra={"mutations": mutation_total, "undetected": undetected,
+               "did_not_parse": unparsed, "anchor_missing": absent})
+
+    # Runtime link: a gate that is structurally sound but never emitted proves nothing.
+    emitted_ids = {c["check_id"].split(" ", 1)[0] for c in _emitted_drift_checks()}
+    missing_runtime = sorted(set(COUPLING.PROTECTED_GATES) - emitted_ids)
+    rec("FZ09 protected-gates-are-actually-emitted",
+        not missing_runtime,
+        "every protected gate appears in the drift guard's REAL emitted check inventory, closing "
+        "the gap between a gate that parses and a gate that runs",
+        level="structural source check",
+        extra={"missing": missing_runtime, "emitted": len(emitted_ids)})
+
+    guard_src = guard_source
     guard_tree = _ast.parse(guard_src)
     calls_registry_inventory = any(
         isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
@@ -876,25 +948,6 @@ def run() -> int:
         extra={"declared": len(EXPECTED_TRIP), "broken": missing_trip[:5]})
 
     guard_src = (ROOT / "scripts" / "ga_gap_assessment_guard.py").read_text(encoding="utf-8")
-    arm_evidence = {
-        "GA50b re-measures the tree": 'git", "status", "--porcelain", "--untracked-files=no"',
-        "GA50b consumes the measurement": "not dirty_paths",
-        "GA04k length floor": "len(disclosure) >= 200",
-        "GA04k required terms": "DISCLOSURE_REQUIRED_TERMS",
-        "GA04k forbidden terms": "DISCLOSURE_FORBIDDEN_TERMS",
-        "consumer is hermetic": 'k.startswith("MONDAY_REPORT_")',
-        "GA47f requires evidence present": "paths_present < 1",
-        "GA47i types the machine-local values": "0123456789abcdef",
-    }
-    missing_arms = [name for name, needle in arm_evidence.items() if needle not in guard_src]
-    rec("FZ07 hardened-arms-are-structurally-pinned",
-        not missing_arms,
-        "the conjuncts that carry the two HIGH fixes are pinned in SOURCE. FZ06 reconciles which "
-        "CHECK trips, never which ARM: a review replaced GA50b's predicate with the old self-report "
-        "and GA04k's with the bare equality, one edit each, and both batteries stayed fully green "
-        "because the mutations still tripped the hollowed-out checks",
-        level="structural source check", extra={"missing": missing_arms})
-
     rec("FZ05 inventory-authority-is-the-registry",
         calls_registry_inventory and gen_reads_registry and not literal_lists and no_pin_authority,
         "the drift guard loads its expected inventory by calling the generator's registry_inventory() "

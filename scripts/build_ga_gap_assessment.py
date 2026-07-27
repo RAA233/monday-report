@@ -497,6 +497,47 @@ _EVIDENCE_DRIVEN = {
 }
 
 
+def _promotion_map(fresh: dict) -> dict:
+    """Which SPECIFIC artifact promotes which control, asked of the real evaluator.
+
+    Answers, per control, "which evidence artifact -- if any -- is the one that moves THIS control",
+    by hiding every artifact except one and observing what changes. Nothing is assumed from a curated
+    list: an exact-head review showed ``_EVIDENCE_DRIVEN`` contains behavioural probes
+    (ga_rbac_role_separation, ga_verified_reviewer_identity) that no artifact drives at all, so
+    membership of that set is not evidence of anything.
+
+    This exists to replace a global COUNT. GA47f previously allowed any evidence-driven control to
+    move whenever *some unrelated* artifact existed, which let both production adapters be recorded
+    PASS in the machine-local half with no adapter evidence anywhere.
+    """
+    import backend.app.ga_readiness as G
+
+    every = _all_evidence_paths()
+    promoted: dict[str, str] = {}
+    for keep in [p for p in every if p.exists()]:
+        stash = Path(tempfile.mkdtemp(prefix="gap-promotion-"))
+        moved = []
+        try:
+            for index, path in enumerate(every):
+                if path != keep and path.exists():
+                    target = stash / f"{index}-{path.name}"
+                    os.replace(path, target)
+                    moved.append((path, target))
+            for check in G.evaluate_blockers({}):
+                # Attribute only an IMPROVEMENT over the hermetic baseline, and let the first
+                # artifact that achieves it own the attribution: a later iteration must not
+                # overwrite a correct one.
+                if (check["disposition"] != fresh.get(check["id"])
+                        and check["disposition"] == "PASS"):
+                    promoted.setdefault(check["id"], keep.name)
+        finally:
+            for path, target in moved:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target, path)
+            shutil.rmtree(stash, ignore_errors=True)
+    return promoted
+
+
 def _evidence_status(check_id: str, probe_type: str | None, fresh_disposition: str | None) -> str:
     """How this control's evidence stands AT THE CURRENT HEAD.
 
@@ -607,7 +648,8 @@ NON_CANONICAL_KEYS = frozenset({"canonical_payload_hash", "local_evidence_artifa
                                 "local_evidence_artifact_present",
                                 "local_evidence_paths_present"})
 NON_CANONICAL_CONTEXT_KEYS = frozenset({"verified_environment_with_evidence"})
-NON_CANONICAL_CONTROL_KEYS = frozenset({"current_disposition_verified_environment"})
+NON_CANONICAL_CONTROL_KEYS = frozenset({"current_disposition_verified_environment",
+                                        "verified_promoted_by"})
 
 
 def canonical_body(payload: dict) -> dict:
@@ -692,6 +734,7 @@ def build() -> dict:
     registry_bytes = REGISTRY_PATH.read_bytes()
     registry = json.loads(registry_bytes.decode("utf-8"))
     fresh, verified, ga_fresh, ga_verified, evidence_present = _dispositions()
+    promoted_by = _promotion_map(fresh)
     blocking_reasons = dict(_CAPTURED.get("hermetic_reasons") or {})
 
     controls = []
@@ -719,6 +762,10 @@ def build() -> dict:
             "resolution_condition": entry["resolution_condition"],
             "current_disposition_fresh_checkout": fresh.get(cid),
             "current_disposition_verified_environment": verified.get(cid),
+            # The SPECIFIC artifact that moves this control, or null. Machine-local, so it is
+            # excluded from the canonical body -- it exists to make the machine-local bound
+            # per-control instead of a global count.
+            "verified_promoted_by": promoted_by.get(cid),
             "probe_type": a.get("probe_type", PROBE_NONE),
             "probe_location": a.get("probe_location", f"{_EVAL} default branch"),
             "measurement_class": klass,

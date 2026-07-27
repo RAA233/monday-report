@@ -39,6 +39,7 @@ from backend.app import production_database_adapter_evidence as DB  # noqa: E402
 from backend.app import production_queue_adapter_evidence as Q  # noqa: E402
 from backend.app import readiness_contexts as RC  # noqa: E402
 import build_ga_gap_assessment as GEN  # noqa: E402
+import ga_gap_assessment_coupling as COUPLING  # noqa: E402
 
 # Identity comes from ONE authority -- the generator module -- so the artifact path and schema
 # cannot drift apart by editing a duplicated literal here.
@@ -85,6 +86,16 @@ def live_payload() -> dict:
 #: What this run actually validated, recorded where the artifact IS in scope and read by _emit().
 VALIDATED_IDENTITY: dict = {}
 
+#: Filenames of every evidence artifact the EVALUATOR consults, derived from the evaluator module
+#: rather than listed here, so a newly added evidence path cannot be silently omitted.
+KNOWN_EVIDENCE_FILENAMES = frozenset(p.name for p in GEN._all_evidence_paths())
+
+#: control id -> the evidence artifact filenames that control's OWN probe reads, derived from the
+#: evaluator's AST. Empty for a control whose gating artifact cannot be proved, which forbids any
+#: machine-local promotion of it rather than permitting one on an unrelated artifact's authority.
+EVIDENCE_SCOPE = COUPLING.evidence_scope(
+    (ROOT / "backend" / "app" / "ga_readiness.py").read_text(encoding="utf-8"))
+
 #: Meaning the curated-prose disclosure MUST carry, pinned in the consumer rather than compared
 #: against the generator constant it is supposed to police (see GA04k).
 DISCLOSURE_REQUIRED_TERMS = (
@@ -116,8 +127,8 @@ NOTHING_MISSING_CLAIMS = (
 )
 
 #: Reciprocal cross-file pin of the FAULTS battery's declared check set (see GA80).
-PINNED_FAULTS_ID_SET_HASH = "ca9417898f12250cc9721e6a5ca889d9b63e40edb016d4dbbe59c70712235960"
-PINNED_FAULTS_CHECK_COUNT = 87
+PINNED_FAULTS_ID_SET_HASH = "5f2ef13af6e142081afefd20d4c7cb90609abba331e78b0131f2c4bafeca483a"
+PINNED_FAULTS_CHECK_COUNT = 89
 
 DB_CONTROL, QUEUE_CONTROL = "production-database-adapter", "production-queue-adapter"
 DB_CHECK, QUEUE_CHECK = "ga_postgres_adapter", "ga_redis_adapter"
@@ -611,6 +622,21 @@ def run() -> int:
     local_block = local_block if isinstance(local_block, dict) else {}
     present_flag = artifact.get("local_evidence_artifact_present")
     paths_present = artifact.get("local_evidence_paths_present")
+    promoter_mismatch = []
+    for c in controls:
+        if not isinstance(c, dict):
+            continue
+        differs = (c.get("current_disposition_verified_environment")
+                   != c.get("current_disposition_fresh_checkout"))
+        named = isinstance(c.get("verified_promoted_by"), str)
+        if differs != named:
+            promoter_mismatch.append(f"{c.get('id')}:differs={differs},named={named}")
+    rec("GA47n promoter-named-exactly-when-promoted",
+        not promoter_mismatch,
+        "a control names its promoting artifact exactly when its machine-local disposition differs "
+        "from the authoritative one -- no orphan promoter names, no unexplained promotions",
+        extra={"mismatched": promoter_mismatch[:5]})
+
     rec("GA47l evidence-path-count-is-honest",
         isinstance(paths_present, int) and paths_present >= 0
         and (paths_present > 0) >= bool(local_block.get("present")),
@@ -871,7 +897,8 @@ def run() -> int:
         ctx.pop("verified_environment_with_evidence", None)
         view["contexts"] = ctx
         view["controls"] = [{k: v for k, v in (c or {}).items()
-                             if k != "current_disposition_verified_environment"}
+                             if k not in ("current_disposition_verified_environment",
+                                          "verified_promoted_by")}
                             for c in view.get("controls") or []]
         return view
 
@@ -917,13 +944,29 @@ def run() -> int:
         # refused by its own guard -- pushing the author toward hand-editing the very half that is
         # least policed. The presence gate is dropped for the same reason: it reflected only the
         # migration artifact, while seven gitignored artifacts drive this half.
-        # Evidence-driven AND at least one evidence artifact actually present. Dropping the
-        # presence requirement (because the old flag reflected only the migration artifact) let a
-        # review record BOTH production adapters PASS in the verified half with nothing present
-        # anywhere. The count below covers all seven paths, so it can be required honestly.
+        # PER-CONTROL, never a count. The control must name the SPECIFIC artifact that promoted
+        # it, and that name must be one the evaluator actually consults. The previous rule asked
+        # only "is some unrelated evidence count non-zero", which let a review record BOTH
+        # production adapters PASS in the machine-local half with no adapter evidence anywhere.
+        # Membership of _EVIDENCE_DRIVEN alone is NOT sufficient either: an exact-head review
+        # showed that set contains behavioural probes (ga_rbac_role_separation,
+        # ga_verified_reviewer_identity) that no artifact drives, and both are legitimately PASS
+        # in the authoritative half -- a blanket rule over that set would reject honest data.
+        promoter = c.get("verified_promoted_by")
+        # The promoter must be an artifact that gates THIS control, not merely a known artifact.
+        # Naming a KNOWN-but-unrelated artifact was the count escape one level down: a review
+        # promoted the production database adapter while naming the MIGRATION artifact and the
+        # guard accepted it. The per-control scope is derived from the evaluator's AST, so it is a
+        # property of the code and identical on every machine. It FAILS CLOSED: a control whose
+        # own gating artifact cannot be proved gets an empty scope, which forbids promotion.
+        in_scope = promoter in EVIDENCE_SCOPE.get(str(c.get("check_id")), frozenset())
         if (str(c.get("check_id")) not in GEN._EVIDENCE_DRIVEN
-                or not isinstance(paths_present, int) or paths_present < 1):
-            unbounded.append(f"{c.get('id')}:{fresh_d}->{ver_d}")
+                or not isinstance(promoter, str)
+                or promoter not in KNOWN_EVIDENCE_FILENAMES
+                or not in_scope):
+            unbounded.append(
+                f"{c.get('id')}:{fresh_d}->{ver_d} promoted_by={str(promoter)[:40]!r}")
+
     rec("GA45c contexts-declare-their-authority",
         fresh_ctx.get("authoritative_for_release") is True
         and fresh_ctx.get("informational_only") is False
@@ -940,12 +983,13 @@ def run() -> int:
 
     rec("GA47f verified-half-is-bounded",
         not unbounded,
-        "a verified-environment disposition may differ from the fresh one ONLY for an "
-        "evidence-driven control, and only while a local evidence artifact is present. Without this "
-        "bound, 18 of 19 BLOCKED controls -- including both production adapters -- could be flipped "
-        "to PASS below the all-non-blocking threshold that GA47c detects, with the canonical hash "
-        "unchanged. RESIDUAL: an attacker may still flip an evidence-driven control; that half is "
-        "explicitly not repository state and the authoritative context is the fresh one",
+        "a machine-local disposition may differ from the authoritative one ONLY when the control "
+        "names the SPECIFIC evidence artifact that promoted it, and that artifact is one the "
+        "evaluator consults. No count of unrelated evidence authorizes any control. The "
+        "authoritative half itself is not bounded here at all -- it is RECOMPUTED against the "
+        "hermetic evaluator by GA12, so it cannot be forged. RESIDUAL, stated plainly: the "
+        "machine-local half is not repository state and a per-control promoter name is itself "
+        "machine-local; the authoritative context is the only release-relevant one",
         extra={"unbounded": unbounded[:5]})
 
     rec("GA51b top-level-keys-closed",
