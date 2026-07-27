@@ -130,12 +130,22 @@ def _constant_rebindings(tree, call, required: set) -> set:
         line = getattr(node, "lineno", 0)
         if not line or line >= call.lineno:
             continue
-        if isinstance(node, ast.Assign):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
             inert = (isinstance(value, ast.Constant)
                      or (isinstance(value, (ast.List, ast.Tuple, ast.Set)) and not value.elts)
                      or (isinstance(value, ast.Dict) and not value.keys))
-            for target in node.targets:
+            # AnnAssign has a single .target; a tuple target unpacks several names. Both were
+            # invisible, so `dirty_paths: list = []` and `dirty_paths, _s = [], []` hollowed a gate
+            # while evading this check entirely.
+            targets = getattr(node, "targets", None) or [getattr(node, "target", None)]
+            flat = []
+            for target in targets:
+                if isinstance(target, (ast.Tuple, ast.List)):
+                    flat.extend(target.elts)
+                elif target is not None:
+                    flat.append(target)
+            for target in flat:
                 if not isinstance(target, ast.Name) or target.id not in required:
                     continue
                 book = last_inert if inert else last_feed
@@ -345,66 +355,173 @@ def mutations(source: str) -> dict:
 
 
 # --------------------------------------------------------------------------- evidence scoping
-def evidence_scope(evaluator_source: str) -> dict:
-    """Map each control id to the evidence artifact FILENAMES its own probe reads.
+def _eq_targets(test) -> set:
+    """Control ids a dispatch test selects: ``check_id == "ga_x"`` or ``check_id in ("a", "b")``."""
+    ids = set()
+    for node in ast.walk(test):
+        if isinstance(node, ast.Compare) and len(node.ops) == 1:
+            left, op, right = node.left, node.ops[0], node.comparators[0]
+            if (isinstance(op, ast.Eq) and isinstance(left, ast.Name)
+                    and isinstance(right, ast.Constant) and isinstance(right.value, str)
+                    and right.value.startswith("ga_")):
+                ids.add(right.value)
+            elif (isinstance(op, ast.In) and isinstance(left, ast.Name)
+                  and isinstance(right, (ast.Tuple, ast.List, ast.Set))):
+                for elt in right.elts:
+                    if isinstance(elt, ast.Constant) and str(elt.value).startswith("ga_"):
+                        ids.add(elt.value)
+    return ids
 
-    Derived from the evaluator's AST, so it is a property of the CODE and identical on every
-    machine -- unlike asking "which artifact happens to move this control here", which needs the
-    artifact to be present and therefore differs per checkout.
 
-    Why this exists: bounding a machine-local promotion on "the promoter is *a* known artifact" is
-    the count escape one level down. A review promoted the production database adapter while naming
-    the MIGRATION artifact as its promoter and the guard accepted it. A promoter must be an artifact
-    that actually gates THAT control.
+def _called_names(node) -> set:
+    out = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            fn = sub.func
+            if isinstance(fn, ast.Name):
+                out.add(fn.id)
+            elif isinstance(fn, ast.Attribute):
+                out.add(fn.attr)
+    return out
 
-    Fails CLOSED: a control whose probe cannot be resolved gets an empty set, which forbids
-    promotion rather than allowing it.
+
+def evaluator_graph(evaluator_source: str) -> dict:
+    """Derive the evidence-gated control graph from the evaluator's own AST.
+
+    Returns ``{check_id: {"artifacts": [...], "conjunction": bool, "validators": [...],
+    "extra_predicates": [...], "probes": [...]}}``.
+
+    Three things the first attempt got wrong, each of which made the resolver return NOTHING:
+
+    * DISPATCH -- ``evaluate_blockers`` is an ``if/elif`` chain, so ``ast.walk`` over a branch node
+      dragged in every sibling id and the "exactly one id" selector never matched. Only ``node.test``
+      is read for the id and only ``node.body`` for the calls; the rest of the chain lives in
+      ``node.orelse``.
+    * TRANSITIVITY -- a probe rarely touches a path constant itself. ``_migration_runner_probe`` ->
+      ``_migration_evidence_valid`` -> ``_load_migration_evidence`` is two hops from
+      ``MIGRATION_EVIDENCE_PATH``, so a direct-reference scan found nothing. The call graph is closed
+      transitively.
+    * FILENAME EXTRACTION -- taking the last dotted string in the assignment yielded ``.json`` for the
+      adapter paths. The path is rebuilt from every string constant in the expression.
+
+    Fails closed: a control that cannot be resolved is simply absent, and the caller forbids
+    promotion for anything absent. Nothing here depends on which artifacts exist on this machine --
+    it is a property of the code and therefore identical on every checkout.
     """
     try:
         tree = ast.parse(evaluator_source)
     except SyntaxError:
         return {}
 
-    # module-level PATH constants -> filename
-    path_files = {}
+    # Module-level string constants, so an f-string filename can be resolved.
+    consts = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)                 and isinstance(node.value.value, str):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    consts[target.id] = node.value.value
+
+    def _segments(expr):
+        """Path segments of a ``ROOT / "a" / "b"`` chain, in SOURCE order.
+
+        ast.walk yields the operands of a BinOp chain outermost-first, so the first attempt read
+        the filename as "output". The chain is descended explicitly instead, and an f-string
+        segment such as f"{_PRODUCTION_ADAPTER_SCHEMA}.json" is resolved from the module constants
+        -- without that, both production adapter paths reduced to the useless segment ".json".
+        """
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Div):
+            return _segments(expr.left) + _segments(expr.right)
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return [expr.value]
+        if isinstance(expr, ast.Name):
+            return [consts[expr.id]] if expr.id in consts else []
+        if isinstance(expr, ast.JoinedStr):
+            text = ""
+            for part in expr.values:
+                if isinstance(part, ast.Constant):
+                    text += str(part.value)
+                elif isinstance(part, ast.FormattedValue) and isinstance(part.value, ast.Name):
+                    text += consts.get(part.value.id, "")
+            return [text] if text else []
+        return []
+
+    # module-level artifact path constants -> filename (evidence artifacts only)
+    path_file = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
-            if not isinstance(target, ast.Name):
+            if not isinstance(target, ast.Name) or not target.id.endswith("_PATH"):
                 continue
-            if not (target.id.endswith("_PATH") or "EVIDENCE" in target.id):
-                continue
-            leaf = None
-            for sub in ast.walk(node.value):
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and "." in sub.value:
-                    leaf = sub.value
-            if leaf:
-                path_files[target.id] = leaf
+            segs = _segments(node.value)
+            # An evidence artifact lives under output/ and is a .json file. REGISTRY_PATH and other
+            # TRACKED inputs are deliberately excluded: they are repository state, not promotion
+            # evidence, and admitting one would let a tracked file authorize a promotion.
+            if segs and "output" in segs and segs[-1].endswith(".json"):
+                path_file[target.id] = segs[-1]
 
-    # function -> filenames it reads
-    func_files = {}
+    # function -> (paths it names directly, functions it calls)
+    direct, calls, func_nodes = {}, {}, {}
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
+        func_nodes[fn.name] = fn
         names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
-        files = {path_files[p] for p in names & set(path_files)}
-        if files:
-            func_files[fn.name] = files
+        direct[fn.name] = {path_file[p] for p in names & set(path_file)}
+        calls[fn.name] = _called_names(fn) & set(func_nodes) | _called_names(fn)
 
-    # control id -> functions called in the same branch/statement group
-    scope = {}
+    def reachable(name, seen=None):
+        seen = seen or set()
+        if name in seen or name not in direct:
+            return set(), set()
+        seen.add(name)
+        files = set(direct[name])
+        fns = {name}
+        for callee in calls.get(name, ()):  # transitive closure over the call graph
+            if callee in direct and callee not in seen:
+                sub_files, sub_fns = reachable(callee, seen)
+                files |= sub_files
+                fns |= sub_fns
+        return files, fns
+
+    # dispatch: control id -> probe functions
+    dispatch = {}
     for node in ast.walk(tree):
-        ids = [n.value for n in ast.walk(node)
-               if isinstance(n, ast.Constant) and isinstance(n.value, str)
-               and n.value.startswith("ga_")]
-        if len(ids) != 1:
+        if not isinstance(node, ast.If):
             continue
-        called = {n.func.id for n in ast.walk(node)
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        files = set()
-        for name in called & set(func_files):
-            files |= func_files[name]
-        if files:
-            scope.setdefault(ids[0], set()).update(files)
-    return scope
+        ids = _eq_targets(node.test)
+        if not ids:
+            continue
+        called = set()
+        for stmt in node.body:  # body only -- the elif chain is in orelse
+            called |= _called_names(stmt)
+        for cid in ids:
+            dispatch.setdefault(cid, set()).update(called & set(direct))
+
+    graph = {}
+    for cid, probes in dispatch.items():
+        files, fns = set(), set()
+        for probe in probes:
+            probe_files, probe_fns = reachable(probe)
+            files |= probe_files
+            fns |= probe_fns
+        if not files:
+            continue  # not evidence-gated; absent means promotion is forbidden
+        validators = sorted(f for f in fns if direct.get(f))
+        graph[cid] = {
+            "artifacts": sorted(files),
+            "conjunction": len(files) > 1,
+            "validators": validators,
+            # Functions in the probe's closure that read NO artifact: additional static predicates
+            # that a valid artifact does not override (ga_migration_validity's legacy 0003 FK check).
+            "extra_predicates": sorted(f for f in fns if f in direct and not direct[f]
+                                       and f not in probes),
+            "probes": sorted(probes),
+        }
+    return graph
+
+
+def evidence_scope(evaluator_source: str) -> dict:
+    """control id -> the evidence artifact filenames that authorize IT, and nothing else."""
+    return {cid: set(spec["artifacts"]) for cid, spec in
+            evaluator_graph(evaluator_source).items()}

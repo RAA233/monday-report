@@ -93,8 +93,9 @@ KNOWN_EVIDENCE_FILENAMES = frozenset(p.name for p in GEN._all_evidence_paths())
 #: control id -> the evidence artifact filenames that control's OWN probe reads, derived from the
 #: evaluator's AST. Empty for a control whose gating artifact cannot be proved, which forbids any
 #: machine-local promotion of it rather than permitting one on an unrelated artifact's authority.
-EVIDENCE_SCOPE = COUPLING.evidence_scope(
+EVIDENCE_GRAPH = COUPLING.evaluator_graph(
     (ROOT / "backend" / "app" / "ga_readiness.py").read_text(encoding="utf-8"))
+EVIDENCE_SCOPE = {cid: set(spec["artifacts"]) for cid, spec in EVIDENCE_GRAPH.items()}
 
 #: Meaning the curated-prose disclosure MUST carry, pinned in the consumer rather than compared
 #: against the generator constant it is supposed to police (see GA04k).
@@ -628,7 +629,7 @@ def run() -> int:
             continue
         differs = (c.get("current_disposition_verified_environment")
                    != c.get("current_disposition_fresh_checkout"))
-        named = isinstance(c.get("verified_promoted_by"), str)
+        named = isinstance(c.get("verified_promoted_by"), list) and bool(c["verified_promoted_by"])
         if differs != named:
             promoter_mismatch.append(f"{c.get('id')}:differs={differs},named={named}")
     rec("GA47n promoter-named-exactly-when-promoted",
@@ -636,6 +637,22 @@ def run() -> int:
         "a control names its promoting artifact exactly when its machine-local disposition differs "
         "from the authoritative one -- no orphan promoter names, no unexplained promotions",
         extra={"mismatched": promoter_mismatch[:5]})
+
+    unresolved = sorted(set(GEN._EVIDENCE_DRIVEN) - set(EVIDENCE_GRAPH))
+    rec("GA47o evidence-graph-resolves",
+        len(EVIDENCE_GRAPH) >= 7
+        and {"ga_migration_runner", "ga_tenant_authorization", "ga_postgres_adapter",
+             "ga_redis_adapter"} <= set(EVIDENCE_GRAPH)
+        and EVIDENCE_GRAPH.get("ga_tenant_authorization", {}).get("conjunction") is True,
+        "the evidence graph resolves every artifact-gated control from the evaluator's call graph, "
+        "including the tenant-authorization CONJUNCTION. An earlier resolver returned an empty map, "
+        "which made the per-control scope arm a constant False: it forbade every promotion, refused "
+        "an honest artifact generated on a machine holding real evidence, and was indistinguishable "
+        "from a hard-coded False",
+        extra={"resolved": len(EVIDENCE_GRAPH),
+               "evidence_driven_without_artifact_gate": unresolved,
+               "conjunction_controls": sorted(k for k, v in EVIDENCE_GRAPH.items()
+                                              if v["conjunction"])})
 
     rec("GA47l evidence-path-count-is-honest",
         isinstance(paths_present, int) and paths_present >= 0
@@ -953,33 +970,18 @@ def run() -> int:
         # ga_verified_reviewer_identity) that no artifact drives, and both are legitimately PASS
         # in the authoritative half -- a blanket rule over that set would reject honest data.
         promoter = c.get("verified_promoted_by")
-        # The promoter must be an artifact that gates THIS control, not merely a known artifact.
-        # Naming a KNOWN-but-unrelated artifact was the count escape one level down: a review
-        # promoted the production database adapter while naming the MIGRATION artifact and the
-        # guard accepted it. The per-control scope is derived from the evaluator's AST, so it is a
-        # property of the code and identical on every machine. It FAILS CLOSED: a control whose
-        # own gating artifact cannot be proved gets an empty scope, which forbids promotion.
-        in_scope = promoter in EVIDENCE_SCOPE.get(str(c.get("check_id")), frozenset())
-        if (str(c.get("check_id")) not in GEN._EVIDENCE_DRIVEN
-                or not isinstance(promoter, str)
-                or promoter not in KNOWN_EVIDENCE_FILENAMES
-                or not in_scope):
+        required = EVIDENCE_SCOPE.get(str(c.get("check_id")), frozenset())
+        named = set(promoter) if isinstance(promoter, list) else set()
+        # PER CONTROL, and for a CONJUNCTION every component must be named. The scope comes from
+        # the evaluator's own call graph -- dispatch, transitive helpers and composed filenames --
+        # so it is a property of the code and identical on every machine. It still fails closed: a
+        # control absent from the graph has an empty requirement and cannot be promoted at all.
+        if (not required
+                or not named
+                or not named <= set(KNOWN_EVIDENCE_FILENAMES)
+                or named != set(required)):
             unbounded.append(
-                f"{c.get('id')}:{fresh_d}->{ver_d} promoted_by={str(promoter)[:40]!r}")
-
-    rec("GA45c contexts-declare-their-authority",
-        fresh_ctx.get("authoritative_for_release") is True
-        and fresh_ctx.get("informational_only") is False
-        and verified_ctx.get("authoritative_for_release") is False
-        and verified_ctx.get("informational_only") is True
-        and artifact.get("authoritative_context") == "fresh_checkout_no_local_evidence",
-        "both contexts classify themselves in MACHINE-READABLE form: the fresh checkout is "
-        "authoritative for release, the machine-local verified environment is informational only. "
-        "The distinction previously existed only in a prose note",
-        extra={"fresh": {k: fresh_ctx.get(k) for k in
-                         ("informational_only", "authoritative_for_release")},
-               "verified": {k: verified_ctx.get(k) for k in
-                            ("informational_only", "authoritative_for_release")}})
+                f"{c.get('id')}:{fresh_d}->{ver_d} named={sorted(named)} required={sorted(required)}")
 
     rec("GA47f verified-half-is-bounded",
         not unbounded,

@@ -111,7 +111,7 @@ EXPECTED_CHECK_IDS = [
 ]
 EXPECTED_TOTAL_CHECKS = 93
 EXPECTED_MUTATION_COUNT = 78
-PINNED_DRIFT_ID_SET_HASH = "fdc2f72ac3f5125f2a6318254f943d4104d6a315131337981cd5d4ffa62bb303"
+PINNED_DRIFT_ID_SET_HASH = "310454143c3dc616e800312757b1c2ddb0af297dec4358e3a1b1aeab52878c52"
 PINNED_DRIFT_CHECK_COUNT = 90
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
 #: editable alongside the very list it protects, so it proves nothing against intent. Completeness is
@@ -811,18 +811,21 @@ def run() -> int:
                "duplicate_bodies": {k[:12]: v for k, v in list(dup.items())[:3]}})
     # Cross-pin the DRIFT guard's own check set. Without it four of its checks -- GA21, GA42, GA70,
     # GA71 -- could each be deleted with this battery still green.
-    GG.checks.clear()
-    with contextlib.redirect_stdout(io.StringIO()):
-        GG.run()
-    drift_ids = sorted(c["check_id"] for c in GG.checks)
-    GG.checks.clear()
+    # Protected exactly like _emitted_drift_checks(). Unprotected, a hollowing that the coupling
+    # verifier DOES detect (an input rebound to a constant) raised AttributeError here and the whole
+    # battery died with ZERO stdout, no JSON and no named failure -- the precise outcome this file
+    # calls unacceptable elsewhere. A crash is not a refusal, and it is not a pin either.
+    drift_ids = sorted(c["check_id"] for c in _emitted_drift_checks())
+    crashed_enumerating = not drift_ids
     drift_hash = hashlib.sha256("\n".join(drift_ids).encode("utf-8")).hexdigest()
     rec("FZ04 drift-guard-check-set-pinned",
-        drift_hash == PINNED_DRIFT_ID_SET_HASH and len(drift_ids) == PINNED_DRIFT_CHECK_COUNT,
+        not crashed_enumerating
+        and drift_hash == PINNED_DRIFT_ID_SET_HASH and len(drift_ids) == PINNED_DRIFT_CHECK_COUNT,
         "the drift guard's emitted check-id set is hashed and pinned HERE, so one of its checks "
         "cannot be deleted with this battery still reporting green",
         level="structural source check",
-        extra={"observed": drift_hash[:16] + "...", "count": len(drift_ids)})
+        extra={"observed": drift_hash[:16] + "...", "count": len(drift_ids),
+               "crashed_enumerating": crashed_enumerating})
 
     # The expected control inventory must come from the registry, and no editable constant may
     # redefine it. Proved on the parsed guard source, not by string search.

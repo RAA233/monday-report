@@ -498,53 +498,45 @@ _EVIDENCE_DRIVEN = {
 
 
 def _promotion_map(fresh: dict) -> dict:
-    """Which SPECIFIC artifact promotes which control, asked of the real evaluator.
+    """Per-control evidence attribution, conjunction-aware.
 
-    Answers, per control, "which evidence artifact -- if any -- is the one that moves THIS control",
-    by hiding every artifact except one and observing what changes. Nothing is assumed from a curated
-    list: an exact-head review showed ``_EVIDENCE_DRIVEN`` contains behavioural probes
-    (ga_rbac_role_separation, ga_verified_reviewer_identity) that no artifact drives at all, so
-    membership of that set is not evidence of anything.
+    Returns ``{check_id: {"required": [...], "present": [...], "missing": [...],
+    "conjunction": bool}}`` for every control whose machine-local disposition improves on the
+    authoritative one.
 
-    This exists to replace a global COUNT. GA47f previously allowed any evidence-driven control to
-    move whenever *some unrelated* artifact existed, which let both production adapters be recorded
-    PASS in the machine-local half with no adapter evidence anywhere.
+    The previous version kept ONE artifact visible at a time and recorded whichever single file
+    moved the control. That cannot attribute a control gated on a CONJUNCTION:
+    ga_tenant_authorization requires tenant-rls v2 AND tenant-authorization v3, so neither artifact
+    alone moves it and the honest output was a null promoter beside a changed disposition -- which
+    the guard then refused. The requirement now comes from the evaluator's own call graph, so a
+    conjunction is represented as one and every component is named.
     """
     import backend.app.ga_readiness as G
+    import ga_gap_assessment_coupling as _coupling
 
-    every = _all_evidence_paths()
-    promoted: dict[str, str] = {}
-    for keep in [p for p in every if p.exists()]:
-        stash = Path(tempfile.mkdtemp(prefix="gap-promotion-"))
-        moved = []
-        try:
-            for index, path in enumerate(every):
-                if path != keep and path.exists():
-                    target = stash / f"{index}-{path.name}"
-                    os.replace(path, target)
-                    moved.append((path, target))
-            # Hermetic, exactly as the fresh snapshot is. Without this the map attributed
-            # ENVIRONMENT-driven promotions to whichever artifact happened to be visible: with
-            # MONDAY_REPORT_AUDIT_HMAC_KEY set, ga_audit_keyed_integrity was recorded as promoted
-            # by the migration artifact, which is simply false.
-            saved_env = {k: os.environ.pop(k) for k in
-                         [k for k in os.environ if k.startswith("MONDAY_REPORT_")]}
-            try:
-                checks = G.evaluate_blockers({})
-            finally:
-                os.environ.update(saved_env)
-            for check in checks:
-                # Attribute only an IMPROVEMENT over the hermetic baseline, and let the first
-                # artifact that achieves it own the attribution: a later iteration must not
-                # overwrite a correct one.
-                if (check["disposition"] != fresh.get(check["id"])
-                        and check["disposition"] == "PASS"):
-                    promoted.setdefault(check["id"], keep.name)
-        finally:
-            for path, target in moved:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(target, path)
-            shutil.rmtree(stash, ignore_errors=True)
+    graph = _coupling.evaluator_graph(
+        (ROOT / "backend" / "app" / "ga_readiness.py").read_text(encoding="utf-8"))
+    by_name = {p.name: p for p in _all_evidence_paths()}
+
+    saved_env = {k: os.environ.pop(k) for k in
+                 [k for k in os.environ if k.startswith("MONDAY_REPORT_")]}
+    try:
+        verified = {c["id"]: c["disposition"] for c in G.evaluate_blockers({})}
+    finally:
+        os.environ.update(saved_env)
+
+    promoted: dict[str, dict] = {}
+    for cid, disposition in verified.items():
+        if disposition == fresh.get(cid) or cid not in graph:
+            continue
+        required = list(graph[cid]["artifacts"])
+        present = sorted(n for n in required if n in by_name and by_name[n].exists())
+        promoted[cid] = {
+            "required": required,
+            "present": present,
+            "missing": sorted(set(required) - set(present)),
+            "conjunction": graph[cid]["conjunction"],
+        }
     return promoted
 
 
@@ -659,7 +651,8 @@ NON_CANONICAL_KEYS = frozenset({"canonical_payload_hash", "local_evidence_artifa
                                 "local_evidence_paths_present"})
 NON_CANONICAL_CONTEXT_KEYS = frozenset({"verified_environment_with_evidence"})
 NON_CANONICAL_CONTROL_KEYS = frozenset({"current_disposition_verified_environment",
-                                        "verified_promoted_by"})
+                                        "verified_promoted_by",
+                                        "verified_promotion_detail"})
 
 
 def canonical_body(payload: dict) -> dict:
@@ -775,7 +768,10 @@ def build() -> dict:
             # The SPECIFIC artifact that moves this control, or null. Machine-local, so it is
             # excluded from the canonical body -- it exists to make the machine-local bound
             # per-control instead of a global count.
-            "verified_promoted_by": promoted_by.get(cid),
+            # Conjunction-aware: EVERY artifact that authorizes this control, not whichever single
+            # file happened to move it. Machine-local, so it stays out of the canonical body.
+            "verified_promoted_by": (promoted_by.get(cid) or {}).get("present") or None,
+            "verified_promotion_detail": promoted_by.get(cid),
             "probe_type": a.get("probe_type", PROBE_NONE),
             "probe_location": a.get("probe_location", f"{_EVAL} default branch"),
             "measurement_class": klass,
