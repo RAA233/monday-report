@@ -976,12 +976,24 @@ def run() -> int:
         # the evaluator's own call graph -- dispatch, transitive helpers and composed filenames --
         # so it is a property of the code and identical on every machine. It still fails closed: a
         # control absent from the graph has an empty requirement and cannot be promoted at all.
+        # Naming the required artifacts is not the same as HAVING them: a probe of this gate
+        # promoted the tenant-authorization conjunction by listing both components while neither
+        # artifact was present. The control's own detail block must therefore report every required
+        # artifact present and nothing missing.
+        detail = c.get("verified_promotion_detail")
+        detail = detail if isinstance(detail, dict) else {}
+        present = set(detail.get("present") or [])
+        missing = set(detail.get("missing") or [])
         if (not required
                 or not named
                 or not named <= set(KNOWN_EVIDENCE_FILENAMES)
-                or named != set(required)):
+                or named != set(required)
+                or present != set(required)
+                or missing
+                or detail.get("conjunction") is not (len(required) > 1)):
             unbounded.append(
-                f"{c.get('id')}:{fresh_d}->{ver_d} named={sorted(named)} required={sorted(required)}")
+                f"{c.get('id')}:{fresh_d}->{ver_d} named={sorted(named)} "
+                f"required={sorted(required)} present={sorted(present)} missing={sorted(missing)}")
 
     rec("GA47f verified-half-is-bounded",
         not unbounded,
