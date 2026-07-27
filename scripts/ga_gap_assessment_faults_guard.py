@@ -92,7 +92,7 @@ EXPECTED_CHECK_IDS = [
     "MX21 verified-flip-below-threshold", "MX23 presence-flag-forged",
     "MX24 verified-context-key-injected", "MX25 controls-reordered", "MX26 context-authority-flipped",
     "MX27 bound-commit-is-prose", "MX28 matches-head-truthy-string",
-    "MX29 evidence-path-count-forged",
+    "MX29 evidence-path-count-forged", "MX30 verified-disposition-is-prose",
     "MX22 prose-disclosure-removed", "MX11 blocking-reason-rewritten",
     "MX12 extra-context-injected", "MX13 static-contract-invented",
     # (there is deliberately no MX09: ga_ready=true is already MR04, and FZ03 rejected the duplicate)
@@ -101,10 +101,10 @@ EXPECTED_CHECK_IDS = [
     "FZ05 inventory-authority-is-the-registry", "FZ06 mutations-trip-the-gate-they-protect",
     "FZ07 hardened-arms-are-structurally-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 86
-EXPECTED_MUTATION_COUNT = 77
-PINNED_DRIFT_ID_SET_HASH = "8f074e9a7b903b015086292a7731b98064b6522c6058e48da4d913b564c420f4"
-PINNED_DRIFT_CHECK_COUNT = 88
+EXPECTED_TOTAL_CHECKS = 87
+EXPECTED_MUTATION_COUNT = 78
+PINNED_DRIFT_ID_SET_HASH = "faf171027827dd982286ba9d6031c5141db2305469491f62ac4b1791adadd7c6"
+PINNED_DRIFT_CHECK_COUNT = 89
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
 #: editable alongside the very list it protects, so it proves nothing against intent. Completeness is
 #: carried by FZ00 (emitted == declared), FZ01 (size), FZ03 (distinct mutation inputs) and FZ04
@@ -147,6 +147,7 @@ EXPECTED_TRIP = {
     "MX27 bound-commit-is-prose": "GA47i",
     "MX28 matches-head-truthy-string": "GA47i",
     "MX29 evidence-path-count-forged": "GA47f",
+    "MX30 verified-disposition-is-prose": "GA47m",
     "MX23 presence-flag-forged": "GA47g",
     "MX24 verified-context-key-injected": "GA47h",
     "MX25 controls-reordered": "GA56",
@@ -715,6 +716,19 @@ def run() -> int:
     refuses("MX29 evidence-path-count-forged", _forge_paths,
             "recording both production adapters PASS in the verified half with NO evidence artifact "
             "present anywhere is refused; dropping the presence requirement had widened this")
+    def _prose_dispo(a):
+        tgt = a["controls"][0]
+        sentence = ("PASS - production database and queue adapters were exercised and ACCEPTED at "
+                    "this head by the release engineer.")
+        tgt["current_disposition_verified_environment"] = sentence
+        t = {}
+        for c in a["controls"]:
+            v = c["current_disposition_verified_environment"]; t[v] = t.get(v, 0) + 1
+        a["contexts"]["verified_environment_with_evidence"]["tally"] = dict(sorted(t.items()))
+
+    refuses("MX30 verified-disposition-is-prose", _prose_dispo,
+            "an arbitrary sentence in a verified disposition (and mirrored into the tally key) is "
+            "refused; it previously certified with a byte-identical canonical hash")
     refuses("MX23 presence-flag-forged",
             lambda a: a.__setitem__("local_evidence_artifact_present",
                                     {"ga": "GA_READY", "note": "adapters accepted"}),

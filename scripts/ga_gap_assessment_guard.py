@@ -116,8 +116,8 @@ NOTHING_MISSING_CLAIMS = (
 )
 
 #: Reciprocal cross-file pin of the FAULTS battery's declared check set (see GA80).
-PINNED_FAULTS_ID_SET_HASH = "2239622d21fbf495ddcf550bc381a18c1c6ba085043d0db95e229c86f6ebada3"
-PINNED_FAULTS_CHECK_COUNT = 86
+PINNED_FAULTS_ID_SET_HASH = "ca9417898f12250cc9721e6a5ca889d9b63e40edb016d4dbbe59c70712235960"
+PINNED_FAULTS_CHECK_COUNT = 87
 
 DB_CONTROL, QUEUE_CONTROL = "production-database-adapter", "production-queue-adapter"
 DB_CHECK, QUEUE_CHECK = "ga_postgres_adapter", "ga_redis_adapter"
@@ -648,6 +648,22 @@ def run() -> int:
         "unchanged hash. Closing the key set and the note left the VALUES open",
         extra={"bound_to_commit": str(bound_val)[:60],
                "matches_current_head": repr(matches_val)})
+    DISPOSITIONS = {"PASS", "BLOCKED", "FAIL", "SKIPPED", "REVIEW_REQUIRED", "NOT_APPLICABLE"}
+    bad_dispo = sorted(
+        f"{c.get('id')}={str(c.get('current_disposition_verified_environment'))[:40]}"
+        for c in controls
+        if isinstance(c, dict)
+        and c.get("current_disposition_verified_environment") not in DISPOSITIONS)
+    bad_tally = sorted(str(k)[:40] for k in (verified_ctx.get("tally") or {})
+                       if str(k) not in DISPOSITIONS)
+    rec("GA47m verified-dispositions-are-enum-members",
+        not bad_dispo and not bad_tally,
+        "every machine-local disposition and every tally KEY is a member of the evaluator's "
+        "disposition enum. Typing bound_to_commit and matches_current_head closed one free-text "
+        "channel and a review immediately found the next one: an arbitrary sentence in a control's "
+        "verified disposition, mirrored into the tally key, certified 88/0 and 86/0 with a "
+        "BYTE-IDENTICAL canonical hash, because the field is outside both the hash and the deep view",
+        extra={"bad_dispositions": bad_dispo[:4], "bad_tally_keys": bad_tally[:4]})
     rec("GA47j machine-local-note-agrees-with-state",
         (local_block.get("note") == GEN.LOCAL_EVIDENCE_NOTES[3]) == bool(matches_val is True)
         or not local_block.get("present"),
@@ -843,7 +859,8 @@ def run() -> int:
     #   worktree_clean      -- a property of the generating tree, not of the payload (GA50b)
     #   machine-local half  -- explicitly NOT repository state; bounded by GA47b/c/d/f below
     DEEP_EXCLUDED = {"canonical_payload_hash", "generated_from_commit", "generated_from_tree",
-                     "worktree_clean", "local_evidence_artifact", "local_evidence_artifact_present"}
+                     "worktree_clean", "local_evidence_artifact", "local_evidence_artifact_present",
+                     "local_evidence_paths_present"}
 
     def deep_view(payload: dict) -> dict:
         view = {k: v for k, v in payload.items() if k not in DEEP_EXCLUDED}

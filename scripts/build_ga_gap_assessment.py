@@ -598,8 +598,14 @@ def _source_bindings(registry_bytes: bytes) -> dict:
 #: `contexts` was previously excluded wholesale, which let a GA_BLOCKED artifact and a GA_READY /
 #: 28-PASS artifact share a canonical hash. Only the verified-environment half, which depends on
 #: gitignored local artifacts, is excluded now.
+# ``local_evidence_paths_present`` counts GITIGNORED artifacts, so it is machine-local exactly like
+# the two fields beside it. Admitting it to the canonical body made the hash a function of untracked
+# state: a pristine checkout computed 0 where the author's machine computed 5, so the tracked
+# artifact was green on one machine and RED everywhere else, with the fault battery reporting zero
+# mutations. That is the defect this whole increment exists to prevent.
 NON_CANONICAL_KEYS = frozenset({"canonical_payload_hash", "local_evidence_artifact",
-                                "local_evidence_artifact_present"})
+                                "local_evidence_artifact_present",
+                                "local_evidence_paths_present"})
 NON_CANONICAL_CONTEXT_KEYS = frozenset({"verified_environment_with_evidence"})
 NON_CANONICAL_CONTROL_KEYS = frozenset({"current_disposition_verified_environment"})
 

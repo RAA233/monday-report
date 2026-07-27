@@ -1,7 +1,7 @@
 {
   "schema_version": "ga-gap-assessment.v2",
-  "generated_from_commit": "a28f420d8964453ef49f678db803de35948c5d6d",
-  "generated_from_tree": "e6f2287932c2a00ab9f33f57bfce4beec863dd59",
+  "generated_from_commit": "fe089faab8192174f94d7b245ab3a184539c314a",
+  "generated_from_tree": "ece1602199c517103c775e53e7e292dd2cc1dbbf",
   "worktree_clean": true,
   "registry_version": "v1",
   "registry_path": "evals/ga/blocker_registry.v1.json",
@@ -20,7 +20,7 @@
     "production_queue_adapter_contract_hash": "45bc335f8066576ee1694ba07d47e2c6d97ad74ac4fab69374e9202ad16e7afb"
   },
   "source_file_hashes": {
-    "scripts/build_ga_gap_assessment.py": "52829d3b5c4b85bcc69bdb8366536869fb2909bc51cc5e2408e0a2c682e9b37c",
+    "scripts/build_ga_gap_assessment.py": "3108d2b8609a73dafd1bc5cecbc5a81e56ef828b0f4a47b61384646a8b266035",
     "evals/ga/blocker_registry.v1.json": "68ae5a433eb98ceb08d5ac80f76f54d2a11d7faa721580024f3dd8d2d8a487e2",
     "backend/app/ga_readiness.py": "dd6dad107af85fdfed781f9469ecd12371a4997818ec5d0bcd52fe11ca69fa1d",
     "backend/app/readiness_contexts.py": "99e93ede67f106244288600e3f89e4dd83f75686e663f13e5d558b7f6309d33e",
@@ -795,5 +795,5 @@
       "notes": ""
     }
   ],
-  "canonical_payload_hash": "3cd8d18a8f66118be7a625b033839c43f027046247ce325f7bbf5006d56844bd"
+  "canonical_payload_hash": "d9611848081b1e30b5e86c535c730458b5409210ada02bf5f7645bf00dc89597"
 }
