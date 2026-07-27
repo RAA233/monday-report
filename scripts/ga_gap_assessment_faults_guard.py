@@ -111,8 +111,8 @@ EXPECTED_CHECK_IDS = [
 ]
 EXPECTED_TOTAL_CHECKS = 93
 EXPECTED_MUTATION_COUNT = 78
-PINNED_DRIFT_ID_SET_HASH = "310454143c3dc616e800312757b1c2ddb0af297dec4358e3a1b1aeab52878c52"
-PINNED_DRIFT_CHECK_COUNT = 90
+PINNED_DRIFT_ID_SET_HASH = "f4c64d167d0a476b25746d7225e37789cd558ef6d6ab9dda96820bccbcbc5634"
+PINNED_DRIFT_CHECK_COUNT = 91
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
 #: editable alongside the very list it protects, so it proves nothing against intent. Completeness is
 #: carried by FZ00 (emitted == declared), FZ01 (size), FZ03 (distinct mutation inputs) and FZ04

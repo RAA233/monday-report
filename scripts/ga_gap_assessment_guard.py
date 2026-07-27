@@ -996,6 +996,20 @@ def run() -> int:
                 f"{c.get('id')}:{fresh_d}->{ver_d} named={sorted(named)} "
                 f"required={sorted(required)} present={sorted(present)} missing={sorted(missing)}")
 
+    rec("GA45c contexts-declare-their-authority",
+        fresh_ctx.get("authoritative_for_release") is True
+        and fresh_ctx.get("informational_only") is False
+        and verified_ctx.get("authoritative_for_release") is False
+        and verified_ctx.get("informational_only") is True
+        and artifact.get("authoritative_context") == "fresh_checkout_no_local_evidence",
+        "both contexts classify themselves in MACHINE-READABLE form: the fresh checkout is "
+        "authoritative for release, the machine-local verified environment is informational only. "
+        "The distinction previously existed only in a prose note",
+        extra={"fresh": {k: fresh_ctx.get(k) for k in
+                         ("informational_only", "authoritative_for_release")},
+               "verified": {k: verified_ctx.get(k) for k in
+                            ("informational_only", "authoritative_for_release")}})
+
     rec("GA47f verified-half-is-bounded",
         not unbounded,
         "a machine-local disposition may differ from the authoritative one ONLY when the control "
