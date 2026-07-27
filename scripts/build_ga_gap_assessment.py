@@ -808,6 +808,10 @@ def build() -> dict:
         # to false / to prose / to null / to {"ga": "GA_READY"} and every variant certified green
         # with a BYTE-IDENTICAL canonical hash, because no check read it at all.
         "local_evidence_artifact_present": evidence_present,
+        # How many of the gitignored evidence artifacts actually exist here. The single boolean
+        # above reflects only the MIGRATION artifact, which is why GA47f could neither bound the
+        # verified half honestly nor refuse a forged one: seven paths drive that half.
+        "local_evidence_paths_present": sum(1 for p in _all_evidence_paths() if p.exists()),
         "contexts": {
             "fresh_checkout_no_local_evidence": {
                 "ga": ga_fresh,

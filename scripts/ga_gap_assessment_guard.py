@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import ast
 import subprocess
@@ -94,7 +95,9 @@ DISCLOSURE_REQUIRED_TERMS = (
 #: Claims the disclosure may never make about itself.
 DISCLOSURE_FORBIDDEN_TERMS = (
     "independently verified", "has been verified", "reconciled with the live evaluator",
-    "reviewed engineering position", "commentary reflects",
+    "reviewed engineering position", "commentary reflects", "may rely", "can be relied",
+    "re-checked", "rechecked", "senior engineer", "more accurate", "fuller and more",
+    "reviewed by", "signed off", "audited", "corroborated", "governs the assessment",
 )
 
 #: Scanned in ``implemented_capability`` and ``notes`` -- fields that describe what EXISTS.
@@ -113,8 +116,8 @@ NOTHING_MISSING_CLAIMS = (
 )
 
 #: Reciprocal cross-file pin of the FAULTS battery's declared check set (see GA80).
-PINNED_FAULTS_ID_SET_HASH = "58f3c24aa3111d00f4bbc50420896cc7de3aa0c607f765b290b06c7eadf96f30"
-PINNED_FAULTS_CHECK_COUNT = 82
+PINNED_FAULTS_ID_SET_HASH = "2239622d21fbf495ddcf550bc381a18c1c6ba085043d0db95e229c86f6ebada3"
+PINNED_FAULTS_CHECK_COUNT = 86
 
 DB_CONTROL, QUEUE_CONTROL = "production-database-adapter", "production-queue-adapter"
 DB_CHECK, QUEUE_CHECK = "ga_postgres_adapter", "ga_redis_adapter"
@@ -170,7 +173,16 @@ def live_dispositions() -> dict[str, str]:
                 target = stash / f"{index}-{path.name}"
                 os.replace(path, target)
                 moved.append((path, target))
-        return {c["id"]: c["disposition"] for c in GA.evaluate_blockers({})}
+        # Hermetic, exactly as the generator's fresh snapshot now is. Without this the two halves
+        # of the guard disagreed: with the project's own documented MONDAY_REPORT_AUDIT_HMAC_KEY
+        # exported, GA12 failed on an HONEST artifact while GA56 -- which regenerates
+        # hermetically -- passed.
+        _saved_env = {k: os.environ.pop(k) for k in
+                      [k for k in os.environ if k.startswith("MONDAY_REPORT_")]}
+        try:
+            return {c["id"]: c["disposition"] for c in GA.evaluate_blockers({})}
+        finally:
+            os.environ.update(_saved_env)
     finally:
         for path, target in moved:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -203,8 +215,33 @@ def run() -> int:
     rec("GA00b artifact-is-object", True, "the assessment is a JSON object",
         level="structural source check")
 
-    registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-    reg_by_id = {b["id"]: b for b in registry["blockers"]}
+    try:
+        registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        rec("GA04q registry-readable", False,
+            "the registry file must exist and parse as JSON; an unreadable inventory authority is "
+            "refused with a structured result, never a crash",
+            level="structural source check", extra={"exception": exc.__class__.__name__})
+        _emit(1)
+        return 1
+    rec("GA04q registry-readable", True, "the registry file parses as JSON",
+        level="structural source check")
+    # Shape-validate BEFORE indexing. The registry is the declared inventory authority, but a
+    # corrupt one killed the guard here with an uncaught TypeError and zero structured output.
+    _blockers = registry.get("blockers") if isinstance(registry, dict) else None
+    if not isinstance(_blockers, list) or not all(
+            isinstance(b, dict) and "id" in b and "check_id" in b for b in _blockers):
+        rec("GA04r registry-well-formed", False,
+            "the registry must be an object with a LIST of blocker objects each carrying id and "
+            "check_id; a malformed registry is refused with a structured result, never a crash",
+            level="structural source check",
+            extra={"blockers_type": type(_blockers).__name__})
+        _emit(1)
+        return 1
+    rec("GA04r registry-well-formed", True,
+        "the registry parses and every blocker carries an id and a check_id",
+        level="structural source check", extra={"blockers": len(_blockers)})
+    reg_by_id = {b["id"]: b for b in _blockers}
     controls = artifact.get("controls")
     controls = controls if isinstance(controls, list) else []
     art_by_id = {}
@@ -236,7 +273,7 @@ def run() -> int:
 
     # ---------------------------------------------------------------- schema / shape
     VALIDATED_IDENTITY.update({"schema_version": artifact.get("schema_version"),
-                               "path": ARTIFACT_PATH.name})
+                               "path": GEN.OUTPUT_PATH.name})
     rec("GA00 artifact-readable", True, "the tracked assessment parses as JSON",
         level="structural source check")
     # The CANONICAL path constant, not ARTIFACT_PATH: the fault battery redirects the latter to a
@@ -276,7 +313,20 @@ def run() -> int:
     # The REGISTRY is the expected inventory. Nothing here maintains a second list of the 28, and no
     # editable constant defines the expected set -- a pin that can be edited alongside the artifact
     # it protects is not an authority.
-    expected_inventory = GEN.registry_inventory()
+    try:
+        expected_inventory = GEN.registry_inventory()
+    except Exception as exc:  # noqa: BLE001
+        # The registry is the declared inventory authority; a corrupt one previously killed the
+        # guard with an uncaught KeyError/TypeError/JSONDecodeError and ZERO stdout.
+        rec("GA04s registry-loadable", False,
+            "the registry must parse and expose blockers with ids and check_ids; a malformed "
+            "registry is refused with a structured result, never a crash",
+            level="structural source check", extra={"exception": exc.__class__.__name__})
+        _emit(1)
+        return 1
+    rec("GA04s registry-loadable", True,
+        "the registry parses and exposes its blocker inventory",
+        level="structural source check", extra={"controls": len(expected_inventory)})
     # str() coercion: a list/dict `id` is unhashable and crashed set() with no JSON report emitted.
     ids = [c.get("id") if isinstance(c.get("id"), str) else repr(c.get("id"))
            for c in controls if isinstance(c, dict)]
@@ -560,6 +610,13 @@ def run() -> int:
     local_block = artifact.get("local_evidence_artifact")
     local_block = local_block if isinstance(local_block, dict) else {}
     present_flag = artifact.get("local_evidence_artifact_present")
+    paths_present = artifact.get("local_evidence_paths_present")
+    rec("GA47l evidence-path-count-is-honest",
+        isinstance(paths_present, int) and paths_present >= 0
+        and (paths_present > 0) >= bool(local_block.get("present")),
+        "the evidence-path count is a non-negative integer and is at least as large as the single "
+        "migration-artifact flag it supersedes",
+        extra={"paths_present": paths_present, "migration_flag": local_block.get("present")})
     rec("GA47g machine-local-presence-agrees",
         isinstance(present_flag, bool) and present_flag == local_block.get("present"),
         "the top-level presence flag is a BOOLEAN and equals the block's own present field. It sat "
@@ -577,6 +634,32 @@ def run() -> int:
         "comparison, so arbitrary keys and values could be injected into it undetected",
         extra={"unexpected": sorted(set(verified_ctx) - VERIFIED_CTX_KEYS),
                "measured": verified_ctx.get("measured")})
+    bound_val = local_block.get("bound_to_commit")
+    matches_val = local_block.get("matches_current_head")
+    rec("GA47i machine-local-values-are-typed",
+        (bound_val is None or (isinstance(bound_val, str)
+                               and len(bound_val) == 40
+                               and all(ch in "0123456789abcdef" for ch in bound_val.lower())))
+        and isinstance(matches_val, bool),
+        "bound_to_commit is a 40-hex commit id or null, and matches_current_head is a strict "
+        "boolean. Both were unvalidated free text inside a block excluded from BOTH the canonical "
+        "hash and the deep comparison: a review planted 'Production database and queue adapters "
+        "were exercised and ACCEPTED at this head' in bound_to_commit and certified 81/0 with an "
+        "unchanged hash. Closing the key set and the note left the VALUES open",
+        extra={"bound_to_commit": str(bound_val)[:60],
+               "matches_current_head": repr(matches_val)})
+    rec("GA47j machine-local-note-agrees-with-state",
+        (local_block.get("note") == GEN.LOCAL_EVIDENCE_NOTES[3]) == bool(matches_val is True)
+        or not local_block.get("present"),
+        "the local-evidence note agrees with the state it describes; membership of a closed set is "
+        "not consistency with the fields beside it",
+        extra={"note_says_current": local_block.get("note") == GEN.LOCAL_EVIDENCE_NOTES[3],
+               "matches_current_head": repr(matches_val)})
+    rec("GA47k verified-note-agrees-with-measured",
+        (verified_ctx.get("note") == GEN.VERIFIED_CONTEXT_NOTES[0])
+        == (verified_ctx.get("measured") is True),
+        "the machine-local context's note agrees with its own measured flag: a 'NOT MEASURED' note "
+        "beside measured=true (or the reverse) previously certified green")
     rec("GA47d machine-local-prose-is-a-closed-set",
         set(local_block) == set(GEN.LOCAL_EVIDENCE_KEYS)
         and local_block.get("note") in GEN.LOCAL_EVIDENCE_NOTES
@@ -611,12 +694,12 @@ def run() -> int:
     missing_terms = [t for t in DISCLOSURE_REQUIRED_TERMS if t not in low]
     contra_terms = [t for t in DISCLOSURE_FORBIDDEN_TERMS if t in low]
     rec("GA04k curated-prose-disclosure-says-what-it-must",
-        len(disclosure) >= 200 and not missing_terms and not contra_terms
-        and artifact.get("curated_prose_disclosure") == GEN.CURATED_PROSE_DISCLOSURE,
-        "the disclosure is non-trivial, states that the commentary is author-supplied and "
-        "unverified, names the derived fields that govern, and asserts NOTHING about the "
-        "commentary having been verified. Equality with the generator constant alone proved "
-        "nothing: both sides move together in one edit",
+        len(disclosure) >= 200 and not missing_terms and not contra_terms,
+        "KEYWORD FLOOR, not a semantic proof: the disclosure is non-trivial, states that the "
+        "commentary is author-supplied and unverified, names the derived fields that govern, and "
+        "carries none of a blacklist of verification claims. A determined author can still write a "
+        "compliant-but-misleading disclosure -- this raises the cost, it does not close the class. "
+        "Equality with the generator constant alone proved nothing: both sides move in one edit",
         extra={"length": len(disclosure), "missing_required": missing_terms,
                "forbidden_present": contra_terms})
     rec("GA04k2 curated-prose-disclosure-matches-generator",
@@ -720,11 +803,12 @@ def run() -> int:
     # code-derived sub-structure is compared against the regenerated payload. blocking_reason is
     # derived from the hermetic evaluator snapshot, so it is deterministic on any machine -- yet it
     # was never compared, and rewriting all 28 to "Resolved: verified in production." passed.
-    live_by_cid = {c["check_id"]: c for c in live_payload().get("controls") or []}
+    live_by_cid = {str(c.get("check_id")): c for c in live_payload().get("controls") or []}
+    # str() coercion: an unhashable check_id (dict/list) crashed the genexpr below with zero stdout.
     reason_drift = sorted(
         str(c.get("check_id")) for c in controls
         if isinstance(c, dict)
-        and c.get("blocking_reason") != (live_by_cid.get(c.get("check_id")) or {}).get(
+        and c.get("blocking_reason") != (live_by_cid.get(str(c.get("check_id"))) or {}).get(
             "blocking_reason"))
     rec("GA47e blocking-reasons-recomputed",
         not reason_drift,
@@ -763,7 +847,10 @@ def run() -> int:
 
     def deep_view(payload: dict) -> dict:
         view = {k: v for k, v in payload.items() if k not in DEEP_EXCLUDED}
-        ctx = dict(view.get("contexts") or {})
+        raw_ctx = view.get("contexts")
+        # A non-dict contexts value raised ValueError inside dict(); deep_view reads the RAW
+        # artifact, so the earlier shape guard did not protect it.
+        ctx = dict(raw_ctx) if isinstance(raw_ctx, dict) else {"<invalid>": repr(raw_ctx)[:80]}
         ctx.pop("verified_environment_with_evidence", None)
         view["contexts"] = ctx
         view["controls"] = [{k: v for k, v in (c or {}).items()
@@ -813,7 +900,12 @@ def run() -> int:
         # refused by its own guard -- pushing the author toward hand-editing the very half that is
         # least policed. The presence gate is dropped for the same reason: it reflected only the
         # migration artifact, while seven gitignored artifacts drive this half.
-        if str(c.get("check_id")) not in GEN._EVIDENCE_DRIVEN:
+        # Evidence-driven AND at least one evidence artifact actually present. Dropping the
+        # presence requirement (because the old flag reflected only the migration artifact) let a
+        # review record BOTH production adapters PASS in the verified half with nothing present
+        # anywhere. The count below covers all seven paths, so it can be required honestly.
+        if (str(c.get("check_id")) not in GEN._EVIDENCE_DRIVEN
+                or not isinstance(paths_present, int) or paths_present < 1):
             unbounded.append(f"{c.get('id')}:{fresh_d}->{ver_d}")
     rec("GA45c contexts-declare-their-authority",
         fresh_ctx.get("authoritative_for_release") is True

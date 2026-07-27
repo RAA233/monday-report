@@ -90,17 +90,21 @@ EXPECTED_CHECK_IDS = [
     "MX17 legend-value-rewritten", "MX18 curated-prose-rewritten",
     "MX19 authoritative-note-forged", "MX20 evidence-status-claimed",
     "MX21 verified-flip-below-threshold", "MX23 presence-flag-forged",
-    "MX24 verified-context-key-injected", "MX25 controls-reordered", "MX26 context-authority-flipped", "MX22 prose-disclosure-removed", "MX11 blocking-reason-rewritten",
+    "MX24 verified-context-key-injected", "MX25 controls-reordered", "MX26 context-authority-flipped",
+    "MX27 bound-commit-is-prose", "MX28 matches-head-truthy-string",
+    "MX29 evidence-path-count-forged",
+    "MX22 prose-disclosure-removed", "MX11 blocking-reason-rewritten",
     "MX12 extra-context-injected", "MX13 static-contract-invented",
     # (there is deliberately no MX09: ga_ready=true is already MR04, and FZ03 rejected the duplicate)
     "FZ00 completeness", "FZ01 battery-size-pinned",
     "FZ03 mutations-are-distinct-inputs", "FZ04 drift-guard-check-set-pinned",
     "FZ05 inventory-authority-is-the-registry", "FZ06 mutations-trip-the-gate-they-protect",
+    "FZ07 hardened-arms-are-structurally-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 82
-EXPECTED_MUTATION_COUNT = 74
-PINNED_DRIFT_ID_SET_HASH = "c1d23b6667dd4e7cce8e522a0f58ed8dfba014ecbfc6180ab55dec0d362da906"
-PINNED_DRIFT_CHECK_COUNT = 81
+EXPECTED_TOTAL_CHECKS = 86
+EXPECTED_MUTATION_COUNT = 77
+PINNED_DRIFT_ID_SET_HASH = "8f074e9a7b903b015086292a7731b98064b6522c6058e48da4d913b564c420f4"
+PINNED_DRIFT_CHECK_COUNT = 88
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
 #: editable alongside the very list it protects, so it proves nothing against intent. Completeness is
 #: carried by FZ00 (emitted == declared), FZ01 (size), FZ03 (distinct mutation inputs) and FZ04
@@ -140,6 +144,9 @@ EXPECTED_TRIP = {
     "MX21 verified-flip-below-threshold": "GA47f",
     "MX22 prose-disclosure-removed": "GA04k",
     "MX26 context-authority-flipped": "GA45c",
+    "MX27 bound-commit-is-prose": "GA47i",
+    "MX28 matches-head-truthy-string": "GA47i",
+    "MX29 evidence-path-count-forged": "GA47f",
     "MX23 presence-flag-forged": "GA47g",
     "MX24 verified-context-key-injected": "GA47h",
     "MX25 controls-reordered": "GA56",
@@ -683,6 +690,31 @@ def run() -> int:
                     "informational_only", False)),
             "promoting the machine-local context to authoritative is refused: the classification is "
             "machine-readable precisely so it cannot be quietly inverted")
+    refuses("MX27 bound-commit-is-prose",
+            lambda a: a["local_evidence_artifact"].__setitem__(
+                "bound_to_commit",
+                "Production database and queue adapters were exercised and ACCEPTED at this head."),
+            "prose in bound_to_commit is refused: the block's key set and note were closed while "
+            "its VALUES stayed open, and it sits outside both the hash and the deep comparison")
+    refuses("MX28 matches-head-truthy-string",
+            lambda a: a["local_evidence_artifact"].__setitem__(
+                "matches_current_head", "yes - exact-head production evidence present"),
+            "a truthy STRING in matches_current_head is refused; the old check only rejected the "
+            "literal True, so any sentence passed")
+
+    def _forge_paths(a):
+        a["local_evidence_paths_present"] = 0
+        for c in a["controls"]:
+            if c["id"] in ("production-database-adapter", "production-queue-adapter"):
+                c["current_disposition_verified_environment"] = "PASS"
+        t = {}
+        for c in a["controls"]:
+            v = c["current_disposition_verified_environment"]; t[v] = t.get(v, 0) + 1
+        a["contexts"]["verified_environment_with_evidence"]["tally"] = dict(sorted(t.items()))
+
+    refuses("MX29 evidence-path-count-forged", _forge_paths,
+            "recording both production adapters PASS in the verified half with NO evidence artifact "
+            "present anywhere is refused; dropping the presence requirement had widened this")
     refuses("MX23 presence-flag-forged",
             lambda a: a.__setitem__("local_evidence_artifact_present",
                                     {"ga": "GA_READY", "note": "adapters accepted"}),
@@ -819,7 +851,7 @@ def run() -> int:
         tripped = MUTATION_TRIPPED.get(mid)
         if tripped is None:
             missing_trip.append(f"{mid}:NOT-RUN")
-        elif not any(expected in str(t) for t in tripped):
+        elif not any(str(t).split(" ", 1)[0] == expected for t in tripped):
             missing_trip.append(f"{mid}:expected {expected}, tripped {tripped[:2]}")
     rec("FZ06 mutations-trip-the-gate-they-protect",
         not missing_trip,
@@ -828,6 +860,26 @@ def run() -> int:
         "field, leaving the gate with zero coverage and every completeness counter green",
         level="structural source check",
         extra={"declared": len(EXPECTED_TRIP), "broken": missing_trip[:5]})
+
+    guard_src = (ROOT / "scripts" / "ga_gap_assessment_guard.py").read_text(encoding="utf-8")
+    arm_evidence = {
+        "GA50b re-measures the tree": 'git", "status", "--porcelain", "--untracked-files=no"',
+        "GA50b consumes the measurement": "not dirty_paths",
+        "GA04k length floor": "len(disclosure) >= 200",
+        "GA04k required terms": "DISCLOSURE_REQUIRED_TERMS",
+        "GA04k forbidden terms": "DISCLOSURE_FORBIDDEN_TERMS",
+        "consumer is hermetic": 'k.startswith("MONDAY_REPORT_")',
+        "GA47f requires evidence present": "paths_present < 1",
+        "GA47i types the machine-local values": "0123456789abcdef",
+    }
+    missing_arms = [name for name, needle in arm_evidence.items() if needle not in guard_src]
+    rec("FZ07 hardened-arms-are-structurally-pinned",
+        not missing_arms,
+        "the conjuncts that carry the two HIGH fixes are pinned in SOURCE. FZ06 reconciles which "
+        "CHECK trips, never which ARM: a review replaced GA50b's predicate with the old self-report "
+        "and GA04k's with the bare equality, one edit each, and both batteries stayed fully green "
+        "because the mutations still tripped the hollowed-out checks",
+        level="structural source check", extra={"missing": missing_arms})
 
     rec("FZ05 inventory-authority-is-the-registry",
         calls_registry_inventory and gen_reads_registry and not literal_lists and no_pin_authority,

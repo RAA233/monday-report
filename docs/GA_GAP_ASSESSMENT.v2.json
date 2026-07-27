@@ -1,7 +1,7 @@
 {
   "schema_version": "ga-gap-assessment.v2",
-  "generated_from_commit": "c7f05c2e44103662f8dbc194e66c7a766cf45edb",
-  "generated_from_tree": "47d6fe3fc7f7efd4fd0a58fbe56902930ff5810d",
+  "generated_from_commit": "25ce5815bcc9acd9f180cdfc0f19491daa083119",
+  "generated_from_tree": "7a57477fde6c412a7b15056ae6575d88177ad9ad",
   "worktree_clean": true,
   "registry_version": "v1",
   "registry_path": "evals/ga/blocker_registry.v1.json",
@@ -20,7 +20,7 @@
     "production_queue_adapter_contract_hash": "45bc335f8066576ee1694ba07d47e2c6d97ad74ac4fab69374e9202ad16e7afb"
   },
   "source_file_hashes": {
-    "scripts/build_ga_gap_assessment.py": "c4ac2eb0e38ffb29af9169899f22110fb6f5f866a899c8855947eb8788425183",
+    "scripts/build_ga_gap_assessment.py": "52829d3b5c4b85bcc69bdb8366536869fb2909bc51cc5e2408e0a2c682e9b37c",
     "evals/ga/blocker_registry.v1.json": "68ae5a433eb98ceb08d5ac80f76f54d2a11d7faa721580024f3dd8d2d8a487e2",
     "backend/app/ga_readiness.py": "dd6dad107af85fdfed781f9469ecd12371a4997818ec5d0bcd52fe11ca69fa1d",
     "backend/app/readiness_contexts.py": "99e93ede67f106244288600e3f89e4dd83f75686e663f13e5d558b7f6309d33e",
@@ -66,6 +66,7 @@
   },
   "curated_prose_disclosure": "implemented_capability, missing_capability, estimated_effort, technical_dependencies, external_dependencies and notes are AUTHOR-SUPPLIED commentary. They are not derived from any evaluator and no guard can verify them, because there is no source of truth to check them against. The authoritative, machine-derived fields are current_disposition_fresh_checkout and blocking_reason, both produced by ga_readiness.evaluate_blockers; where the commentary and those fields disagree, the derived fields govern.",
   "local_evidence_artifact_present": true,
+  "local_evidence_paths_present": 5,
   "contexts": {
     "fresh_checkout_no_local_evidence": {
       "ga": "GA_BLOCKED",
@@ -794,5 +795,5 @@
       "notes": ""
     }
   ],
-  "canonical_payload_hash": "3a957a3e5ff93058bf553c8d77a0abbc19c4426ce72795e3efc26d2355574899"
+  "canonical_payload_hash": "13f94cf1adb86f2ff0d6a9e86911b81d55c1efc08378be3660655433f0f10206"
 }
