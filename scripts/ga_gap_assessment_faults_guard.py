@@ -97,7 +97,7 @@ EXPECTED_CHECK_IDS = [
     "MX29 evidence-path-count-forged", "MX30 verified-disposition-is-prose",
     "MX31 promoter-names-wrong-artifact",
     "MX32 conjunction-one-component-named",
-    "MX33 promoter-named-but-absent",
+    "MX33 promoter-named-but-absent", "MX34 detail-reports-a-missing-component",
     "MX22 prose-disclosure-removed", "MX11 blocking-reason-rewritten",
     "MX12 extra-context-injected", "MX13 static-contract-invented",
     # (there is deliberately no MX09: ga_ready=true is already MR04, and FZ03 rejected the duplicate)
@@ -112,8 +112,8 @@ EXPECTED_CHECK_IDS = [
     "FZ10-GA47f rejects-what-it-exists-to-reject",
     "FZ11 protected-gate-set-is-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 96
-EXPECTED_MUTATION_COUNT = 81
+EXPECTED_TOTAL_CHECKS = 97
+EXPECTED_MUTATION_COUNT = 82
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
@@ -168,6 +168,7 @@ EXPECTED_TRIP = {
     "MX31 promoter-names-wrong-artifact": "GA47f",
     "MX32 conjunction-one-component-named": "GA47f",
     "MX33 promoter-named-but-absent": "GA47f",
+    "MX34 detail-reports-a-missing-component": "GA47f",
     "MX23 presence-flag-forged": "GA47g",
     "MX24 verified-context-key-injected": "GA47h",
     "MX25 controls-reordered": "GA56",
@@ -775,34 +776,57 @@ def run() -> int:
             "refused; it previously certified with a byte-identical canonical hash")
     # One probe per substantive GA47f arm. Each was previously unreachable because the only
     # GA47f-bound mutations either used a string promoter or set none at all.
+    # Each probe must differ from a VALID promotion in exactly ONE arm. The first cut tripped two
+    # or three arms at once, and because the arms are OR'd a probe that trips several pins none of
+    # them: `present != required`, `missing` and the conjunction equality could each be deleted with
+    # both batteries fully green.
     def _wrong_artifact(a):
+        # ONLY `named != required`: the named artifact is known but gates a different control.
         t = next(c for c in a["controls"] if c["check_id"] == "ga_postgres_adapter")
         t["current_disposition_verified_environment"] = "PASS"
         t["verified_promoted_by"] = ["migration-evidence.v1.json"]
-        t["verified_promotion_detail"] = {"required": ["migration-evidence.v1.json"],
-                                          "present": ["migration-evidence.v1.json"],
-                                          "missing": [], "conjunction": False}
-        _retally(a)
-
-    def _one_component(a):
-        t = next(c for c in a["controls"] if c["check_id"] == "ga_tenant_authorization")
-        t["current_disposition_verified_environment"] = "PASS"
-        t["verified_promoted_by"] = ["tenant-rls-enforcement-evidence.v2.json"]
         t["verified_promotion_detail"] = {
-            "required": ["tenant-rls-enforcement-evidence.v2.json"],
-            "present": ["tenant-rls-enforcement-evidence.v2.json"],
+            "required": ["production-database-adapter-evidence.v1.json"],
+            "present": ["production-database-adapter-evidence.v1.json"],
             "missing": [], "conjunction": False}
         _retally(a)
 
+    def _one_component(a):
+        # ONLY the conjunction equality: both components named and present, flag says False.
+        t = next(c for c in a["controls"] if c["check_id"] == "ga_tenant_authorization")
+        both = ["tenant-authorization-evidence.v3.json",
+                "tenant-rls-enforcement-evidence.v2.json"]
+        t["current_disposition_verified_environment"] = "PASS"
+        t["verified_promoted_by"] = list(both)
+        t["verified_promotion_detail"] = {"required": list(both), "present": list(both),
+                                          "missing": [], "conjunction": False}
+        _retally(a)
+
     def _named_but_absent(a):
+        # ONLY `present != required`: correct artifact named, detail reports none present,
+        # and `missing` left EMPTY so that arm cannot also fire.
         t = next(c for c in a["controls"] if c["check_id"] == "ga_redis_adapter")
         t["current_disposition_verified_environment"] = "PASS"
         t["verified_promoted_by"] = ["production-queue-adapter-evidence.v1.json"]
         t["verified_promotion_detail"] = {
             "required": ["production-queue-adapter-evidence.v1.json"],
-            "present": [], "missing": ["production-queue-adapter-evidence.v1.json"],
-            "conjunction": False}
+            "present": [], "missing": [], "conjunction": False}
         _retally(a)
+
+    def _missing_component(a):
+        # ONLY `missing`: named and present agree with required, but missing is non-empty.
+        t = next(c for c in a["controls"] if c["check_id"] == "ga_migration_runner")
+        t["current_disposition_verified_environment"] = "PASS"
+        t["verified_promoted_by"] = ["migration-evidence.v1.json"]
+        t["verified_promotion_detail"] = {
+            "required": ["migration-evidence.v1.json"],
+            "present": ["migration-evidence.v1.json"],
+            "missing": ["migration-evidence.v1.json"], "conjunction": False}
+        _retally(a)
+
+    refuses("MX34 detail-reports-a-missing-component", _missing_component,
+            "a non-empty missing list is refused even when named and present agree with required: "
+            "this pins the `missing` arm alone")
 
     refuses("MX31 promoter-names-wrong-artifact", _wrong_artifact,
             "a promoter naming a KNOWN artifact that does not gate THIS control is refused: the "

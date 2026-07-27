@@ -480,7 +480,12 @@ def _dispositions() -> tuple[dict[str, str], dict[str, str], str, str, bool]:
     # of an untracked file's CONTENTS -- an independent review changed the hash by planting garbage.
     _CAPTURED["hermetic_reasons"] = dict(_CAPTURED.get("reasons") or {})
     had = bool(moved)
-    verified, ga_verified = snap() if had else (fresh, ga_fresh)
+    # Hermetic in env for BOTH halves. _promotion_map hides MONDAY_REPORT_* while this snapshot
+    # did not, so the two measured different populations -- the same "different populations" defect
+    # just fixed for the presence flags, one field over. With the project's own documented
+    # MONDAY_REPORT_AUDIT_HMAC_KEY exported, ga_audit_keyed_integrity flipped here but got no
+    # promoter entry, and the generator's honest output was refused by its own guard.
+    verified, ga_verified = snap(hermetic_env=True) if had else (fresh, ga_fresh)
     return fresh, verified, ga_fresh, ga_verified, had
 
 
