@@ -128,8 +128,8 @@ NOTHING_MISSING_CLAIMS = (
 )
 
 #: Reciprocal cross-file pin of the FAULTS battery's declared check set (see GA80).
-PINNED_FAULTS_ID_SET_HASH = "e01f35d326237ccbe7b2566cd588fc6d79136a471fef9660ccfce64c79485d34"
-PINNED_FAULTS_CHECK_COUNT = 93
+PINNED_FAULTS_ID_SET_HASH = "e03e2ae0f9f585e0dbbca4c5f7f67c7a52b4b9d33ef6bbe664282efd67193b63"
+PINNED_FAULTS_CHECK_COUNT = 96
 
 DB_CONTROL, QUEUE_CONTROL = "production-database-adapter", "production-queue-adapter"
 DB_CHECK, QUEUE_CHECK = "ga_postgres_adapter", "ga_redis_adapter"
@@ -532,9 +532,13 @@ def run() -> int:
     rec("GA41 local-artifact-disclosed",
         isinstance(artifact.get("local_evidence_artifact"), dict)
         and artifact["local_evidence_artifact"].get("tracked") is False
-        and artifact["local_evidence_artifact"].get("matches_current_head") is not True,
+        and isinstance(artifact["local_evidence_artifact"].get("matches_current_head"), bool),
         "any machine-local evidence artifact is disclosed as untracked, so a gitignored file cannot "
-        "silently be read as repository state",
+        "silently be read as repository state. The head-binding is DISCLOSED, not constrained: the "
+        "predicate previously demanded `matches_current_head is not True`, which rejected a CURRENT "
+        "exact-head artifact and accepted a STALE one -- the exact inverse of the intent, and it "
+        "made the one state in which a control is legitimately promotable unrepresentable. Whether "
+        "the note agrees with that binding is GA47j's job",
         extra={k: v for k, v in (artifact.get("local_evidence_artifact") or {}).items()
                if k != "note"} if isinstance(artifact.get("local_evidence_artifact"), dict) else {})
     rec("GA42 authoritative-context-is-fresh",
@@ -661,17 +665,28 @@ def run() -> int:
         "migration-artifact flag it supersedes",
         extra={"paths_present": paths_present, "migration_flag": local_block.get("present")})
     rec("GA47g machine-local-presence-agrees",
-        isinstance(present_flag, bool) and present_flag == local_block.get("present"),
-        "the top-level presence flag is a BOOLEAN and equals the block's own present field. It sat "
-        "outside the canonical hash and was read by no check at all, so setting it to false, to "
-        "prose, to null or to an object all certified green with a byte-identical hash",
-        extra={"top_level": present_flag, "block": local_block.get("present")})
+        isinstance(present_flag, bool)
+        and isinstance(paths_present, int)
+        and present_flag == (paths_present > 0),
+        "the top-level presence flag is a BOOLEAN consistent with the evidence-path COUNT, which "
+        "measures the same population it does. It was previously compared against the "
+        "local_evidence_artifact block, which describes the MIGRATION artifact alone: on any machine "
+        "holding one of the other six artifacts the two disagreed and the generator's own honest "
+        "output was refused",
+        extra={"top_level": present_flag, "paths_present": paths_present,
+               "block_describes": local_block.get("describes"),
+               "block_present": local_block.get("present")})
+    rec("GA47p local-block-declares-its-scope",
+        local_block.get("describes") == GEN.EVIDENCE_PATH.name,
+        "the local-evidence block names the single artifact it describes. It was read as though it "
+        "spoke for all seven evidence paths, which is how the presence flags came to disagree",
+        extra={"describes": local_block.get("describes"), "expected": GEN.EVIDENCE_PATH.name})
     VERIFIED_CTX_KEYS = {"ga", "tally", "measured", "note",
                          "informational_only", "authoritative_for_release"}
     rec("GA47h verified-context-closed",
         set(verified_ctx) == VERIFIED_CTX_KEYS
         and isinstance(verified_ctx.get("measured"), bool)
-        and verified_ctx.get("measured") == present_flag,
+        and verified_ctx.get("measured") == (isinstance(paths_present, int) and paths_present > 0),
         "the machine-local context carries exactly its known keys and its measured flag is a "
         "boolean consistent with evidence presence. The whole subtree was popped from the deep "
         "comparison, so arbitrary keys and values could be injected into it undetected",

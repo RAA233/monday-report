@@ -95,6 +95,9 @@ EXPECTED_CHECK_IDS = [
     "MX24 verified-context-key-injected", "MX25 controls-reordered", "MX26 context-authority-flipped",
     "MX27 bound-commit-is-prose", "MX28 matches-head-truthy-string",
     "MX29 evidence-path-count-forged", "MX30 verified-disposition-is-prose",
+    "MX31 promoter-names-wrong-artifact",
+    "MX32 conjunction-one-component-named",
+    "MX33 promoter-named-but-absent",
     "MX22 prose-disclosure-removed", "MX11 blocking-reason-rewritten",
     "MX12 extra-context-injected", "MX13 static-contract-invented",
     # (there is deliberately no MX09: ga_ready=true is already MR04, and FZ03 rejected the duplicate)
@@ -109,10 +112,10 @@ EXPECTED_CHECK_IDS = [
     "FZ10-GA47f rejects-what-it-exists-to-reject",
     "FZ11 protected-gate-set-is-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 93
-EXPECTED_MUTATION_COUNT = 78
-PINNED_DRIFT_ID_SET_HASH = "f4c64d167d0a476b25746d7225e37789cd558ef6d6ab9dda96820bccbcbc5634"
-PINNED_DRIFT_CHECK_COUNT = 91
+EXPECTED_TOTAL_CHECKS = 96
+EXPECTED_MUTATION_COUNT = 81
+PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
+PINNED_DRIFT_CHECK_COUNT = 92
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
 #: editable alongside the very list it protects, so it proves nothing against intent. Completeness is
 #: carried by FZ00 (emitted == declared), FZ01 (size), FZ03 (distinct mutation inputs) and FZ04
@@ -162,6 +165,9 @@ EXPECTED_TRIP = {
     "MX28 matches-head-truthy-string": "GA47i",
     "MX29 evidence-path-count-forged": "GA47f",
     "MX30 verified-disposition-is-prose": "GA47m",
+    "MX31 promoter-names-wrong-artifact": "GA47f",
+    "MX32 conjunction-one-component-named": "GA47f",
+    "MX33 promoter-named-but-absent": "GA47f",
     "MX23 presence-flag-forged": "GA47g",
     "MX24 verified-context-key-injected": "GA47h",
     "MX25 controls-reordered": "GA56",
@@ -203,6 +209,15 @@ def _emitted_drift_checks() -> list:
     finally:
         GG.checks.clear()
         GG.checks.extend(saved)
+
+
+def _retally(a: dict) -> None:
+    """Recompute the machine-local tally so a promotion probe stays self-consistent."""
+    tally: dict = {}
+    for control in a["controls"]:
+        value = control["current_disposition_verified_environment"]
+        tally[value] = tally.get(value, 0) + 1
+    a["contexts"]["verified_environment_with_evidence"]["tally"] = dict(sorted(tally.items()))
 
 
 def real_refusal(rc: int, failing: list) -> bool:
@@ -758,6 +773,46 @@ def run() -> int:
     refuses("MX30 verified-disposition-is-prose", _prose_dispo,
             "an arbitrary sentence in a verified disposition (and mirrored into the tally key) is "
             "refused; it previously certified with a byte-identical canonical hash")
+    # One probe per substantive GA47f arm. Each was previously unreachable because the only
+    # GA47f-bound mutations either used a string promoter or set none at all.
+    def _wrong_artifact(a):
+        t = next(c for c in a["controls"] if c["check_id"] == "ga_postgres_adapter")
+        t["current_disposition_verified_environment"] = "PASS"
+        t["verified_promoted_by"] = ["migration-evidence.v1.json"]
+        t["verified_promotion_detail"] = {"required": ["migration-evidence.v1.json"],
+                                          "present": ["migration-evidence.v1.json"],
+                                          "missing": [], "conjunction": False}
+        _retally(a)
+
+    def _one_component(a):
+        t = next(c for c in a["controls"] if c["check_id"] == "ga_tenant_authorization")
+        t["current_disposition_verified_environment"] = "PASS"
+        t["verified_promoted_by"] = ["tenant-rls-enforcement-evidence.v2.json"]
+        t["verified_promotion_detail"] = {
+            "required": ["tenant-rls-enforcement-evidence.v2.json"],
+            "present": ["tenant-rls-enforcement-evidence.v2.json"],
+            "missing": [], "conjunction": False}
+        _retally(a)
+
+    def _named_but_absent(a):
+        t = next(c for c in a["controls"] if c["check_id"] == "ga_redis_adapter")
+        t["current_disposition_verified_environment"] = "PASS"
+        t["verified_promoted_by"] = ["production-queue-adapter-evidence.v1.json"]
+        t["verified_promotion_detail"] = {
+            "required": ["production-queue-adapter-evidence.v1.json"],
+            "present": [], "missing": ["production-queue-adapter-evidence.v1.json"],
+            "conjunction": False}
+        _retally(a)
+
+    refuses("MX31 promoter-names-wrong-artifact", _wrong_artifact,
+            "a promoter naming a KNOWN artifact that does not gate THIS control is refused: the "
+            "per-control arm, not merely `some promoter was named`")
+    refuses("MX32 conjunction-one-component-named", _one_component,
+            "naming one component of a conjunction is refused; the requirement comes from the "
+            "evaluator graph, so a control cannot redefine its own conjunction as a single artifact")
+    refuses("MX33 promoter-named-but-absent", _named_but_absent,
+            "naming the correct artifact while the detail block reports it MISSING is refused: "
+            "naming is not having")
     refuses("MX23 presence-flag-forged",
             lambda a: a.__setitem__("local_evidence_artifact_present",
                                     {"ga": "GA_READY", "note": "adapters accepted"}),
@@ -897,7 +952,14 @@ def run() -> int:
         a = copy.deepcopy(live_artifact())
         target = next(c for c in a["controls"] if c["check_id"] == "ga_postgres_adapter")
         target["current_disposition_verified_environment"] = "PASS"
-        target["verified_promoted_by"] = "migration-evidence.v1.json"
+        # A LIST, matching the shipped shape. As a string this tripped only the `not named` arm and
+        # every substantive arm -- named != required, present != required, missing, conjunction --
+        # had ZERO coverage: all four could be deleted with both batteries fully green.
+        target["verified_promoted_by"] = ["migration-evidence.v1.json"]
+        target["verified_promotion_detail"] = {
+            "required": ["production-database-adapter-evidence.v1.json"],
+            "present": ["production-database-adapter-evidence.v1.json"],
+            "missing": [], "conjunction": False}
         tally: dict = {}
         for control in a["controls"]:
             value = control["current_disposition_verified_environment"]

@@ -585,8 +585,8 @@ CURATED_PROSE_DISCLOSURE = (
 )
 
 #: Exact key set of the local-evidence block.
-LOCAL_EVIDENCE_KEYS = frozenset({"present", "tracked", "bound_to_commit", "matches_current_head",
-                                 "note"})
+LOCAL_EVIDENCE_KEYS = frozenset({"describes", "present", "tracked", "bound_to_commit",
+                                 "matches_current_head", "note"})
 
 
 def _local_evidence_binding() -> dict:
@@ -596,17 +596,22 @@ def _local_evidence_binding() -> dict:
     its commit binding makes a stale local artifact visible instead of silently flipping a control.
     """
     if not EVIDENCE_PATH.exists():
-        return {"present": False, "tracked": False, "bound_to_commit": None,
+        return {"describes": EVIDENCE_PATH.name,
+                "present": False, "tracked": False, "bound_to_commit": None,
                 "matches_current_head": False,
                 "note": LOCAL_EVIDENCE_NOTES[0]}
     try:
         payload = json.loads(EVIDENCE_PATH.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        return {"present": True, "tracked": False, "bound_to_commit": None,
+        return {"describes": EVIDENCE_PATH.name,
+                "present": True, "tracked": False, "bound_to_commit": None,
                 "matches_current_head": False, "note": LOCAL_EVIDENCE_NOTES[1]}
     bound = payload.get("git_commit")
     head = _git(["rev-parse", "HEAD"])
     return {
+        # This block describes ONE artifact. Naming it stops a reader -- and a check -- treating it
+        # as a statement about all seven evidence paths.
+        "describes": EVIDENCE_PATH.name,
         "present": True,
         "tracked": False,
         "bound_to_commit": bound,
