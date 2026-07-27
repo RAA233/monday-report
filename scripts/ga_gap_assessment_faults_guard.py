@@ -115,9 +115,10 @@ EXPECTED_CHECK_IDS = [
     "PP09 stale-artifacts-rejected",
     "PP10 overall-ga-remains-blocked",
     "PP11 graph-exactness-derived-from-evaluator",
+    "PP12 honest-payload-accepted-by-the-unmutated-guard",
     # scope mutations -- each must break a POSITIVE path, not merely fail closed
     "PM01 empty-evidence-scope-mapping",
-    "PM02 remove-migration-runner-arm", "PM03 remove-migration-validity-arm",
+    "PM02 remove-migration-runner-arm", "PP13 migration-validity-arm-pinned",
     "PM04 remove-tenant-conjunction-arm", "PM05 remove-database-adapter-arm",
     "PM06 remove-queue-adapter-arm", "PM07 remove-persistence-locking-arm",
     "PM08 remove-correction-atomicity-arm",
@@ -135,8 +136,8 @@ EXPECTED_CHECK_IDS = [
     "FZ10-GA47f rejects-what-it-exists-to-reject",
     "FZ11 protected-gate-set-is-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 122
-EXPECTED_MUTATION_COUNT = 96
+EXPECTED_TOTAL_CHECKS = 123
+EXPECTED_MUTATION_COUNT = 95
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
@@ -945,6 +946,8 @@ def run() -> int:
     tenant = fx["controls"].get("ga_tenant_authorization", {})
     tdetail = tenant.get("verified_promotion_detail") or {}
     both = {"tenant-rls-enforcement-evidence.v2.json", "tenant-authorization-evidence.v3.json"}
+    conj = PP.conjunction_members_matrix(SYN, GEN, GA_MOD)
+    alone_blocked = all(v == "BLOCKED" for v in conj["alone"].values())
     rec("PP03 tenant-conjunction-accepted",
         matrix.get("ga_tenant_authorization", {}).get("disposition") == "PASS"
         and set(matrix.get("ga_tenant_authorization", {}).get("movers") or [])
@@ -952,10 +955,14 @@ def run() -> int:
         and set(tdetail.get("required") or []) == both
         and set(tdetail.get("present") or []) == both
         and not tdetail.get("missing")
-        and tdetail.get("conjunction") is True,
-        "the tenant conjunction PASSES only with BOTH artifacts, names both as required and "
-        "present, reports nothing missing, and records conjunction satisfied",
-        level="positive path", extra={"detail": tdetail})
+        and tdetail.get("conjunction") is True
+        and len(conj["alone"]) == 2 and alone_blocked and conj["both"] == "PASS",
+        "the tenant conjunction is measured BEHAVIOURALLY: each member installed ALONE leaves the "
+        "control BLOCKED and only both together reach PASS. The graph derives `conjunction` from "
+        "artifact CARDINALITY, not from the evaluator's operator, so weakening the real all-of to "
+        "an any-of was invisible until the single-member cases were actually evaluated",
+        level="positive path",
+        extra={"detail": tdetail, "each_member_alone": conj["alone"], "both": conj["both"]})
 
     _scoped("ga_postgres_adapter", "PP04 database-adapter-own-synthetic-artifact-accepted",
             ["production-database-adapter-evidence.v1.json"])
@@ -969,12 +976,15 @@ def run() -> int:
 
     bc = PP.unrelated_and_stale_matrix(SYN, GEN, GA_MOD)
     rec("PP08 unrelated-artifacts-rejected",
-        set(bc["unrelated"]) <= {"ga_redis_adapter"},
+        isinstance(bc.get("unrelated"), list)
+        and "measured" in bc and bc["measured"]
+        and set(bc["unrelated"]) <= {"ga_redis_adapter"},
         "with only ONE control's artifact present, no OTHER control moves: an unrelated artifact "
         "never promotes a control",
         level="positive path", extra={"movers": bc["unrelated"]})
     rec("PP09 stale-artifacts-rejected",
-        not bc["stale"],
+        isinstance(bc.get("stale"), list) and bc.get("measured")
+        and not bc["stale"],
         "artifacts corrupted so their own validators refuse them promote nothing at all",
         level="positive path", extra={"movers": bc["stale"]})
     rec("PP10 overall-ga-remains-blocked",
@@ -1003,6 +1013,17 @@ def run() -> int:
         level="structural source check",
         extra={"controls": len(derived),
                "conjunction_controls": sorted(k for k, v in derived.items() if v["conjunction"])})
+
+    anchor_rc, anchor_failing = PP.guard_verdict(GG, payload)
+    rec("PP12 honest-payload-accepted-by-the-unmutated-guard",
+        anchor_rc == 0 and not anchor_failing,
+        "ANCHOR for the whole scope-mutation family: the UNMUTATED guard ACCEPTS the honest "
+        "evidence-present payload. Without it every PM below only proves that a mutated guard "
+        "refuses -- which an always-refusing guard satisfies too. A review set EVIDENCE_SCOPE={} "
+        "permanently and the entire battery still certified green, because the tracked artifact "
+        "promotes nothing and GA47f/GA47n are vacuous against it",
+        level="positive path",
+        extra={"guard_exit": anchor_rc, "failing": anchor_failing[:4]})
 
     # ---------------------------------------------------------------- scope mutations
     def _scope_mutation(cid, label, removed, expect_control):
@@ -1037,10 +1058,7 @@ def run() -> int:
     # Its mapping is load-bearing structurally instead: it must be present in the graph derived
     # from the evaluator, with the same artifact its promoting sibling uses.
     derived_mv = PP.graph_fingerprint(COUPLING, ROOT).get("ga_migration_validity", {})
-    MUTATION_FINGERPRINTS["PM03 remove-migration-validity-arm"] = hashlib.sha256(
-        b"graph:ga_migration_validity").hexdigest()[:16]
-    MUTATION_TRIPPED["PM03 remove-migration-validity-arm"] = []
-    rec("PM03 remove-migration-validity-arm",
+    rec("PP13 migration-validity-arm-pinned",
         derived_mv.get("artifacts") == ("migration-evidence.v1.json",)
         and derived_mv.get("conjunction") is False
         and bool(derived_mv.get("extra_predicates")),
@@ -1048,22 +1066,26 @@ def run() -> int:
         "the same artifact its sibling promotes from, and carries extra static predicates. It is "
         "pinned structurally rather than by a broken promotion: this control never promotes, so "
         "claiming a promotion-break mutation for it would be vacuous",
-        level="scope mutation",
+        level="structural source check",
         extra={"derived": {k: list(v) if isinstance(v, tuple) else v
                            for k, v in derived_mv.items()},
-               "mutation_fingerprint":
-                   MUTATION_FINGERPRINTS["PM03 remove-migration-validity-arm"]})
+               "applies_a_mutation": False})
 
     def _scope_rewrite(label, rewrite, why):
         original = GG.EVIDENCE_SCOPE
+        mutated_scope = rewrite(dict(original))
         try:
-            GG.EVIDENCE_SCOPE = rewrite(dict(original))
+            GG.EVIDENCE_SCOPE = mutated_scope
             rc, failing = PP.guard_verdict(GG, payload)
         finally:
             GG.EVIDENCE_SCOPE = original
         crashed = [f for f in failing if str(f).startswith("<exception")]
         tripped = [f for f in failing if f.split(" ", 1)[0] == "GA47f"]
-        MUTATION_FINGERPRINTS[label] = hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+        # Fingerprint the mutated MAPPING, not the check's own name: hashing the label makes two
+        # mutations with identical bodies indistinguishable and hollows out FZ03.
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(
+            json.dumps({k: sorted(v) for k, v in sorted(mutated_scope.items())},
+                       sort_keys=True).encode("utf-8")).hexdigest()[:16]
         MUTATION_TRIPPED[label] = list(failing)
         rec(label, rc != 0 and bool(tripped) and not crashed, why,
             level="scope mutation",
@@ -1086,16 +1108,25 @@ def run() -> int:
                    "a changed artifact filename is refused: the promoter no longer matches")
 
     def _generator_mutation(label, patch, restore, why):
+        _mutated_promoters, _mutation_shape = {}, [label]
         try:
             patch()
-            mutated, _promoted = PP.legitimate_promotion_payload(SYN, GEN)
+            mutated, _mutated_promoters = PP.legitimate_promotion_payload(SYN, GEN)
+            _mutation_shape = [[c.get("check_id"), c.get("verified_promoted_by"),
+                                c.get("verified_promotion_detail")]
+                               for c in mutated.get("controls", [])]
             rc, failing = PP.guard_verdict(GG, mutated)
         except Exception as exc:  # noqa: BLE001
             rc, failing = 1, [f"<exception:{exc.__class__.__name__}>"]
         finally:
             restore()
         crashed = [f for f in failing if str(f).startswith("<exception")]
-        MUTATION_FINGERPRINTS[label] = hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+        # Hash the full per-control promotion DETAIL, not just the promoter map: two different
+        # generator mutations can both yield an empty promoter map while differing in what the
+        # detail block reports, and hashing only the map made them indistinguishable to FZ03.
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(
+            json.dumps(_mutation_shape, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
         MUTATION_TRIPPED[label] = list(failing)
         rec(label, rc != 0 and bool(failing) and not crashed, why,
             level="generator mutation",

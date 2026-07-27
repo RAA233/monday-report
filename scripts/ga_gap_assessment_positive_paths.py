@@ -94,10 +94,14 @@ def scoped_promotion_matrix(syn, gen, ga) -> dict:
             outdir = Path(tempfile.mkdtemp(prefix="pp-syn-"))
             saved = {}
             try:
-                for module_name, const, _rel in syn.EVIDENCE_PATH_CONSTANTS[control]:
-                    import importlib
-                    module = importlib.import_module(module_name)
-                    saved[(module_name, const)] = getattr(module, const)
+                # install() repoints ALL seven constants, so saving only this control's leaves the
+                # other six dangling at deleted temp paths after the fixture runs.
+                import importlib
+                for slots in syn.EVIDENCE_PATH_CONSTANTS.values():
+                    for module_name, const, _rel in slots:
+                        key = (module_name, const)
+                        if key not in saved:
+                            saved[key] = getattr(importlib.import_module(module_name), const)
                 written = syn.install(outdir)
                 # Re-hide every artifact this control does NOT require, so the measurement is
                 # genuinely per-control rather than "everything at once".
@@ -230,6 +234,7 @@ def unrelated_and_stale_matrix(syn, gen, ga) -> dict:
                     os.replace(path, str(path) + ".off")
             after_b = dispositions(ga)
             results["unrelated"] = sorted(k for k in baseline if baseline[k] != after_b[k])
+            results["measured"] = bool(written) and len(baseline) > 20
             for name, path in written.items():
                 off = Path(str(path) + ".off")
                 if off.exists():
@@ -266,3 +271,50 @@ def graph_fingerprint(coupling, root: Path) -> dict:
                   "validators": tuple(sorted(spec["validators"])),
                   "extra_predicates": tuple(sorted(spec["extra_predicates"]))}
             for cid, spec in graph.items()}
+
+
+def conjunction_members_matrix(syn, gen, ga, control="ga_tenant_authorization") -> dict:
+    """Install each conjunction member ALONE and record the control's disposition.
+
+    The graph derives ``conjunction`` from artifact CARDINALITY, not from the evaluator's boolean
+    operator, so a review weakened the evaluator's all-of to an any-of and both batteries stayed
+    green: nothing ever evaluated a single member on its own. This measures it behaviourally.
+    """
+    import importlib
+    slots = syn.EVIDENCE_PATH_CONSTANTS[control]
+    names = [rel.rsplit("/", 1)[-1] for _m, _c, rel in slots]
+    results = {"members": sorted(names), "alone": {}, "both": None}
+    with hidden_real_evidence(gen):
+        outdir = Path(tempfile.mkdtemp(prefix="pp-conj-"))
+        saved = {}
+        try:
+            for every in syn.EVIDENCE_PATH_CONSTANTS.values():
+                for module_name, const, _rel in every:
+                    key = (module_name, const)
+                    if key not in saved:
+                        saved[key] = getattr(importlib.import_module(module_name), const)
+            written = syn.install(outdir)
+            paths = {Path(p).name: Path(p) for p in written.values()}
+            # every artifact NOT belonging to this control stays off for the whole measurement
+            for name, path in paths.items():
+                if name not in names and path.exists():
+                    os.replace(path, str(path) + ".off")
+            for keep in names:
+                for name in names:
+                    target = paths[name]
+                    off = Path(str(target) + ".off")
+                    if name == keep and off.exists():
+                        os.replace(off, target)
+                    elif name != keep and target.exists():
+                        os.replace(target, off)
+                results["alone"][keep] = dispositions(ga).get(control)
+            for name in names:
+                off = Path(str(paths[name]) + ".off")
+                if off.exists():
+                    os.replace(off, paths[name])
+            results["both"] = dispositions(ga).get(control)
+        finally:
+            for (module_name, const), value in saved.items():
+                setattr(importlib.import_module(module_name), const, value)
+            shutil.rmtree(outdir, ignore_errors=True)
+    return results
