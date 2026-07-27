@@ -915,7 +915,8 @@ def run() -> int:
         view["contexts"] = ctx
         view["controls"] = [{k: v for k, v in (c or {}).items()
                              if k not in ("current_disposition_verified_environment",
-                                          "verified_promoted_by")}
+                                          "verified_promoted_by",
+                                          "verified_promotion_detail")}
                             for c in view.get("controls") or []]
         return view
 
