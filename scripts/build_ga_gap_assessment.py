@@ -521,7 +521,17 @@ def _promotion_map(fresh: dict) -> dict:
 
     graph = _coupling.evaluator_graph(
         (ROOT / "backend" / "app" / "ga_readiness.py").read_text(encoding="utf-8"))
-    by_name = {p.name: p for p in _all_evidence_paths()}
+    # Resolve by basename, but let an EXISTING path win a collision. _all_evidence_paths() can
+    # list the same filename twice -- the generator's own EVIDENCE_PATH and the evaluator's
+    # MIGRATION_EVIDENCE_PATH are distinct constants naming the same artifact -- and a plain dict
+    # comprehension let whichever came last win. When one of them had been repointed and the other
+    # had not, `present` came out empty for a control that HAD genuinely been promoted, the
+    # promoter was recorded as null, and the guard refused the generator's own honest output.
+    by_name: dict = {}
+    for candidate in _all_evidence_paths():
+        current = by_name.get(candidate.name)
+        if current is None or (candidate.exists() and not current.exists()):
+            by_name[candidate.name] = candidate
 
     saved_env = {k: os.environ.pop(k) for k in
                  [k for k in os.environ if k.startswith("MONDAY_REPORT_")]}
