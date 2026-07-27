@@ -523,7 +523,17 @@ def _promotion_map(fresh: dict) -> dict:
                     target = stash / f"{index}-{path.name}"
                     os.replace(path, target)
                     moved.append((path, target))
-            for check in G.evaluate_blockers({}):
+            # Hermetic, exactly as the fresh snapshot is. Without this the map attributed
+            # ENVIRONMENT-driven promotions to whichever artifact happened to be visible: with
+            # MONDAY_REPORT_AUDIT_HMAC_KEY set, ga_audit_keyed_integrity was recorded as promoted
+            # by the migration artifact, which is simply false.
+            saved_env = {k: os.environ.pop(k) for k in
+                         [k for k in os.environ if k.startswith("MONDAY_REPORT_")]}
+            try:
+                checks = G.evaluate_blockers({})
+            finally:
+                os.environ.update(saved_env)
+            for check in checks:
                 # Attribute only an IMPROVEMENT over the hermetic baseline, and let the first
                 # artifact that achieves it own the attribution: a later iteration must not
                 # overwrite a correct one.

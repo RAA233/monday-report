@@ -87,6 +87,73 @@ def _unreachable_nodes(tree: ast.AST) -> set:
     return dead
 
 
+def _trivially_used(predicate, required: set) -> set:
+    """Names whose every occurrence is an existence test rather than a real use."""
+    real_use = set()
+    trivial_nodes = set()
+    for node in ast.walk(predicate):
+        if (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name)
+                and len(node.ops) == 1 and isinstance(node.ops[0], (ast.Is, ast.IsNot))
+                and len(node.comparators) == 1
+                and isinstance(node.comparators[0], ast.Constant)
+                and node.comparators[0].value is None):
+            trivial_nodes.add(id(node.left))
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "bool" and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name)):
+            trivial_nodes.add(id(node.args[0]))
+    for node in ast.walk(predicate):
+        if isinstance(node, ast.Name) and node.id in required and id(node) not in trivial_nodes:
+            real_use.add(node.id)
+    return required - real_use
+
+
+def _constant_rebindings(tree, call, required: set) -> set:
+    """Required names whose LAST write before the gate is an inert constant.
+
+    A predicate can be left byte-identical and neutered one line earlier by rebinding its inputs to
+    an empty literal -- invisible to any predicate-only inspection. Ordering matters: ``unbounded =
+    []`` followed by ``unbounded.append(...)`` is a legitimate accumulator, so only a constant write
+    with NO later feed before the gate actually hollows it.
+    """
+    enclosing = None
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if any(node is call for node in ast.walk(fn)):
+            enclosing = fn
+    if enclosing is None:
+        return set()
+
+    last_inert, last_feed = {}, {}
+    for node in ast.walk(enclosing):
+        line = getattr(node, "lineno", 0)
+        if not line or line >= call.lineno:
+            continue
+        if isinstance(node, ast.Assign):
+            value = node.value
+            inert = (isinstance(value, ast.Constant)
+                     or (isinstance(value, (ast.List, ast.Tuple, ast.Set)) and not value.elts)
+                     or (isinstance(value, ast.Dict) and not value.keys))
+            for target in node.targets:
+                if not isinstance(target, ast.Name) or target.id not in required:
+                    continue
+                book = last_inert if inert else last_feed
+                book[target.id] = max(book.get(target.id, 0), line)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and isinstance(node.func.value, ast.Name)
+              and node.func.value.id in required
+              and node.func.attr in ("append", "extend", "update", "add", "insert")):
+            name = node.func.value.id
+            last_feed[name] = max(last_feed.get(name, 0), line)
+        elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+              and node.target.id in required):
+            name = node.target.id
+            last_feed[name] = max(last_feed.get(name, 0), line)
+
+    return {n for n, line in last_inert.items() if line > last_feed.get(n, 0)}
+
+
 def verify_coupling(source: str) -> list:
     """Return a list of problems. Empty means every protected gate is load-bearing.
 
@@ -144,12 +211,32 @@ def verify_coupling(source: str) -> list:
                 f"{sorted(missing_names | missing_attrs | missing_calls)} ({spec['why']})")
             continue
 
-        # A predicate that merely mentions the names but consumes none of them -- e.g. rebound to a
-        # same-named no-op -- is caught by requiring the names to appear in a LOAD context.
         loaded = {n.id for n in ast.walk(predicate)
                   if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
         if spec["names"] - loaded:
             problems.append(f"{gate}: required names appear but are never read")
+            continue
+
+        # A LOAD is not a USE. An exact-head review deleted the load-bearing conjunct and kept the
+        # name alive with `tracked_dirty is not None`, so every required name still "read" and both
+        # batteries stayed green -- a REGRESSION against the raw-text scan this replaced, which at
+        # least noticed the missing `not dirty_paths`. A name whose only appearances are
+        # existence-shaped is therefore not counted as consumed.
+        trivial = _trivially_used(predicate, spec["names"])
+        if trivial:
+            problems.append(
+                f"{gate}: {sorted(trivial)} appear only in existence tests "
+                f"(is/is not None, bool(x)); the load-bearing conjunct has been removed")
+            continue
+
+        # The predicate can also be left byte-identical and neutered one line earlier by rebinding
+        # its inputs to an empty literal. That is invisible to any predicate-only inspection, so the
+        # enclosing function is scanned for a constant rebinding of a required name.
+        rebound = _constant_rebindings(tree, call, spec["names"])
+        if rebound:
+            problems.append(
+                f"{gate}: {sorted(rebound)} rebound to a constant before the check, "
+                f"which neuters it without touching the predicate")
 
     return problems
 
@@ -209,6 +296,21 @@ def mutations(source: str) -> dict:
         out["neutralize-" + gate + "-keeping-strings"] = replace_predicate(gate, "True")
         out["constant-pass-" + gate] = replace_predicate(gate, "bool(1)")
         out["noop-same-name-" + gate] = replace_predicate(gate, "(lambda *_a, **_k: True)()")
+
+    for gate, spec in sorted(PROTECTED_GATES.items()):
+        names = sorted(spec["names"])
+        # D1/D7: delete the load-bearing conjunct but keep every name "read".
+        trivial = " and ".join(f"({n} is not None)" for n in names)
+        out["trivial-read-" + gate] = replace_predicate(gate, trivial)
+        # D2/D8: leave the predicate byte-identical and rebind its inputs one line earlier.
+        span = _predicate_span(source, gate)
+        if span:
+            begin, _ = span
+            line_start = source.rfind(newline, 0, begin) + 1
+            stmt_line = source.rfind(newline, 0, line_start - 1) + 1
+            indent = " " * (len(source[stmt_line:]) - len(source[stmt_line:].lstrip()))
+            inject = "".join(f"{indent}{n} = []{newline}" for n in names)
+            out["rebind-inputs-" + gate] = source[:stmt_line] + inject + source[stmt_line:]
 
     span = _stmt_span(source, "GA50b")
     if span:
