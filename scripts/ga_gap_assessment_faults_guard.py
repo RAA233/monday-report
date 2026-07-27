@@ -38,9 +38,11 @@ from backend.app import ga_readiness as GA_MOD  # noqa: E402
 import build_ga_gap_assessment as GEN  # noqa: E402
 import ga_gap_assessment_guard as GG  # noqa: E402
 import ga_gap_assessment_coupling as COUPLING  # noqa: E402
+import ga_gap_assessment_positive_paths as PP  # noqa: E402
+import synthetic_ga_evidence as SYN  # noqa: E402
 
 checks: list[dict] = []
-MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP", "MV", "MI", "MG", "MX")
+MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP", "MV", "MI", "MG", "MX", "PM")
 
 DB_ID, QUEUE_ID = "production-database-adapter", "production-queue-adapter"
 
@@ -101,6 +103,27 @@ EXPECTED_CHECK_IDS = [
     "MX22 prose-disclosure-removed", "MX11 blocking-reason-rewritten",
     "MX12 extra-context-injected", "MX13 static-contract-invented",
     # (there is deliberately no MX09: ga_ready=true is already MR04, and FZ03 rejected the duplicate)
+    # positive paths -- a RIGHT promotion must be ACCEPTED, not merely a wrong one refused
+    "PP01 migration-runner-own-artifact-accepted",
+    "PP02 migration-validity-scope-recognized-blocker-retained",
+    "PP03 tenant-conjunction-accepted",
+    "PP04 database-adapter-own-synthetic-artifact-accepted",
+    "PP05 queue-adapter-own-synthetic-artifact-accepted",
+    "PP06 persistence-locking-own-artifact-accepted",
+    "PP07 correction-atomicity-own-artifact-accepted",
+    "PP08 unrelated-artifacts-rejected",
+    "PP09 stale-artifacts-rejected",
+    "PP10 overall-ga-remains-blocked",
+    "PP11 graph-exactness-derived-from-evaluator",
+    # scope mutations -- each must break a POSITIVE path, not merely fail closed
+    "PM01 empty-evidence-scope-mapping",
+    "PM02 remove-migration-runner-arm", "PM03 remove-migration-validity-arm",
+    "PM04 remove-tenant-conjunction-arm", "PM05 remove-database-adapter-arm",
+    "PM06 remove-queue-adapter-arm", "PM07 remove-persistence-locking-arm",
+    "PM08 remove-correction-atomicity-arm",
+    "PM09 tenant-all-of-weakened-to-any-of", "PM10 tenant-conjunction-member-removed",
+    "PM11 own-artifact-replaced-with-unrelated", "PM12 artifact-path-changed",
+    "PM13 promoter-attribution-disabled", "PM14 promoter-basename-collision-restored",
     "FZ00 completeness", "FZ01 battery-size-pinned",
     "FZ03 mutations-are-distinct-inputs", "FZ04 drift-guard-check-set-pinned",
     "FZ05 inventory-authority-is-the-registry", "FZ06 mutations-trip-the-gate-they-protect",
@@ -112,8 +135,8 @@ EXPECTED_CHECK_IDS = [
     "FZ10-GA47f rejects-what-it-exists-to-reject",
     "FZ11 protected-gate-set-is-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 97
-EXPECTED_MUTATION_COUNT = 82
+EXPECTED_TOTAL_CHECKS = 122
+EXPECTED_MUTATION_COUNT = 96
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
@@ -875,6 +898,236 @@ def run() -> int:
         "the tracked assessment is byte-identical after every mutation: each ran on a temp copy",
         level="structural source check")
 
+    # ---------------------------------------------------------------- positive paths
+    # Until now the battery proved only that a WRONG promotion is refused. A guard that silently
+    # stops accepting the generator's own honest output looks identical to a working one -- which
+    # is exactly how an inert resolver survived two independent reviews. These checks require a
+    # RIGHT promotion to be ACCEPTED, and the mutations below require each of them to break.
+    fx = PP.fixture(SYN, GEN, GA_MOD)
+    matrix, payload, promoted = fx["matrix"], fx["payload"], fx["promoted"]
+
+    def _scoped(cid, label, artifacts):
+        entry = matrix.get(cid, {})
+        control = fx["controls"].get(cid, {})
+        rec(label,
+            entry.get("disposition") == "PASS"
+            and set(entry.get("movers") or []) == PP.EXPECTED_MOVERS[cid]
+            and set(control.get("verified_promoted_by") or []) == set(artifacts)
+            and payload["release_recommendation"] == "GA_BLOCKED",
+            f"{cid} reaches PASS from its OWN exact-head artifact, moves exactly the intended "
+            f"control, and is attributed to exactly {sorted(artifacts)}",
+            level="positive path",
+            extra={"disposition": entry.get("disposition"), "movers": entry.get("movers"),
+                   "promoted_by": control.get("verified_promoted_by"),
+                   "synthetic_artifact": True, "parser_evaluator_coverage_only": True,
+                   "real_production_execution": False})
+
+    _scoped("ga_migration_runner", "PP01 migration-runner-own-artifact-accepted",
+            ["migration-evidence.v1.json"])
+
+    mv = matrix.get("ga_migration_validity", {})
+    marker, sibling = PP.STATIC_BLOCKER_CONTROLS["ga_migration_validity"]
+    rec("PP02 migration-validity-scope-recognized-blocker-retained",
+        mv.get("disposition") == "BLOCKED"
+        and marker in mv.get("detail", "")
+        and matrix.get(sibling, {}).get("disposition") == "PASS"
+        and "not proven" not in mv.get("detail", ""),
+        "the migration artifact is RECOGNISED as in scope -- proved by the sibling reaching PASS "
+        "off the same artifact -- while the control stays BLOCKED on the independent legacy FK "
+        "blocker. A fail-closed BLOCKED is NOT accepted as success: scope-resolution failure "
+        "reads 'Migration validity not proven' and leaves the sibling BLOCKED too",
+        level="positive path",
+        extra={"disposition": mv.get("disposition"), "sibling": sibling,
+               "sibling_disposition": matrix.get(sibling, {}).get("disposition"),
+               "blocker_marker_present": marker in mv.get("detail", ""),
+               "detail": mv.get("detail", "")[:140]})
+
+    tenant = fx["controls"].get("ga_tenant_authorization", {})
+    tdetail = tenant.get("verified_promotion_detail") or {}
+    both = {"tenant-rls-enforcement-evidence.v2.json", "tenant-authorization-evidence.v3.json"}
+    rec("PP03 tenant-conjunction-accepted",
+        matrix.get("ga_tenant_authorization", {}).get("disposition") == "PASS"
+        and set(matrix.get("ga_tenant_authorization", {}).get("movers") or [])
+        == {"ga_tenant_authorization"}
+        and set(tdetail.get("required") or []) == both
+        and set(tdetail.get("present") or []) == both
+        and not tdetail.get("missing")
+        and tdetail.get("conjunction") is True,
+        "the tenant conjunction PASSES only with BOTH artifacts, names both as required and "
+        "present, reports nothing missing, and records conjunction satisfied",
+        level="positive path", extra={"detail": tdetail})
+
+    _scoped("ga_postgres_adapter", "PP04 database-adapter-own-synthetic-artifact-accepted",
+            ["production-database-adapter-evidence.v1.json"])
+    _scoped("ga_redis_adapter", "PP05 queue-adapter-own-synthetic-artifact-accepted",
+            ["production-queue-adapter-evidence.v1.json"])
+    _scoped("ga_persistence_locking", "PP06 persistence-locking-own-artifact-accepted",
+            ["persistence-atomicity-evidence.v4.json"])
+    _scoped("ga_correction_cross_process_atomicity",
+            "PP07 correction-atomicity-own-artifact-accepted",
+            ["normalized-correction-persistence-evidence.v4.json"])
+
+    bc = PP.unrelated_and_stale_matrix(SYN, GEN, GA_MOD)
+    rec("PP08 unrelated-artifacts-rejected",
+        set(bc["unrelated"]) <= {"ga_redis_adapter"},
+        "with only ONE control's artifact present, no OTHER control moves: an unrelated artifact "
+        "never promotes a control",
+        level="positive path", extra={"movers": bc["unrelated"]})
+    rec("PP09 stale-artifacts-rejected",
+        not bc["stale"],
+        "artifacts corrupted so their own validators refuse them promote nothing at all",
+        level="positive path", extra={"movers": bc["stale"]})
+    rec("PP10 overall-ga-remains-blocked",
+        payload["release_recommendation"] == "GA_BLOCKED"
+        and payload["ga_ready"] is False
+        and payload["execution_verdicts"]["production_database_adapter"].endswith("NOT_ACCEPTED")
+        and payload["execution_verdicts"]["production_queue_adapter"].endswith("NOT_ACCEPTED"),
+        "even with every synthetic artifact present and six controls promoted, GA stays blocked "
+        "and both production adapters stay NOT_ACCEPTED. Synthetic evidence is parser/evaluator "
+        "coverage and can never be production acceptance",
+        level="positive path",
+        extra={"release_recommendation": payload["release_recommendation"],
+               "production_adapter_accepted": False,
+               "synthetic_artifact": True, "parser_evaluator_coverage_only": True,
+               "real_production_execution": False})
+
+    derived = PP.graph_fingerprint(COUPLING, ROOT)
+    rec("PP11 graph-exactness-derived-from-evaluator",
+        set(derived) == set(PP.EXPECTED_MOVERS)
+        and derived.get("ga_tenant_authorization", {}).get("conjunction") is True
+        and all(spec["artifacts"] for spec in derived.values())
+        and all(spec["validators"] for spec in derived.values()),
+        "artifacts, operator and validators are re-derived from the evaluator's own AST every run "
+        "and cover exactly the seven artifact-gated controls -- not one editable copy of a mapping "
+        "compared against another",
+        level="structural source check",
+        extra={"controls": len(derived),
+               "conjunction_controls": sorted(k for k, v in derived.items() if v["conjunction"])})
+
+    # ---------------------------------------------------------------- scope mutations
+    def _scope_mutation(cid, label, removed, expect_control):
+        """Remove mapping arms and require the corresponding POSITIVE path to break."""
+        with PP.scope_without(GG, removed):
+            rc, failing = PP.guard_verdict(GG, payload)
+        crashed = [f for f in failing if str(f).startswith("<exception")]
+        tripped = [f for f in failing if f.split(" ", 1)[0] == "GA47f"]
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(
+            ("scope:" + ",".join(sorted(removed))).encode("utf-8")).hexdigest()[:16]
+        MUTATION_TRIPPED[label] = list(failing)
+        rec(label, rc != 0 and bool(tripped) and not crashed,
+            f"removing {sorted(removed) or 'the whole mapping'} breaks the accepted promotion of "
+            f"{expect_control}: the positive path stops working, which a fail-closed guard hides",
+            level="scope mutation",
+            extra={"removed": sorted(removed), "failing": failing[:3],
+                   "mutation_fingerprint": MUTATION_FINGERPRINTS[label]})
+
+    _scope_mutation(None, "PM01 empty-evidence-scope-mapping",
+                    set(GG.EVIDENCE_SCOPE), "every promoted control")
+    for cid, label in (
+            ("ga_migration_runner", "PM02 remove-migration-runner-arm"),
+            ("ga_tenant_authorization", "PM04 remove-tenant-conjunction-arm"),
+            ("ga_postgres_adapter", "PM05 remove-database-adapter-arm"),
+            ("ga_redis_adapter", "PM06 remove-queue-adapter-arm"),
+            ("ga_persistence_locking", "PM07 remove-persistence-locking-arm"),
+            ("ga_correction_cross_process_atomicity", "PM08 remove-correction-atomicity-arm")):
+        _scope_mutation(cid, label, {cid}, cid)
+
+    # ga_migration_validity is the one mapped control that never promotes -- its independent
+    # static blocker outlives the evidence gate -- so removing its arm cannot break a promotion.
+    # Its mapping is load-bearing structurally instead: it must be present in the graph derived
+    # from the evaluator, with the same artifact its promoting sibling uses.
+    derived_mv = PP.graph_fingerprint(COUPLING, ROOT).get("ga_migration_validity", {})
+    MUTATION_FINGERPRINTS["PM03 remove-migration-validity-arm"] = hashlib.sha256(
+        b"graph:ga_migration_validity").hexdigest()[:16]
+    MUTATION_TRIPPED["PM03 remove-migration-validity-arm"] = []
+    rec("PM03 remove-migration-validity-arm",
+        derived_mv.get("artifacts") == ("migration-evidence.v1.json",)
+        and derived_mv.get("conjunction") is False
+        and bool(derived_mv.get("extra_predicates")),
+        "the migration-validity arm is present in the graph DERIVED from the evaluator, bound to "
+        "the same artifact its sibling promotes from, and carries extra static predicates. It is "
+        "pinned structurally rather than by a broken promotion: this control never promotes, so "
+        "claiming a promotion-break mutation for it would be vacuous",
+        level="scope mutation",
+        extra={"derived": {k: list(v) if isinstance(v, tuple) else v
+                           for k, v in derived_mv.items()},
+               "mutation_fingerprint":
+                   MUTATION_FINGERPRINTS["PM03 remove-migration-validity-arm"]})
+
+    def _scope_rewrite(label, rewrite, why):
+        original = GG.EVIDENCE_SCOPE
+        try:
+            GG.EVIDENCE_SCOPE = rewrite(dict(original))
+            rc, failing = PP.guard_verdict(GG, payload)
+        finally:
+            GG.EVIDENCE_SCOPE = original
+        crashed = [f for f in failing if str(f).startswith("<exception")]
+        tripped = [f for f in failing if f.split(" ", 1)[0] == "GA47f"]
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+        MUTATION_TRIPPED[label] = list(failing)
+        rec(label, rc != 0 and bool(tripped) and not crashed, why,
+            level="scope mutation",
+            extra={"failing": failing[:3], "mutation_fingerprint": MUTATION_FINGERPRINTS[label]})
+
+    _scope_rewrite("PM09 tenant-all-of-weakened-to-any-of",
+                   lambda m: {**m, "ga_tenant_authorization":
+                              {"tenant-rls-enforcement-evidence.v2.json"}},
+                   "weakening the tenant ALL-OF to a single sufficient member is refused: the "
+                   "artifact names both, so a one-member requirement no longer matches")
+    _scope_rewrite("PM10 tenant-conjunction-member-removed",
+                   lambda m: {**m, "ga_tenant_authorization":
+                              {"tenant-authorization-evidence.v3.json"}},
+                   "dropping the other conjunction member is refused for the same reason")
+    _scope_rewrite("PM11 own-artifact-replaced-with-unrelated",
+                   lambda m: {**m, "ga_postgres_adapter": {"migration-evidence.v1.json"}},
+                   "pointing a control's requirement at an unrelated artifact is refused")
+    _scope_rewrite("PM12 artifact-path-changed",
+                   lambda m: {**m, "ga_redis_adapter": {"production-queue-adapter-evidence.v9.json"}},
+                   "a changed artifact filename is refused: the promoter no longer matches")
+
+    def _generator_mutation(label, patch, restore, why):
+        try:
+            patch()
+            mutated, _promoted = PP.legitimate_promotion_payload(SYN, GEN)
+            rc, failing = PP.guard_verdict(GG, mutated)
+        except Exception as exc:  # noqa: BLE001
+            rc, failing = 1, [f"<exception:{exc.__class__.__name__}>"]
+        finally:
+            restore()
+        crashed = [f for f in failing if str(f).startswith("<exception")]
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+        MUTATION_TRIPPED[label] = list(failing)
+        rec(label, rc != 0 and bool(failing) and not crashed, why,
+            level="generator mutation",
+            extra={"failing": failing[:3], "mutation_fingerprint": MUTATION_FINGERPRINTS[label]})
+
+    _original_promotion_map = GEN._promotion_map
+    _generator_mutation(
+        "PM13 promoter-attribution-disabled",
+        lambda: setattr(GEN, "_promotion_map", lambda fresh: {}),
+        lambda: setattr(GEN, "_promotion_map", _original_promotion_map),
+        "a generator that stops attributing promotions is refused: a promoted control with no "
+        "promoter is exactly the state GA47n exists to catch")
+
+    def _collide():
+        def broken(fresh):
+            result = _original_promotion_map(fresh)
+            # the pre-fix behaviour: last path with a given basename wins, so a control whose
+            # artifact basename appears twice loses its `present` entry
+            for spec in result.values():
+                spec["present"] = []
+                spec["missing"] = list(spec["required"])
+            return result
+        GEN._promotion_map = broken
+
+    _generator_mutation(
+        "PM14 promoter-basename-collision-restored",
+        _collide,
+        lambda: setattr(GEN, "_promotion_map", _original_promotion_map),
+        "restoring the basename-collision behaviour -- present empty, everything reported missing "
+        "for a control that WAS promoted -- is refused. This regression made the guard reject the "
+        "generator's own honest output and was found by the first positive-path run")
+
     # ---------------------------------------------------------------- completeness
     dup = {}
     for fingerprint in set(MUTATION_FINGERPRINTS.values()):
@@ -1159,7 +1412,10 @@ def run() -> int:
     missing = [c for c in EXPECTED_CHECK_IDS if c not in emitted and c != "FZ00 completeness"]
     unknown = [c for c in emitted if c not in EXPECTED_CHECK_IDS]
     dupes = sorted({c for c in emitted if emitted.count(c) > 1})
-    stray = [c for c in emitted if not c.startswith("F") and c[:2] not in MUTATION_PREFIXES]
+    # "PP" is a legitimate non-mutation prefix: a positive path asserts an ACCEPTANCE, so it is
+    # neither an F-gate nor a mutation, and must not be reported as a stray id.
+    stray = [c for c in emitted
+             if not c.startswith(("F", "PP")) and c[:2] not in MUTATION_PREFIXES]
     rec("FZ00 completeness", not (missing or unknown or dupes or stray),
         "the emitted check set equals the declared set exactly",
         level="structural source check",

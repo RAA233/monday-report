@@ -180,3 +180,89 @@ def scope_without(gg, controls):
             gg.EVIDENCE_SCOPE = original
 
     return _ctx()
+
+
+# --------------------------------------------------------------------------- registered fixture
+#: The positive-path fixture, computed ONCE per process. Building it runs the real evaluator many
+#: times and the real generator once, so every registered PP check and every scope mutation reads
+#: this single measurement rather than repeating it.
+_FIXTURE: dict = {}
+
+
+def fixture(syn, gen, ga):
+    """Measure the whole positive-path surface once: matrix, honest payload, promoters."""
+    if _FIXTURE:
+        return _FIXTURE
+    matrix = scoped_promotion_matrix(syn, gen, ga)
+    payload, promoted = legitimate_promotion_payload(syn, gen)
+    _FIXTURE.update({
+        "matrix": matrix,
+        "payload": payload,
+        "promoted": promoted,
+        "controls": {c["check_id"]: c for c in payload["controls"]},
+    })
+    return _FIXTURE
+
+
+def unrelated_and_stale_matrix(syn, gen, ga) -> dict:
+    """B and C cases: an unrelated control's artifact, and a corrupted own artifact.
+
+    The stale case for the migration artifact deliberately corrupts its migration-set hash rather
+    than its commit: ``_migration_evidence_valid`` performs no commit binding at all, so a
+    wrong-commit fixture would pass and the check would be vacuous.
+    """
+    import importlib
+    results = {}
+    with hidden_real_evidence(gen):
+        baseline = dispositions(ga)
+        outdir = Path(tempfile.mkdtemp(prefix="pp-bc-"))
+        saved = {}
+        try:
+            for slots in syn.EVIDENCE_PATH_CONSTANTS.values():
+                for module_name, const, _rel in slots:
+                    key = (module_name, const)
+                    if key not in saved:
+                        saved[key] = getattr(importlib.import_module(module_name), const)
+            written = syn.install(outdir)
+            # ---- B: only the queue artifact present; every other control must stay put
+            for name, path in written.items():
+                if "production-queue-adapter" not in Path(path).name and Path(path).exists():
+                    os.replace(path, str(path) + ".off")
+            after_b = dispositions(ga)
+            results["unrelated"] = sorted(k for k in baseline if baseline[k] != after_b[k])
+            for name, path in written.items():
+                off = Path(str(path) + ".off")
+                if off.exists():
+                    os.replace(off, path)
+            # ---- C: corrupt each artifact so its own validator refuses it
+            for path in written.values():
+                target = Path(path)
+                if not target.exists():
+                    continue
+                body = json.loads(target.read_text(encoding="utf-8"))
+                for key in ("migration_set_sha256", "git_commit", "git_tree", "payload_sha256"):
+                    if key in body:
+                        body[key] = "0" * len(str(body[key])) if isinstance(body[key], str) else body[key]
+                target.write_text(json.dumps(body), encoding="utf-8")
+            after_c = dispositions(ga)
+            results["stale"] = sorted(k for k in baseline if baseline[k] != after_c[k])
+        finally:
+            for (module_name, const), value in saved.items():
+                setattr(importlib.import_module(module_name), const, value)
+            shutil.rmtree(outdir, ignore_errors=True)
+    return results
+
+
+def graph_fingerprint(coupling, root: Path) -> dict:
+    """Independently derived expected graph: artifacts, operator, validators, extra predicates.
+
+    Derived from the evaluator's own AST every run, so it cannot be satisfied by editing a second
+    hand-authored copy in tandem with the first.
+    """
+    graph = coupling.evaluator_graph((root / "backend" / "app" / "ga_readiness.py")
+                                     .read_text(encoding="utf-8"))
+    return {cid: {"artifacts": tuple(sorted(spec["artifacts"])),
+                  "conjunction": bool(spec["conjunction"]),
+                  "validators": tuple(sorted(spec["validators"])),
+                  "extra_predicates": tuple(sorted(spec["extra_predicates"]))}
+            for cid, spec in graph.items()}
