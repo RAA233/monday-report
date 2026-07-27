@@ -104,8 +104,11 @@ EXPECTED_CHECK_IDS = [
     "FZ07 protected-gates-are-structurally-load-bearing",
     "FZ08 gate-hollowing-is-behaviorally-detected",
     "FZ09 protected-gates-are-actually-emitted",
+    "FZ10-GA50b rejects-what-it-exists-to-reject",
+    "FZ10-GA04k rejects-what-it-exists-to-reject",
+    "FZ10-GA47f rejects-what-it-exists-to-reject",
 ]
-EXPECTED_TOTAL_CHECKS = 89
+EXPECTED_TOTAL_CHECKS = 92
 EXPECTED_MUTATION_COUNT = 78
 PINNED_DRIFT_ID_SET_HASH = "fdc2f72ac3f5125f2a6318254f943d4104d6a315131337981cd5d4ffa62bb303"
 PINNED_DRIFT_CHECK_COUNT = 90
@@ -114,6 +117,12 @@ PINNED_DRIFT_CHECK_COUNT = 90
 #: carried by FZ00 (emitted == declared), FZ01 (size), FZ03 (distinct mutation inputs) and FZ04
 #: (cross-file pin of the DRIFT guard's set), and the expected CONTROL inventory now comes from the
 #: real registry (FZ05).
+
+#: The gates whose behaviour FZ10 probes and whose shape FZ07/FZ08 inspect, and how many coupling
+#: mutations that set produces. Pinned because the set was otherwise editable alongside the checks
+#: that consume it.
+PINNED_PROTECTED_GATES = "GA04k,GA47f,GA50b"
+PINNED_COUPLING_MUTATIONS = 18
 
 MUTATION_FINGERPRINTS: dict[str, str] = {}
 
@@ -817,6 +826,84 @@ def run() -> int:
     # The expected control inventory must come from the registry, and no editable constant may
     # redefine it. Proved on the parsed guard source, not by string search.
     import ast as _ast
+    # ---------------------------------------------------------------- behavioral discrimination
+    # THE load-bearing proof. FZ07/FZ08 inspect the SHAPE of each gate's predicate, and an
+    # exact-head review showed that is an arms race that cannot be won: of twenty hollowings it
+    # tried, nineteen evaded the shape rules (`len(x) >= 0`, `x == x`, `x or True`, `str(x) != "z"`,
+    # `list()`, `x.clear()`, ...), each leaving both batteries at a full green while the gate no
+    # longer did anything. Enumerating bad syntax is the same mistake as the raw-text scan it
+    # replaced, one level up.
+    #
+    # These probes ask the only question that matters: does the gate still REJECT the thing it
+    # exists to reject? A hollowed gate stops rejecting it, whatever syntax was used, so no
+    # enumeration is needed and there is nothing to evade.
+    def _fails_on(scenario_name, gate, prepare, restore=None):
+        artifact_copy, patch = prepare()
+        try:
+            rc, failing = guard_result(artifact_copy)
+        finally:
+            if restore is not None:
+                restore(patch)
+        tripped = [f for f in failing if str(f).split(" ", 1)[0] == gate]
+        rec(f"FZ10-{gate} rejects-what-it-exists-to-reject",
+            bool(tripped) and not any(str(f).startswith("<exception") for f in failing),
+            f"the REAL {gate} rejects {scenario_name}. This is behavioural, not syntactic: a gate "
+            f"hollowed by any means -- constant, trivial read, rebound input, deleted conjunct -- "
+            f"stops rejecting it and this fails, so no catalogue of bad syntax has to be maintained",
+            level="behavioural gate probe",
+            extra={"scenario": scenario_name, "tripped": tripped[:2], "all_failing": failing[:4]})
+
+    # GA50b must reject a DIRTY tracked tree. The tree here is clean, so the measurement the gate
+    # performs is intercepted rather than the tree being touched.
+    def _dirty_tree():
+        import subprocess as _sp
+
+        class _Result:
+            returncode = 0
+            stdout = " M backend/app/permissions.py\n M backend/app/store.py\n"
+
+        original = GG.subprocess.run
+
+        def fake(cmd, *a, **k):
+            if list(cmd[:3]) == ["git", "status", "--porcelain"]:
+                return _Result()
+            return original(cmd, *a, **k)
+
+        GG.subprocess.run = fake
+        return copy.deepcopy(live_artifact()), original
+
+    _fails_on("a dirty tracked worktree", "GA50b", _dirty_tree,
+              restore=lambda original: setattr(GG.subprocess, "run", original))
+
+    # GA04k must reject a disclosure that claims the curated prose was verified.
+    def _forbidden_disclosure():
+        a = copy.deepcopy(live_artifact())
+        a["curated_prose_disclosure"] = (
+            "This commentary has been independently verified and reviewed by a senior engineer "
+            "and may be relied upon as the fuller and more accurate description of the system. "
+            "current_disposition_fresh_checkout and blocking_reason are author-supplied and no "
+            "guard can verify them; where they disagree the commentary governs.")
+        return rehash(a), None
+
+    _fails_on("a disclosure claiming the prose was independently verified", "GA04k",
+              _forbidden_disclosure)
+
+    # GA47f must reject a machine-local promotion that no artifact scopes to that control.
+    def _unscoped_promotion():
+        a = copy.deepcopy(live_artifact())
+        target = next(c for c in a["controls"] if c["check_id"] == "ga_postgres_adapter")
+        target["current_disposition_verified_environment"] = "PASS"
+        target["verified_promoted_by"] = "migration-evidence.v1.json"
+        tally: dict = {}
+        for control in a["controls"]:
+            value = control["current_disposition_verified_environment"]
+            tally[value] = tally.get(value, 0) + 1
+        a["contexts"]["verified_environment_with_evidence"]["tally"] = dict(sorted(tally.items()))
+        return rehash(a), None
+
+    _fails_on("the production database adapter promoted on an unrelated artifact's authority",
+              "GA47f", _unscoped_promotion)
+
     # ---------------------------------------------------------------- gate coupling
     # The previous FZ07 asked only ``needle not in guard_src`` -- a substring search over the whole
     # file, so a comment, a docstring, a dead branch or an unused variable satisfied it while the
@@ -847,9 +934,14 @@ def run() -> int:
             unparsed.append(name)
             continue
         problems = COUPLING.verify_coupling(mutated)
-        if not problems or any("does not parse" in p for p in problems):
+        # Own-gate attribution is REQUIRED, not merely observed: accepting "some problem" is the
+        # masking bug that made a mutation look covered because a different gate tripped.
+        gate = next((g for g in COUPLING.PROTECTED_GATES if g in name), None)
+        if (not problems or any("does not parse" in p for p in problems)
+                or (gate and not any(p.startswith(gate) for p in problems))):
             undetected.append(name)
     mutation_total = len(COUPLING.mutations(guard_source))
+    gate_set = ",".join(sorted(COUPLING.PROTECTED_GATES))
     rec("FZ08 gate-hollowing-is-behaviorally-detected",
         mutation_total >= 8 and not undetected and not unparsed and not absent,
         "every hollowing of a protected gate -- constant predicate, same-named no-op, unreachable "
@@ -858,7 +950,13 @@ def run() -> int:
         "is missing, are failures rather than silent passes",
         level="structural source check",
         extra={"mutations": mutation_total, "undetected": undetected,
-               "did_not_parse": unparsed, "anchor_missing": absent})
+               "did_not_parse": unparsed, "anchor_missing": absent, "gates": gate_set})
+    rec("FZ11 protected-gate-set-is-pinned",
+        gate_set == PINNED_PROTECTED_GATES and mutation_total == PINNED_COUPLING_MUTATIONS,
+        "the protected-gate SET and the mutation count are pinned. Dropping a gate from "
+        "PROTECTED_GATES silently removed six mutations while every counter stayed green",
+        level="structural source check",
+        extra={"gates": gate_set, "mutations": mutation_total})
 
     # Runtime link: a gate that is structurally sound but never emitted proves nothing.
     emitted_ids = {c["check_id"].split(" ", 1)[0] for c in _emitted_drift_checks()}
