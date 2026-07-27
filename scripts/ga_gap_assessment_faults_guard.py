@@ -107,8 +107,9 @@ EXPECTED_CHECK_IDS = [
     "FZ10-GA50b rejects-what-it-exists-to-reject",
     "FZ10-GA04k rejects-what-it-exists-to-reject",
     "FZ10-GA47f rejects-what-it-exists-to-reject",
+    "FZ11 protected-gate-set-is-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 92
+EXPECTED_TOTAL_CHECKS = 93
 EXPECTED_MUTATION_COUNT = 78
 PINNED_DRIFT_ID_SET_HASH = "fdc2f72ac3f5125f2a6318254f943d4104d6a315131337981cd5d4ffa62bb303"
 PINNED_DRIFT_CHECK_COUNT = 90
