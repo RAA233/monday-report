@@ -104,6 +104,7 @@ EXPECTED_CHECK_IDS = [
     "MX12 extra-context-injected", "MX13 static-contract-invented",
     # (there is deliberately no MX09: ga_ready=true is already MR04, and FZ03 rejected the duplicate)
     # positive paths -- a RIGHT promotion must be ACCEPTED, not merely a wrong one refused
+    "PP00 positive-path-fixture-built",
     "PP01 migration-runner-own-artifact-accepted",
     "PP02 migration-validity-scope-recognized-blocker-retained",
     "PP03 tenant-conjunction-accepted",
@@ -136,7 +137,7 @@ EXPECTED_CHECK_IDS = [
     "FZ10-GA47f rejects-what-it-exists-to-reject",
     "FZ11 protected-gate-set-is-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 123
+EXPECTED_TOTAL_CHECKS = 124
 EXPECTED_MUTATION_COUNT = 95
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
@@ -304,6 +305,25 @@ def refuses(cid, mutate, desc, *, rehash_after=True, level="artifact mutation"):
 
 def ctl(artifact: dict, rid: str) -> dict:
     return next(c for c in artifact["controls"] if c["id"] == rid)
+
+
+def _emit_and_exit() -> None:
+    """Emit the structured report and exit non-zero.
+
+    Used where continuing is impossible. The point is that the battery still prints valid JSON with
+    a named failure: a crash that produces no output is not a refusal and must never look like one.
+    """
+    passed = sum(1 for c in checks if c["ok"])
+    print(json.dumps({"guard": "audit:ga-gap-assessment-faults",
+                      "claim_scope": "ga-gap-assessment-faults-only",
+                      "release_recommendation": "GA_BLOCKED",
+                      "checks": checks,
+                      "summary": {"passed": passed, "failed": len(checks) - passed,
+                                  "skipped": 0, "mutations": 0,
+                                  "baseline_anchor_holds": False,
+                                  "certification": "not_passed"}},
+                     indent=2, sort_keys=True, ensure_ascii=False))
+    raise SystemExit(1)
 
 
 def run() -> int:
@@ -904,7 +924,21 @@ def run() -> int:
     # stops accepting the generator's own honest output looks identical to a working one -- which
     # is exactly how an inert resolver survived two independent reviews. These checks require a
     # RIGHT promotion to be ACCEPTED, and the mutations below require each of them to break.
-    fx = PP.fixture(SYN, GEN, GA_MOD)
+    # A crash here is not a refusal and must not be silence. Unguarded, an exception inside the
+    # fixture killed the battery with ZERO stdout and no named failure -- the outcome FZ04's own
+    # comment calls unacceptable, and which refuses()/guard_verdict() already defend against.
+    try:
+        fx = PP.fixture(SYN, GEN, GA_MOD)
+    except Exception as exc:  # noqa: BLE001
+        rec("PP00 positive-path-fixture-built", False,
+            "the positive-path fixture must build. A crash is reported as a named failure with "
+            "structured output, never as a silent non-zero exit",
+            level="positive path", extra={"exception": exc.__class__.__name__})
+        _emit_and_exit()
+    rec("PP00 positive-path-fixture-built", bool(fx.get("controls")),
+        "the positive-path fixture built: the real evaluator and generator ran and produced the "
+        "measurements every PP check below reads",
+        level="positive path", extra={"controls": len(fx.get("controls") or {})})
     matrix, payload, promoted = fx["matrix"], fx["payload"], fx["promoted"]
 
     def _scoped(cid, label, artifacts):
@@ -1007,9 +1041,12 @@ def run() -> int:
         and derived.get("ga_tenant_authorization", {}).get("conjunction") is True
         and all(spec["artifacts"] for spec in derived.values())
         and all(spec["validators"] for spec in derived.values()),
-        "artifacts, operator and validators are re-derived from the evaluator's own AST every run "
-        "and cover exactly the seven artifact-gated controls -- not one editable copy of a mapping "
-        "compared against another",
+        "artifacts, artifact CARDINALITY and validators are re-derived from the evaluator's own "
+        "AST every run, covering exactly the seven artifact-gated controls -- not one editable copy "
+        "of a mapping compared against another. It does NOT derive the boolean OPERATOR: "
+        "`conjunction` is inferred from cardinality, so an evaluator whose all-of is weakened to an "
+        "any-of still looks correct HERE. PP03 measures the operator behaviourally, and that is "
+        "what catches it",
         level="structural source check",
         extra={"controls": len(derived),
                "conjunction_controls": sorted(k for k, v in derived.items() if v["conjunction"])})
