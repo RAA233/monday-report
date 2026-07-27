@@ -1,7 +1,7 @@
 {
   "schema_version": "ga-gap-assessment.v2",
-  "generated_from_commit": "fe089faab8192174f94d7b245ab3a184539c314a",
-  "generated_from_tree": "ece1602199c517103c775e53e7e292dd2cc1dbbf",
+  "generated_from_commit": "70ba7a4ffd281a1db11322e01699715df59a4288",
+  "generated_from_tree": "fa30506a10b672063bd917b0b9fd81454f3505c9",
   "worktree_clean": true,
   "registry_version": "v1",
   "registry_path": "evals/ga/blocker_registry.v1.json",
@@ -795,5 +795,5 @@
       "notes": ""
     }
   ],
-  "canonical_payload_hash": "d9611848081b1e30b5e86c535c730458b5409210ada02bf5f7645bf00dc89597"
+  "canonical_payload_hash": "7b11f4ea5f528b6eae4f1f51916442e63c248016fddeea7ff272c92a914f357a"
 }
