@@ -331,9 +331,19 @@ INFORMATIONAL_CONTROL_KEYS = ("current_disposition_verified_environment", "verif
                               "verified_promotion_detail")
 INFORMATIONAL_CONTEXT = "verified_environment_with_evidence"
 
+#: What ``informational_forgery`` writes into each machine-local payload key. Published so a caller
+#: can require the key to have been REWRITTEN rather than merely to differ: one of them is already
+#: True in an honest evidence-present payload, so "differs" is unreachable for it.
+FORGED_PAYLOAD_VALUES = {"local_evidence_artifact": "output/forged-everything.json",
+                         "local_evidence_artifact_present": True,
+                         "local_evidence_paths_present": 99}
+
 #: The outputs a release decision is actually read from.
 AUTHORITATIVE_PAYLOAD_KEYS = ("client_data_ready", "release_candidate_ready", "ga_ready",
                               "release_recommendation")
+
+#: The per-control field a release decision is actually read from.
+AUTHORITATIVE_DISPOSITION_KEY = "current_disposition_fresh_checkout"
 
 
 def release_surface(payload: dict) -> dict:
@@ -343,9 +353,14 @@ def release_surface(payload: dict) -> dict:
         "payload": {k: payload.get(k) for k in AUTHORITATIVE_PAYLOAD_KEYS},
         "authoritative_context": (payload.get("contexts") or {}).get(
             "fresh_checkout_no_local_evidence"),
-        "dispositions": {c.get("check_id"): c.get("disposition") for c in controls},
+        # The authoritative per-control disposition is `current_disposition_fresh_checkout`.
+        # Reading a plain `disposition` key -- which no control has -- made every value None and
+        # every blocker set empty, so PJ02 compared two constants and reported "blockers: 0" for an
+        # artifact with twenty of them.
+        "dispositions": {c.get("check_id"): c.get(AUTHORITATIVE_DISPOSITION_KEY)
+                         for c in controls},
         "blockers": sorted(str(c.get("check_id")) for c in controls
-                           if c.get("disposition") == "BLOCKED"),
+                           if c.get(AUTHORITATIVE_DISPOSITION_KEY) == "BLOCKED"),
         "blocking_reasons": {c.get("check_id"): c.get("blocking_reason") for c in controls},
     }
 
@@ -362,9 +377,7 @@ def informational_forgery(payload: dict) -> dict:
     """
     forged = copy.deepcopy(payload)
     controls = [c for c in forged.get("controls") or [] if isinstance(c, dict)]
-    forged["local_evidence_artifact"] = "output/forged-everything.json"
-    forged["local_evidence_artifact_present"] = True
-    forged["local_evidence_paths_present"] = 99
+    forged.update(FORGED_PAYLOAD_VALUES)
     ctx = (forged.get("contexts") or {}).get(INFORMATIONAL_CONTEXT)
     if isinstance(ctx, dict):
         ctx["ga"] = "GA_READY"
@@ -390,8 +403,9 @@ def authoritative_touch(payload: dict) -> dict:
     """
     touched = copy.deepcopy(payload)
     for control in touched.get("controls") or []:
-        if isinstance(control, dict) and control.get("disposition") == "BLOCKED":
-            control["disposition"] = "PASS"
+        if (isinstance(control, dict)
+                and control.get(AUTHORITATIVE_DISPOSITION_KEY) == "BLOCKED"):
+            control[AUTHORITATIVE_DISPOSITION_KEY] = "PASS"
             return touched
     touched["release_recommendation"] = "GA_READY"
     return touched

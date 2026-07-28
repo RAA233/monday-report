@@ -123,9 +123,11 @@ EXPECTED_CHECK_IDS = [
     "PJ03 canonical-hash-is-sensitive-to-authoritative-change",
     "PJ04 contexts-declare-their-own-authority",
     "PJ05 authoritative-half-is-reproducible-without-evidence",
+    "PJ06 forgery-covers-every-machine-local-key-the-generator-excludes",
     # scope mutations -- each must break a POSITIVE path, not merely fail closed
     "PM01 empty-evidence-scope-mapping",
     "PM02 remove-migration-runner-arm", "PP13 migration-validity-arm-pinned",
+    "PP14 scope-rewrites-survive-a-degraded-resolver",
     "PM04 remove-tenant-conjunction-arm", "PM05 remove-database-adapter-arm",
     "PM06 remove-queue-adapter-arm", "PM07 remove-persistence-locking-arm",
     "PM08 remove-correction-atomicity-arm",
@@ -150,7 +152,7 @@ EXPECTED_CHECK_IDS = [
     "FZ10-GA47f rejects-what-it-exists-to-reject",
     "FZ11 protected-gate-set-is-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 136
+EXPECTED_TOTAL_CHECKS = 138
 EXPECTED_MUTATION_COUNT = 102
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
@@ -1110,14 +1112,29 @@ def run() -> int:
     # directory. It is declared informational. That declaration is only worth something if it is
     # enforced, so the whole informational surface is forged at once and the authoritative outputs
     # are required not to move.
-    forged = PP.informational_forgery(payload)
-    honest_surface = PP.release_surface(payload)
-    forged_surface = PP.release_surface(forged)
+    forged = _guarded("PJ01 informational-forgery-cannot-move-the-canonical-hash",
+                      lambda: PP.informational_forgery(payload))
+    honest_surface = _guarded("PJ02 informational-forgery-cannot-move-the-release-surface",
+                              lambda: PP.release_surface(payload))
+    forged_surface = _guarded("PJ02 informational-forgery-cannot-move-the-release-surface",
+                              lambda: PP.release_surface(forged))
     honest_hash = GEN.canonical_hash(payload)
     forged_hash = GEN.canonical_hash(forged)
     # The forgery must actually forge. A no-op informational_forgery() would satisfy every
     # assertion below while proving nothing at all -- the same vacuity that let an inert
     # EVIDENCE_SCOPE resolver stay green, one layer up.
+    # Coverage is required PER SURFACE. A single pooled count let the forgery stop touching the
+    # entire top-level machine-local surface while 84 control-key differences kept the total above
+    # the threshold -- and the honest fixture can only ever differ in 2 of the 3 payload keys, so
+    # the threshold was unreachable from that surface anyway. Each surface is now checked on its
+    # own terms: every payload key must be REWRITTEN (not merely different, since one is already
+    # True in the honest payload), every control must have every machine-local key rewritten, and
+    # the machine-local context block must change.
+    payload_surface = all(forged.get(k) == PP.FORGED_PAYLOAD_VALUES[k]
+                          for k in PP.INFORMATIONAL_PAYLOAD_KEYS)
+    control_surface = bool(forged.get("controls")) and all(
+        all(c.get(k) is not None for k in PP.INFORMATIONAL_CONTROL_KEYS)
+        for c in forged.get("controls") or [])
     forged_fields = sum(1 for k in PP.INFORMATIONAL_PAYLOAD_KEYS
                         if payload.get(k) != forged.get(k))
     forged_fields += sum(
@@ -1126,7 +1143,7 @@ def run() -> int:
     forged_context = ((payload.get("contexts") or {}).get(PP.INFORMATIONAL_CONTEXT)
                       != (forged.get("contexts") or {}).get(PP.INFORMATIONAL_CONTEXT))
     rec("PJ01 informational-forgery-cannot-move-the-canonical-hash",
-        forged_fields >= len(PP.INFORMATIONAL_PAYLOAD_KEYS) and forged_context
+        payload_surface and control_surface and forged_context
         and payload != forged
         and honest_hash == forged_hash and GEN.canonical_body(payload) == GEN.canonical_body(forged),
         "every informational field is forged AT ONCE -- verified context rewritten to a green "
@@ -1137,6 +1154,8 @@ def run() -> int:
         level="informational isolation",
         extra={"honest_hash": honest_hash[:16], "forged_hash": forged_hash[:16],
                "informational_fields_actually_forged": forged_fields,
+               "payload_surface_forged": payload_surface,
+               "control_surface_forged": control_surface,
                "context_forged": forged_context})
 
     rec("PJ02 informational-forgery-cannot-move-the-release-surface",
@@ -1154,7 +1173,8 @@ def run() -> int:
                "forged_context_claims": (forged.get("contexts") or {}).get(
                    PP.INFORMATIONAL_CONTEXT, {}).get("ga")})
 
-    touched = PP.authoritative_touch(payload)
+    touched = _guarded("PJ03 canonical-hash-is-sensitive-to-authoritative-change",
+                       lambda: PP.authoritative_touch(payload))
     touched_hash = GEN.canonical_hash(touched)
     rec("PJ03 canonical-hash-is-sensitive-to-authoritative-change",
         touched_hash != honest_hash,
@@ -1185,7 +1205,8 @@ def run() -> int:
 
     hermetic = _guarded("PJ05 authoritative-half-is-reproducible-without-evidence",
                         lambda: PP.hermetic_reference_payload(GEN))
-    hermetic_surface = PP.release_surface(hermetic)
+    hermetic_surface = _guarded("PJ05 authoritative-half-is-reproducible-without-evidence",
+                                lambda: PP.release_surface(hermetic))
     rec("PJ05 authoritative-half-is-reproducible-without-evidence",
         hermetic_surface == honest_surface
         and GEN.canonical_hash(hermetic) == honest_hash,
@@ -1256,10 +1277,19 @@ def run() -> int:
                            for k, v in derived_mv.items()},
                "applies_a_mutation": False})
 
+    _scope_rewrites = []
+
     def _scope_rewrite(label, rewrite, why):
+        _scope_rewrites.append((label, rewrite))
         original = GG.EVIDENCE_SCOPE
-        mutated_scope = rewrite(dict(original))
+        mutated_scope = {}
         try:
+            # The rewrite runs INSIDE the try. It used to run outside, so a rewrite that assumed a
+            # control was present raised before any handler existed and killed the battery with zero
+            # stdout -- under a DEGRADED RESOLVER, which is the one condition this battery exists to
+            # catch. An evaluator edit that merely stops naming its path constant drops the control
+            # from EVIDENCE_SCOPE and reproduced it.
+            mutated_scope = rewrite(dict(original))
             GG.EVIDENCE_SCOPE = mutated_scope
             rc, failing = PP.guard_verdict(GG, payload)
         finally:
@@ -1437,13 +1467,18 @@ def run() -> int:
         "PM18 migration-validity-static-predicate-removed", _drop_static_predicate,
         "dropping an additional static predicate from the migration-validity arm is detected. "
         "Without exact extra-predicate equality an arm could silently lose the very predicate that "
-        "keeps the control blocked while still looking correctly mapped",
+        "keeps the control blocked while still looking correctly mapped. HONEST LIMIT: this arm "
+        "corrupts closure MEMBERSHIP, which both derivations read from the same extraction, so it "
+        "is detected only against the pristine reference graph -- a real evaluator edit removing "
+        "the predicate would move both sides alike and PP11 would not see it. PP02 covers that "
+        "case behaviourally",
         "ga_migration_validity")
 
     _scope_rewrite(
         "PM19 unrelated-artifact-added-to-a-required-set",
-        lambda scope: {**scope, "ga_persistence_locking": set(scope["ga_persistence_locking"])
-                                | {"production-queue-adapter-evidence.v1.json"}},
+        lambda scope: {**scope,
+                       "ga_persistence_locking": set(scope.get("ga_persistence_locking") or ())
+                       | {"production-queue-adapter-evidence.v1.json"}},
         "adding an UNRELATED control's artifact to an arm's required set is refused. Note the "
         "semantics honestly: EVIDENCE_SCOPE is a REQUIRED set, so this makes the arm stricter and "
         "breaks the legitimate promotion -- it is not an alternative-sufficient-source mapping, "
@@ -1459,19 +1494,25 @@ def run() -> int:
         admitted, forging the informational half MOVES the canonical hash. That is measured here
         directly.
         """
-        detected, crashed = False, False
+        detected, crashed, _probe_value = False, False, None
         try:
             patch()
             honest_now = GEN.canonical_hash(payload)
             forged_now = GEN.canonical_hash(PP.informational_forgery(payload))
             detected = honest_now != forged_now
+            # Sample the probe WHILE the mutation is applied. Sampling after restore() made both
+            # isolation mutations hash their restored -- identical -- state, so they were told apart
+            # only by a hand-written literal. That is the "hash the label" anti-pattern this file's
+            # own _scope_rewrite comment says hollows out FZ03.
+            _probe_value = probe()
         except Exception as exc:  # noqa: BLE001 - a crash is never a controlled rejection
             crashed, detected = True, False
+            _probe_value = [f"<exception:{exc.__class__.__name__}>"]
             MUTATION_TRIPPED[label] = [f"<exception:{exc.__class__.__name__}>"]
         finally:
             restore()
         MUTATION_FINGERPRINTS[label] = hashlib.sha256(
-            json.dumps(probe(), sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+            json.dumps(_probe_value, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
         MUTATION_TRIPPED.setdefault(label, ["PJ01 informational-forgery-cannot-move-the-canonical-hash"]
                                     if detected else [])
         rec(label, detected and not crashed, why,
@@ -1490,7 +1531,7 @@ def run() -> int:
         "informational forgery immediately moves the hash. This is the regression that made the "
         "tracked artifact a function of untracked state -- green on the author's machine, red "
         "everywhere else",
-        lambda: ["control-keys", sorted(GEN.NON_CANONICAL_CONTROL_KEYS)])
+        lambda: sorted(GEN.NON_CANONICAL_CONTROL_KEYS))
 
     _original_context_keys = GEN.NON_CANONICAL_CONTEXT_KEYS
     _isolation_mutation(
@@ -1499,7 +1540,42 @@ def run() -> int:
         lambda: setattr(GEN, "NON_CANONICAL_CONTEXT_KEYS", _original_context_keys),
         "admitting the whole machine-local CONTEXT breaks isolation the same way: the hash would "
         "depend on which gitignored artifacts happen to exist on the generating machine",
-        lambda: ["context-keys", sorted(GEN.NON_CANONICAL_CONTEXT_KEYS)])
+        lambda: sorted(GEN.NON_CANONICAL_CONTEXT_KEYS))
+
+    # ---------------------------------------------------------------- degraded-resolver robustness
+    degraded_failures = []
+    for _label, _rewrite in _scope_rewrites:
+        for _drop in sorted(GG.EVIDENCE_SCOPE):
+            _degraded = {k: v for k, v in GG.EVIDENCE_SCOPE.items() if k != _drop}
+            try:
+                _rewrite(dict(_degraded))
+            except Exception as exc:  # noqa: BLE001
+                degraded_failures.append(f"{_label} raised {exc.__class__.__name__} without {_drop}")
+    rec("PP14 scope-rewrites-survive-a-degraded-resolver",
+        bool(_scope_rewrites) and not degraded_failures,
+        "every registered scope rewrite is replayed against a resolver that has LOST each control "
+        "in turn, and none may raise. A rewrite that assumed a control was present crashed the "
+        "whole battery with zero stdout under exactly the condition it exists to detect: an "
+        "evaluator that merely stops naming its path constant drops that control from "
+        "EVIDENCE_SCOPE, and the empty-resolver case then produced an unnamed traceback instead of "
+        "a named PP12 failure",
+        level="positive path",
+        extra={"rewrites_replayed": len(_scope_rewrites),
+               "controls_dropped_each": len(GG.EVIDENCE_SCOPE),
+               "failures": degraded_failures[:4]})
+
+    _uncovered = ((set(GEN.NON_CANONICAL_KEYS) - {"canonical_payload_hash"})
+                  - set(PP.INFORMATIONAL_PAYLOAD_KEYS)) | (
+        set(GEN.NON_CANONICAL_CONTROL_KEYS) - set(PP.INFORMATIONAL_CONTROL_KEYS))
+    rec("PJ06 forgery-covers-every-machine-local-key-the-generator-excludes",
+        not _uncovered,
+        "the forgery's informational surface covers EVERY key the generator excludes from the "
+        "canonical body. Without this, a machine-local key added to the generator alone would never "
+        "be forged, and PJ01 would certify an isolation it had not tested",
+        level="informational isolation",
+        extra={"generator_excludes": sorted(set(GEN.NON_CANONICAL_KEYS)
+                                            | set(GEN.NON_CANONICAL_CONTROL_KEYS)),
+               "uncovered": sorted(_uncovered)})
 
     # ---------------------------------------------------------------- completeness
     dup = {}
