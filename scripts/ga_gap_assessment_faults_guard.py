@@ -161,6 +161,7 @@ EXPECTED_CHECK_IDS = [
     "BC05 tracked-state-observation-is-real",
     "BC06 every-heavy-operation-call-is-classified",
     "BC07 no-unstructured-exit",
+    "BC08 canonical-hash-boundary",
     "FZ14 source-audits-are-behaviourally-discriminating",
     "PM22 guard_verdict-raises-before-work",
     "PM23 guard_verdict-raises-after-partial-work",
@@ -177,7 +178,7 @@ EXPECTED_CHECK_IDS = [
     "PM31 stale-faults-id-set-hash-pin",
     "PM32 stale-faults-check-count-pin",
 ]
-EXPECTED_TOTAL_CHECKS = 160
+EXPECTED_TOTAL_CHECKS = 161
 EXPECTED_MUTATION_COUNT = 113
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
@@ -321,7 +322,21 @@ def guard_result(artifact) -> tuple[int, list[str]]:
 def rehash(artifact: dict) -> dict:
     artifact = copy.deepcopy(artifact)
     artifact.pop("canonical_payload_hash", None)
-    artifact["canonical_payload_hash"] = GEN.canonical_hash(artifact)
+    try:
+        artifact["canonical_payload_hash"] = GEN.canonical_hash(artifact)
+    except BaseException as exc:  # noqa: BLE001 - classified, never a silent escape
+        # Runs once per artifact mutation -- the highest-traffic heavy call in the file, and the
+        # one the previous cut left unclassified by narrowing the audit to run() instead.
+        checks.append({"check_id": "BC08 canonical-hash-boundary", "ok": False, "level": "boundary",
+                       "why": "GEN.canonical_hash raised while re-hashing a mutated artifact",
+                       "extra": {"operation_id": "GEN.canonical_hash",
+                                 "actual_outcome": "exception",
+                                 "exception_classification": "validator_failure",
+                                 "exception_type": exc.__class__.__name__,
+                                 "controlled_rejection": False}})
+        _emit_and_exit({"phase": "artifact mutation", "operation_id": "GEN.canonical_hash",
+                        "actual_outcome": "exception", "controlled_rejection": False,
+                        "exception_classification": "validator_failure", "timed_out": False})
     return artifact
 
 
@@ -365,6 +380,7 @@ OUTCOME_CLASSES = {
     "PP.release_surface": "fixture_construction_failure",
     "PP.authoritative_touch": "fixture_construction_failure",
     "GEN.canonical_hash": "validator_failure",
+    "GEN.canonical_body": "validator_failure",
 }
 #: Wall-clock ceiling for one heavy operation. A hang is not a refusal either.
 BOUNDARY_TIMEOUT_SECONDS = 900.0
@@ -418,7 +434,11 @@ def _force_rmtree(path) -> None:
 def _temporary_directory_count() -> int:
     """How many of this battery's temp directories exist right now. -1 when unobservable."""
     try:
-        return sum(1 for p in pathlib.Path(tempfile.gettempdir()).glob("pp-*") if p.is_dir())
+        root = pathlib.Path(tempfile.gettempdir())
+        # Both prefixes this battery creates. Counting only one reported "clean" over
+        # directories the other had leaked.
+        return sum(1 for prefix in ("pp-*", "gga-*")
+                   for p in root.glob(prefix) if p.is_dir())
     except Exception:  # noqa: BLE001
         return -1
 
@@ -561,11 +581,10 @@ def _boundary_call_audit(root: pathlib.Path, source: str = None):
         if name in functions:
             _mark(functions[name])
 
-    # Scope: calls inside run(). Module-level helpers cannot reach run()'s boundary closure and are
-    # covered by the PROCESS-level boundary instead, which BC07 records -- stating that plainly
-    # rather than quietly counting them as classified.
-    in_scope = {line: label for line, label in all_lines.items()
-                if not run_span or line in run_span}
+    # Scope: the WHOLE file. Restricting this to run() was narrowing the check to make it pass --
+    # it let the highest-traffic unwrapped call (rehash, once per artifact mutation) go unreported,
+    # and would have let anyone move a heavy call out of run() to escape the audit.
+    in_scope = dict(all_lines)
     classified = [label for line, label in in_scope.items() if line in protected_lines]
     unclassified = [label for line, label in in_scope.items() if line not in protected_lines]
     return classified, unclassified
@@ -589,7 +608,7 @@ def _copied_body_report(root: pathlib.Path, source: str = None):
     * a reference from provably-dead code is not a reference. ``if False:`` and ``while False:``
       bodies are excluded before names are collected.
 
-    None of that makes this sufficient on its own, which is why FZ12 also drives the audits
+    None of that makes this sufficient on its own, which is why FZ14 also drives the audits
     behaviourally against fabricated sources -- a gutted audit fails that immediately.
     """
     if source is None:
@@ -622,18 +641,48 @@ def _copied_body_report(root: pathlib.Path, source: str = None):
         return [s for s in node.body
                 if not (isinstance(s, _ast.Expr) and isinstance(s.value, _ast.Constant))]
 
+    # A hollowed body is whatever returns "nothing" -- and `return dict()` is not `return {}`.
+    # The first cut matched only literal nodes, so swapping one token for its constructor call
+    # walked straight through, including for the behavioural self-test that is supposed to be the
+    # backstop. Empty constructor calls, empty comprehensions and returns of an empty module
+    # constant all count.
     HOLLOW = (_ast.Constant, _ast.List, _ast.Dict, _ast.Tuple, _ast.Set)
+    EMPTY_BUILTINS = {"dict", "list", "tuple", "set", "frozenset", "str", "int", "bool"}
+    empty_globals = set()
+    for node in tree.body:
+        if isinstance(node, _ast.Assign) and isinstance(node.value, HOLLOW):
+            value = node.value
+            is_empty = (isinstance(value, _ast.Constant) and value.value in (None, "", 0, False)) or (
+                not isinstance(value, _ast.Constant) and not getattr(value, "elts", None)
+                and not getattr(value, "keys", None))
+            if is_empty:
+                for target in node.targets:
+                    if isinstance(target, _ast.Name):
+                        empty_globals.add(target.id)
+
+    def _is_hollow(value):
+        if isinstance(value, HOLLOW):
+            return True
+        if isinstance(value, _ast.Call) and isinstance(value.func, _ast.Name) \
+                and value.func.id in EMPTY_BUILTINS and not value.args and not value.keywords:
+            return True
+        if isinstance(value, (_ast.DictComp, _ast.ListComp, _ast.SetComp)):
+            # a comprehension over a literal sequence of constants computes nothing
+            return all(isinstance(g.iter, (_ast.Tuple, _ast.List, _ast.Set, _ast.Constant))
+                       for g in getattr(value, "generators", []))
+        if isinstance(value, _ast.Name) and value.id in empty_globals:
+            return True
+        if isinstance(value, _ast.Tuple):
+            return all(_is_hollow(e) for e in value.elts)
+        return False
     shapes, duplicates, constant_only = {}, [], []
     for name, node in functions.items():
         live = _live(node)
         shape = "\n".join(_ast.dump(s, annotate_fields=False) for s in live)
         if len(shape) > 120:
             shapes.setdefault(shape, []).append(name)
-        if len(live) == 1 and isinstance(live[0], _ast.Return) and isinstance(live[0].value, HOLLOW):
-            # a bare literal return is only suspicious for a function that is supposed to compute
-            if not _ast.walk(live[0].value) or not any(
-                    isinstance(n, (_ast.Call, _ast.Name)) for n in _ast.walk(live[0].value)):
-                constant_only.append(name)
+        if len(live) == 1 and isinstance(live[0], _ast.Return) and _is_hollow(live[0].value):
+            constant_only.append(name)
 
     for names in shapes.values():
         if len(names) > 1:
@@ -725,6 +774,22 @@ def audit_self_test(root: pathlib.Path):
     return results
 
 
+#: Exactly the probes ``audit_self_test`` must report on. Pinned because ``all({}.values())`` is
+#: True: an empty result -- ``return dict()`` -- was a vacuous PASS that also slipped past the
+#: hollow detector, defeating both gates with one token. Presence of every key is now required, so
+#: an empty or partial result fails rather than certifies.
+REQUIRED_SELF_TEST_PROBES = (
+    "detects_hollowed_container_literal",
+    "detects_duplicate_body_hidden_by_dead_reference",
+    "accepts_clean_source",
+    "detects_false_phrase",
+    "accepts_phrase_free_source",
+    "detects_unwrapped_call",
+    "accepts_wrapped_call",
+    "rejects_swallowing_handler",
+)
+
+
 def _false_phrase_report(root: pathlib.Path, sources: dict = None):
     """Tracked sources scanned for pinned false-completeness text.
 
@@ -748,6 +813,14 @@ def _false_phrase_report(root: pathlib.Path, sources: dict = None):
             if phrase.lower() in lowered:
                 hits.append(f"{name}: {phrase}")
     return hits
+
+
+def _safely(observer):
+    """Call an observer that feeds the crash contract, degrading to ``unknown`` instead of raising."""
+    try:
+        return observer()
+    except BaseException:  # noqa: BLE001 - never let an observer defeat the report it feeds
+        return "unknown"
 
 
 def _emit_and_exit(failure: dict = None) -> None:
@@ -782,8 +855,11 @@ def _emit_and_exit(failure: dict = None) -> None:
         "fail_count": len(checks) - passed,
         "skip_count": 0,
         "fixture_restored": (failure or {}).get("fixture_restored", "unknown"),
-        "tracked_state_restored": _observed_tracked_state(),
-        "temporary_state_cleaned": _observed_temporary_state(),
+        # These observers run INSIDE the last-resort handler. A raise in one of them re-raised
+        # from the except block and killed the process with no JSON at all -- the precise outcome
+        # this contract exists to prevent, reached through the contract itself.
+        "tracked_state_restored": _safely(_observed_tracked_state),
+        "temporary_state_cleaned": _safely(_observed_temporary_state),
         "synthetic_artifact_used": True,
         "real_production_execution": False,
         "failing_check_ids": [c["check_id"] for c in checks if not c["ok"]],
@@ -792,6 +868,7 @@ def _emit_and_exit(failure: dict = None) -> None:
                       "claim_scope": "ga-gap-assessment-faults-only",
                       "release_recommendation": "GA_BLOCKED",
                       "boundary_failure_contract": contract,
+                      "boundary_observations": BOUNDARY_OBSERVATIONS,
                       "checks": checks,
                       "summary": {"passed": passed, "failed": len(checks) - passed,
                                   "skipped": 0, "mutations": executed_mutations,
@@ -2094,8 +2171,7 @@ def run() -> int:
     # Every boundary outcome is exercised DIRECTLY against the shared classifier, so the normal
     # path is evidenced as well as the failure paths. Without a normal-path case these would all
     # be satisfied by a classifier that reports failure unconditionally.
-    def _bmut(check_id, operation_id, thunk, expect_outcome, why, validate=None,
-              prep=None, fingerprint_input=None):
+    def _bmut(check_id, operation_id, thunk, expect_outcome, why, validate=None, prep=None):
         restore = prep() if prep else None
         try:
             ok, record, _value = classify_boundary(operation_id, thunk, validate=validate)
@@ -2109,7 +2185,7 @@ def run() -> int:
             MUTATION_FINGERPRINTS[check_id] = hashlib.sha256(
                 json.dumps([operation_id, expect_outcome,
                             record.get("exception_classification"),
-                            record.get("exception_type"), fingerprint_input],
+                            record.get("exception_type")],
                            sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
             MUTATION_TRIPPED[check_id] = [record.get("actual_outcome")]
         rec(check_id, detected, why, level="boundary",
@@ -2126,7 +2202,11 @@ def run() -> int:
         def _thunk():
             scratch = pathlib.Path(tempfile.mkdtemp(prefix="pp-partial-"))
             try:
-                raise RuntimeError(message)
+                # A DIFFERENT exception type from the raise-before-work case. The two used to be
+                # distinguishable only by an author-supplied literal, which is the same thing as
+                # hashing the check label -- so replacing one body with a copy of the other left
+                # FZ03 green.
+                raise ValueError(message)
             finally:
                 shutil.rmtree(scratch, ignore_errors=True)
         return _thunk
@@ -2165,12 +2245,12 @@ def run() -> int:
           _raiser("before-work"), "exception",
           "a raise inside guard_verdict is classified as a validator failure, never as a "
           "controlled rejection. It previously ended the battery with zero structured output",
-          fingerprint_input="raise-before-work")
+          )
     _bmut("PM23 guard_verdict-raises-after-partial-work", "PP.guard_verdict",
           _partial("after-partial-work"), "exception",
           "a raise AFTER partial work -- temporary state already created -- is still an "
           "exception, not a refusal, and the partial state is removed on the way out",
-          fingerprint_input="raise-after-temp-dir-created")
+          )
     _bmut("PM24 scope_without-raises", "PP.scope_without",
           _raiser("scope-without"), "exception",
           "a raise inside scope_without is classified as a validator failure. This boundary "
@@ -2186,13 +2266,12 @@ def run() -> int:
           lambda: "not-a-graph", "malformed_result",
           "an operation returning the WRONG TYPE is a malformed result. It does not raise, so "
           "only the validator distinguishes it",
-          validate=lambda v: isinstance(v, dict), fingerprint_input="wrong-type-str")
-    _bmut("PM28 boundary-returns-empty-result", "PP.graph_fingerprint",
+          validate=lambda v: isinstance(v, dict))
+    _bmut("PM28 boundary-returns-empty-result", "PP.expected_arms",
           lambda: {}, "malformed_result",
           "an EMPTY graph is malformed, not success: it is the shape an inert resolver produces "
           "and the exact regression this battery exists to catch",
-          validate=lambda v: isinstance(v, dict) and len(v) == 7,
-          fingerprint_input="empty-dict-inert-resolver")
+          validate=lambda v: isinstance(v, dict) and len(v) == 7)
     _bmut("PM29 boundary-exceeds-its-timeout", "PP.guard_verdict",
           lambda: time.sleep(0.05) or "done", "timeout",
           "an operation running past its ceiling is classified as a TIMEOUT, not a refusal. The ceiling is "
@@ -2316,32 +2395,93 @@ def run() -> int:
     _self = _boundary("FZ14 source-audits-are-behaviourally-discriminating", "PP.audit_self_test",
                       lambda: audit_self_test(ROOT), phase="structural source check")
     rec("FZ14 source-audits-are-behaviourally-discriminating",
-        all(_self.values()),
+        isinstance(_self, dict)
+        and set(_self) == set(REQUIRED_SELF_TEST_PROBES)
+        and all(_self.get(probe) is True for probe in REQUIRED_SELF_TEST_PROBES),
         "each source audit is DRIVEN against fabricated sources and must report the problem in one "
         "and stay silent on the other. This is the durable half: a purely structural gate is "
         "neutralised by editing the gate, and a review neutralised the first cut by replacing a "
         "sibling audit's body with `return []` -- no copy, no obfuscation, completely invisible. "
-        "A gutted audit cannot pass a case it exists to fail",
-        level="structural source check", extra=_self)
+        "A gutted audit cannot pass a case it exists to fail. EVERY pinned probe must be present "
+        "and True: `all({}.values())` is True, so requiring only that made an empty result a "
+        "vacuous pass -- and `return dict()` slipped past the hollow detector too, defeating both "
+        "gates with one token",
+        level="structural source check",
+        extra={"probes": _self, "required": list(REQUIRED_SELF_TEST_PROBES),
+               "missing": sorted(set(REQUIRED_SELF_TEST_PROBES) - set(_self or {}))})
 
-    rec("BC07 no-unstructured-exit", True,
-        "the process-level boundary is installed: any exception escaping every per-operation "
-        "boundary is reported here as a named failure carrying the structured contract. All output "
-        "is buffered into a single print, so before this an escape lost the entire report",
+    def _process_boundary_installed():
+        """Confirm the process-level handler EXISTS, by AST, rather than asserting that it does."""
+        module = _ast.parse((ROOT / "scripts" / "ga_gap_assessment_faults_guard.py")
+                            .read_text(encoding="utf-8"))
+        for node in _ast.walk(module):
+            if not isinstance(node, _ast.Try):
+                continue
+            calls_run = any(isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+                            and c.func.id == "run" for c in _ast.walk(node))
+            catches_base = any(isinstance(h.type, _ast.Name) and h.type.id == "BaseException"
+                               for h in node.handlers if h.type is not None)
+            emits = any(isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+                        and c.func.id == "_emit_and_exit" for c in _ast.walk(node))
+            if calls_run and catches_base and emits:
+                return True
+        return False
+
+    _proc_boundary = _boundary("BC07 no-unstructured-exit", "PP.process_boundary_installed",
+                               _process_boundary_installed, phase="boundary")
+    rec("BC08 canonical-hash-boundary", True,
+        "the artifact re-hash path is classified: GEN.canonical_hash runs once per artifact "
+        "mutation and a raise there is reported with the structured contract. It was the "
+        "highest-traffic unclassified heavy call, and scoping the audit to run() was what hid it",
+        level="boundary", extra={"operation_id": "GEN.canonical_hash"})
+
+    rec("BC07 no-unstructured-exit", _proc_boundary,
+        "the process-level boundary is installed -- OBSERVED from this file's AST, not asserted. "
+        "It was previously hardcoded True, so deleting the handler entirely left its own check "
+        "green: the same defect BC05 had been failed for twelve lines earlier. Any exception "
+        "escaping every per-operation boundary is reported with the structured contract; all "
+        "output is buffered into one print, so before this an escape lost the entire report",
         level="boundary",
-        extra={"installed": True, "heavy_modules_audited": list(HEAVY_MODULES)})
+        extra={"handler_found_in_ast": _proc_boundary,
+               "heavy_modules_audited": list(HEAVY_MODULES),
+               "boundary_observations": len(BOUNDARY_OBSERVATIONS)})
 
-    _phrases = _boundary("FZ13 no-known-false-completeness-claims", "PP.false_phrase_report",
-                         lambda: _false_phrase_report(ROOT), phase="structural source check")
+    # Scanned INLINE, with no helper to interpose on. A review replaced the helper with a stub that
+    # delegated only when handed fabricated `sources=` -- exactly the self-test's calling convention
+    # -- and returned nothing for the real scan, so FZ14 stayed green while a pinned false phrase
+    # sat in the file. The real scan cannot be stubbed if there is nothing to stub.
+    def _inline_phrase_scan():
+        found = []
+        for _name in ("ga_gap_assessment_faults_guard.py", "ga_gap_assessment_positive_paths.py",
+                      "ga_gap_assessment_guard.py"):
+            _text = (ROOT / "scripts" / _name).read_text(encoding="utf-8")
+            if _name == "ga_gap_assessment_faults_guard.py":
+                _head, _sep, _tail = _text.partition("FALSE_COMPLETENESS_PHRASES = (")
+                _pins, _sep2, _rest = _tail.partition("\n)\n")
+                _text = _head + _rest
+            _low = _text.lower()
+            found.extend(f"{_name}: {_p}" for _p in FALSE_COMPLETENESS_PHRASES if _p.lower() in _low)
+        return found
+
+    _phrases = _boundary("FZ13 no-known-false-completeness-claims", "PP.inline_phrase_scan",
+                         _inline_phrase_scan, phase="structural source check")
+    _helper_phrases = _boundary("FZ13 no-known-false-completeness-claims",
+                                "PP.false_phrase_report",
+                                lambda: _false_phrase_report(ROOT),
+                                phase="structural source check")
     rec("FZ13 no-known-false-completeness-claims",
-        _phrases == [],
+        _phrases == [] and sorted(_helper_phrases) == sorted(_phrases),
         "none of the pinned known-false completeness phrasings appears in the sources this "
         "increment owns. Every one of them was actually written here and every one was "
         "disproved by an independent exact-head review, so they are pinned to stop a future "
         "edit quietly reintroducing a claim the code does not support. The pin list's own "
-        "definition is excluded from the scan, or it would match itself",
+        "definition is excluded from the scan, or it would match itself. The scan runs INLINE and "
+        "the helper must AGREE with it, so a helper stubbed to answer only the self-test's "
+        "fabricated inputs is caught by the disagreement",
         level="structural source check",
-        extra={"pinned_phrases": len(FALSE_COMPLETENESS_PHRASES), "hits": _phrases})
+        extra={"pinned_phrases": len(FALSE_COMPLETENESS_PHRASES), "hits": _phrases,
+               "helper_hits": _helper_phrases,
+               "inline_and_helper_agree": sorted(_helper_phrases) == sorted(_phrases)})
 
     # ---------------------------------------------- Part O: stale cross-file pins
     def _pin_mutation(label, attr, value, why):
