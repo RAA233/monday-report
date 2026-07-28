@@ -396,6 +396,25 @@ def _observed_tracked_state(root=None) -> str:
         return "unknown"
 
 
+def _force_rmtree(path) -> None:
+    """Remove a tree even when it contains read-only files.
+
+    git marks objects read-only, so shutil.rmtree(ignore_errors=True) silently FAILS to remove a
+    scratch repository on Windows -- which is how the tracked-state probe started leaking the very
+    kind of directory the cleanup observation reports on.
+    """
+    def _on_error(func, target, _exc):
+        try:
+            import stat
+
+            pathlib.Path(target).chmod(stat.S_IWRITE)
+            func(target)
+        except Exception:  # noqa: BLE001
+            pass
+
+    shutil.rmtree(path, onerror=_on_error)
+
+
 def _temporary_directory_count() -> int:
     """How many of this battery's temp directories exist right now. -1 when unobservable."""
     try:
@@ -2214,7 +2233,7 @@ def run() -> int:
             when_dirty = _observed_tracked_state(scratch)
             return {"clean_repo": when_clean, "dirty_repo": when_dirty}
         finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+            _force_rmtree(scratch)
 
     _tracked = _boundary("BC05 tracked-state-observation-is-real", "PP.tracked_probe",
                          _tracked_probe, phase="boundary")
