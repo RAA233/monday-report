@@ -695,6 +695,29 @@ def _copied_body_report(root: pathlib.Path, source: str = None):
             "constant_only_functions": sorted(constant_only), "unreferenced": unreferenced}
 
 
+def process_boundary_installed(root: pathlib.Path, source: str = None) -> bool:
+    """Confirm the process-level handler EXISTS, by AST, rather than asserting that it does.
+
+    BC07 was hardcoded True, so deleting the entire last-resort handler left its own check green --
+    the defect BC05 had been failed for a few lines earlier. Module-level so the source audits cover
+    it like every other gate.
+    """
+    if source is None:
+        source = (root / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(encoding="utf-8")
+    for node in _ast.walk(_ast.parse(source)):
+        if not isinstance(node, _ast.Try):
+            continue
+        calls_run = any(isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+                        and c.func.id == "run" for c in _ast.walk(node))
+        catches_base = any(isinstance(h.type, _ast.Name) and h.type.id == "BaseException"
+                           for h in node.handlers if h.type is not None)
+        emits = any(isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+                    and c.func.id == "_emit_and_exit" for c in _ast.walk(node))
+        if calls_run and catches_base and emits:
+            return True
+    return False
+
+
 def audit_self_test(root: pathlib.Path):
     """Drive each source audit against FABRICATED sources and require it to report the problem.
 
@@ -771,6 +794,19 @@ def audit_self_test(root: pathlib.Path):
     results["detects_unwrapped_call"] = bool(u1)
     results["accepts_wrapped_call"] = not u2
     results["rejects_swallowing_handler"] = bool(u3)
+
+    nl = chr(10)
+    with_handler = nl.join([
+        "def run():", "    return 0", "",
+        "try:", "    raise SystemExit(run())",
+        "except SystemExit:", "    raise",
+        "except BaseException:", "    _emit_and_exit({})", ""])
+    without_handler = nl.join([
+        "def run():", "    return 0", "", "raise SystemExit(run())", ""])
+    results["detects_process_boundary"] = process_boundary_installed(
+        root, source=with_handler)
+    results["detects_missing_process_boundary"] = not process_boundary_installed(
+        root, source=without_handler)
     return results
 
 
@@ -787,6 +823,8 @@ REQUIRED_SELF_TEST_PROBES = (
     "detects_unwrapped_call",
     "accepts_wrapped_call",
     "rejects_swallowing_handler",
+    "detects_process_boundary",
+    "detects_missing_process_boundary",
 )
 
 
@@ -2410,25 +2448,8 @@ def run() -> int:
         extra={"probes": _self, "required": list(REQUIRED_SELF_TEST_PROBES),
                "missing": sorted(set(REQUIRED_SELF_TEST_PROBES) - set(_self or {}))})
 
-    def _process_boundary_installed():
-        """Confirm the process-level handler EXISTS, by AST, rather than asserting that it does."""
-        module = _ast.parse((ROOT / "scripts" / "ga_gap_assessment_faults_guard.py")
-                            .read_text(encoding="utf-8"))
-        for node in _ast.walk(module):
-            if not isinstance(node, _ast.Try):
-                continue
-            calls_run = any(isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
-                            and c.func.id == "run" for c in _ast.walk(node))
-            catches_base = any(isinstance(h.type, _ast.Name) and h.type.id == "BaseException"
-                               for h in node.handlers if h.type is not None)
-            emits = any(isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
-                        and c.func.id == "_emit_and_exit" for c in _ast.walk(node))
-            if calls_run and catches_base and emits:
-                return True
-        return False
-
     _proc_boundary = _boundary("BC07 no-unstructured-exit", "PP.process_boundary_installed",
-                               _process_boundary_installed, phase="boundary")
+                               lambda: process_boundary_installed(ROOT), phase="boundary")
     rec("BC08 canonical-hash-boundary", True,
         "the artifact re-hash path is classified: GEN.canonical_hash runs once per artifact "
         "mutation and a raise there is reported with the structured contract. It was the "
