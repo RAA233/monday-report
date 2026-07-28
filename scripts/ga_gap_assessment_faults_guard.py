@@ -1115,8 +1115,20 @@ def run() -> int:
     forged_surface = PP.release_surface(forged)
     honest_hash = GEN.canonical_hash(payload)
     forged_hash = GEN.canonical_hash(forged)
+    # The forgery must actually forge. A no-op informational_forgery() would satisfy every
+    # assertion below while proving nothing at all -- the same vacuity that let an inert
+    # EVIDENCE_SCOPE resolver stay green, one layer up.
+    forged_fields = sum(1 for k in PP.INFORMATIONAL_PAYLOAD_KEYS
+                        if payload.get(k) != forged.get(k))
+    forged_fields += sum(
+        1 for h, g in zip(payload.get("controls") or [], forged.get("controls") or [])
+        for k in PP.INFORMATIONAL_CONTROL_KEYS if h.get(k) != g.get(k))
+    forged_context = ((payload.get("contexts") or {}).get(PP.INFORMATIONAL_CONTEXT)
+                      != (forged.get("contexts") or {}).get(PP.INFORMATIONAL_CONTEXT))
     rec("PJ01 informational-forgery-cannot-move-the-canonical-hash",
-        honest_hash == forged_hash and GEN.canonical_body(payload) == GEN.canonical_body(forged),
+        forged_fields >= len(PP.INFORMATIONAL_PAYLOAD_KEYS) and forged_context
+        and payload != forged
+        and honest_hash == forged_hash and GEN.canonical_body(payload) == GEN.canonical_body(forged),
         "every informational field is forged AT ONCE -- verified context rewritten to a green "
         "28-PASS GA_READY environment, both honesty flags inverted, every control claiming a "
         "verified PASS with a forged promoter, evidence counters inflated -- and the canonical body "
@@ -1124,8 +1136,8 @@ def run() -> int:
         "value, so the forgery is coordinated rather than field-by-field",
         level="informational isolation",
         extra={"honest_hash": honest_hash[:16], "forged_hash": forged_hash[:16],
-               "forged_fields": len(PP.INFORMATIONAL_PAYLOAD_KEYS)
-                                + len(PP.INFORMATIONAL_CONTROL_KEYS) + 1})
+               "informational_fields_actually_forged": forged_fields,
+               "context_forged": forged_context})
 
     rec("PJ02 informational-forgery-cannot-move-the-release-surface",
         honest_surface == forged_surface
