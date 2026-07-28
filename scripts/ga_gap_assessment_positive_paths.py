@@ -331,12 +331,60 @@ INFORMATIONAL_CONTROL_KEYS = ("current_disposition_verified_environment", "verif
                               "verified_promotion_detail")
 INFORMATIONAL_CONTEXT = "verified_environment_with_evidence"
 
-#: What ``informational_forgery`` writes into each machine-local payload key. Published so a caller
-#: can require the key to have been REWRITTEN rather than merely to differ: one of them is already
-#: True in an honest evidence-present payload, so "differs" is unreachable for it.
-FORGED_PAYLOAD_VALUES = {"local_evidence_artifact": "output/forged-everything.json",
-                         "local_evidence_artifact_present": True,
-                         "local_evidence_paths_present": 99}
+#: Retained EMPTY and unused. The forgery used to be a table of literals, and the check that the
+#: forgery was real compared against that same table -- one editable source on both sides, so
+#: emptying it made the payload arm inert while the battery stayed green. The forgery is now a set
+#: of deterministic TRANSFORMATIONS of each honest value, and the check verifies the type-specific
+#: PROPERTY each transformation must produce. Neither side can be neutralised by editing a table.
+FORGED_PAYLOAD_VALUES: dict = {}
+
+#: Appended to forged strings so a forged value is recognisable without being looked up.
+FORGE_SENTINEL = "::FORGED::"
+
+#: How much a forged integer must move. Any nonzero constant works; the CHECK asserts "strictly
+#: greater than the honest value", not this number, so changing it cannot make the check vacuous.
+FORGE_INT_DELTA = 1000
+
+
+def deterministic_forge(value):
+    """Transform a value into a recognisably different one, by type.
+
+    Deterministic so two runs agree, and type-driven so the verifying side can assert a PROPERTY
+    ("the boolean flipped", "the integer grew", "the string carries the sentinel") instead of
+    looking up an expected literal from a table the forgery itself owns.
+    """
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + FORGE_INT_DELTA
+    if isinstance(value, float):
+        return value + FORGE_INT_DELTA
+    if isinstance(value, str):
+        return value + FORGE_SENTINEL
+    if value is None:
+        return FORGE_SENTINEL
+    if isinstance(value, list):
+        return list(value) + [FORGE_SENTINEL]
+    if isinstance(value, dict):
+        return dict(value, forged=FORGE_SENTINEL)
+    return FORGE_SENTINEL
+
+
+def forgery_is_real(honest, forged) -> bool:
+    """Did ``deterministic_forge`` actually transform this value, in the way its type requires?"""
+    if isinstance(honest, bool):
+        return forged is (not honest)
+    if isinstance(honest, (int, float)):
+        return isinstance(forged, (int, float)) and forged > honest
+    if isinstance(honest, str):
+        return isinstance(forged, str) and forged.endswith(FORGE_SENTINEL) and forged != honest
+    if honest is None:
+        return forged == FORGE_SENTINEL
+    if isinstance(honest, list):
+        return isinstance(forged, list) and FORGE_SENTINEL in forged and forged != honest
+    if isinstance(honest, dict):
+        return isinstance(forged, dict) and forged.get("forged") == FORGE_SENTINEL
+    return forged != honest
 
 #: The outputs a release decision is actually read from.
 AUTHORITATIVE_PAYLOAD_KEYS = ("client_data_ready", "release_candidate_ready", "ga_ready",
@@ -377,7 +425,8 @@ def informational_forgery(payload: dict) -> dict:
     """
     forged = copy.deepcopy(payload)
     controls = [c for c in forged.get("controls") or [] if isinstance(c, dict)]
-    forged.update(FORGED_PAYLOAD_VALUES)
+    for key in INFORMATIONAL_PAYLOAD_KEYS:
+        forged[key] = deterministic_forge(forged.get(key))
     ctx = (forged.get("contexts") or {}).get(INFORMATIONAL_CONTEXT)
     if isinstance(ctx, dict):
         ctx["ga"] = "GA_READY"
@@ -387,10 +436,8 @@ def informational_forgery(payload: dict) -> dict:
         ctx["authoritative_for_release"] = True
         ctx["note"] = "FORGED: this environment is authoritative and every control passes."
     for control in controls:
-        control["current_disposition_verified_environment"] = "PASS"
-        control["verified_promoted_by"] = "output/forged-everything.json"
-        control["verified_promotion_detail"] = {"required": [], "present": [], "missing": [],
-                                                "conjunction": False, "forged": True}
+        for key in INFORMATIONAL_CONTROL_KEYS:
+            control[key] = deterministic_forge(control.get(key))
     return forged
 
 
@@ -509,3 +556,26 @@ def hermetic_reference_payload(gen):
         payload = gen.build()
         payload["canonical_payload_hash"] = gen.canonical_hash(payload)
     return payload
+
+
+def informational_surface(gen) -> dict:
+    """The exact machine-local surface, derived from the generator's own exclusion sets.
+
+    All THREE exclusion sets are read, including the context one. PJ06 previously unioned only two,
+    so a machine-local key added to the context set alone would never have been forged -- the very
+    hole the check exists to close, open on one of its three surfaces.
+    """
+    return {
+        "payload": sorted(set(gen.NON_CANONICAL_KEYS) - {"canonical_payload_hash"}),
+        "control": sorted(gen.NON_CANONICAL_CONTROL_KEYS),
+        "context": sorted(gen.NON_CANONICAL_CONTEXT_KEYS),
+    }
+
+
+def forgery_surface() -> dict:
+    """What the forgery actually covers, so the two can be compared for EXACT set equality."""
+    return {
+        "payload": sorted(INFORMATIONAL_PAYLOAD_KEYS),
+        "control": sorted(INFORMATIONAL_CONTROL_KEYS),
+        "context": [INFORMATIONAL_CONTEXT],
+    }
