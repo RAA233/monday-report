@@ -18,6 +18,7 @@ adapter verdicts are unaffected.
 from __future__ import annotations
 
 import contextlib
+import copy
 import io
 import json
 import os
@@ -318,3 +319,179 @@ def conjunction_members_matrix(syn, gen, ga, control="ga_tenant_authorization") 
                 setattr(importlib.import_module(module_name), const, value)
             shutil.rmtree(outdir, ignore_errors=True)
     return results
+
+
+# ------------------------------------------------------- informational-context isolation (Part J)
+#: The machine-local half of the assessment. These fields are observations of THIS developer's
+#: gitignored ``output/`` directory; they are not repository state and not exact-head evidence.
+#: Nothing in this set may reach an authoritative release output or the canonical hash.
+INFORMATIONAL_PAYLOAD_KEYS = ("local_evidence_artifact", "local_evidence_artifact_present",
+                              "local_evidence_paths_present")
+INFORMATIONAL_CONTROL_KEYS = ("current_disposition_verified_environment", "verified_promoted_by",
+                              "verified_promotion_detail")
+INFORMATIONAL_CONTEXT = "verified_environment_with_evidence"
+
+#: The outputs a release decision is actually read from.
+AUTHORITATIVE_PAYLOAD_KEYS = ("client_data_ready", "release_candidate_ready", "ga_ready",
+                              "release_recommendation")
+
+
+def release_surface(payload: dict) -> dict:
+    """Every authoritative output a consumer could base a release decision on."""
+    controls = [c for c in payload.get("controls") or [] if isinstance(c, dict)]
+    return {
+        "payload": {k: payload.get(k) for k in AUTHORITATIVE_PAYLOAD_KEYS},
+        "authoritative_context": (payload.get("contexts") or {}).get(
+            "fresh_checkout_no_local_evidence"),
+        "dispositions": {c.get("check_id"): c.get("disposition") for c in controls},
+        "blockers": sorted(str(c.get("check_id")) for c in controls
+                           if c.get("disposition") == "BLOCKED"),
+        "blocking_reasons": {c.get("check_id"): c.get("blocking_reason") for c in controls},
+    }
+
+
+def informational_forgery(payload: dict) -> dict:
+    """Forge EVERY informational field at once, as maximally as the schema allows.
+
+    This is deliberately a COORDINATED forgery rather than one field at a time: a consumer that
+    reads the machine-local half is fooled by a self-consistent lie, not by a single odd value. The
+    verified context is rewritten to a fully green 28-PASS GA_READY environment, both self-describing
+    honesty flags are inverted, every control claims a verified PASS with a forged promoter, and the
+    evidence counters are inflated. If any authoritative output or the canonical hash moves, the
+    machine-local half is load-bearing and the "informational only" declaration is false.
+    """
+    forged = copy.deepcopy(payload)
+    controls = [c for c in forged.get("controls") or [] if isinstance(c, dict)]
+    forged["local_evidence_artifact"] = "output/forged-everything.json"
+    forged["local_evidence_artifact_present"] = True
+    forged["local_evidence_paths_present"] = 99
+    ctx = (forged.get("contexts") or {}).get(INFORMATIONAL_CONTEXT)
+    if isinstance(ctx, dict):
+        ctx["ga"] = "GA_READY"
+        ctx["tally"] = {"PASS": len(controls)}
+        ctx["measured"] = True
+        ctx["informational_only"] = False
+        ctx["authoritative_for_release"] = True
+        ctx["note"] = "FORGED: this environment is authoritative and every control passes."
+    for control in controls:
+        control["current_disposition_verified_environment"] = "PASS"
+        control["verified_promoted_by"] = "output/forged-everything.json"
+        control["verified_promotion_detail"] = {"required": [], "present": [], "missing": [],
+                                                "conjunction": False, "forged": True}
+    return forged
+
+
+def authoritative_touch(payload: dict) -> dict:
+    """Change exactly ONE authoritative field.
+
+    Anti-vacuity partner for the forgery above: if the canonical hash does not move for THIS, it is
+    insensitive to everything and proving it does not move for the informational forgery says
+    nothing at all.
+    """
+    touched = copy.deepcopy(payload)
+    for control in touched.get("controls") or []:
+        if isinstance(control, dict) and control.get("disposition") == "BLOCKED":
+            control["disposition"] = "PASS"
+            return touched
+    touched["release_recommendation"] = "GA_READY"
+    return touched
+
+
+# ------------------------------------------------------------ independent arm expectations (Part I)
+def expected_arms(syn, coupling, root: Path, graph: dict = None) -> dict:
+    """Per-control arm expectations derived INDEPENDENTLY of the AST dispatch parse.
+
+    Part I forbids checking one hand-authored mapping against another hand-authored mapping, because
+    the two can be edited in tandem. So nothing here is a literal list:
+
+    * artifacts come from the LIVE module path constants (``syn.EVIDENCE_PATH_CONSTANTS`` reads
+      ``getattr(module, const)`` at runtime) -- a completely different route to the same fact than
+      parsing the evaluator's if/elif dispatch;
+    * validators are re-derived by READING EACH FUNCTION'S SOURCE: a validator is exactly a function
+      in the control's call closure whose own body mentions that control's artifact path constant;
+    * extra predicates are the complement -- closure functions that do NOT mention it.
+
+    Changing a validator in the evaluator therefore changes both derivations; editing only the
+    guard's copy changes neither.
+    """
+    import importlib
+    import inspect
+
+    module = importlib.import_module("backend.app.ga_readiness")
+    # The caller may supply the reference graph. A mutation test that corrupts the AST extraction
+    # must not be allowed to corrupt BOTH sides of the comparison -- if it did, the two derivations
+    # would agree on the lie and the check would be vacuous. Passing the pristine graph keeps the
+    # reference immune. NOTE the honest limit this exposes: closure MEMBERSHIP comes from the AST
+    # extraction on both sides, so PP11 cross-derives an arm's CONTENTS, not the extraction itself.
+    if graph is None:
+        graph = coupling.evaluator_graph((root / "backend" / "app" / "ga_readiness.py")
+                                         .read_text(encoding="utf-8"))
+    expectations = {}
+    for cid, slots in syn.EVIDENCE_PATH_CONSTANTS.items():
+        constants = [const for _m, const, _rel in slots]
+        artifacts = tuple(sorted(Path(str(getattr(importlib.import_module(mod), const))).name
+                                 for mod, const, _rel in slots))
+        closure = sorted(set(graph.get(cid, {}).get("validators", ()))
+                         | set(graph.get(cid, {}).get("extra_predicates", ())))
+        validators, extras, unresolved = [], [], []
+        for name in closure:
+            body = None
+            fn = getattr(module, name, None)
+            if fn is not None and callable(fn):
+                try:
+                    body = inspect.getsource(fn)
+                except (OSError, TypeError):
+                    body = None
+            if body is None:
+                # NESTED definitions are not module attributes -- the evaluator defines `_as_int`
+                # inside `_tenant_rls_evidence_reasons`. Falling back to "unresolved" here silently
+                # dropped a real closure member from the comparison and made the tenant arm look
+                # inexact, so nested defs are located in the module source instead.
+                body = _nested_source(root, name)
+            if body is None:
+                unresolved.append(name)
+                continue
+            (validators if any(c in body for c in constants) else extras).append(name)
+        expectations[cid] = {
+            "artifacts": artifacts,
+            "validators": tuple(sorted(validators)),
+            "extra_predicates": tuple(sorted(extras)),
+            "conjunction": len(artifacts) > 1,
+            "unresolved": tuple(sorted(unresolved)),
+        }
+    return expectations
+
+
+_NESTED_SOURCE_CACHE: dict = {}
+
+
+def _nested_source(root: Path, name: str):
+    """Source of a function defined ANYWHERE in the evaluator, including nested definitions."""
+    key = str(root)
+    index = _NESTED_SOURCE_CACHE.get(key)
+    if index is None:
+        import ast
+
+        text = (root / "backend" / "app" / "ga_readiness.py").read_text(encoding="utf-8")
+        lines = text.splitlines()
+        index = {}
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                index.setdefault(node.name,
+                                 chr(10).join(
+                                     lines[node.lineno - 1:(node.end_lineno or node.lineno)]))
+        _NESTED_SOURCE_CACHE[key] = index
+    return index.get(name)
+
+
+def hermetic_reference_payload(gen):
+    """The assessment the generator produces with NO evidence present at all.
+
+    The authoritative half is defined to be reproducible from the tracked repository alone. So the
+    authoritative outputs of this payload must equal those of the evidence-present payload; anything
+    that differs is machine-local state leaking into the release decision.
+    """
+    with hidden_real_evidence(gen):
+        payload = gen.build()
+        payload["canonical_payload_hash"] = gen.canonical_hash(payload)
+    return payload

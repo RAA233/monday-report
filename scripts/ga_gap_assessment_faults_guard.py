@@ -117,6 +117,12 @@ EXPECTED_CHECK_IDS = [
     "PP10 overall-ga-remains-blocked",
     "PP11 graph-exactness-derived-from-evaluator",
     "PP12 honest-payload-accepted-by-the-unmutated-guard",
+    # informational-context isolation -- the machine-local half must not reach a release output
+    "PJ01 informational-forgery-cannot-move-the-canonical-hash",
+    "PJ02 informational-forgery-cannot-move-the-release-surface",
+    "PJ03 canonical-hash-is-sensitive-to-authoritative-change",
+    "PJ04 contexts-declare-their-own-authority",
+    "PJ05 authoritative-half-is-reproducible-without-evidence",
     # scope mutations -- each must break a POSITIVE path, not merely fail closed
     "PM01 empty-evidence-scope-mapping",
     "PM02 remove-migration-runner-arm", "PP13 migration-validity-arm-pinned",
@@ -126,6 +132,13 @@ EXPECTED_CHECK_IDS = [
     "PM09 tenant-all-of-weakened-to-any-of", "PM10 tenant-conjunction-member-removed",
     "PM11 own-artifact-replaced-with-unrelated", "PM12 artifact-path-changed",
     "PM13 promoter-attribution-disabled", "PM14 promoter-basename-collision-restored",
+    "PM15 artifact-schema-version-changed",
+    "PM16 validator-replaced-with-another-controls-validator",
+    "PM17 artifact-requirement-duplicated",
+    "PM18 migration-validity-static-predicate-removed",
+    "PM19 unrelated-artifact-added-to-a-required-set",
+    "PM20 machine-local-field-admitted-to-the-canonical-body",
+    "PM21 machine-local-context-admitted-to-the-canonical-body",
     "FZ00 completeness", "FZ01 battery-size-pinned",
     "FZ03 mutations-are-distinct-inputs", "FZ04 drift-guard-check-set-pinned",
     "FZ05 inventory-authority-is-the-registry", "FZ06 mutations-trip-the-gate-they-protect",
@@ -137,8 +150,8 @@ EXPECTED_CHECK_IDS = [
     "FZ10-GA47f rejects-what-it-exists-to-reject",
     "FZ11 protected-gate-set-is-pinned",
 ]
-EXPECTED_TOTAL_CHECKS = 124
-EXPECTED_MUTATION_COUNT = 95
+EXPECTED_TOTAL_CHECKS = 136
+EXPECTED_MUTATION_COUNT = 102
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
@@ -927,6 +940,22 @@ def run() -> int:
     # A crash here is not a refusal and must not be silence. Unguarded, an exception inside the
     # fixture killed the battery with ZERO stdout and no named failure -- the outcome FZ04's own
     # comment calls unacceptable, and which refuses()/guard_verdict() already defend against.
+    def _guarded(label, thunk):
+        """Run a heavy fixture call so an exception becomes a NAMED failure, never silence.
+
+        The battery forbids treating a crash as a refusal everywhere -- and then applied that rule
+        to exactly one of its own four fixture call sites, so a raise inside any of the other three
+        still killed it with rc=1 and zero stdout. Every one of them goes through here now.
+        """
+        try:
+            return thunk()
+        except Exception as exc:  # noqa: BLE001
+            rec(label, False,
+                "a fixture this check depends on raised. A crash is reported as a named failure "
+                "with structured output, never as a silent non-zero exit",
+                level="fixture", extra={"exception": exc.__class__.__name__, "detail": str(exc)[:200]})
+            _emit_and_exit()
+
     try:
         fx = PP.fixture(SYN, GEN, GA_MOD)
     except Exception as exc:  # noqa: BLE001
@@ -980,7 +1009,7 @@ def run() -> int:
     tenant = fx["controls"].get("ga_tenant_authorization", {})
     tdetail = tenant.get("verified_promotion_detail") or {}
     both = {"tenant-rls-enforcement-evidence.v2.json", "tenant-authorization-evidence.v3.json"}
-    conj = PP.conjunction_members_matrix(SYN, GEN, GA_MOD)
+    conj = _guarded("PP03 tenant-conjunction-accepted", lambda: PP.conjunction_members_matrix(SYN, GEN, GA_MOD))
     alone_blocked = all(v == "BLOCKED" for v in conj["alone"].values())
     rec("PP03 tenant-conjunction-accepted",
         matrix.get("ga_tenant_authorization", {}).get("disposition") == "PASS"
@@ -1008,7 +1037,7 @@ def run() -> int:
             "PP07 correction-atomicity-own-artifact-accepted",
             ["normalized-correction-persistence-evidence.v4.json"])
 
-    bc = PP.unrelated_and_stale_matrix(SYN, GEN, GA_MOD)
+    bc = _guarded("PP08 unrelated-artifacts-rejected", lambda: PP.unrelated_and_stale_matrix(SYN, GEN, GA_MOD))
     rec("PP08 unrelated-artifacts-rejected",
         isinstance(bc.get("unrelated"), list)
         and "measured" in bc and bc["measured"]
@@ -1035,21 +1064,128 @@ def run() -> int:
                "synthetic_artifact": True, "parser_evaluator_coverage_only": True,
                "real_production_execution": False})
 
-    derived = PP.graph_fingerprint(COUPLING, ROOT)
+    derived = _guarded("PP11 graph-exactness-derived-from-evaluator",
+                       lambda: PP.graph_fingerprint(COUPLING, ROOT))
+    # Exactness is asserted against the AST-derived graph itself, arm by arm: the artifact set, the
+    # validator set, the extra-predicate set and the cardinality flag must each match EXACTLY, not
+    # merely be non-empty. A non-empty assertion is satisfied by any mapping at all.
+    independent = _guarded("PP11 graph-exactness-derived-from-evaluator",
+                           lambda: PP.expected_arms(SYN, COUPLING, ROOT))
+    exact_arms = {}
+    for cid, spec in derived.items():
+        want = independent.get(cid)
+        exact_arms[cid] = bool(want) and not want["unresolved"] and (
+            tuple(spec["artifacts"]) == want["artifacts"]
+            and tuple(spec["validators"]) == want["validators"]
+            and tuple(spec["extra_predicates"]) == want["extra_predicates"]
+            and spec["conjunction"] is want["conjunction"])
     rec("PP11 graph-exactness-derived-from-evaluator",
         set(derived) == set(PP.EXPECTED_MOVERS)
         and derived.get("ga_tenant_authorization", {}).get("conjunction") is True
+        and all(exact_arms.values())
+        and sorted(k for k, v in derived.items() if v["conjunction"]) == ["ga_tenant_authorization"]
         and all(spec["artifacts"] for spec in derived.values())
         and all(spec["validators"] for spec in derived.values()),
-        "artifacts, artifact CARDINALITY and validators are re-derived from the evaluator's own "
-        "AST every run, covering exactly the seven artifact-gated controls -- not one editable copy "
-        "of a mapping compared against another. It does NOT derive the boolean OPERATOR: "
+        "artifact paths, validators, extra static predicates and artifact CARDINALITY are re-derived "
+        "from the evaluator's own AST every run and compared arm by arm for EXACT set equality, "
+        "covering exactly the seven artifact-gated controls -- not one editable copy of a mapping "
+        "compared against another. It does NOT derive the boolean OPERATOR: "
         "`conjunction` is inferred from cardinality, so an evaluator whose all-of is weakened to an "
-        "any-of still looks correct HERE. PP03 measures the operator behaviourally, and that is "
-        "what catches it",
+        "any-of still looks correct HERE, and duplicating one artifact would spoof the flag the other "
+        "way. PP03 measures the operator behaviourally and PM20 mutates the duplication -- those, "
+        "not this check, are what catch them. The extra migration-VALIDITY legacy blocker is not "
+        "an AST-visible predicate either; PP02 proves it behaviourally",
         level="structural source check",
         extra={"controls": len(derived),
+               "exact_arms": sum(1 for v in exact_arms.values() if v),
+               "independently_derived_arms": len(independent),
+               "unresolved_closure_members": sorted(
+                   n for w in independent.values() for n in w["unresolved"]),
+               "inexact_arms": sorted(k for k, v in exact_arms.items() if not v),
                "conjunction_controls": sorted(k for k, v in derived.items() if v["conjunction"])})
+
+
+    # ---------------------------------------------------------------- Part J: informational isolation
+    # The assessment carries a machine-local half describing THIS developer's gitignored output/
+    # directory. It is declared informational. That declaration is only worth something if it is
+    # enforced, so the whole informational surface is forged at once and the authoritative outputs
+    # are required not to move.
+    forged = PP.informational_forgery(payload)
+    honest_surface = PP.release_surface(payload)
+    forged_surface = PP.release_surface(forged)
+    honest_hash = GEN.canonical_hash(payload)
+    forged_hash = GEN.canonical_hash(forged)
+    rec("PJ01 informational-forgery-cannot-move-the-canonical-hash",
+        honest_hash == forged_hash and GEN.canonical_body(payload) == GEN.canonical_body(forged),
+        "every informational field is forged AT ONCE -- verified context rewritten to a green "
+        "28-PASS GA_READY environment, both honesty flags inverted, every control claiming a "
+        "verified PASS with a forged promoter, evidence counters inflated -- and the canonical body "
+        "and hash are byte-identical. A self-consistent lie is what fools a consumer, not one odd "
+        "value, so the forgery is coordinated rather than field-by-field",
+        level="informational isolation",
+        extra={"honest_hash": honest_hash[:16], "forged_hash": forged_hash[:16],
+               "forged_fields": len(PP.INFORMATIONAL_PAYLOAD_KEYS)
+                                + len(PP.INFORMATIONAL_CONTROL_KEYS) + 1})
+
+    rec("PJ02 informational-forgery-cannot-move-the-release-surface",
+        honest_surface == forged_surface
+        and forged_surface["payload"] == {"client_data_ready": False,
+                                          "release_candidate_ready": False, "ga_ready": False,
+                                          "release_recommendation": "GA_BLOCKED"},
+        "under the same coordinated forgery every authoritative output is unchanged: "
+        "client_data_ready, release_candidate_ready, ga_ready, release_recommendation, the "
+        "authoritative context, every control disposition, the blocker id set and every blocking "
+        "reason. The forged environment claims GA_READY and the release recommendation stays "
+        "GA_BLOCKED",
+        level="informational isolation",
+        extra={"release": forged_surface["payload"], "blockers": len(forged_surface["blockers"]),
+               "forged_context_claims": (forged.get("contexts") or {}).get(
+                   PP.INFORMATIONAL_CONTEXT, {}).get("ga")})
+
+    touched = PP.authoritative_touch(payload)
+    touched_hash = GEN.canonical_hash(touched)
+    rec("PJ03 canonical-hash-is-sensitive-to-authoritative-change",
+        touched_hash != honest_hash,
+        "ANTI-VACUITY partner for PJ01: changing exactly ONE authoritative field -- a single "
+        "control's disposition -- DOES move the canonical hash. Without this, a hash that is "
+        "constant, empty or insensitive would satisfy PJ01 while proving nothing. Excluding the "
+        "`contexts` block wholesale once let a GA_BLOCKED and a 28-PASS GA_READY artifact share a "
+        "hash, which is exactly this failure mode",
+        level="informational isolation",
+        extra={"honest_hash": honest_hash[:16], "authoritative_change_hash": touched_hash[:16]})
+
+    contexts = payload.get("contexts") or {}
+    local_ctx = contexts.get(PP.INFORMATIONAL_CONTEXT) or {}
+    auth_ctx = contexts.get("fresh_checkout_no_local_evidence") or {}
+    rec("PJ04 contexts-declare-their-own-authority",
+        local_ctx.get("informational_only") is True
+        and local_ctx.get("authoritative_for_release") is False
+        and auth_ctx.get("informational_only") is False
+        and auth_ctx.get("authoritative_for_release") is True,
+        "both contexts declare their authority in MACHINE-READABLE form and declare it opposite "
+        "ways round. The distinction used to live only in a prose note, so a consumer reading the "
+        "structure could take the machine-local half for the authoritative one",
+        level="informational isolation",
+        extra={"machine_local": {k: local_ctx.get(k) for k in
+                                 ("informational_only", "authoritative_for_release")},
+               "authoritative": {k: auth_ctx.get(k) for k in
+                                 ("informational_only", "authoritative_for_release")}})
+
+    hermetic = _guarded("PJ05 authoritative-half-is-reproducible-without-evidence",
+                        lambda: PP.hermetic_reference_payload(GEN))
+    hermetic_surface = PP.release_surface(hermetic)
+    rec("PJ05 authoritative-half-is-reproducible-without-evidence",
+        hermetic_surface == honest_surface
+        and GEN.canonical_hash(hermetic) == honest_hash,
+        "BEHAVIOURAL proof that the authoritative half depends on the tracked repository ALONE: a "
+        "payload generated with every evidence artifact present and one generated with none at all "
+        "produce the same dispositions, the same blocker ids, the same blocking reasons and the "
+        "same canonical hash. Declaring the local half informational is a claim; this measures it",
+        level="informational isolation",
+        extra={"evidence_present_hash": honest_hash[:16],
+               "no_evidence_hash": GEN.canonical_hash(hermetic)[:16],
+               "dispositions_equal": hermetic_surface["dispositions"]
+                                     == honest_surface["dispositions"]})
 
     anchor_rc, anchor_failing = PP.guard_verdict(GG, payload)
     rec("PP12 honest-payload-accepted-by-the-unmutated-guard",
@@ -1195,6 +1331,163 @@ def run() -> int:
         "restoring the basename-collision behaviour -- present empty, everything reported missing "
         "for a control that WAS promoted -- is refused. This regression made the guard reject the "
         "generator's own honest output and was found by the first positive-path run")
+
+
+    # ---------------------------------------------------------------- graph-exactness mutations
+    def _graph_mutation(label, corrupt, why, expect_arm):
+        """Corrupt the AST-derived side of PP11 and require the exactness comparison to detect it.
+
+        PP11 compares two INDEPENDENT derivations. Corrupting one of them is the only honest way to
+        show the comparison is load-bearing: if the arms still read exact, PP11 would pass with a
+        wrong validator, a wrong schema version or a missing static predicate in the evaluator.
+        """
+        original = COUPLING.evaluator_graph
+        try:
+            baseline = original((ROOT / "backend" / "app" / "ga_readiness.py")
+                                .read_text(encoding="utf-8"))
+            mutated_graph = corrupt(copy.deepcopy(baseline))
+            COUPLING.evaluator_graph = lambda _src, _g=mutated_graph: copy.deepcopy(_g)
+            derived_now = PP.graph_fingerprint(COUPLING, ROOT)
+            want_now = PP.expected_arms(SYN, COUPLING, ROOT, graph=baseline)
+            detected = []
+            for cid, spec in derived_now.items():
+                want = want_now.get(cid)
+                exact = bool(want) and not want["unresolved"] and (
+                    tuple(spec["artifacts"]) == want["artifacts"]
+                    and tuple(spec["validators"]) == want["validators"]
+                    and tuple(spec["extra_predicates"]) == want["extra_predicates"]
+                    and spec["conjunction"] is want["conjunction"])
+                if not exact:
+                    detected.append(cid)
+            crashed = False
+        except Exception as exc:  # noqa: BLE001 - a crash is never a controlled rejection
+            detected, crashed = [f"<exception:{exc.__class__.__name__}>"], True
+            mutated_graph = {}
+        finally:
+            COUPLING.evaluator_graph = original
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(
+            json.dumps({k: {kk: sorted(vv) if isinstance(vv, (list, set, tuple)) else vv
+                            for kk, vv in v.items()}
+                        for k, v in sorted(mutated_graph.items())},
+                       sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+        MUTATION_TRIPPED[label] = list(detected)
+        rec(label, expect_arm in detected and not crashed, why,
+            level="graph mutation",
+            extra={"detected_inexact": detected[:4],
+                   "mutation_fingerprint": MUTATION_FINGERPRINTS[label]})
+
+    def _swap_schema(graph):
+        # the artifact filename IS the schema identity: v3 and v2 are different contracts
+        arm = graph["ga_tenant_authorization"]
+        arm["artifacts"] = sorted({"tenant-authorization-evidence.v2.json"
+                                   if a.endswith("v3.json") else a for a in arm["artifacts"]})
+        return graph
+
+    _graph_mutation(
+        "PM15 artifact-schema-version-changed", _swap_schema,
+        "pointing an arm at a DIFFERENT SCHEMA VERSION of the same artifact family "
+        "(tenant-authorization-evidence v3 -> v2) is detected. The filename carries the contract "
+        "version, so this is a wrong-schema mapping and not merely a wrong path",
+        "ga_tenant_authorization")
+
+    def _swap_validator(graph):
+        arm = graph["ga_persistence_locking"]
+        arm["validators"] = ["_correction_atomicity_probe"]
+        return graph
+
+    _graph_mutation(
+        "PM16 validator-replaced-with-another-controls-validator", _swap_validator,
+        "an arm pointed at ANOTHER control's real validator is detected. The replacement is a real "
+        "function that exists and is callable, so nothing crashes -- only the independent "
+        "source-level re-derivation distinguishes it",
+        "ga_persistence_locking")
+
+    def _duplicate_requirement(graph):
+        arm = graph["ga_migration_runner"]
+        arm["artifacts"] = list(arm["artifacts"]) + list(arm["artifacts"])
+        arm["conjunction"] = len(arm["artifacts"]) > 1
+        return graph
+
+    _graph_mutation(
+        "PM17 artifact-requirement-duplicated", _duplicate_requirement,
+        "DUPLICATING one artifact in a single-artifact arm is detected. This is the precise attack "
+        "the cardinality-derived `conjunction` flag invites: duplication makes a single-artifact "
+        "control claim to be a conjunction without any second artifact existing",
+        "ga_migration_runner")
+
+    def _drop_static_predicate(graph):
+        arm = graph["ga_migration_validity"]
+        arm["extra_predicates"] = [p for p in arm["extra_predicates"]
+                                   if p != "_migration_evidence_valid"]
+        return graph
+
+    _graph_mutation(
+        "PM18 migration-validity-static-predicate-removed", _drop_static_predicate,
+        "dropping an additional static predicate from the migration-validity arm is detected. "
+        "Without exact extra-predicate equality an arm could silently lose the very predicate that "
+        "keeps the control blocked while still looking correctly mapped",
+        "ga_migration_validity")
+
+    _scope_rewrite(
+        "PM19 unrelated-artifact-added-to-a-required-set",
+        lambda scope: {**scope, "ga_persistence_locking": set(scope["ga_persistence_locking"])
+                                | {"production-queue-adapter-evidence.v1.json"}},
+        "adding an UNRELATED control's artifact to an arm's required set is refused. Note the "
+        "semantics honestly: EVIDENCE_SCOPE is a REQUIRED set, so this makes the arm stricter and "
+        "breaks the legitimate promotion -- it is not an alternative-sufficient-source mapping, "
+        "because the structure has no such concept to corrupt")
+
+    # ---------------------------------------------------------------- informational-isolation mutations
+    def _isolation_mutation(label, patch, restore, why, probe):
+        """Make a machine-local field canonical and require PJ01's isolation to break.
+
+        These mutations change WHAT THE CANONICAL BODY CONTAINS, not what gets promoted, so the
+        drift guard has nothing to refuse -- it recomputes the hash the same mutated way and agrees
+        with itself. The property they are load-bearing on is PJ01: once a machine-local field is
+        admitted, forging the informational half MOVES the canonical hash. That is measured here
+        directly.
+        """
+        detected, crashed = False, False
+        try:
+            patch()
+            honest_now = GEN.canonical_hash(payload)
+            forged_now = GEN.canonical_hash(PP.informational_forgery(payload))
+            detected = honest_now != forged_now
+        except Exception as exc:  # noqa: BLE001 - a crash is never a controlled rejection
+            crashed, detected = True, False
+            MUTATION_TRIPPED[label] = [f"<exception:{exc.__class__.__name__}>"]
+        finally:
+            restore()
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(
+            json.dumps(probe(), sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+        MUTATION_TRIPPED.setdefault(label, ["PJ01 informational-forgery-cannot-move-the-canonical-hash"]
+                                    if detected else [])
+        rec(label, detected and not crashed, why,
+            level="informational-isolation mutation",
+            extra={"forgery_moves_hash": detected,
+                   "mutation_fingerprint": MUTATION_FINGERPRINTS[label]})
+
+    _original_control_keys = GEN.NON_CANONICAL_CONTROL_KEYS
+    _isolation_mutation(
+        "PM20 machine-local-field-admitted-to-the-canonical-body",
+        lambda: setattr(GEN, "NON_CANONICAL_CONTROL_KEYS",
+                        frozenset(_original_control_keys
+                                  - {"current_disposition_verified_environment"})),
+        lambda: setattr(GEN, "NON_CANONICAL_CONTROL_KEYS", _original_control_keys),
+        "admitting a single MACHINE-LOCAL control field to the canonical body breaks isolation: the "
+        "informational forgery immediately moves the hash. This is the regression that made the "
+        "tracked artifact a function of untracked state -- green on the author's machine, red "
+        "everywhere else",
+        lambda: ["control-keys", sorted(GEN.NON_CANONICAL_CONTROL_KEYS)])
+
+    _original_context_keys = GEN.NON_CANONICAL_CONTEXT_KEYS
+    _isolation_mutation(
+        "PM21 machine-local-context-admitted-to-the-canonical-body",
+        lambda: setattr(GEN, "NON_CANONICAL_CONTEXT_KEYS", frozenset()),
+        lambda: setattr(GEN, "NON_CANONICAL_CONTEXT_KEYS", _original_context_keys),
+        "admitting the whole machine-local CONTEXT breaks isolation the same way: the hash would "
+        "depend on which gitignored artifacts happen to exist on the generating machine",
+        lambda: ["context-keys", sorted(GEN.NON_CANONICAL_CONTEXT_KEYS)])
 
     # ---------------------------------------------------------------- completeness
     dup = {}
@@ -1483,7 +1776,7 @@ def run() -> int:
     # "PP" is a legitimate non-mutation prefix: a positive path asserts an ACCEPTANCE, so it is
     # neither an F-gate nor a mutation, and must not be reported as a stray id.
     stray = [c for c in emitted
-             if not c.startswith(("F", "PP")) and c[:2] not in MUTATION_PREFIXES]
+             if not c.startswith(("F", "PP", "PJ")) and c[:2] not in MUTATION_PREFIXES]
     rec("FZ00 completeness", not (missing or unknown or dupes or stray),
         "the emitted check set equals the declared set exactly",
         level="structural source check",

@@ -128,8 +128,8 @@ NOTHING_MISSING_CLAIMS = (
 )
 
 #: Reciprocal cross-file pin of the FAULTS battery's declared check set (see GA80).
-PINNED_FAULTS_ID_SET_HASH = "c7ebb504b56606ce483283a8ac208789bfcdcf080475f404065e73168b7946e4"
-PINNED_FAULTS_CHECK_COUNT = 124
+PINNED_FAULTS_ID_SET_HASH = "6f2b880d26353e0002aeb00099f59f3f5a8f5261899f2945133ad8e9ba28fca1"
+PINNED_FAULTS_CHECK_COUNT = 136
 
 DB_CONTROL, QUEUE_CONTROL = "production-database-adapter", "production-queue-adapter"
 DB_CHECK, QUEUE_CHECK = "ga_postgres_adapter", "ga_redis_adapter"
