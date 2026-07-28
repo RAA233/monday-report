@@ -373,6 +373,10 @@ BOUNDARY_TIMEOUT_SECONDS = 900.0
 #: boundary is evidence, not just an assertion.
 BOUNDARY_OBSERVATIONS: list = []
 
+#: Temp directories present before this battery ran anything, so cleanup is measured as a
+#: DELTA rather than as absolute cleanliness of a shared system directory.
+TEMP_DIRECTORY_BASELINE: int = -1
+
 
 def _observed_tracked_state(root=None) -> str:
     """Whether the TRACKED worktree is clean right now. Observed, never assumed.
@@ -392,14 +396,30 @@ def _observed_tracked_state(root=None) -> str:
         return "unknown"
 
 
-def _observed_temporary_state() -> str:
-    """Whether this battery's temp directories were cleaned up. Observed, never assumed."""
+def _temporary_directory_count() -> int:
+    """How many of this battery's temp directories exist right now. -1 when unobservable."""
     try:
-        root = pathlib.Path(tempfile.gettempdir())
-        leftovers = [p.name for p in root.glob("pp-*") if p.is_dir()]
-        return "clean" if not leftovers else f"leftover:{len(leftovers)}"
+        return sum(1 for p in pathlib.Path(tempfile.gettempdir()).glob("pp-*") if p.is_dir())
     except Exception:  # noqa: BLE001
+        return -1
+
+
+def _observed_temporary_state(baseline: int = None) -> str:
+    """Whether this battery cleaned up after itself, RELATIVE to a baseline.
+
+    Absolute cleanliness is the wrong question: a directory left by an earlier aborted run would
+    make an honest run report a leak it did not cause, and the check would fail for the wrong
+    reason. What is actually observable is the DELTA against a baseline taken at start-up.
+    """
+    current = _temporary_directory_count()
+    if current < 0:
         return "unknown"
+    if baseline is None:
+        baseline = TEMP_DIRECTORY_BASELINE
+    if baseline < 0:
+        return "unknown"
+    leaked = current - baseline
+    return "clean" if leaked <= 0 else f"leaked:{leaked}"
 
 
 def classify_boundary(operation_id, thunk, validate=None):
@@ -763,6 +783,9 @@ def _emit_and_exit(failure: dict = None) -> None:
 
 
 def run() -> int:
+    global TEMP_DIRECTORY_BASELINE
+    if TEMP_DIRECTORY_BASELINE < 0:
+        TEMP_DIRECTORY_BASELINE = _temporary_directory_count()
     rc, failing = guard_result(live_artifact())
     BASELINE_OK.append(rc == 0 and not failing)
     rec("FB00 baseline-passes", rc == 0 and not failing,
@@ -2163,17 +2186,19 @@ def run() -> int:
           "even a BaseException is caught and classified. Catching only Exception would let a "
           "SystemExit raised inside a nested guard escape as a silent exit")
 
+    _temp_baseline = _temporary_directory_count()
     _planted = pathlib.Path(tempfile.mkdtemp(prefix="pp-cleanup-probe-"))
-    _temp_probe_detects = _observed_temporary_state() != "clean"
+    _temp_probe_detects = _observed_temporary_state(_temp_baseline) != "clean"
     shutil.rmtree(_planted, ignore_errors=True)
     rec("BC04 temporary-state-observation-is-real",
-        _temp_probe_detects and _observed_temporary_state() == "clean",
+        _temp_probe_detects and _observed_temporary_state(_temp_baseline) == "clean",
         "the temporary-state observation actually DETECTS a planted leftover directory and "
         "reports clean once it is gone. An observation that always said clean would let the "
         "crash contract report a cleanup that never happened",
         level="boundary",
         extra={"detected_planted_leftover": _temp_probe_detects,
-               "state_after_cleanup": _observed_temporary_state()})
+               "state_after_cleanup": _observed_temporary_state(_temp_baseline),
+               "baseline_directories": _temp_baseline})
 
     def _tracked_probe():
         """Point the observer at throwaway repositories made deliberately clean and dirty."""
