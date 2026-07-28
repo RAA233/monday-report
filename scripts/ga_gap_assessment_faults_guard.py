@@ -41,11 +41,12 @@ from backend.app import ga_readiness as GA_MOD  # noqa: E402
 import build_ga_gap_assessment as GEN  # noqa: E402
 import ga_gap_assessment_guard as GG  # noqa: E402
 import ga_gap_assessment_coupling as COUPLING  # noqa: E402
-import ga_gap_assessment_positive_paths as PP  # noqa: E402
+import ga_gap_assessment_positive_paths as PP
+import ga_gap_assessment_witnesses as WIT  # noqa: E402
 import synthetic_ga_evidence as SYN  # noqa: E402
 
 checks: list[dict] = []
-MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP", "MV", "MI", "MG", "MX", "PM")
+MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP", "MV", "MI", "MG", "MX", "PM", "WT")
 
 DB_ID, QUEUE_ID = "production-database-adapter", "production-queue-adapter"
 
@@ -154,6 +155,25 @@ EXPECTED_CHECK_IDS = [
     "FZ10-GA04k rejects-what-it-exists-to-reject",
     "FZ10-GA47f rejects-what-it-exists-to-reject",
     "FZ11 protected-gate-set-is-pinned",
+    "FZ15 pin-assignments-resolve-to-one-live-node",
+    "FZ16 witness-manifest-is-pinned",
+    "FZ17 behavioural-witnesses-detect-their-mutations",
+    "WT01 source-audit execution",
+    "WT02 source-audit execution",
+    "WT03 source-audit execution",
+    "WT04 source-audit execution",
+    "WT05 inline source scan",
+    "WT06 inline source scan",
+    "WT07 pin-set completeness",
+    "WT08 pin-set completeness",
+    "WT09 process handler",
+    "WT10 process handler",
+    "WT11 process handler",
+    "WT12 process handler",
+    "WT13 process handler",
+    "WT14 BC08's real property",
+    "WC01 control",
+    "WC02 control",
     "BC01 guard_verdict-normal-path-succeeds",
     "BC02 scope_without-normal-path-succeeds",
     "BC03 graph_fingerprint-normal-path-succeeds",
@@ -178,8 +198,15 @@ EXPECTED_CHECK_IDS = [
     "PM31 stale-faults-id-set-hash-pin",
     "PM32 stale-faults-check-count-pin",
 ]
-EXPECTED_TOTAL_CHECKS = 161
-EXPECTED_MUTATION_COUNT = 113
+
+#: Witness-manifest pins. The manifest, its protected-property set and its id set are each
+#: hashed, so a witness cannot be removed, renamed, duplicated or retargeted quietly.
+PINNED_WITNESS_MANIFEST_HASH = "8620d821333c8709a6e52a58fb7027a14393c2e5b1cac87b233466c79d1c6d00"
+PINNED_PROTECTED_PROPERTY_HASH = "95cf0977ef33ea5b483fc551016ddfa643b3d118d854914d72f8d10f0c924dc7"
+PINNED_WITNESS_ID_HASH = "7c30300e7eaf8582ce3f4dbeeb66f9d6aa2419db939c0a43556f8386b0645477"
+PINNED_WITNESS_COUNT = 16
+EXPECTED_TOTAL_CHECKS = 180
+EXPECTED_MUTATION_COUNT = 127
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
@@ -718,7 +745,7 @@ def process_boundary_installed(root: pathlib.Path, source: str = None) -> bool:
     return False
 
 
-def audit_self_test(root: pathlib.Path):
+def audit_self_test(root: pathlib.Path, audits: dict = None):
     """Drive each source audit against FABRICATED sources and require it to report the problem.
 
     This is the durable half. A purely structural gate can be neutralised by editing the gate, and
@@ -727,6 +754,16 @@ def audit_self_test(root: pathlib.Path):
     pass a case it is supposed to fail, so each audit is handed a source it MUST flag and a source
     it MUST NOT, and both directions are required.
     """
+    # The audits are INJECTABLE so this function can be driven against deliberately broken
+    # stand-ins. Without that, a canned `{k: True for k in REQUIRED_SELF_TEST_PROBES}` was
+    # indistinguishable from a real run, because the truthful answer is also all-True -- which is
+    # exactly how the shape heuristic kept being defeated. A case whose correct answer is FALSE is
+    # the only thing a canned all-True result cannot survive.
+    audits = audits or {}
+    copied = audits.get("copied_body_report", _copied_body_report)
+    phrases = audits.get("false_phrase_report", _false_phrase_report)
+    boundary_audit = audits.get("boundary_call_audit", _boundary_call_audit)
+    handler_probe = audits.get("process_boundary_installed", process_boundary_installed)
     results = {}
 
     hollowed = (
@@ -767,18 +804,18 @@ def audit_self_test(root: pathlib.Path):
         "def user():\n"
         "    return live([1])\n"
     )
-    hollow_report = _copied_body_report(root, source=hollowed)
-    dup_report = _copied_body_report(root, source=duplicated)
-    clean_report = _copied_body_report(root, source=clean)
+    hollow_report = copied(root, source=hollowed)
+    dup_report = copied(root, source=duplicated)
+    clean_report = copied(root, source=clean)
     results["detects_hollowed_container_literal"] = bool(hollow_report["constant_only_functions"])
     results["detects_duplicate_body_hidden_by_dead_reference"] = bool(dup_report["duplicate_bodies"])
     results["accepts_clean_source"] = not (clean_report["duplicate_bodies"]
                                            or clean_report["constant_only_functions"])
 
-    phrase = FALSE_COMPLETENESS_PHRASES[0]
+    phrase = FALSE_COMPLETENESS_PHRASES[0] if FALSE_COMPLETENESS_PHRASES else "<no-pin>"
     results["detects_false_phrase"] = bool(
         _false_phrase_report(root, sources={"fabricated.py": f"# {phrase}\n"}))
-    results["accepts_phrase_free_source"] = not _false_phrase_report(
+    results["accepts_phrase_free_source"] = not phrases(
         root, sources={"fabricated.py": "# nothing pinned here\n"})
 
     unwrapped = "def run():\n    return PP.guard_verdict(GG, {})\n"
@@ -788,9 +825,9 @@ def audit_self_test(root: pathlib.Path):
                  "        return PP.guard_verdict(GG, {})\n"
                  "    except Exception:\n"
                  "        pass\n")
-    _c1, u1 = _boundary_call_audit(root, source=unwrapped)
-    _c2, u2 = _boundary_call_audit(root, source=wrapped)
-    _c3, u3 = _boundary_call_audit(root, source=swallowed)
+    _c1, u1 = boundary_audit(root, source=unwrapped)
+    _c2, u2 = boundary_audit(root, source=wrapped)
+    _c3, u3 = boundary_audit(root, source=swallowed)
     results["detects_unwrapped_call"] = bool(u1)
     results["accepts_wrapped_call"] = not u2
     results["rejects_swallowing_handler"] = bool(u3)
@@ -805,7 +842,7 @@ def audit_self_test(root: pathlib.Path):
         "def run():", "    return 0", "", "raise SystemExit(run())", ""])
     results["detects_process_boundary"] = process_boundary_installed(
         root, source=with_handler)
-    results["detects_missing_process_boundary"] = not process_boundary_installed(
+    results["detects_missing_process_boundary"] = not handler_probe(
         root, source=without_handler)
     return results
 
@@ -914,6 +951,198 @@ def _emit_and_exit(failure: dict = None) -> None:
                                   "certification": "not_passed"}},
                      indent=2, sort_keys=True, ensure_ascii=False))
     raise SystemExit(1)
+
+
+
+
+def structural_source_checks(rec, boundary):
+    """Every check that needs only the tracked sources -- no fixture, no evidence, no payload.
+
+    Extracted so the witness harness can execute the REAL checks in a subprocess without paying
+    for the heavy fixture. ONE implementation, two entry points: the full battery calls it, and
+    the --witness-probe entry point calls it alone. A second copy of these checks would be
+    precisely the shared-expectation-source problem the witnesses exist to remove.
+    """
+    _boundary = boundary
+    _classified, _unclassified = _boundary_call_audit(ROOT)
+    rec("BC06 every-heavy-operation-call-is-classified",
+        bool(_classified) and not _unclassified,
+        "every call into the positive-path module from this battery is either inside the shared "
+        "boundary classifier or inside a handler that turns a raise into a named failure. "
+        "Derived by walking THIS file's own AST, so a newly added unwrapped call fails here "
+        "instead of waiting to crash in the field",
+        level="structural source check",
+        extra={"classified_calls": len(_classified),
+               "unclassified_calls": sorted(_unclassified)[:8]})
+
+
+    # ---------------------------------------------- Part L: patch-only body copies
+    _copies = _boundary("FZ12 no-patch-only-body-copies", "PP.copied_body_report",
+                        lambda: _copied_body_report(ROOT), phase="structural source check")
+    # `constant_only_functions` is now a DIAGNOSTIC LABEL ONLY and deliberately does not enter this
+    # verdict. Three reviews defeated it one token at a time -- {} then dict() then a comprehension
+    # over the production pin -- and it also rejected legitimate implementations that merely return
+    # a tuple. Whether a protected audit still works is decided by the behavioural witnesses (FZ17),
+    # which mutate it and observe whether anything breaks, not by the syntax of its return.
+    _copy_verdict = not _copies["duplicate_bodies"] and not [
+        n for n in _copies["unreferenced"]
+        if n not in {"_copied_body_report", "_false_phrase_report", "process_boundary_installed",
+                     "structural_source_checks", "audit_self_test", "_boundary_call_audit",
+                     "nested_append"}]
+    rec("FZ12 no-patch-only-body-copies",
+        _copy_verdict,
+        "no protected body is duplicated into an unexecuted helper and nothing substantial is "
+        "unreachable. Bodies are "
+        "compared by normalised AST dump and reachability counts ANY load of the name, so "
+        "renaming a copy, reflowing its text or preserving its strings does not hide it -- "
+        "which raw-text or name-presence checks cannot say. The hollow-shape label it also "
+        "computes is reported for diagnosis and has NO bearing on this verdict",
+        level="structural source check",
+        extra=dict(_copies, shape_label_is_advisory_only=True))
+
+    # ---------------------------------------------- Part M: no reintroduced false claims
+    _self = _boundary("FZ14 source-audits-are-behaviourally-discriminating", "PP.audit_self_test",
+                      lambda: audit_self_test(ROOT), phase="structural source check")
+    def _broken_audits():
+        """Stand-ins that answer WRONG, so a real self-test must report False for them."""
+        return {"copied_body_report": lambda root, source=None: {
+                    "defined": 0, "duplicate_bodies": [], "constant_only_functions": [],
+                    "unreferenced": []},
+                "false_phrase_report": lambda root, sources=None: [],
+                "boundary_call_audit": lambda root, source=None: ([], []),
+                "process_boundary_installed": lambda root, source=None: True}
+
+    _negative = _boundary("FZ14 source-audits-are-behaviourally-discriminating",
+                          "PP.audit_self_test",
+                          lambda: audit_self_test(ROOT, audits=_broken_audits()),
+                          phase="structural source check")
+    _negative_control_holds = isinstance(_negative, dict) and not all(_negative.values())
+    rec("FZ14 source-audits-are-behaviourally-discriminating",
+        _negative_control_holds
+        and isinstance(_self, dict)
+        and set(_self) == set(REQUIRED_SELF_TEST_PROBES)
+        and all(_self.get(probe) is True for probe in REQUIRED_SELF_TEST_PROBES),
+        "each source audit is DRIVEN against fabricated sources and must report the problem in one "
+        "and stay silent on the other. This is the durable half: a purely structural gate is "
+        "neutralised by editing the gate, and a review neutralised the first cut by replacing a "
+        "sibling audit's body with `return []` -- no copy, no obfuscation, completely invisible. "
+        "A gutted audit cannot pass a case it exists to fail. It is ALSO driven against deliberately "
+        "wrong stand-ins and must report False for them -- a canned all-True result cannot "
+        "survive a case whose correct answer is False, which is the distinction the shape "
+        "heuristic never had. EVERY pinned probe must be present "
+        "and True: `all({}.values())` is True, so requiring only that made an empty result a "
+        "vacuous pass -- and `return dict()` slipped past the hollow detector too, defeating both "
+        "gates with one token",
+        level="structural source check",
+        extra={"probes": _self, "required": list(REQUIRED_SELF_TEST_PROBES),
+               "missing": sorted(set(REQUIRED_SELF_TEST_PROBES) - set(_self or {})),
+               "negative_control": _negative,
+               "negative_control_holds": _negative_control_holds})
+
+    _handler_source = (ROOT / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(
+        encoding="utf-8")
+    _handler = _boundary("BC07 no-unstructured-exit", "PP.process_handler_contract",
+                         lambda: WIT.process_handler_contract(_handler_source), phase="boundary")
+    _proc_boundary = bool(
+        _handler["handler_found"] and _handler["catches_base_exception"] and _handler["emits"]
+        and _handler["terminates_nonzero"] and not _handler["is_pass"]
+        and not _handler["can_fall_through"] and not _handler["returns_success"])
+    _rehash = _boundary("BC08 canonical-hash-boundary", "PP.rehash_boundary_contract",
+                        lambda: WIT.rehash_boundary_contract(_handler_source), phase="boundary")
+    rec("BC08 canonical-hash-boundary",
+        bool(_rehash["function_found"] and _rehash["call_guarded"] and _rehash["emits"]),
+        "the artifact re-hash path is classified -- MEASURED from the source, not asserted. This "
+        "check was the literal `True`, so removing the very behaviour it names left it green. "
+        "GEN.canonical_hash runs once per artifact mutation and its call must sit inside a handler "
+        "that emits a structured failure",
+        level="boundary", extra=dict(_rehash, operation_id="GEN.canonical_hash"))
+
+    rec("BC07 no-unstructured-exit", _proc_boundary,
+        "the process-level boundary is validated on the HANDLER BODY, not on the whole Try. The "
+        "previous check walked the entire Try for a structured emitter, so a DEAD emitter parked in "
+        "the try body satisfied it while the handler itself was `pass` -- and an escape then exited "
+        "rc=0 with no output at all, a silent success in the audit chain. The handler must catch "
+        "BaseException, contain a REACHABLE emitter, terminate non-zero, not be pass, not return "
+        "success and not fall through",
+        level="boundary",
+        extra={"handler_contract": _handler,
+               "heavy_modules_audited": list(HEAVY_MODULES),
+               "boundary_observations": len(BOUNDARY_OBSERVATIONS)})
+
+    # Scanned INLINE, with no helper to interpose on. A review replaced the helper with a stub that
+    # delegated only when handed fabricated `sources=` -- exactly the self-test's calling convention
+    # -- and returned nothing for the real scan, so FZ14 stayed green while a pinned false phrase
+    # sat in the file. The real scan cannot be stubbed if there is nothing to stub.
+    def _inline_phrase_scan():
+        """Scan the tracked sources, excluding ONLY the pin tuple's own AST span.
+
+        The exclusion used to be a raw-text partition on the first occurrence of the assignment
+        text, so a COMMENT carrying that text above the real assignment redefined the excluded span
+        and the scan went blind. The span now comes from the live assignment node; comments,
+        docstrings and string literals cannot move it.
+        """
+        found = []
+        for _name in ("ga_gap_assessment_faults_guard.py", "ga_gap_assessment_positive_paths.py",
+                      "ga_gap_assessment_guard.py"):
+            _text = (ROOT / "scripts" / _name).read_text(encoding="utf-8")
+            _span = WIT.excluded_span(_text, "FALSE_COMPLETENESS_PHRASES")
+            if _span:
+                _lines = _text.splitlines()
+                _text = "\n".join(_lines[:_span[0] - 1] + _lines[_span[1]:])
+            _low = _text.lower()
+            found.extend(f"{_name}: {_p}" for _p in FALSE_COMPLETENESS_PHRASES if _p.lower() in _low)
+        return found
+
+    _pin_reports = {name: WIT.resolve_module_assignment(_handler_source, name)
+                    for name in ("FALSE_COMPLETENESS_PHRASES", "REQUIRED_SELF_TEST_PROBES")}
+    rec("FZ15 pin-assignments-resolve-to-one-live-node",
+        all(r["resolved"] for r in _pin_reports.values()),
+        "each pin is located as exactly ONE live module-level assignment of a non-empty sequence of "
+        "unique string literals, resolved from the AST. Multiple assignments, an assignment nested "
+        "in a function, one in dead code, a missing one, an empty sequence and duplicate entries "
+        "are each refused. Raw-text location was bypassable by a comment carrying the assignment "
+        "text",
+        level="structural source check",
+        extra={name: {k: r[k] for k in ("resolved", "reason", "value_count", "span")}
+               for name, r in _pin_reports.items()})
+
+    _manifest = {"manifest_hash": WIT.manifest_hash(),
+                 "protected_property_hash": WIT.protected_property_hash(),
+                 "witness_id_hash": WIT.witness_id_hash(),
+                 "declared": len(WIT.WITNESS_REGISTRY)}
+    rec("FZ16 witness-manifest-is-pinned",
+        _manifest["manifest_hash"] == PINNED_WITNESS_MANIFEST_HASH
+        and _manifest["protected_property_hash"] == PINNED_PROTECTED_PROPERTY_HASH
+        and _manifest["witness_id_hash"] == PINNED_WITNESS_ID_HASH
+        and _manifest["declared"] == PINNED_WITNESS_COUNT
+        and sorted(w["witness_id"] for w in WIT.WITNESS_REGISTRY)
+        == sorted({w["witness_id"] for w in WIT.WITNESS_REGISTRY}),
+        "the witness manifest, its protected-property set and its id set are each pinned by "
+        "canonical hash. Removing, renaming, duplicating or retargeting a witness, or emptying the "
+        "manifest, changes a hash -- so a witness set cannot drift downward the way the probe tuple "
+        "silently could",
+        level="structural source check",
+        extra=dict(_manifest, pinned_count=PINNED_WITNESS_COUNT))
+
+    _phrases = _boundary("FZ13 no-known-false-completeness-claims", "PP.inline_phrase_scan",
+                         _inline_phrase_scan, phase="structural source check")
+    _helper_phrases = _boundary("FZ13 no-known-false-completeness-claims",
+                                "PP.false_phrase_report",
+                                lambda: _false_phrase_report(ROOT),
+                                phase="structural source check")
+    rec("FZ13 no-known-false-completeness-claims",
+        _phrases == [] and sorted(_helper_phrases) == sorted(_phrases),
+        "none of the pinned known-false completeness phrasings appears in the sources this "
+        "increment owns. Every one of them was actually written here and every one was "
+        "disproved by an independent exact-head review, so they are pinned to stop a future "
+        "edit quietly reintroducing a claim the code does not support. The pin list's own "
+        "definition is excluded from the scan, or it would match itself. The scan runs INLINE and "
+        "the helper must AGREE with it, so a helper stubbed to answer only the self-test's "
+        "fabricated inputs is caught by the disagreement",
+        level="structural source check",
+        extra={"pinned_phrases": len(FALSE_COMPLETENESS_PHRASES), "hits": _phrases,
+               "helper_hits": _helper_phrases,
+               "inline_and_helper_agree": sorted(_helper_phrases) == sorted(_phrases)})
 
 
 def run() -> int:
@@ -2363,18 +2592,6 @@ def run() -> int:
         level="boundary",
         extra=dict(_tracked, live_tracked_state=_observed_tracked_state()))
 
-    _classified, _unclassified = _boundary_call_audit(ROOT)
-    rec("BC06 every-heavy-operation-call-is-classified",
-        bool(_classified) and not _unclassified,
-        "every call into the positive-path module from this battery is either inside the shared "
-        "boundary classifier or inside a handler that turns a raise into a named failure. "
-        "Derived by walking THIS file's own AST, so a newly added unwrapped call fails here "
-        "instead of waiting to crash in the field",
-        level="structural source check",
-        extra={"classified_calls": len(_classified),
-               "unclassified_calls": sorted(_unclassified)[:8]})
-
-
     # ---------------------------------------------- Part I: the forgery oracle is not shared
     def _oracle_probe():
         """Measure the forgery oracle with its former shared constant neutralised."""
@@ -2415,94 +2632,48 @@ def run() -> int:
                "noop_rejected": _noop_rejected, "dropped_transformation_rejected": _drop_rejected,
                "shared_constant_is_empty": not PP.FORGED_PAYLOAD_VALUES})
 
-    # ---------------------------------------------- Part L: patch-only body copies
-    _copies = _boundary("FZ12 no-patch-only-body-copies", "PP.copied_body_report",
-                        lambda: _copied_body_report(ROOT), phase="structural source check")
-    rec("FZ12 no-patch-only-body-copies",
-        not _copies["duplicate_bodies"] and not _copies["constant_only_functions"]
-        and not [n for n in _copies["unreferenced"]
-                 if n not in {"_copied_body_report", "_false_phrase_report"}],
-        "no protected body is duplicated into an unexecuted helper, no function has been "
-        "reduced to returning a constant, and nothing substantial is unreachable. Bodies are "
-        "compared by normalised AST dump and reachability counts ANY load of the name, so "
-        "renaming a copy, reflowing its text or preserving its strings does not hide it -- "
-        "which raw-text or name-presence checks cannot say",
-        level="structural source check", extra=_copies)
+    structural_source_checks(rec, _boundary)
 
-    # ---------------------------------------------- Part M: no reintroduced false claims
-    _self = _boundary("FZ14 source-audits-are-behaviourally-discriminating", "PP.audit_self_test",
-                      lambda: audit_self_test(ROOT), phase="structural source check")
-    rec("FZ14 source-audits-are-behaviourally-discriminating",
-        isinstance(_self, dict)
-        and set(_self) == set(REQUIRED_SELF_TEST_PROBES)
-        and all(_self.get(probe) is True for probe in REQUIRED_SELF_TEST_PROBES),
-        "each source audit is DRIVEN against fabricated sources and must report the problem in one "
-        "and stay silent on the other. This is the durable half: a purely structural gate is "
-        "neutralised by editing the gate, and a review neutralised the first cut by replacing a "
-        "sibling audit's body with `return []` -- no copy, no obfuscation, completely invisible. "
-        "A gutted audit cannot pass a case it exists to fail. EVERY pinned probe must be present "
-        "and True: `all({}.values())` is True, so requiring only that made an empty result a "
-        "vacuous pass -- and `return dict()` slipped past the hollow detector too, defeating both "
-        "gates with one token",
-        level="structural source check",
-        extra={"probes": _self, "required": list(REQUIRED_SELF_TEST_PROBES),
-               "missing": sorted(set(REQUIRED_SELF_TEST_PROBES) - set(_self or {}))})
+    # ---------------------------------------------- behavioural witnesses
+    _witness_results = _boundary("FZ17 behavioural-witnesses-detect-their-mutations",
+                                 "PP.run_all_witnesses", WIT.run_all_witnesses,
+                                 phase="behavioural witness")
+    _by_id = {r["witness_id"]: r for r in _witness_results}
+    for _w in WIT.WITNESS_REGISTRY:
+        _r = _by_id.get(_w["witness_id"], {})
+        _is_control = bool(_w.get("expect_pass"))
+        _label = f"{_w['witness_id']} {_w['protected_property'].split(':')[0]}"
+        if not _is_control:
+            MUTATION_FINGERPRINTS[_label] = hashlib.sha256(
+                json.dumps([_w["witness_id"], _w["target"], _w["expected_failing_check"],
+                            _w["note"]], sort_keys=True).encode("utf-8")).hexdigest()[:16]
+            MUTATION_TRIPPED[_label] = list(_r.get("failing") or [])
+        rec(_label, bool(_r.get("detected")),
+            ("CONTROL: " if _is_control else "") + _w["note"] + ". The witness writes a mutated but "
+            "valid copy of the guard tree and runs the real probe entry point in a SUBPROCESS. It "
+            "counts only when the child emits valid structured JSON, exits non-zero and fails the "
+            "named check this mutation should break -- a syntax error, a crash, a timeout, empty "
+            "stdout or malformed JSON is never a detection, because an inert guard produces those "
+            "too",
+            level="behavioural witness control" if _is_control else "behavioural witness",
+            extra={k: _r.get(k) for k in
+                   ("rc", "detected", "parsed", "structured", "timed_out", "reason",
+                    "expected_failing_check", "failing")})
 
-    _proc_boundary = _boundary("BC07 no-unstructured-exit", "PP.process_boundary_installed",
-                               lambda: process_boundary_installed(ROOT), phase="boundary")
-    rec("BC08 canonical-hash-boundary", True,
-        "the artifact re-hash path is classified: GEN.canonical_hash runs once per artifact "
-        "mutation and a raise there is reported with the structured contract. It was the "
-        "highest-traffic unclassified heavy call, and scoping the audit to run() was what hid it",
-        level="boundary", extra={"operation_id": "GEN.canonical_hash"})
-
-    rec("BC07 no-unstructured-exit", _proc_boundary,
-        "the process-level boundary is installed -- OBSERVED from this file's AST, not asserted. "
-        "It was previously hardcoded True, so deleting the handler entirely left its own check "
-        "green: the same defect BC05 had been failed for twelve lines earlier. Any exception "
-        "escaping every per-operation boundary is reported with the structured contract; all "
-        "output is buffered into one print, so before this an escape lost the entire report",
-        level="boundary",
-        extra={"handler_found_in_ast": _proc_boundary,
-               "heavy_modules_audited": list(HEAVY_MODULES),
-               "boundary_observations": len(BOUNDARY_OBSERVATIONS)})
-
-    # Scanned INLINE, with no helper to interpose on. A review replaced the helper with a stub that
-    # delegated only when handed fabricated `sources=` -- exactly the self-test's calling convention
-    # -- and returned nothing for the real scan, so FZ14 stayed green while a pinned false phrase
-    # sat in the file. The real scan cannot be stubbed if there is nothing to stub.
-    def _inline_phrase_scan():
-        found = []
-        for _name in ("ga_gap_assessment_faults_guard.py", "ga_gap_assessment_positive_paths.py",
-                      "ga_gap_assessment_guard.py"):
-            _text = (ROOT / "scripts" / _name).read_text(encoding="utf-8")
-            if _name == "ga_gap_assessment_faults_guard.py":
-                _head, _sep, _tail = _text.partition("FALSE_COMPLETENESS_PHRASES = (")
-                _pins, _sep2, _rest = _tail.partition("\n)\n")
-                _text = _head + _rest
-            _low = _text.lower()
-            found.extend(f"{_name}: {_p}" for _p in FALSE_COMPLETENESS_PHRASES if _p.lower() in _low)
-        return found
-
-    _phrases = _boundary("FZ13 no-known-false-completeness-claims", "PP.inline_phrase_scan",
-                         _inline_phrase_scan, phase="structural source check")
-    _helper_phrases = _boundary("FZ13 no-known-false-completeness-claims",
-                                "PP.false_phrase_report",
-                                lambda: _false_phrase_report(ROOT),
-                                phase="structural source check")
-    rec("FZ13 no-known-false-completeness-claims",
-        _phrases == [] and sorted(_helper_phrases) == sorted(_phrases),
-        "none of the pinned known-false completeness phrasings appears in the sources this "
-        "increment owns. Every one of them was actually written here and every one was "
-        "disproved by an independent exact-head review, so they are pinned to stop a future "
-        "edit quietly reintroducing a claim the code does not support. The pin list's own "
-        "definition is excluded from the scan, or it would match itself. The scan runs INLINE and "
-        "the helper must AGREE with it, so a helper stubbed to answer only the self-test's "
-        "fabricated inputs is caught by the disagreement",
-        level="structural source check",
-        extra={"pinned_phrases": len(FALSE_COMPLETENESS_PHRASES), "hits": _phrases,
-               "helper_hits": _helper_phrases,
-               "inline_and_helper_agree": sorted(_helper_phrases) == sorted(_phrases)})
+    rec("FZ17 behavioural-witnesses-detect-their-mutations",
+        bool(_witness_results) and all(r.get("detected") for r in _witness_results)
+        and len(_witness_results) == PINNED_WITNESS_COUNT,
+        "every registered witness observed what it exists to observe. This -- not the syntax of a "
+        "return value -- is what decides whether a protected audit still works. Shape "
+        "classification was defeated one token at a time across three reviews and also rejected "
+        "legitimate implementations; it is now a diagnostic label with no authority anywhere. "
+        "SCOPE: these witnesses detect the registered isolated mutations. A coordinated rewrite of "
+        "a witness, its expectation and the production logic together is not detectable from "
+        "inside the repository, and independent exact-head review remains the control for that",
+        level="behavioural witness",
+        extra={"witnesses": len(_witness_results),
+               "detected": sum(1 for r in _witness_results if r.get("detected")),
+               "controls": sum(1 for w in WIT.WITNESS_REGISTRY if w.get("expect_pass"))})
 
     # ---------------------------------------------- Part O: stale cross-file pins
     def _pin_mutation(label, attr, value, why):
@@ -2834,7 +3005,7 @@ def run() -> int:
     # "PP" is a legitimate non-mutation prefix: a positive path asserts an ACCEPTANCE, so it is
     # neither an F-gate nor a mutation, and must not be reported as a stray id.
     stray = [c for c in emitted
-             if not c.startswith(("F", "PP", "PJ", "BC")) and c[:2] not in MUTATION_PREFIXES]
+             if not c.startswith(("F", "PP", "PJ", "BC", "WC")) and c[:2] not in MUTATION_PREFIXES]
     rec("FZ00 completeness", not (missing or unknown or dupes or stray),
         "the emitted check set equals the declared set exactly",
         level="structural source check",
@@ -2872,6 +3043,50 @@ if __name__ == "__main__":
     # rarely-taken branch -- used to escape and end the process with zero structured stdout. All
     # output is buffered into a single print, so any escape lost the whole report. Nothing gets to
     # exit this battery silently now.
+    if WIT.PROBE_FLAG in sys.argv:
+        # Narrow, fixture-free entry point used by the behavioural witnesses. It runs the REAL
+        # structural checks -- the same function the full battery calls -- so a witness observes
+        # production behaviour rather than a re-implementation. Its claim scope is distinct so it
+        # can never be mistaken for the full certification.
+        def _probe_boundary(label, operation_id, thunk, phase="witness probe"):
+            try:
+                return thunk()
+            except BaseException as exc:  # noqa: BLE001
+                rec(label, False,
+                    "a heavy operation failed during the witness probe",
+                    level="boundary",
+                    extra={"operation_id": operation_id, "actual_outcome": "exception",
+                           "exception_type": exc.__class__.__name__,
+                           "controlled_rejection": False})
+                _emit_and_exit({"phase": phase, "operation_id": operation_id,
+                                "actual_outcome": "exception", "controlled_rejection": False,
+                                "exception_classification": "internal_battery_exception",
+                                "timed_out": False})
+
+        try:
+            structural_source_checks(rec, _probe_boundary)
+        except BaseException as _probe_exc:  # noqa: BLE001
+            rec("BC07 no-unstructured-exit", False,
+                "the witness probe raised outside every per-operation boundary",
+                level="boundary",
+                extra={"exception_type": _probe_exc.__class__.__name__,
+                       "controlled_rejection": False})
+            _emit_and_exit({"phase": "witness probe", "operation_id": "unclassified",
+                            "actual_outcome": "exception", "controlled_rejection": False,
+                            "exception_classification": "internal_battery_exception",
+                            "timed_out": False})
+        _probe_passed = sum(1 for c in checks if c["ok"])
+        print(json.dumps({"guard": "audit:ga-gap-assessment-faults",
+                          "claim_scope": "ga-gap-assessment-faults-witness-probe-only",
+                          "release_recommendation": "GA_BLOCKED",
+                          "checks": checks,
+                          "summary": {"passed": _probe_passed,
+                                      "failed": len(checks) - _probe_passed,
+                                      "skipped": 0, "mutations": 0,
+                                      "certification": "witness_probe_not_certification"}},
+                         indent=2, sort_keys=True, ensure_ascii=False))
+        raise SystemExit(0 if _probe_passed == len(checks) else 1)
+
     try:
         raise SystemExit(run())
     except SystemExit:
