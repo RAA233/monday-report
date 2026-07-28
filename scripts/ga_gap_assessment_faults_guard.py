@@ -160,6 +160,8 @@ EXPECTED_CHECK_IDS = [
     "BC04 temporary-state-observation-is-real",
     "BC05 tracked-state-observation-is-real",
     "BC06 every-heavy-operation-call-is-classified",
+    "BC07 no-unstructured-exit",
+    "FZ14 source-audits-are-behaviourally-discriminating",
     "PM22 guard_verdict-raises-before-work",
     "PM23 guard_verdict-raises-after-partial-work",
     "PM24 scope_without-raises",
@@ -175,7 +177,7 @@ EXPECTED_CHECK_IDS = [
     "PM31 stale-faults-id-set-hash-pin",
     "PM32 stale-faults-check-count-pin",
 ]
-EXPECTED_TOTAL_CHECKS = 158
+EXPECTED_TOTAL_CHECKS = 160
 EXPECTED_MUTATION_COUNT = 113
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
@@ -349,8 +351,6 @@ def ctl(artifact: dict, rid: str) -> dict:
 #: an unexpected exit are all DISTINCT from a controlled rejection -- that distinction is the whole
 #: point of the classification, because a battery that scores crashes as refusals certifies itself.
 OUTCOME_SUCCESS = "success"
-OUTCOME_SCOPED_ACCEPTANCE = "expected_scoped_acceptance"
-OUTCOME_CONTROLLED_REJECTION = "controlled_guard_rejection"
 OUTCOME_CLASSES = {
     "PP.fixture": "fixture_construction_failure",
     "PP.legitimate_promotion_payload": "fixture_construction_failure",
@@ -369,15 +369,22 @@ OUTCOME_CLASSES = {
 #: Wall-clock ceiling for one heavy operation. A hang is not a refusal either.
 BOUNDARY_TIMEOUT_SECONDS = 900.0
 
-#: Successful heavy-operation observations, so the normal path of every boundary is evidenced too.
+#: Successful heavy-operation observations. Emitted in the report so the normal path of every
+#: boundary is evidence, not just an assertion.
 BOUNDARY_OBSERVATIONS: list = []
 
 
-def _observed_tracked_state() -> str:
-    """Whether the TRACKED worktree is clean right now. Observed, never assumed."""
+def _observed_tracked_state(root=None) -> str:
+    """Whether the TRACKED worktree is clean right now. Observed, never assumed.
+
+    Takes a root so the observation itself can be shown to DISCRIMINATE: BC05 points it
+    at throwaway repositories it has deliberately made clean and dirty. Asserting only
+    that the return value is one of two strings was satisfied by a hardcoded "clean".
+    """
     try:
         out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
-                             cwd=str(ROOT), capture_output=True, text=True, timeout=60)
+                             cwd=str(root or ROOT), capture_output=True, text=True,
+                             timeout=60)
         if out.returncode != 0:
             return "unknown"
         return "clean" if not out.stdout.strip() else "dirty"
@@ -452,7 +459,11 @@ FALSE_COMPLETENESS_PHRASES = (
 )
 
 
-def _boundary_call_audit(root: pathlib.Path):
+#: Modules whose calls are heavy enough that an unclassified call is a defect.
+HEAVY_MODULES = ("PP", "GEN", "COUPLING", "SYN")
+
+
+def _boundary_call_audit(root: pathlib.Path, source: str = None):
     """Walk THIS file's AST for calls into the positive-path module that are not classified.
 
     A call counts as classified when it is lexically inside the shared wrapper, inside a ``try``
@@ -461,7 +472,9 @@ def _boundary_call_audit(root: pathlib.Path):
     its source does not sit inside the wrapper's call node. Text matching would be fooled by a
     comment; the AST is not.
     """
-    source = (root / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(encoding="utf-8")
+    if source is None:
+        source = (root / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(
+            encoding="utf-8")
     tree = _ast.parse(source)
     wrapper_names = {"classify_boundary", "_boundary", "_guarded", "_bmut"}
     protected_lines, all_lines = set(), {}
@@ -472,11 +485,19 @@ def _boundary_call_audit(root: pathlib.Path):
             if hasattr(child, "lineno"):
                 protected_lines.add(child.lineno)
 
+    run_node = next((n for n in _ast.walk(tree)
+                     if isinstance(n, _ast.FunctionDef) and n.name == "run"), None)
+    run_span = range(run_node.lineno, (run_node.end_lineno or run_node.lineno) + 1)         if run_node else range(0)
+
     for node in _ast.walk(tree):
         if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
             functions[node.name] = node
         elif isinstance(node, _ast.Try) and node.handlers:
-            _mark(node)
+            # A handler that does nothing is the silence this battery forbids, so it
+            # does not count as protection.
+            if any(not all(isinstance(s, _ast.Pass) for s in h.body)
+                   for h in node.handlers):
+                _mark(node)
         elif isinstance(node, _ast.Call):
             func = node.func
             if isinstance(func, _ast.Name) and func.id in wrapper_names:
@@ -485,62 +506,98 @@ def _boundary_call_audit(root: pathlib.Path):
                     if isinstance(arg, _ast.Name):
                         handed_to_wrapper.add(arg.id)
             if (isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Name)
-                    and func.value.id == "PP"):
-                all_lines[node.lineno] = f"PP.{func.attr}:{node.lineno}"
+                    and func.value.id in HEAVY_MODULES):
+                all_lines[node.lineno] = f"{func.value.id}.{func.attr}:{node.lineno}"
+            # An indirect call hides the module behind a string or an alias. The audit
+            # cannot resolve it, so it is reported rather than silently accepted.
+            if (isinstance(func, _ast.Name) and func.id == "getattr" and node.args
+                    and isinstance(node.args[0], _ast.Name)
+                    and node.args[0].id in HEAVY_MODULES):
+                # Only an INDIRECT call into a heavy module hides the operation. getattr on the
+                # drift-guard module to read a pinned constant is an attribute read, not a heavy
+                # operation, and flagging it made the audit noise rather than signal.
+                all_lines[node.lineno] = f"indirect-heavy-getattr:{node.lineno}"
 
     for name in handed_to_wrapper:
         if name in functions:
             _mark(functions[name])
 
-    classified = [label for line, label in all_lines.items() if line in protected_lines]
-    unclassified = [label for line, label in all_lines.items() if line not in protected_lines]
+    # Scope: calls inside run(). Module-level helpers cannot reach run()'s boundary closure and are
+    # covered by the PROCESS-level boundary instead, which BC07 records -- stating that plainly
+    # rather than quietly counting them as classified.
+    in_scope = {line: label for line, label in all_lines.items()
+                if not run_span or line in run_span}
+    classified = [label for line, label in in_scope.items() if line in protected_lines]
+    unclassified = [label for line, label in in_scope.items() if line not in protected_lines]
     return classified, unclassified
 
 
-def _copied_body_report(root: pathlib.Path):
-    """Detect a protected body COPIED into an unexecuted helper while the live body is neutered.
+def _copied_body_report(root: pathlib.Path, source: str = None):
+    """Detect a protected body COPIED into an unexecuted helper, or HOLLOWED to a bare literal.
 
     Structural name/string checks are trivially defeated by preserving names and strings, so this
-    targets the shape of the attack itself: two functions whose bodies are structurally identical
-    where at least one is never referenced, and functions that merely return a constant while an
-    identical body survives elsewhere. Bodies are compared by normalised AST dump, so renaming a
-    copy or reflowing its text does not hide it.
+    targets the shapes of the attack: two functions whose bodies are structurally identical, and
+    functions reduced to returning a bare literal. Bodies are compared by normalised AST dump, so
+    renaming a copy or reflowing its text does not hide it.
 
-    Reachability counts ANY load of the name, not just a direct call: nearly every helper here is
-    handed to another function as a callback, and counting only calls reported them all as dead.
+    Three corrections after an independent review defeated the first cut with one line of code:
+
+    * a hollowed body is ``return []`` / ``{}`` / ``()`` far more often than ``return None`` -- the
+      first cut matched only ``ast.Constant`` and so missed every container literal, including a
+      self-hollowing of THIS function;
+    * duplicate detection was gated behind the reachability arm, so making a copy "referenced" by a
+      single ``if False:`` line disabled it;
+    * a reference from provably-dead code is not a reference. ``if False:`` and ``while False:``
+      bodies are excluded before names are collected.
+
+    None of that makes this sufficient on its own, which is why FZ12 also drives the audits
+    behaviourally against fabricated sources -- a gutted audit fails that immediately.
     """
-    source = (root / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(encoding="utf-8")
+    if source is None:
+        source = (root / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(encoding="utf-8")
     tree = _ast.parse(source)
     functions, referenced = {}, set()
+
+    def _is_dead(node):
+        test = getattr(node, "test", None)
+        return isinstance(test, _ast.Constant) and not test.value
+
+    dead_lines = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.If, _ast.While)) and _is_dead(node):
+            for child in _ast.walk(node):
+                if hasattr(child, "lineno"):
+                    dead_lines.add(child.lineno)
 
     for node in _ast.walk(tree):
         if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
             functions[node.name] = node
         elif isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
-            referenced.add(node.id)
+            if node.lineno not in dead_lines:
+                referenced.add(node.id)
         elif isinstance(node, _ast.Attribute):
-            referenced.add(node.attr)
+            if getattr(node, "lineno", None) not in dead_lines:
+                referenced.add(node.attr)
 
-    def _shape(node):
-        body = [_ast.dump(stmt, annotate_fields=False) for stmt in node.body
-                if not (isinstance(stmt, _ast.Expr) and isinstance(stmt.value, _ast.Constant))]
-        return "\n".join(body)
+    def _live(node):
+        return [s for s in node.body
+                if not (isinstance(s, _ast.Expr) and isinstance(s.value, _ast.Constant))]
 
+    HOLLOW = (_ast.Constant, _ast.List, _ast.Dict, _ast.Tuple, _ast.Set)
     shapes, duplicates, constant_only = {}, [], []
     for name, node in functions.items():
-        shape = _shape(node)
-        if not shape:
-            continue
+        live = _live(node)
+        shape = "\n".join(_ast.dump(s, annotate_fields=False) for s in live)
         if len(shape) > 120:
             shapes.setdefault(shape, []).append(name)
-        live = [s for s in node.body
-                if not (isinstance(s, _ast.Expr) and isinstance(s.value, _ast.Constant))]
-        if len(live) == 1 and isinstance(live[0], _ast.Return) and isinstance(
-                live[0].value, _ast.Constant):
-            constant_only.append(name)
+        if len(live) == 1 and isinstance(live[0], _ast.Return) and isinstance(live[0].value, HOLLOW):
+            # a bare literal return is only suspicious for a function that is supposed to compute
+            if not _ast.walk(live[0].value) or not any(
+                    isinstance(n, (_ast.Call, _ast.Name)) for n in _ast.walk(live[0].value)):
+                constant_only.append(name)
 
     for names in shapes.values():
-        if len(names) > 1 and any(n not in referenced for n in names):
+        if len(names) > 1:
             duplicates.append(sorted(names))
 
     unreferenced = sorted(n for n in functions
@@ -550,7 +607,86 @@ def _copied_body_report(root: pathlib.Path):
             "constant_only_functions": sorted(constant_only), "unreferenced": unreferenced}
 
 
-def _false_phrase_report(root: pathlib.Path):
+def audit_self_test(root: pathlib.Path):
+    """Drive each source audit against FABRICATED sources and require it to report the problem.
+
+    This is the durable half. A purely structural gate can be neutralised by editing the gate, and
+    an independent review neutralised the first cut by replacing a sibling audit's body with
+    ``return []`` -- zero obfuscation, completely invisible. An audit that has been gutted cannot
+    pass a case it is supposed to fail, so each audit is handed a source it MUST flag and a source
+    it MUST NOT, and both directions are required.
+    """
+    results = {}
+
+    hollowed = (
+        "def helper(a):\n"
+        "    return []\n"
+        "\n"
+        "def user():\n"
+        "    return helper(1)\n"
+    )
+    duplicated = (
+        "def live(a):\n"
+        "    total = 0\n"
+        "    for item in a:\n"
+        "        total += item * 2\n"
+        "        total -= item\n"
+        "    return total\n"
+        "\n"
+        "def copy_of_live(a):\n"
+        "    total = 0\n"
+        "    for item in a:\n"
+        "        total += item * 2\n"
+        "        total -= item\n"
+        "    return total\n"
+        "\n"
+        "def user():\n"
+        "    if False:\n"
+        "        copy_of_live([1])\n"
+        "    return live([1])\n"
+    )
+    clean = (
+        "def live(a):\n"
+        "    total = 0\n"
+        "    for item in a:\n"
+        "        total += item * 2\n"
+        "        total -= item\n"
+        "    return total\n"
+        "\n"
+        "def user():\n"
+        "    return live([1])\n"
+    )
+    hollow_report = _copied_body_report(root, source=hollowed)
+    dup_report = _copied_body_report(root, source=duplicated)
+    clean_report = _copied_body_report(root, source=clean)
+    results["detects_hollowed_container_literal"] = bool(hollow_report["constant_only_functions"])
+    results["detects_duplicate_body_hidden_by_dead_reference"] = bool(dup_report["duplicate_bodies"])
+    results["accepts_clean_source"] = not (clean_report["duplicate_bodies"]
+                                           or clean_report["constant_only_functions"])
+
+    phrase = FALSE_COMPLETENESS_PHRASES[0]
+    results["detects_false_phrase"] = bool(
+        _false_phrase_report(root, sources={"fabricated.py": f"# {phrase}\n"}))
+    results["accepts_phrase_free_source"] = not _false_phrase_report(
+        root, sources={"fabricated.py": "# nothing pinned here\n"})
+
+    unwrapped = "def run():\n    return PP.guard_verdict(GG, {})\n"
+    wrapped = "def run():\n    return _boundary('x', 'PP.guard_verdict', lambda: PP.guard_verdict(GG, {}))\n"
+    swallowed = ("def run():\n"
+                 "    try:\n"
+                 "        return PP.guard_verdict(GG, {})\n"
+                 "    except Exception:\n"
+                 "        pass\n")
+    _c1, u1 = _boundary_call_audit(root, source=unwrapped)
+    _c2, u2 = _boundary_call_audit(root, source=wrapped)
+    _c3, u3 = _boundary_call_audit(root, source=swallowed)
+    results["detects_unwrapped_call"] = bool(u1)
+    results["accepts_wrapped_call"] = not u2
+    results["rejects_swallowing_handler"] = bool(u3)
+    return results
+
+
+def _false_phrase_report(root: pathlib.Path, sources: dict = None):
     """Tracked sources scanned for pinned false-completeness text.
 
     The pin list itself is skipped: it lives in this file, so a naive scan matched its own
@@ -558,9 +694,12 @@ def _false_phrase_report(root: pathlib.Path):
     span, not to the whole file.
     """
     hits = []
-    for name in ("ga_gap_assessment_faults_guard.py", "ga_gap_assessment_positive_paths.py",
-                 "ga_gap_assessment_guard.py"):
-        text = (root / "scripts" / name).read_text(encoding="utf-8")
+    names = list(sources) if sources else ["ga_gap_assessment_faults_guard.py",
+                                           "ga_gap_assessment_positive_paths.py",
+                                           "ga_gap_assessment_guard.py"]
+    for name in names:
+        text = (sources[name] if sources
+                else (root / "scripts" / name).read_text(encoding="utf-8"))
         if name == "ga_gap_assessment_faults_guard.py":
             head, _sep, tail = text.partition("FALSE_COMPLETENESS_PHRASES = (")
             _pins, _sep2, rest = tail.partition("\n)\n")
@@ -1244,9 +1383,15 @@ def run() -> int:
             level="boundary", extra=record)
         _emit_and_exit(record)
 
-    def _guarded(label, thunk):
-        """Back-compatible alias; every call site is classified by _boundary."""
-        return _boundary(label, getattr(thunk, "__operation_id__", "PP.unclassified"), thunk)
+    def _chash(target):
+        return _boundary("PJ01 informational-forgery-cannot-move-the-canonical-hash",
+                         "GEN.canonical_hash", lambda: GEN.canonical_hash(target),
+                         phase="informational isolation")
+
+    def _cbody(target):
+        return _boundary("PJ01 informational-forgery-cannot-move-the-canonical-hash",
+                         "GEN.canonical_body", lambda: GEN.canonical_body(target),
+                         phase="informational isolation")
 
     fx = _boundary("PP00 positive-path-fixture-built", "PP.fixture",
                    lambda: PP.fixture(SYN, GEN, GA_MOD), phase="fixture")
@@ -1295,7 +1440,7 @@ def run() -> int:
     tenant = fx["controls"].get("ga_tenant_authorization", {})
     tdetail = tenant.get("verified_promotion_detail") or {}
     both = {"tenant-rls-enforcement-evidence.v2.json", "tenant-authorization-evidence.v3.json"}
-    conj = _guarded("PP03 tenant-conjunction-accepted", lambda: PP.conjunction_members_matrix(SYN, GEN, GA_MOD))
+    conj = _boundary("PP03 tenant-conjunction-accepted", "PP.conjunction_members_matrix", lambda: PP.conjunction_members_matrix(SYN, GEN, GA_MOD))
     alone_blocked = all(v == "BLOCKED" for v in conj["alone"].values())
     rec("PP03 tenant-conjunction-accepted",
         matrix.get("ga_tenant_authorization", {}).get("disposition") == "PASS"
@@ -1323,7 +1468,7 @@ def run() -> int:
             "PP07 correction-atomicity-own-artifact-accepted",
             ["normalized-correction-persistence-evidence.v4.json"])
 
-    bc = _guarded("PP08 unrelated-artifacts-rejected", lambda: PP.unrelated_and_stale_matrix(SYN, GEN, GA_MOD))
+    bc = _boundary("PP08 unrelated-artifacts-rejected", "PP.unrelated_and_stale_matrix", lambda: PP.unrelated_and_stale_matrix(SYN, GEN, GA_MOD))
     rec("PP08 unrelated-artifacts-rejected",
         isinstance(bc.get("unrelated"), list)
         and "measured" in bc and bc["measured"]
@@ -1350,12 +1495,12 @@ def run() -> int:
                "synthetic_artifact": True, "parser_evaluator_coverage_only": True,
                "real_production_execution": False})
 
-    derived = _guarded("PP11 graph-exactness-derived-from-evaluator",
+    derived = _boundary("PP11 graph-exactness-derived-from-evaluator", "PP.graph_fingerprint",
                        lambda: PP.graph_fingerprint(COUPLING, ROOT))
     # Exactness is asserted against the AST-derived graph itself, arm by arm: the artifact set, the
     # validator set, the extra-predicate set and the cardinality flag must each match EXACTLY, not
     # merely be non-empty. A non-empty assertion is satisfied by any mapping at all.
-    independent = _guarded("PP11 graph-exactness-derived-from-evaluator",
+    independent = _boundary("PP11 graph-exactness-derived-from-evaluator", "PP.expected_arms",
                            lambda: PP.expected_arms(SYN, COUPLING, ROOT))
     exact_arms = {}
     for cid, spec in derived.items():
@@ -1396,14 +1541,14 @@ def run() -> int:
     # directory. It is declared informational. That declaration is only worth something if it is
     # enforced, so the whole informational surface is forged at once and the authoritative outputs
     # are required not to move.
-    forged = _guarded("PJ01 informational-forgery-cannot-move-the-canonical-hash",
+    forged = _boundary("PJ01 informational-forgery-cannot-move-the-canonical-hash", "PP.informational_forgery",
                       lambda: PP.informational_forgery(payload))
-    honest_surface = _guarded("PJ02 informational-forgery-cannot-move-the-release-surface",
+    honest_surface = _boundary("PJ02 informational-forgery-cannot-move-the-release-surface", "PP.release_surface",
                               lambda: PP.release_surface(payload))
-    forged_surface = _guarded("PJ02 informational-forgery-cannot-move-the-release-surface",
+    forged_surface = _boundary("PJ02 informational-forgery-cannot-move-the-release-surface", "PP.release_surface",
                               lambda: PP.release_surface(forged))
-    honest_hash = GEN.canonical_hash(payload)
-    forged_hash = GEN.canonical_hash(forged)
+    honest_hash = _chash(payload)
+    forged_hash = _chash(forged)
     # The forgery must actually forge. A no-op informational_forgery() would satisfy every
     # assertion below while proving nothing at all -- the same vacuity that let an inert
     # EVIDENCE_SCOPE resolver stay green, one layer up.
@@ -1441,7 +1586,7 @@ def run() -> int:
     rec("PJ01 informational-forgery-cannot-move-the-canonical-hash",
         payload_surface and control_surface and forged_context
         and payload != forged
-        and honest_hash == forged_hash and GEN.canonical_body(payload) == GEN.canonical_body(forged),
+        and honest_hash == forged_hash and _cbody(payload) == _cbody(forged),
         "every informational field is forged AT ONCE -- verified context rewritten to a green "
         "28-PASS GA_READY environment, both honesty flags inverted, every control claiming a "
         "verified PASS with a forged promoter, evidence counters inflated -- and the canonical body "
@@ -1469,9 +1614,9 @@ def run() -> int:
                "forged_context_claims": (forged.get("contexts") or {}).get(
                    PP.INFORMATIONAL_CONTEXT, {}).get("ga")})
 
-    touched = _guarded("PJ03 canonical-hash-is-sensitive-to-authoritative-change",
+    touched = _boundary("PJ03 canonical-hash-is-sensitive-to-authoritative-change", "PP.authoritative_touch",
                        lambda: PP.authoritative_touch(payload))
-    touched_hash = GEN.canonical_hash(touched)
+    touched_hash = _chash(touched)
     rec("PJ03 canonical-hash-is-sensitive-to-authoritative-change",
         touched_hash != honest_hash,
         "ANTI-VACUITY partner for PJ01: changing exactly ONE authoritative field -- a single "
@@ -1499,20 +1644,20 @@ def run() -> int:
                "authoritative": {k: auth_ctx.get(k) for k in
                                  ("informational_only", "authoritative_for_release")}})
 
-    hermetic = _guarded("PJ05 authoritative-half-is-reproducible-without-evidence",
+    hermetic = _boundary("PJ05 authoritative-half-is-reproducible-without-evidence", "PP.hermetic_reference_payload",
                         lambda: PP.hermetic_reference_payload(GEN))
-    hermetic_surface = _guarded("PJ05 authoritative-half-is-reproducible-without-evidence",
+    hermetic_surface = _boundary("PJ05 authoritative-half-is-reproducible-without-evidence", "PP.release_surface",
                                 lambda: PP.release_surface(hermetic))
     rec("PJ05 authoritative-half-is-reproducible-without-evidence",
         hermetic_surface == honest_surface
-        and GEN.canonical_hash(hermetic) == honest_hash,
+        and _chash(hermetic) == honest_hash,
         "BEHAVIOURAL proof that the authoritative half depends on the tracked repository ALONE: a "
         "payload generated with every evidence artifact present and one generated with none at all "
         "produce the same dispositions, the same blocker ids, the same blocking reasons and the "
         "same canonical hash. Declaring the local half informational is a claim; this measures it",
         level="informational isolation",
         extra={"evidence_present_hash": honest_hash[:16],
-               "no_evidence_hash": GEN.canonical_hash(hermetic)[:16],
+               "no_evidence_hash": _chash(hermetic)[:16],
                "dispositions_equal": hermetic_surface["dispositions"]
                                      == honest_surface["dispositions"]})
 
@@ -1907,7 +2052,8 @@ def run() -> int:
     # Every boundary outcome is exercised DIRECTLY against the shared classifier, so the normal
     # path is evidenced as well as the failure paths. Without a normal-path case these would all
     # be satisfied by a classifier that reports failure unconditionally.
-    def _bmut(check_id, operation_id, thunk, expect_outcome, why, validate=None, prep=None):
+    def _bmut(check_id, operation_id, thunk, expect_outcome, why, validate=None,
+              prep=None, fingerprint_input=None):
         restore = prep() if prep else None
         try:
             ok, record, _value = classify_boundary(operation_id, thunk, validate=validate)
@@ -1921,7 +2067,7 @@ def run() -> int:
             MUTATION_FINGERPRINTS[check_id] = hashlib.sha256(
                 json.dumps([operation_id, expect_outcome,
                             record.get("exception_classification"),
-                            record.get("exception_type"), check_id.split(" ", 1)[-1]],
+                            record.get("exception_type"), fingerprint_input],
                            sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
             MUTATION_TRIPPED[check_id] = [record.get("actual_outcome")]
         rec(check_id, detected, why, level="boundary",
@@ -1976,11 +2122,13 @@ def run() -> int:
     _bmut("PM22 guard_verdict-raises-before-work", "PP.guard_verdict",
           _raiser("before-work"), "exception",
           "a raise inside guard_verdict is classified as a validator failure, never as a "
-          "controlled rejection. It previously ended the battery with zero structured output")
+          "controlled rejection. It previously ended the battery with zero structured output",
+          fingerprint_input="raise-before-work")
     _bmut("PM23 guard_verdict-raises-after-partial-work", "PP.guard_verdict",
           _partial("after-partial-work"), "exception",
           "a raise AFTER partial work -- temporary state already created -- is still an "
-          "exception, not a refusal, and the partial state is removed on the way out")
+          "exception, not a refusal, and the partial state is removed on the way out",
+          fingerprint_input="raise-after-temp-dir-created")
     _bmut("PM24 scope_without-raises", "PP.scope_without",
           _raiser("scope-without"), "exception",
           "a raise inside scope_without is classified as a validator failure. This boundary "
@@ -1996,12 +2144,13 @@ def run() -> int:
           lambda: "not-a-graph", "malformed_result",
           "an operation returning the WRONG TYPE is a malformed result. It does not raise, so "
           "only the validator distinguishes it",
-          validate=lambda v: isinstance(v, dict))
+          validate=lambda v: isinstance(v, dict), fingerprint_input="wrong-type-str")
     _bmut("PM28 boundary-returns-empty-result", "PP.graph_fingerprint",
           lambda: {}, "malformed_result",
           "an EMPTY graph is malformed, not success: it is the shape an inert resolver produces "
           "and the exact regression this battery exists to catch",
-          validate=lambda v: isinstance(v, dict) and len(v) == 7)
+          validate=lambda v: isinstance(v, dict) and len(v) == 7,
+          fingerprint_input="empty-dict-inert-resolver")
     _bmut("PM29 boundary-exceeds-its-timeout", "PP.guard_verdict",
           lambda: time.sleep(0.05) or "done", "timeout",
           "an operation running past its ceiling is classified as a TIMEOUT, not a refusal. The ceiling is "
@@ -2026,11 +2175,32 @@ def run() -> int:
         extra={"detected_planted_leftover": _temp_probe_detects,
                "state_after_cleanup": _observed_temporary_state()})
 
+    def _tracked_probe():
+        """Point the observer at throwaway repositories made deliberately clean and dirty."""
+        scratch = pathlib.Path(tempfile.mkdtemp(prefix="pp-tracked-probe-"))
+        try:
+            subprocess.run(["git", "init", "-q"], cwd=str(scratch), timeout=120, check=True)
+            (scratch / "tracked.txt").write_text("one\n", encoding="utf-8")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=str(scratch), timeout=120, check=True)
+            subprocess.run(["git", "-c", "user.email=probe@local", "-c", "user.name=probe",
+                            "commit", "-q", "-m", "probe"], cwd=str(scratch), timeout=120, check=True)
+            when_clean = _observed_tracked_state(scratch)
+            (scratch / "tracked.txt").write_text("two\n", encoding="utf-8")
+            when_dirty = _observed_tracked_state(scratch)
+            return {"clean_repo": when_clean, "dirty_repo": when_dirty}
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    _tracked = _boundary("BC05 tracked-state-observation-is-real", "PP.tracked_probe",
+                         _tracked_probe, phase="boundary")
     rec("BC05 tracked-state-observation-is-real",
-        _observed_tracked_state() in {"clean", "dirty"},
-        "the tracked-state observation returns an OBSERVED value. The crash contract reports "
-        "restoration from it, and a hardcoded \"restored\" would be a fabricated claim",
-        level="boundary", extra={"tracked_state": _observed_tracked_state()})
+        _tracked["clean_repo"] == "clean" and _tracked["dirty_repo"] == "dirty",
+        "the tracked-state observation DISCRIMINATES: pointed at a throwaway repository it "
+        "reports clean, and at the same repository with a tracked file modified it reports dirty. "
+        "Asserting only that the value was one of two strings was satisfied by a hardcoded "
+        "\"clean\" -- and the crash contract reports restoration from this observation",
+        level="boundary",
+        extra=dict(_tracked, live_tracked_state=_observed_tracked_state()))
 
     _classified, _unclassified = _boundary_call_audit(ROOT)
     rec("BC06 every-heavy-operation-call-is-classified",
@@ -2099,6 +2269,24 @@ def run() -> int:
         level="structural source check", extra=_copies)
 
     # ---------------------------------------------- Part M: no reintroduced false claims
+    _self = _boundary("FZ14 source-audits-are-behaviourally-discriminating", "PP.audit_self_test",
+                      lambda: audit_self_test(ROOT), phase="structural source check")
+    rec("FZ14 source-audits-are-behaviourally-discriminating",
+        all(_self.values()),
+        "each source audit is DRIVEN against fabricated sources and must report the problem in one "
+        "and stay silent on the other. This is the durable half: a purely structural gate is "
+        "neutralised by editing the gate, and a review neutralised the first cut by replacing a "
+        "sibling audit's body with `return []` -- no copy, no obfuscation, completely invisible. "
+        "A gutted audit cannot pass a case it exists to fail",
+        level="structural source check", extra=_self)
+
+    rec("BC07 no-unstructured-exit", True,
+        "the process-level boundary is installed: any exception escaping every per-operation "
+        "boundary is reported here as a named failure carrying the structured contract. All output "
+        "is buffered into a single print, so before this an escape lost the entire report",
+        level="boundary",
+        extra={"installed": True, "heavy_modules_audited": list(HEAVY_MODULES)})
+
     _phrases = _boundary("FZ13 no-known-false-completeness-claims", "PP.false_phrase_report",
                          lambda: _false_phrase_report(ROOT), phase="structural source check")
     rec("FZ13 no-known-false-completeness-claims",
@@ -2113,26 +2301,37 @@ def run() -> int:
 
     # ---------------------------------------------- Part O: stale cross-file pins
     def _pin_mutation(label, attr, value, why):
+        """Set a STALE pin and require the real drift guard to reject it.
+
+        The first cut merely asserted that setattr had changed the attribute -- a tautology that
+        never ran a guard and observed nothing. This runs the actual drift guard against the honest
+        artifact with the pin corrupted, and requires a named refusal.
+        """
         original = getattr(GG, attr)
+        failing, crashed = [], False
         try:
             setattr(GG, attr, value)
-            detected = getattr(GG, attr) != original
+            rc, failing = PP.guard_verdict(GG, payload)
+            crashed = any(str(x).startswith("<exception") for x in failing)
+        except Exception as exc:  # noqa: BLE001
+            crashed, failing = True, [f"<exception:{exc.__class__.__name__}>"]
+            rc = 1
         finally:
             setattr(GG, attr, original)
+        detected = rc != 0 and bool(failing) and not crashed
         MUTATION_FINGERPRINTS[label] = hashlib.sha256(
             json.dumps([attr, str(value)], sort_keys=True).encode("utf-8")).hexdigest()[:16]
-        MUTATION_TRIPPED[label] = [attr]
+        MUTATION_TRIPPED[label] = list(failing)
         rec(label, detected, why, level="stale pin mutation",
-            extra={"pin": attr, "pinned_value_length": len(str(original))})
+            extra={"pin": attr, "failing": failing[:3], "crashed": crashed})
 
     _pin_mutation("PM31 stale-faults-id-set-hash-pin", "PINNED_FAULTS_ID_SET_HASH", "0" * 64,
-                  "a STALE cross-file id-set pin is a real difference from the recomputed set. "
-                  "The drift guard recomputes this battery's declared id set and compares; a "
-                  "pin left behind after ids change would certify a set that no longer exists")
+                  "a STALE cross-file id-set pin is REFUSED by the real drift guard. The drift "
+                  "guard recomputes this battery's declared id set and compares against the pin, so "
+                  "a pin left behind after ids change would certify a set that no longer exists")
     _pin_mutation("PM32 stale-faults-check-count-pin", "PINNED_FAULTS_CHECK_COUNT", 1,
-                  "a STALE cross-file count pin is likewise a real difference. Count and hash "
-                  "are pinned separately so a same-size id substitution cannot slip past both")
-
+                  "a STALE cross-file count pin is likewise refused. Count and hash are pinned "
+                  "separately so a same-size id substitution cannot slip past both")
     # ---------------------------------------------------------------- completeness
     dup = {}
     for fingerprint in set(MUTATION_FINGERPRINTS.values()):
@@ -2258,7 +2457,10 @@ def run() -> int:
     # predicate it claimed to pin was ``True``. An exact-head review hollowed GA50b, GA04k and
     # GA47f exactly that way with every needle intact and both batteries stayed green.
     guard_source = (ROOT / "scripts" / "ga_gap_assessment_guard.py").read_text(encoding="utf-8")
-    structural = COUPLING.verify_coupling(guard_source)
+    structural = _boundary("FZ07 protected-gates-are-structurally-load-bearing",
+                           "COUPLING.verify_coupling",
+                           lambda: COUPLING.verify_coupling(guard_source),
+                           phase="structural source check")
     rec("FZ07 protected-gates-are-structurally-load-bearing",
         not structural,
         "each protected gate's PREDICATE is parsed from the AST and must be non-constant, must read "
@@ -2272,7 +2474,11 @@ def run() -> int:
     # require the verifier to catch it. A mutation that fails to PARSE is not counted as detected --
     # that would only prove the mutation was malformed.
     undetected, unparsed, absent = [], [], []
-    for name, mutated in sorted(COUPLING.mutations(guard_source).items()):
+    _coupling_mutations = _boundary("FZ07 protected-gates-are-structurally-load-bearing",
+                                    "COUPLING.mutations",
+                                    lambda: COUPLING.mutations(guard_source),
+                                    phase="structural source check")
+    for name, mutated in sorted(_coupling_mutations.items()):
         if mutated is None:
             absent.append(name)
             continue
@@ -2281,14 +2487,17 @@ def run() -> int:
         except SyntaxError:
             unparsed.append(name)
             continue
-        problems = COUPLING.verify_coupling(mutated)
+        problems = _boundary("FZ07 protected-gates-are-structurally-load-bearing",
+                             "COUPLING.verify_coupling",
+                             lambda: COUPLING.verify_coupling(mutated),
+                             phase="structural source check")
         # Own-gate attribution is REQUIRED, not merely observed: accepting "some problem" is the
         # masking bug that made a mutation look covered because a different gate tripped.
         gate = next((g for g in COUPLING.PROTECTED_GATES if g in name), None)
         if (not problems or any("does not parse" in p for p in problems)
                 or (gate and not any(p.startswith(gate) for p in problems))):
             undetected.append(name)
-    mutation_total = len(COUPLING.mutations(guard_source))
+    mutation_total = len(_coupling_mutations)
     gate_set = ",".join(sorted(COUPLING.PROTECTED_GATES))
     rec("FZ08 gate-hollowing-is-behaviorally-detected",
         mutation_total >= 8 and not undetected and not unparsed and not absent,
@@ -2453,4 +2662,24 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run())
+    # LAST-RESORT boundary. Per-operation classification covers the enumerated heavy calls, but a
+    # raise anywhere else -- a helper nobody thought of, a module-level constant, a typo in a
+    # rarely-taken branch -- used to escape and end the process with zero structured stdout. All
+    # output is buffered into a single print, so any escape lost the whole report. Nothing gets to
+    # exit this battery silently now.
+    try:
+        raise SystemExit(run())
+    except SystemExit:
+        raise
+    except BaseException as _exc:  # noqa: BLE001 - an escape is a battery fault, never a refusal
+        checks.append({"check_id": "BC07 no-unstructured-exit", "ok": False,
+                       "level": "boundary",
+                       "why": "an exception escaped every per-operation boundary. It is reported "
+                              "here as a named failure with the structured contract rather than as "
+                              "a silent non-zero exit",
+                       "extra": {"exception_type": _exc.__class__.__name__,
+                                 "operation_id": "unclassified"}})
+        _emit_and_exit({"phase": "unclassified", "operation_id": "unclassified",
+                        "actual_outcome": "exception", "controlled_rejection": False,
+                        "exception_classification": "internal_battery_exception",
+                        "timed_out": False})
