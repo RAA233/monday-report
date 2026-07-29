@@ -1,15 +1,30 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./shell/AppShell";
 import { Landing } from "./pages/Landing";
+import { SignIn } from "./pages/SignIn";
+import { Ask } from "./pages/Ask";
+import { Reports } from "./pages/Reports";
+import { Studio } from "./pages/Studio";
+import { Validation } from "./pages/Validation";
+import { Exports } from "./pages/Exports";
 import { PendingStage } from "./pages/PendingStage";
 import { NotFound } from "./pages/NotFound";
 
 /**
  * Route contract for the redesigned entry.
  *
- * `/` is the public product page. The Stage 1 workflow views land in the next
- * commit; until then every reserved destination renders the labelled
- * implementation-pending state rather than a surface that pretends to work.
+ *   /                          public landing
+ *   /app/signin                sign-in surface (outside the shell)
+ *   /app                       Ask — the chat-first home
+ *   /app/reports               Monday reports
+ *   /app/reports/:id/draft     Report Studio for one report
+ *   /app/studio                Report Studio without a selected report
+ *   /app/validation            validation queue
+ *   /app/exports               exports and signed references
+ *   /app/chat                  → /app  (the chat-first home IS Ask)
+ *   /app/{well,upload,benchmarking,failures,audit,settings}
+ *                              reserved, explicitly labelled as not implemented
+ *   /app/*                     in-shell not found
  *
  * Deep-route refresh works because `vite.redesign.config.ts` rewrites non-asset
  * GETs to `/redesign.html` rather than letting Vite fall back to the v1 root
@@ -19,17 +34,20 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<Landing />} />
+      <Route path="/app/signin" element={<SignIn />} />
 
       <Route path="/app" element={<AppShell />}>
-        <Route index element={<PendingStage />} />
+        <Route index element={<Ask />} />
+        <Route path="reports" element={<Reports />} />
+        <Route path="reports/:reportId/draft" element={<Studio />} />
+        <Route path="studio" element={<Studio />} />
+        <Route path="validation" element={<Validation />} />
+        <Route path="exports" element={<Exports />} />
 
         {/* Chat is not a separate destination — Ask is the chat-first home. */}
         <Route path="chat" element={<Navigate to="/app" replace />} />
 
-        <Route path="reports" element={<PendingStage />} />
-        <Route path="studio" element={<PendingStage />} />
-        <Route path="validation" element={<PendingStage />} />
-        <Route path="exports" element={<PendingStage />} />
+        {/* Reserved for the next increment; each renders a labelled pending state. */}
         <Route path="well" element={<PendingStage />} />
         <Route path="upload" element={<PendingStage />} />
         <Route path="benchmarking" element={<PendingStage />} />
@@ -40,6 +58,7 @@ export function AppRoutes() {
         <Route path="*" element={<NotFound />} />
       </Route>
 
+      {/* Anything outside /app returns to the public landing page. */}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
