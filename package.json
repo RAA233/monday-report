@@ -125,6 +125,7 @@
     "package:client-approval": "python scripts/client_data_approval.py",
     "preview": "vite preview --host 127.0.0.1",
     "preview:redesign": "vite preview --config vite.redesign.config.ts",
+    "test:ui-redesign": "node scripts/ui_redesign_e2e.mjs",
     "audit:read-coherence": "python scripts/read_coherence_guard.py"
   },
   "dependencies": {
