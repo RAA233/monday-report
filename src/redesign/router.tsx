@@ -1,15 +1,15 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./shell/AppShell";
+import { Landing } from "./pages/Landing";
 import { PendingStage } from "./pages/PendingStage";
 import { NotFound } from "./pages/NotFound";
 
 /**
  * Route contract for the redesigned entry.
  *
- * This commit establishes the shell and the routing foundation. The landing page
- * and the Stage 1 workflow views land in the following commits; until then every
- * reserved destination renders the labelled implementation-pending state rather
- * than a surface that pretends to work.
+ * `/` is the public product page. The Stage 1 workflow views land in the next
+ * commit; until then every reserved destination renders the labelled
+ * implementation-pending state rather than a surface that pretends to work.
  *
  * Deep-route refresh works because `vite.redesign.config.ts` rewrites non-asset
  * GETs to `/redesign.html` rather than letting Vite fall back to the v1 root
@@ -18,8 +18,7 @@ import { NotFound } from "./pages/NotFound";
 export function AppRoutes() {
   return (
     <Routes>
-      {/* The public landing page arrives in the next commit. */}
-      <Route path="/" element={<Navigate to="/app" replace />} />
+      <Route path="/" element={<Landing />} />
 
       <Route path="/app" element={<AppShell />}>
         <Route index element={<PendingStage />} />
