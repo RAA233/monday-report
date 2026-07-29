@@ -46,7 +46,8 @@ import ga_gap_assessment_witnesses as WIT  # noqa: E402
 import synthetic_ga_evidence as SYN  # noqa: E402
 
 checks: list[dict] = []
-MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP", "MV", "MI", "MG", "MX", "PM", "WT")
+MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP", "MV", "MI", "MG", "MX", "PM",
+                     "WT", "AJ")
 
 DB_ID, QUEUE_ID = "production-database-adapter", "production-queue-adapter"
 
@@ -158,20 +159,27 @@ EXPECTED_CHECK_IDS = [
     "FZ15 pin-assignments-resolve-to-one-live-node",
     "FZ16 witness-manifest-is-pinned",
     "FZ17 behavioural-witnesses-detect-their-mutations",
-    "WT01 source-audit execution",
-    "WT02 source-audit execution",
-    "WT03 source-audit execution",
-    "WT04 source-audit execution",
-    "WT05 inline source scan",
-    "WT06 inline source scan",
-    "WT07 pin-set completeness",
-    "WT08 pin-set completeness",
-    "WT09 process handler",
-    "WT10 process handler",
-    "WT11 process handler",
-    "WT12 process handler",
-    "WT13 process handler",
-    "WT14 BC08's real property",
+    "WA00 witness-module-has-no-acceptance-authority",
+    "WA01 witness-manifest-and-constructors-agree-exactly",
+    "AJ01 constructor-returns-a-no-op",
+    "AJ02 constructor-payloads-swapped",
+    "AJ03 constructor-edits-an-undeclared-path",
+    "AJ04 constructor-emits-invalid-source",
+    "AJ05 constructor-is-unknown",
+    "WT01 witness",
+    "WT02 witness",
+    "WT03 witness",
+    "WT04 witness",
+    "WT05 witness",
+    "WT06 witness",
+    "WT07 witness",
+    "WT08 witness",
+    "WT09 witness",
+    "WT10 witness",
+    "WT11 witness",
+    "WT12 witness",
+    "WT13 witness",
+    "WT14 witness",
     "WC01 control",
     "WC02 control",
     "BC01 guard_verdict-normal-path-succeeds",
@@ -201,12 +209,86 @@ EXPECTED_CHECK_IDS = [
 
 #: Witness-manifest pins. The manifest, its protected-property set and its id set are each
 #: hashed, so a witness cannot be removed, renamed, duplicated or retargeted quietly.
-PINNED_WITNESS_MANIFEST_HASH = "8620d821333c8709a6e52a58fb7027a14393c2e5b1cac87b233466c79d1c6d00"
+PINNED_WITNESS_MANIFEST_HASH = "5f740b63518a7684f5d07518b691824d75225562803da80218107de1676b1017"
 PINNED_PROTECTED_PROPERTY_HASH = "95cf0977ef33ea5b483fc551016ddfa643b3d118d854914d72f8d10f0c924dc7"
 PINNED_WITNESS_ID_HASH = "7c30300e7eaf8582ce3f4dbeeb66f9d6aa2419db939c0a43556f8386b0645477"
 PINNED_WITNESS_COUNT = 16
-EXPECTED_TOTAL_CHECKS = 180
-EXPECTED_MUTATION_COUNT = 127
+
+#: The AUTHORITATIVE witness manifest. It lives here, in the guard that adjudicates, and it
+#: owns every expectation. The witness module supplies mutation payloads and nothing else: a
+#: module that both constructs a mutation and declares what its success looks like can be
+#: edited on both sides at once, and an independent review canned that module's aggregate
+#: functions and left this battery fully green.
+WITNESS_TARGET_PATH = "scripts/ga_gap_assessment_faults_guard.py"
+AUTHORITATIVE_WITNESS_MANIFEST = (
+    {"witness_id": "WT01", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("FZ14 source-audits-are-behaviourally-discriminating",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT02", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("FZ14 source-audits-are-behaviourally-discriminating",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT03", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("FZ14 source-audits-are-behaviourally-discriminating",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT04", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("FZ14 source-audits-are-behaviourally-discriminating",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT05", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("FZ13 no-known-false-completeness-claims",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT06", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("FZ13 no-known-false-completeness-claims",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT07", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("FZ14 source-audits-are-behaviourally-discriminating",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT08", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("FZ14 source-audits-are-behaviourally-discriminating",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT09", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT10", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT11", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT12", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT13", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WT14", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": ("BC08 canonical-hash-boundary",),
+     "expected_exit": "nonzero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+    {"witness_id": "WC01", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": (),
+     "expected_exit": "zero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": True},
+    {"witness_id": "WC02", "target_path": WITNESS_TARGET_PATH,
+     "expected_failing_checks": (),
+     "expected_exit": "zero", "expected_output": "structured_json",
+     "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": True},
+)
+
+EXPECTED_TOTAL_CHECKS = 187
+EXPECTED_MUTATION_COUNT = 132
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
@@ -546,7 +628,7 @@ FALSE_COMPLETENESS_PHRASES = (
 
 
 #: Modules whose calls are heavy enough that an unclassified call is a defect.
-HEAVY_MODULES = ("PP", "GEN", "COUPLING", "SYN")
+HEAVY_MODULES = ("PP", "GEN", "COUPLING", "SYN", "WIT")
 
 
 def _boundary_call_audit(root: pathlib.Path, source: str = None):
@@ -615,6 +697,29 @@ def _boundary_call_audit(root: pathlib.Path, source: str = None):
     classified = [label for line, label in in_scope.items() if line in protected_lines]
     unclassified = [label for line, label in in_scope.items() if line not in protected_lines]
     return classified, unclassified
+
+
+def _witness_authority_audit(root: pathlib.Path) -> dict:
+    """Confirm no witness-module function is consulted for an acceptance decision.
+
+    "Acceptance" means a call whose result reaches a `rec(...)` verdict expression. The module may
+    still be called for payloads and location helpers; what it may not do is decide.
+    """
+    source = (root / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(encoding="utf-8")
+    banned = {"diagnostic_run_all", "diagnostic_evaluate", "run_all_witnesses", "evaluate_witness",
+              "handler_contract_holds"}
+    found = []
+    for node in _ast.walk(_ast.parse(source)):
+        if not isinstance(node, _ast.Call):
+            continue
+        func = node.func
+        if (isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Name)
+                and func.value.id == "WIT" and func.attr in banned):
+            found.append(f"WIT.{func.attr}:{node.lineno}")
+    return {"banned_names": sorted(banned), "authority_calls": sorted(found),
+            "witness_module_sha256": hashlib.sha256(
+                (root / "scripts" / "ga_gap_assessment_witnesses.py")
+                .read_bytes()).hexdigest()}
 
 
 def _copied_body_report(root: pathlib.Path, source: str = None):
@@ -898,6 +1003,30 @@ def _safely(observer):
         return "unknown"
 
 
+#: Exit code for an internal battery failure. Non-zero by construction.
+INTERNAL_ERROR_EXIT_CODE = 1
+
+
+def emit_structured_internal_failure(exc: BaseException) -> None:
+    """Print the structured internal-failure document. Does NOT exit -- the handler does that.
+
+    Split out so the process handler can be a flat two-statement sequence: emit, then terminate
+    non-zero. A handler whose termination is implicit inside a helper cannot be verified by
+    inspection, and analysing reachability in general is exactly what let an emitter behind
+    ``for _ in ():`` satisfy the old check.
+    """
+    checks.append({"check_id": "BC07 no-unstructured-exit", "ok": False, "level": "boundary",
+                   "why": "an exception escaped every per-operation boundary. It is reported here "
+                          "as a named failure with the structured contract rather than as a silent "
+                          "non-zero exit",
+                   "extra": {"exception_type": exc.__class__.__name__,
+                             "operation_id": "unclassified"}})
+    _emit_structured({"phase": "unclassified", "operation_id": "unclassified",
+                      "actual_outcome": "exception", "controlled_rejection": False,
+                      "exception_classification": "internal_battery_exception",
+                      "timed_out": False})
+
+
 def _emit_and_exit(failure: dict = None) -> None:
     """Emit the structured report and exit non-zero.
 
@@ -950,7 +1079,15 @@ def _emit_and_exit(failure: dict = None) -> None:
                                   "baseline_anchor_holds": False,
                                   "certification": "not_passed"}},
                      indent=2, sort_keys=True, ensure_ascii=False))
-    raise SystemExit(1)
+    raise SystemExit(INTERNAL_ERROR_EXIT_CODE)
+
+
+def _emit_structured(failure: dict = None) -> None:
+    """The emitting half of _emit_and_exit, without the termination."""
+    try:
+        _emit_and_exit(failure)
+    except SystemExit:
+        return
 
 
 
@@ -1046,7 +1183,9 @@ def structural_source_checks(rec, boundary):
     _proc_boundary = bool(
         _handler["handler_found"] and _handler["catches_base_exception"] and _handler["emits"]
         and _handler["terminates_nonzero"] and not _handler["is_pass"]
-        and not _handler["can_fall_through"] and not _handler["returns_success"])
+        and not _handler["forbidden_nodes"] and _handler["handler_count"] == 1
+        and _handler["reason"] is None
+        and _handler["termination_index"] > _handler["emitter_index"])
     _rehash = _boundary("BC08 canonical-hash-boundary", "PP.rehash_boundary_contract",
                         lambda: WIT.rehash_boundary_contract(_handler_source), phase="boundary")
     rec("BC08 canonical-hash-boundary",
@@ -1083,7 +1222,7 @@ def structural_source_checks(rec, boundary):
         """
         found = []
         for _name in ("ga_gap_assessment_faults_guard.py", "ga_gap_assessment_positive_paths.py",
-                      "ga_gap_assessment_guard.py"):
+                      "ga_gap_assessment_guard.py", "ga_gap_assessment_witnesses.py"):
             _text = (ROOT / "scripts" / _name).read_text(encoding="utf-8")
             _span = WIT.excluded_span(_text, "FALSE_COMPLETENESS_PHRASES")
             if _span:
@@ -1093,8 +1232,12 @@ def structural_source_checks(rec, boundary):
             found.extend(f"{_name}: {_p}" for _p in FALSE_COMPLETENESS_PHRASES if _p.lower() in _low)
         return found
 
-    _pin_reports = {name: WIT.resolve_module_assignment(_handler_source, name)
-                    for name in ("FALSE_COMPLETENESS_PHRASES", "REQUIRED_SELF_TEST_PROBES")}
+    _pin_reports = _boundary("FZ15 pin-assignments-resolve-to-one-live-node",
+                             "WIT.resolve_module_assignment",
+                             lambda: {name: WIT.resolve_module_assignment(_handler_source, name)
+                                      for name in ("FALSE_COMPLETENESS_PHRASES",
+                                                   "REQUIRED_SELF_TEST_PROBES")},
+                             phase="structural source check")
     rec("FZ15 pin-assignments-resolve-to-one-live-node",
         all(r["resolved"] for r in _pin_reports.values()),
         "each pin is located as exactly ONE live module-level assignment of a non-empty sequence of "
@@ -1103,13 +1246,15 @@ def structural_source_checks(rec, boundary):
         "are each refused. Raw-text location was bypassable by a comment carrying the assignment "
         "text",
         level="structural source check",
-        extra={name: {k: r[k] for k in ("resolved", "reason", "value_count", "span")}
+        extra={name: {k: r.get(k) for k in ("resolved", "reason", "value_count", "span")}
                for name, r in _pin_reports.items()})
 
-    _manifest = {"manifest_hash": WIT.manifest_hash(),
-                 "protected_property_hash": WIT.protected_property_hash(),
-                 "witness_id_hash": WIT.witness_id_hash(),
-                 "declared": len(WIT.WITNESS_REGISTRY)}
+    _manifest = _boundary("FZ16 witness-manifest-is-pinned", "WIT.manifest_hash",
+                          lambda: {"manifest_hash": WIT.manifest_hash(),
+                                   "protected_property_hash": WIT.protected_property_hash(),
+                                   "witness_id_hash": WIT.witness_id_hash(),
+                                   "declared": len(WIT.WITNESS_REGISTRY)},
+                          phase="structural source check")
     rec("FZ16 witness-manifest-is-pinned",
         _manifest["manifest_hash"] == PINNED_WITNESS_MANIFEST_HASH
         and _manifest["protected_property_hash"] == PINNED_PROTECTED_PROPERTY_HASH
@@ -1143,6 +1288,90 @@ def structural_source_checks(rec, boundary):
         extra={"pinned_phrases": len(FALSE_COMPLETENESS_PHRASES), "hits": _phrases,
                "helper_hits": _helper_phrases,
                "inline_and_helper_agree": sorted(_helper_phrases) == sorted(_phrases)})
+
+
+def adjudicate_witness(entry: dict, source: str) -> dict:
+    """Independently execute and judge ONE witness. The guard decides; the module only supplies bytes.
+
+    Every step is performed here: request the mutation, verify from the ACTUAL changed bytes that it
+    is valid Python, non-no-op and confined to permitted paths, run the mutated program in a
+    subprocess, parse the child's output independently, and check the exit class and the expected
+    named failure. Nothing in the witness module is trusted to report whether any of that happened.
+    """
+    verdict = {"witness_id": entry["witness_id"], "accepted": False, "reason": None,
+               "expected_failing_checks": list(entry["expected_failing_checks"]),
+               "expected_exit": entry["expected_exit"]}
+    try:
+        record = WIT.build_mutation(entry["witness_id"], source)
+    except BaseException as exc:  # noqa: BLE001 - a constructor crash is never a detection
+        verdict["reason"] = f"constructor raised {exc.__class__.__name__}"
+        verdict["identity"] = {}
+        return verdict
+    verdict["identity"] = {k: v for k, v in record.items() if k != "mutated_source"}
+    if record.get("error"):
+        verdict["reason"] = record["error"]
+        return verdict
+    if not record.get("parses"):
+        verdict["reason"] = "mutated source does not parse"
+        return verdict
+    changed = set(record.get("changed_paths") or ())
+    if not changed <= set(entry["permitted_paths"]):
+        verdict["reason"] = f"mutation touched undeclared paths: {sorted(changed)}"
+        return verdict
+    is_control = bool(entry.get("expect_pass"))
+    if record.get("is_noop") and not is_control:
+        verdict["reason"] = "mutation is a no-op; it cannot demonstrate anything"
+        return verdict
+    if not record.get("is_noop") and entry["witness_id"] == "WC02":
+        verdict["reason"] = "the no-op control must not modify the source"
+        return verdict
+    if record["original_sha256"] == record["mutated_sha256"] and not is_control:
+        verdict["reason"] = "mutated bytes are identical to the original"
+        return verdict
+
+    try:
+        outcome = WIT.run_witness_child(record["mutated_source"])
+    except BaseException as exc:  # noqa: BLE001
+        verdict["reason"] = f"child execution raised {exc.__class__.__name__}"
+        return verdict
+    verdict["child"] = {"rc": outcome.get("rc"), "timed_out": bool(outcome.get("timed_out")),
+                        "stdout_bytes": len(outcome.get("stdout") or "")}
+    if outcome.get("timed_out"):
+        verdict["reason"] = "timeout is not a detection"
+        return verdict
+    stdout = outcome.get("stdout") or ""
+    if not stdout.strip():
+        verdict["reason"] = "empty stdout is not a detection"
+        return verdict
+    try:
+        payload = json.loads(stdout)
+    except Exception:  # noqa: BLE001
+        verdict["reason"] = "child output is not a single parseable JSON document"
+        return verdict
+    child_checks = payload.get("checks")
+    if not isinstance(child_checks, list) or not child_checks:
+        verdict["reason"] = "child emitted no checks"
+        return verdict
+    failing = [c.get("check_id") for c in child_checks if isinstance(c, dict) and not c.get("ok")]
+    verdict["child"]["failing"] = failing
+    verdict["child"]["emitted"] = len(child_checks)
+    if is_control:
+        verdict["accepted"] = outcome.get("rc") == 0 and not failing
+        if not verdict["accepted"]:
+            verdict["reason"] = "a control must leave the probe passing"
+        return verdict
+    if entry["expected_exit"] == "nonzero" and outcome.get("rc") == 0:
+        verdict["reason"] = "child exited zero; a mutation that changes nothing is not a detection"
+        return verdict
+    missing = [c for c in entry["expected_failing_checks"] if c not in failing]
+    if missing:
+        verdict["reason"] = f"expected named failure absent: {missing}"
+        return verdict
+    # Guard against a mutation being "detected" only by unrelated collateral.
+    unrelated = [c for c in failing if c not in entry["expected_failing_checks"]]
+    verdict["child"]["unrelated_failures"] = unrelated
+    verdict["accepted"] = True
+    return verdict
 
 
 def run() -> int:
@@ -2634,46 +2863,146 @@ def run() -> int:
 
     structural_source_checks(rec, _boundary)
 
-    # ---------------------------------------------- behavioural witnesses
-    _witness_results = _boundary("FZ17 behavioural-witnesses-detect-their-mutations",
-                                 "PP.run_all_witnesses", WIT.run_all_witnesses,
-                                 phase="behavioural witness")
-    _by_id = {r["witness_id"]: r for r in _witness_results}
-    for _w in WIT.WITNESS_REGISTRY:
-        _r = _by_id.get(_w["witness_id"], {})
-        _is_control = bool(_w.get("expect_pass"))
-        _label = f"{_w['witness_id']} {_w['protected_property'].split(':')[0]}"
+    # ---------------------------------------------- behavioural witnesses (guard-adjudicated)
+    _witness_source = (ROOT / WITNESS_TARGET_PATH).read_text(encoding="utf-8")
+    _verdicts = []
+    for _entry in AUTHORITATIVE_WITNESS_MANIFEST:
+        _v = _boundary(f"{_entry['witness_id']} witness", "PP.adjudicate_witness",
+                       lambda e=_entry: adjudicate_witness(e, _witness_source),
+                       phase="behavioural witness")
+        _verdicts.append(_v)
+        _is_control = bool(_entry.get("expect_pass"))
+        _label = f"{_entry['witness_id']} {'control' if _is_control else 'witness'}"
         if not _is_control:
-            MUTATION_FINGERPRINTS[_label] = hashlib.sha256(
-                json.dumps([_w["witness_id"], _w["target"], _w["expected_failing_check"],
-                            _w["note"]], sort_keys=True).encode("utf-8")).hexdigest()[:16]
-            MUTATION_TRIPPED[_label] = list(_r.get("failing") or [])
-        rec(_label, bool(_r.get("detected")),
-            ("CONTROL: " if _is_control else "") + _w["note"] + ". The witness writes a mutated but "
-            "valid copy of the guard tree and runs the real probe entry point in a SUBPROCESS. It "
-            "counts only when the child emits valid structured JSON, exits non-zero and fails the "
-            "named check this mutation should break -- a syntax error, a crash, a timeout, empty "
-            "stdout or malformed JSON is never a detection, because an inert guard produces those "
-            "too",
+            # The fingerprint is the ACTUAL mutation: original bytes, mutated bytes and the
+            # canonical diff. Hashing the description meant two witnesses could swap payloads with
+            # every fingerprint unchanged.
+            MUTATION_FINGERPRINTS[_label] = hashlib.sha256(json.dumps(
+                [_v["identity"].get("original_sha256"), _v["identity"].get("mutated_sha256"),
+                 _v["identity"].get("diff_sha256")], sort_keys=True).encode("utf-8")).hexdigest()[:16]
+            MUTATION_TRIPPED[_label] = list((_v.get("child") or {}).get("failing") or [])
+        rec(_label, bool(_v.get("accepted")),
+            ("CONTROL: " if _is_control else "")
+            + "the guard requests this mutation, verifies from the ACTUAL changed bytes that it is "
+              "valid Python, non-no-op and confined to permitted paths, runs the mutated program in "
+              "a subprocess, parses the child's output itself and checks the exit class and the "
+              "expected named failure. Nothing in the witness module reports whether any of that "
+              "happened -- canning its aggregate functions used to leave this battery green",
             level="behavioural witness control" if _is_control else "behavioural witness",
-            extra={k: _r.get(k) for k in
-                   ("rc", "detected", "parsed", "structured", "timed_out", "reason",
-                    "expected_failing_check", "failing")})
+            extra={"reason": _v.get("reason"), "child": _v.get("child"),
+                   "identity": {k: _v["identity"].get(k) for k in
+                                ("original_sha256", "mutated_sha256", "diff_sha256", "diff_lines",
+                                 "is_noop", "parses", "changed_paths")}})
 
     rec("FZ17 behavioural-witnesses-detect-their-mutations",
-        bool(_witness_results) and all(r.get("detected") for r in _witness_results)
-        and len(_witness_results) == PINNED_WITNESS_COUNT,
-        "every registered witness observed what it exists to observe. This -- not the syntax of a "
-        "return value -- is what decides whether a protected audit still works. Shape "
-        "classification was defeated one token at a time across three reviews and also rejected "
-        "legitimate implementations; it is now a diagnostic label with no authority anywhere. "
-        "SCOPE: these witnesses detect the registered isolated mutations. A coordinated rewrite of "
-        "a witness, its expectation and the production logic together is not detectable from "
-        "inside the repository, and independent exact-head review remains the control for that",
+        bool(_verdicts) and all(v.get("accepted") for v in _verdicts)
+        and len(_verdicts) == len(AUTHORITATIVE_WITNESS_MANIFEST),
+        "every witness in the guard's OWN authoritative manifest was executed and adjudicated by "
+        "the guard. SCOPE, precisely: the guard independently adjudicates the registered witness "
+        "mutations from their actual changed bytes and subprocess behaviour, and the canonical "
+        "handler contract with its registered mutations detects the tested isolated silent-success "
+        "rewrites. Independent exact-head review remains the control against coordinated changes to "
+        "all in-repository guards, manifests and expectations",
         level="behavioural witness",
-        extra={"witnesses": len(_witness_results),
-               "detected": sum(1 for r in _witness_results if r.get("detected")),
-               "controls": sum(1 for w in WIT.WITNESS_REGISTRY if w.get("expect_pass"))})
+        extra={"adjudicated": len(_verdicts),
+               "accepted": sum(1 for v in _verdicts if v.get("accepted")),
+               "controls": sum(1 for e in AUTHORITATIVE_WITNESS_MANIFEST if e.get("expect_pass"))})
+
+    _constructors = _boundary("WA01 witness-manifest-and-constructors-agree-exactly",
+                              "WIT.constructor_ids", WIT.constructor_ids,
+                              phase="behavioural witness")
+    _manifest_ids = [e["witness_id"] for e in AUTHORITATIVE_WITNESS_MANIFEST]
+    rec("WA01 witness-manifest-and-constructors-agree-exactly",
+        sorted(_manifest_ids) == sorted(_constructors)
+        and len(set(_manifest_ids)) == len(_manifest_ids)
+        and [v["witness_id"] for v in _verdicts] == _manifest_ids,
+        "the guard's authoritative manifest, the constructor ids the witness module exports and the "
+        "ids actually executed agree by exact set equality. A constructor with no manifest entry is "
+        "never run and a manifest entry with no constructor cannot be satisfied; either is a "
+        "silent hole",
+        level="behavioural witness",
+        extra={"manifest": len(_manifest_ids), "constructors": len(_constructors),
+               "executed": len(_verdicts),
+               "manifest_only": sorted(set(_manifest_ids) - set(_constructors)),
+               "constructor_only": sorted(set(_constructors) - set(_manifest_ids))})
+
+    _authority = _boundary("WA00 witness-module-has-no-acceptance-authority",
+                           "PP.witness_authority_audit",
+                           lambda: _witness_authority_audit(ROOT), phase="structural source check")
+    rec("WA00 witness-module-has-no-acceptance-authority",
+        not _authority["authority_calls"],
+        "no function of the witness module is consulted for an acceptance decision. Its aggregate "
+        "judging functions were canned in review and the battery stayed green, because the module "
+        "that built the mutations also judged them. It now supplies payloads and location helpers "
+        "only; every verdict is reached here",
+        level="structural source check", extra=_authority)
+
+    # ---------------------------------------------- adjudication-rejection mutations
+    def _adj_mutation(label, entry_patch, why, expect_reason_fragment):
+        """Corrupt what a constructor RETURNS and require the guard's adjudicator to refuse it."""
+        base = dict(AUTHORITATIVE_WITNESS_MANIFEST[0])
+        entry = dict(base, **entry_patch)
+        original = WIT.build_mutation
+        detected, reason = False, None
+        try:
+            WIT.build_mutation = entry_patch.pop("_builder", original)
+            verdict = adjudicate_witness(entry, _witness_source)
+            reason = verdict.get("reason") or ""
+            detected = (not verdict.get("accepted")) and expect_reason_fragment in reason
+        except Exception as exc:  # noqa: BLE001 - a crash is never a controlled refusal
+            reason = f"<exception:{exc.__class__.__name__}>"
+        finally:
+            WIT.build_mutation = original
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(
+            json.dumps([label, expect_reason_fragment], sort_keys=True).encode()).hexdigest()[:16]
+        MUTATION_TRIPPED[label] = [reason]
+        rec(label, detected, why, level="adjudication mutation",
+            extra={"observed_reason": reason, "required_fragment": expect_reason_fragment})
+
+    _orig_build = WIT.build_mutation
+
+    def _noop_builder(witness_id, source):
+        record = _orig_build(witness_id, source)
+        record.update(mutated_source=source, mutated_sha256=record["original_sha256"],
+                      diff_sha256=hashlib.sha256(b"").hexdigest(), diff_lines=0, is_noop=True)
+        return record
+
+    def _swap_builder(witness_id, source):
+        other = "WT12" if witness_id != "WT12" else "WT09"
+        record = _orig_build(other, source)
+        record["witness_id"] = witness_id
+        return record
+
+    def _undeclared_builder(witness_id, source):
+        record = _orig_build(witness_id, source)
+        record["changed_paths"] = [WITNESS_TARGET_PATH, "backend/app/ga_readiness.py"]
+        return record
+
+    def _unparseable_builder(witness_id, source):
+        record = _orig_build(witness_id, source)
+        record.update(parses=False, error="mutated source does not parse: 1")
+        return record
+
+    def _unknown_builder(witness_id, source):
+        return {"witness_id": witness_id, "error": "unknown witness id"}
+
+    _adj_mutation("AJ01 constructor-returns-a-no-op", {"_builder": _noop_builder},
+                  "a constructor that returns the ORIGINAL bytes is refused. A no-op demonstrates "
+                  "nothing, and identity is computed from the actual bytes rather than from the "
+                  "description, so it cannot hide", "no-op")
+    _adj_mutation("AJ02 constructor-payloads-swapped", {"_builder": _swap_builder},
+                  "swapping one witness's payload for another's is visible because the fingerprint "
+                  "is the real diff digest. Hashing the description left every fingerprint "
+                  "unchanged under exactly this swap", "expected named failure absent")
+    _adj_mutation("AJ03 constructor-edits-an-undeclared-path", {"_builder": _undeclared_builder},
+                  "a mutation touching a path outside its declared permitted set is refused before "
+                  "anything is executed", "undeclared paths")
+    _adj_mutation("AJ04 constructor-emits-invalid-source", {"_builder": _unparseable_builder},
+                  "a mutation that does not parse is refused. A SyntaxError is not a detection -- an "
+                  "inert guard produces one too", "does not parse")
+    _adj_mutation("AJ05 constructor-is-unknown", {"_builder": _unknown_builder},
+                  "a manifest entry with no matching constructor is refused rather than skipped",
+                  "unknown witness id")
 
     # ---------------------------------------------- Part O: stale cross-file pins
     def _pin_mutation(label, attr, value, why):
@@ -3005,7 +3334,7 @@ def run() -> int:
     # "PP" is a legitimate non-mutation prefix: a positive path asserts an ACCEPTANCE, so it is
     # neither an F-gate nor a mutation, and must not be reported as a stray id.
     stray = [c for c in emitted
-             if not c.startswith(("F", "PP", "PJ", "BC", "WC")) and c[:2] not in MUTATION_PREFIXES]
+             if not c.startswith(("F", "PP", "PJ", "BC", "WC", "WA")) and c[:2] not in MUTATION_PREFIXES]
     rec("FZ00 completeness", not (missing or unknown or dupes or stray),
         "the emitted check set equals the declared set exactly",
         level="structural source check",
@@ -3065,6 +3394,10 @@ if __name__ == "__main__":
 
         try:
             structural_source_checks(rec, _probe_boundary)
+        except SystemExit:
+            # An explicit exit is already a completed structured emission. Re-catching it printed a
+            # SECOND JSON document, so the probe's own output stopped being parseable.
+            raise
         except BaseException as _probe_exc:  # noqa: BLE001
             rec("BC07 no-unstructured-exit", False,
                 "the witness probe raised outside every per-operation boundary",
@@ -3092,14 +3425,5 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except BaseException as _exc:  # noqa: BLE001 - an escape is a battery fault, never a refusal
-        checks.append({"check_id": "BC07 no-unstructured-exit", "ok": False,
-                       "level": "boundary",
-                       "why": "an exception escaped every per-operation boundary. It is reported "
-                              "here as a named failure with the structured contract rather than as "
-                              "a silent non-zero exit",
-                       "extra": {"exception_type": _exc.__class__.__name__,
-                                 "operation_id": "unclassified"}})
-        _emit_and_exit({"phase": "unclassified", "operation_id": "unclassified",
-                        "actual_outcome": "exception", "controlled_rejection": False,
-                        "exception_classification": "internal_battery_exception",
-                        "timed_out": False})
+        emit_structured_internal_failure(_exc)
+        raise SystemExit(INTERNAL_ERROR_EXIT_CODE)

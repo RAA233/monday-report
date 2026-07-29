@@ -27,6 +27,7 @@ output, so editing a production pin does not silently retarget the witness that 
 from __future__ import annotations
 
 import ast
+import difflib
 import hashlib
 import json
 import pathlib
@@ -38,6 +39,10 @@ import tempfile
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 GUARD_RELATIVE = "scripts/ga_gap_assessment_faults_guard.py"
 PROBE_FLAG = "--witness-probe"
+#: WT05/WT06 plant a pinned false-completeness phrase to prove the scanner finds it. This module is
+#: itself scanned now, so the literal is assembled at runtime -- embedding it would make the payload
+#: trip the very check it exists to exercise.
+PLANTED_PHRASE_COMMENT = "# " + "all heavy " + "boundaries" + " are wrapped"
 #: A witness child is a narrow, fixture-free run. Well under a second in practice.
 WITNESS_TIMEOUT_SECONDS = 180
 
@@ -143,99 +148,110 @@ def excluded_span(source: str, name: str):
 
 
 # --------------------------------------------------------------------------- handler validation
+#: The only call names accepted as the structured emitter in the process handler.
+CANONICAL_EMITTERS = ("emit_structured_internal_failure", "_emit_and_exit")
+#: Statement types forbidden anywhere in the handler body. The contract is a WHITELIST: the handler
+#: must be a flat sequence of an emitter call then a non-zero termination, and nothing else.
+FORBIDDEN_HANDLER_NODES = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With,
+                           ast.AsyncWith, ast.Return, ast.Pass, ast.Lambda, ast.ListComp,
+                           ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.FunctionDef,
+                           ast.AsyncFunctionDef)
+if hasattr(ast, "Match"):  # pragma: no branch - version dependent
+    FORBIDDEN_HANDLER_NODES = FORBIDDEN_HANDLER_NODES + (ast.Match,)
+
+
 def process_handler_contract(source: str) -> dict:
-    """Validate the top-level exception HANDLER BODY, not the whole ``Try``.
+    """Validate the top-level exception handler against a deliberately MINIMAL canonical form.
 
-    The previous check walked the entire ``Try`` node looking for a structured emitter, so a dead
-    emitter parked in the try body satisfied it while the handler itself was ``pass`` -- and an
-    escape then exited rc=0 with no output at all, a silent success in the audit chain.
+    The previous version tried to decide reachability in general, and lost: an emitter behind
+    ``for _ in ():`` or behind a false module flag was judged reachable, so the handler passed while
+    a real escape exited rc=0 with no output. Deciding reachability in general is undecidable and
+    every extra syntax case is another arms-race round.
 
-    Everything below is judged on the handler's own reachable statements.
+    So the shape is fixed instead of analysed. The handler body must be exactly a flat sequence
+    containing one emitter call and, after it, one unconditional non-zero ``raise SystemExit``.
+    Any conditional, loop, try, with, match, comprehension, lambda, nested function, ``return`` or
+    ``pass`` anywhere in the body is a refusal -- there is nowhere left to hide an unreachable
+    emitter, because nothing that could make a statement conditional is permitted at all.
     """
     report = {"handler_found": False, "catches_base_exception": False, "emits": False,
-              "terminates_nonzero": False, "is_pass": None, "can_fall_through": None,
-              "returns_success": None, "reason": None}
+              "terminates_nonzero": False, "is_pass": None, "forbidden_nodes": [],
+              "emitter_index": None, "termination_index": None, "handler_count": 0,
+              "reason": None}
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
         report["reason"] = f"unparseable:{exc.__class__.__name__}"
         return report
 
-    def _reachable(statements):
-        """Statements the handler actually executes, skipping provably dead branches."""
-        live = []
-        for stmt in statements:
-            if isinstance(stmt, (ast.If, ast.While)):
-                test = getattr(stmt, "test", None)
-                if isinstance(test, ast.Constant) and not test.value:
-                    live.extend(_reachable(stmt.orelse))
-                    continue
-                live.append(stmt)
-                live.extend(_reachable(stmt.body))
-                live.extend(_reachable(stmt.orelse))
-                continue
-            live.append(stmt)
-            for attribute in ("body", "orelse", "finalbody"):
-                nested = getattr(stmt, attribute, None)
-                if isinstance(nested, list):
-                    live.extend(_reachable(nested))
-        return live
-
+    target = None
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Try):
+        if isinstance(node, ast.Try) and any(
+                isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "run"
+                for c in ast.walk(node)):
+            target = node
+            break
+    if target is None:
+        report["reason"] = "no top-level Try around run()"
+        return report
+
+    handlers = [h for h in target.handlers
+                if getattr(h.type, "id", None) == "BaseException"]
+    report["handler_count"] = len(handlers)
+    if len(handlers) != 1:
+        report["reason"] = ("exactly one BaseException handler is required; found "
+                            f"{len(handlers)}")
+        return report
+    handler = handlers[0]
+    report["handler_found"] = report["catches_base_exception"] = True
+    report["is_pass"] = all(isinstance(s, ast.Pass) for s in handler.body)
+
+    forbidden = sorted({type(n).__name__ for s in handler.body for n in ast.walk(s)
+                        if isinstance(n, FORBIDDEN_HANDLER_NODES)})
+    report["forbidden_nodes"] = forbidden
+    if forbidden:
+        report["reason"] = f"handler body contains forbidden constructs: {forbidden}"
+        return report
+
+    for index, statement in enumerate(handler.body):
+        if (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)
+                and isinstance(statement.value.func, ast.Name)
+                and statement.value.func.id in CANONICAL_EMITTERS):
+            report["emits"] = True
+            report["emitter_index"] = index
+            break
+    if not report["emits"]:
+        report["reason"] = "handler body has no direct structured emitter call"
+        return report
+
+    for index, statement in enumerate(handler.body):
+        if not isinstance(statement, ast.Raise) or not isinstance(statement.exc, ast.Call):
             continue
-        if not any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "run"
-                   for c in ast.walk(node)):
+        func = statement.exc.func
+        if not (isinstance(func, ast.Name) and func.id == "SystemExit"):
             continue
-        for handler in node.handlers:
-            caught = getattr(handler.type, "id", None) if handler.type is not None else None
-            if caught != "BaseException":
-                continue
-            report["handler_found"] = True
-            report["catches_base_exception"] = True
-            live = _reachable(handler.body)
-            report["is_pass"] = all(isinstance(s, ast.Pass) for s in handler.body)
-            calls = [c for s in live for c in ast.walk(s) if isinstance(c, ast.Call)]
-            names = {c.func.id for c in calls if isinstance(c.func, ast.Name)}
-            report["emits"] = "_emit_and_exit" in names or "emit_structured_internal_failure" in names
-            raises_exit = any(
-                isinstance(s, ast.Raise) and isinstance(s.exc, ast.Call)
-                and isinstance(s.exc.func, ast.Name) and s.exc.func.id == "SystemExit"
-                and not (s.exc.args and isinstance(s.exc.args[0], ast.Constant)
-                         and s.exc.args[0].value in (0, None))
-                for s in live)
-            report["terminates_nonzero"] = report["emits"] or raises_exit
-            report["returns_success"] = any(
-                isinstance(s, ast.Return) and (
-                    s.value is None
-                    or (isinstance(s.value, ast.Constant) and s.value.value in (0, None, True)))
-                for s in live)
-            exits_zero = any(
-                isinstance(c.func, ast.Name) and c.func.id in {"SystemExit", "exit"}
-                and c.args and isinstance(c.args[0], ast.Constant) and c.args[0].value == 0
-                for c in calls if isinstance(c.func, ast.Name))
-            terminal = report["emits"] or raises_exit
-            report["can_fall_through"] = not terminal
-            if report["is_pass"]:
-                report["reason"] = "handler body is pass"
-            elif exits_zero:
-                report["reason"] = "handler exits zero"
-            elif report["returns_success"]:
-                report["reason"] = "handler returns success"
-            elif not report["emits"]:
-                report["reason"] = "handler body has no reachable structured emitter"
-            elif report["can_fall_through"]:
-                report["reason"] = "handler can fall through"
+        args = statement.exc.args
+        if args and isinstance(args[0], ast.Constant) and args[0].value in (0, None):
+            report["reason"] = "handler terminates with success"
             return report
-    report["reason"] = "no top-level BaseException handler around run()"
+        report["terminates_nonzero"] = True
+        report["termination_index"] = index
+        break
+    if not report["terminates_nonzero"]:
+        report["reason"] = "handler body has no direct non-zero SystemExit"
+        return report
+    if report["termination_index"] <= report["emitter_index"]:
+        report["reason"] = "termination precedes the emitter"
+        return report
     return report
 
 
 def handler_contract_holds(source: str) -> bool:
+    """Convenience predicate. The guard applies the same conditions itself and does not rely on it."""
     report = process_handler_contract(source)
     return bool(report["handler_found"] and report["catches_base_exception"] and report["emits"]
                 and report["terminates_nonzero"] and not report["is_pass"]
-                and not report["can_fall_through"] and not report["returns_success"])
+                and not report["forbidden_nodes"] and report["reason"] is None)
 
 
 def rehash_boundary_contract(source: str) -> dict:
@@ -329,6 +345,49 @@ def append_lines(source: str, text_lines) -> str:
 
 
 # --------------------------------------------------------------------------- witness execution
+def build_mutation(witness_id: str, source: str) -> dict:
+    """Construct one mutation and return its ACTUAL bytes plus an identity record.
+
+    Identity comes from the real changed bytes -- original digest, mutated digest, canonical unified
+    diff digest, changed path set, parse result and the declared target -- not from metadata. Witness
+    fingerprints previously hashed the description, so swapping two payloads while keeping their
+    descriptions left every fingerprint unchanged.
+    """
+    witness = next((w for w in WITNESS_REGISTRY if w["witness_id"] == witness_id), None)
+    if witness is None:
+        return {"witness_id": witness_id, "error": "unknown witness id"}
+    record = {"witness_id": witness_id, "target": witness["target"],
+              "expect_pass": bool(witness.get("expect_pass")),
+              "changed_paths": [GUARD_RELATIVE],
+              "original_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest()}
+    try:
+        mutated = witness["mutation"](source)
+    except Exception as exc:  # noqa: BLE001
+        record.update({"error": f"constructor raised {exc.__class__.__name__}", "mutated_source": None})
+        return record
+    if not isinstance(mutated, str):
+        record.update({"error": "constructor did not return source text", "mutated_source": None})
+        return record
+    record["mutated_sha256"] = hashlib.sha256(mutated.encode("utf-8")).hexdigest()
+    try:
+        ast.parse(mutated)
+        record["parses"] = True
+    except SyntaxError as exc:
+        record.update({"parses": False, "error": f"mutated source does not parse: {exc.lineno}"})
+        return record
+    diff = list(difflib.unified_diff(source.splitlines(), mutated.splitlines(),
+                                    fromfile="original", tofile="mutated", lineterm="", n=0))
+    record["diff_sha256"] = hashlib.sha256("\n".join(diff).encode("utf-8")).hexdigest()
+    record["diff_lines"] = len(diff)
+    record["is_noop"] = not diff
+    record["mutated_source"] = mutated
+    return record
+
+
+def constructor_ids() -> list:
+    return sorted(w["witness_id"] for w in WITNESS_REGISTRY)
+
+
 def run_witness_child(mutated_guard_source: str, extra_files=None):
     """Run the REAL probe entry point over a mutated copy, in a subprocess.
 
@@ -360,8 +419,9 @@ def run_witness_child(mutated_guard_source: str, extra_files=None):
         shutil.rmtree(workspace, ignore_errors=True)
 
 
-def evaluate_witness(result: dict, expected_failing_check: str, expect_pass: bool = False) -> dict:
-    """Decide whether a witness observed what it exists to observe.
+def diagnostic_evaluate(result: dict, expected_failing_check: str,
+                        expect_pass: bool = False) -> dict:
+    """DIAGNOSTIC ONLY. Never an acceptance authority -- the main guard adjudicates.
 
     A crash, a syntax error, a timeout, empty stdout or malformed JSON is NEVER a detection -- those
     are the outcomes an inert guard also produces, which is the whole reason this harness exists.
@@ -468,7 +528,7 @@ WITNESS_REGISTRY = (
         "target": "_false_phrase_report",
         "expected_failing_check": "FZ13 no-known-false-completeness-claims",
         "mutation": lambda s: append_lines(s, [
-            "# all heavy boundaries are wrapped"]),
+            PLANTED_PHRASE_COMMENT]),
         "note": "a verbatim pinned phrase planted in a scanned source",
     },
     {
@@ -482,7 +542,7 @@ WITNESS_REGISTRY = (
                 ["# FALSE_COMPLETENESS_PHRASES = (",
                  "#     \"decoy\",",
                  "# )"]),
-            ["# all heavy boundaries are wrapped"]),
+            [PLANTED_PHRASE_COMMENT]),
         "note": ("the exact raw-text bypass: a comment carrying the assignment text, above the real "
                  "assignment, plus a planted phrase"),
     },
@@ -616,11 +676,15 @@ def _dead_emitter_in_try(source: str) -> str:
 
 # --------------------------------------------------------------------------- manifest + pins
 def witness_manifest() -> list:
-    """The declared manifest, in canonical form, with no callables."""
+    """The declared CONSTRUCTOR inventory, in canonical form, with no callables.
+
+    Deliberately does NOT include the expected failing check: the guard's own authoritative manifest
+    owns every expectation. A module that both builds a mutation and declares what its success looks
+    like can be edited on both sides at once.
+    """
     return [{"witness_id": w["witness_id"],
              "protected_property": w["protected_property"],
              "target": w["target"],
-             "expected_failing_check": w["expected_failing_check"],
              "expect_pass": bool(w.get("expect_pass")),
              "note": w["note"]}
             for w in WITNESS_REGISTRY]
@@ -644,8 +708,14 @@ def witness_id_hash() -> str:
     return hashlib.sha256(_canonical(ids).encode("utf-8")).hexdigest()
 
 
-def run_all_witnesses(source: str = None) -> list:
-    """Execute every registered witness against a mutated copy of the guard."""
+def diagnostic_run_all(source: str = None) -> list:
+    """DIAGNOSTIC ONLY. Never an acceptance authority.
+
+    An independent review canned this function to report every witness detected and the battery
+    stayed green -- so the module that constructs the mutations was also the module that judged
+    them. The main fault guard now performs its own execution and adjudication; this remains only
+    as a convenience for interactive debugging and its result reaches no verdict.
+    """
     if source is None:
         source = (REPO_ROOT / GUARD_RELATIVE).read_text(encoding="utf-8")
     results = []
@@ -662,7 +732,7 @@ def run_all_witnesses(source: str = None) -> list:
             results.append(entry)
             continue
         outcome = run_witness_child(mutated)
-        entry.update(evaluate_witness(outcome, witness["expected_failing_check"],
-                                      expect_pass=bool(witness.get("expect_pass"))))
+        entry.update(diagnostic_evaluate(outcome, witness["expected_failing_check"],
+                                         expect_pass=bool(witness.get("expect_pass"))))
         results.append(entry)
     return results
