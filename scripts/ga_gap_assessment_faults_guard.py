@@ -24,6 +24,7 @@ import pathlib
 import time
 import subprocess
 import copy
+import difflib
 import hashlib
 import io
 import json
@@ -159,13 +160,16 @@ EXPECTED_CHECK_IDS = [
     "FZ15 pin-assignments-resolve-to-one-live-node",
     "FZ16 witness-manifest-is-pinned",
     "FZ17 behavioural-witnesses-detect-their-mutations",
+    "FZ18 witness-recipe-module-is-source-bound",
+    "PM33 stale-witness-module-source-pin",
+    "PM34 stale-witness-manifest-hash-pin",
     "WA00 witness-module-has-no-acceptance-authority",
     "WA01 witness-manifest-and-constructors-agree-exactly",
-    "AJ01 constructor-returns-a-no-op",
-    "AJ02 constructor-payloads-swapped",
-    "AJ03 constructor-edits-an-undeclared-path",
-    "AJ04 constructor-emits-invalid-source",
-    "AJ05 constructor-is-unknown",
+    "AJ01 recipe-is-a-no-op",
+    "AJ02 recipe-body-swapped-to-wrong-check",
+    "AJ03 recipe-targets-a-missing-function",
+    "AJ04 identity-is-recomputed-from-bytes",
+    "AJ05 manifest-entry-has-no-recipe",
     "WT01 witness",
     "WT02 witness",
     "WT03 witness",
@@ -190,6 +194,7 @@ EXPECTED_CHECK_IDS = [
     "BC06 every-heavy-operation-call-is-classified",
     "BC07 no-unstructured-exit",
     "BC08 canonical-hash-boundary",
+    "BC10 guard-owns-the-witness-subprocess",
     "FZ14 source-audits-are-behaviourally-discriminating",
     "PM22 guard_verdict-raises-before-work",
     "PM23 guard_verdict-raises-after-partial-work",
@@ -209,16 +214,56 @@ EXPECTED_CHECK_IDS = [
 
 #: Witness-manifest pins. The manifest, its protected-property set and its id set are each
 #: hashed, so a witness cannot be removed, renamed, duplicated or retargeted quietly.
-PINNED_WITNESS_MANIFEST_HASH = "5f740b63518a7684f5d07518b691824d75225562803da80218107de1676b1017"
+PINNED_WITNESS_MANIFEST_HASH = "6e0b1d345ec31e45ae2853aed320bd53ad10f0b2b6f617b4fef247d19b6142d2"
 PINNED_PROTECTED_PROPERTY_HASH = "95cf0977ef33ea5b483fc551016ddfa643b3d118d854914d72f8d10f0c924dc7"
-PINNED_WITNESS_ID_HASH = "7c30300e7eaf8582ce3f4dbeeb66f9d6aa2419db939c0a43556f8386b0645477"
+PINNED_WITNESS_ID_HASH = "4607f963e2ab18e85a96f43130a347bfc24776e7f36879c1ac40f6b7f0d130cb"
 PINNED_WITNESS_COUNT = 16
+#: SHA-256 of the COMMITTED witness recipe module blob. Binds the recipe module as a
+#: source: editing a recipe changes this, and FZ18 refuses a stale pin.
+PINNED_WITNESS_MODULE_SHA256 = "a2ffcde968b9a0735c4a6819ccb5e624a7d787d480af3980f7983b2b29e3ee8f"
 
 #: The AUTHORITATIVE witness manifest. It lives here, in the guard that adjudicates, and it
 #: owns every expectation. The witness module supplies mutation payloads and nothing else: a
 #: module that both constructs a mutation and declares what its success looks like can be
 #: edited on both sides at once, and an independent review canned that module's aggregate
 #: functions and left this battery fully green.
+#: The flag selecting the narrow fixture-free entry point the witness children run.
+WITNESS_PROBE_FLAG = "--witness-probe"
+#: Every module the phrase scan and copied-body diagnostics cover.
+AUDITED_MODULES = ("ga_gap_assessment_faults_guard.py", "ga_gap_assessment_guard.py",
+                   "ga_gap_assessment_positive_paths.py", "ga_gap_assessment_witnesses.py")
+
+
+def _witness_module_source() -> str:
+    return (ROOT / "scripts" / "ga_gap_assessment_witnesses.py").read_text(encoding="utf-8")
+
+
+def _no_witness_execution_symbols(source: str) -> bool:
+    """True when the recipe module defines no execution/adjudication symbol and imports nothing.
+
+    Alias-proof: it inspects the MODULE's own parsed definitions, not how the guard refers to it.
+    A recipe module that grew a subprocess launcher, an evaluator or an import would fail here
+    regardless of the name the guard imported it under.
+    """
+    banned = {"run_witness_child", "evaluate_witness", "diagnostic_run_all", "diagnostic_evaluate",
+              "diagnostic_run_all_witnesses", "diagnostic_evaluate_witness", "build_mutation",
+              "manifest_hash", "process_handler_contract", "adjudicate", "run_all_witnesses"}
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in tree.body:
+        if isinstance(node, _ast.ImportFrom) and node.module == "__future__":
+            continue
+        if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+            # subprocess/shutil/etc. would let it execute; a pure data module needs no runtime
+            # import beyond __future__.
+            return False
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and node.name in banned:
+            return False
+    return True
+
+
 WITNESS_TARGET_PATH = "scripts/ga_gap_assessment_faults_guard.py"
 AUTHORITATIVE_WITNESS_MANIFEST = (
     {"witness_id": "WT01", "target_path": WITNESS_TARGET_PATH,
@@ -247,6 +292,7 @@ AUTHORITATIVE_WITNESS_MANIFEST = (
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT07", "target_path": WITNESS_TARGET_PATH,
      "expected_failing_checks": ("FZ14 source-audits-are-behaviourally-discriminating",),
+     "allowed_additional_failures": ("FZ15 pin-assignments-resolve-to-one-live-node",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT08", "target_path": WITNESS_TARGET_PATH,
@@ -255,18 +301,22 @@ AUTHORITATIVE_WITNESS_MANIFEST = (
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT09", "target_path": WITNESS_TARGET_PATH,
      "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "allowed_additional_failures": ("FZ12 no-patch-only-body-copies",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT10", "target_path": WITNESS_TARGET_PATH,
      "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "allowed_additional_failures": ("FZ12 no-patch-only-body-copies",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT11", "target_path": WITNESS_TARGET_PATH,
      "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "allowed_additional_failures": ("FZ12 no-patch-only-body-copies",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT12", "target_path": WITNESS_TARGET_PATH,
      "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "allowed_additional_failures": ("FZ12 no-patch-only-body-copies",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT13", "target_path": WITNESS_TARGET_PATH,
@@ -275,6 +325,7 @@ AUTHORITATIVE_WITNESS_MANIFEST = (
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT14", "target_path": WITNESS_TARGET_PATH,
      "expected_failing_checks": ("BC08 canonical-hash-boundary",),
+     "allowed_additional_failures": ("BC06 every-heavy-operation-call-is-classified",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WC01", "target_path": WITNESS_TARGET_PATH,
@@ -287,8 +338,8 @@ AUTHORITATIVE_WITNESS_MANIFEST = (
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": True},
 )
 
-EXPECTED_TOTAL_CHECKS = 187
-EXPECTED_MUTATION_COUNT = 132
+EXPECTED_TOTAL_CHECKS = 191
+EXPECTED_MUTATION_COUNT = 134
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
@@ -628,7 +679,7 @@ FALSE_COMPLETENESS_PHRASES = (
 
 
 #: Modules whose calls are heavy enough that an unclassified call is a defect.
-HEAVY_MODULES = ("PP", "GEN", "COUPLING", "SYN", "WIT")
+HEAVY_MODULES = ("PP", "GEN", "COUPLING", "SYN")
 
 
 def _boundary_call_audit(root: pathlib.Path, source: str = None):
@@ -699,27 +750,405 @@ def _boundary_call_audit(root: pathlib.Path, source: str = None):
     return classified, unclassified
 
 
-def _witness_authority_audit(root: pathlib.Path) -> dict:
-    """Confirm no witness-module function is consulted for an acceptance decision.
+def _resolve_module_assignment(source: str, name: str) -> dict:
+    """Locate the single live module-level assignment of ``name`` from the AST.
 
-    "Acceptance" means a call whose result reaches a `rec(...)` verdict expression. The module may
-    still be called for payloads and location helpers; what it may not do is decide.
+    Raw-text searching located this by ``str.partition`` on the first occurrence of the assignment
+    text, so a COMMENT containing that text, placed above the real assignment, redefined the span
+    the scanner excluded and the check went inert. Comments, docstrings and string literals cannot
+    influence an AST lookup.
+
+    Returns a report rather than raising, so the caller can name precisely what is wrong.
     """
-    source = (root / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(encoding="utf-8")
-    banned = {"diagnostic_run_all", "diagnostic_evaluate", "run_all_witnesses", "evaluate_witness",
-              "handler_contract_holds"}
-    found = []
-    for node in _ast.walk(_ast.parse(source)):
-        if not isinstance(node, _ast.Call):
+    report = {"name": name, "resolved": False, "reason": None, "lineno": None, "end_lineno": None,
+              "col_offset": None, "end_col_offset": None, "value_count": 0, "duplicates": [],
+              "live_assignments": 0, "nested_assignments": 0, "dead_assignments": 0}
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError as exc:
+        report["reason"] = f"unparseable:{exc.__class__.__name__}"
+        return report
+
+    dead_lines = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, (_ast.If, _ast.While)):
+            test = getattr(node, "test", None)
+            if isinstance(test, _ast.Constant) and not test.value:
+                for child in _ast.walk(node):
+                    if hasattr(child, "lineno"):
+                        dead_lines.add(child.lineno)
+
+    module_level, nested, dead = [], 0, 0
+    for node in _ast.walk(tree):
+        if not isinstance(node, (_ast.Assign, _ast.AnnAssign)):
             continue
-        func = node.func
-        if (isinstance(func, _ast.Attribute) and isinstance(func.value, _ast.Name)
-                and func.value.id == "WIT" and func.attr in banned):
-            found.append(f"WIT.{func.attr}:{node.lineno}")
-    return {"banned_names": sorted(banned), "authority_calls": sorted(found),
-            "witness_module_sha256": hashlib.sha256(
-                (root / "scripts" / "ga_gap_assessment_witnesses.py")
-                .read_bytes()).hexdigest()}
+        targets = node.targets if isinstance(node, _ast.Assign) else [node.target]
+        if not any(isinstance(t, _ast.Name) and t.id == name for t in targets):
+            continue
+        if node.lineno in dead_lines:
+            dead += 1
+            continue
+        module_level.append(node) if node in tree.body else _nested_append(nested_list := [], node)
+        if node not in tree.body:
+            nested += 1
+
+    report["live_assignments"] = len(module_level)
+    report["nested_assignments"] = nested
+    report["dead_assignments"] = dead
+    if nested:
+        report["reason"] = "assignment is not at module scope"
+        return report
+    if dead:
+        report["reason"] = "assignment appears in dead code"
+        return report
+    if not module_level:
+        report["reason"] = "no live module-level assignment"
+        return report
+    if len(module_level) > 1:
+        report["reason"] = "multiple live module-level assignments"
+        return report
+
+    node = module_level[0]
+    value = node.value if isinstance(node, _ast.Assign) else node.value
+    elements = getattr(value, "elts", None)
+    if elements is None:
+        report["reason"] = "assigned value is not a literal sequence"
+        return report
+    literals = []
+    for element in elements:
+        if not isinstance(element, _ast.Constant) or not isinstance(element.value, str):
+            report["reason"] = "sequence contains a non-string element"
+            return report
+        literals.append(element.value)
+    if not literals:
+        report["reason"] = "assigned sequence is empty"
+        return report
+    duplicates = sorted({v for v in literals if literals.count(v) > 1})
+    if duplicates:
+        report["reason"] = "sequence contains duplicate entries"
+        report["duplicates"] = duplicates
+        return report
+
+    report.update({"resolved": True, "lineno": node.lineno, "end_lineno": node.end_lineno,
+                   "col_offset": node.col_offset, "end_col_offset": node.end_col_offset,
+                   "value_count": len(literals), "values": literals,
+                   "span": (node.lineno, node.end_lineno)})
+    return report
+def _nested_append(container, node):  # pragma: no cover - tiny helper kept explicit for clarity
+    container.append(node)
+    return container
+def _excluded_span(source: str, name: str):
+    """The exact source line range occupied by a pin assignment, or ``None``."""
+    report = _resolve_module_assignment(source, name)
+    if not report["resolved"]:
+        return None
+    return report["lineno"], report["end_lineno"]
+CANONICAL_EMITTERS = ("emit_structured_internal_failure", "_emit_and_exit")
+#: Statement types forbidden anywhere in the handler body. The contract is a WHITELIST: the handler
+#: must be a flat sequence of an emitter call then a non-zero termination, and nothing else.
+FORBIDDEN_HANDLER_NODES = (_ast.If, _ast.For, _ast.AsyncFor, _ast.While, _ast.Try, _ast.With,
+                           _ast.AsyncWith, _ast.Return, _ast.Pass, _ast.Lambda, _ast.ListComp,
+                           _ast.SetComp, _ast.DictComp, _ast.GeneratorExp, _ast.FunctionDef,
+                           _ast.AsyncFunctionDef)
+if hasattr(_ast, "Match"):  # pragma: no branch - version dependent
+    FORBIDDEN_HANDLER_NODES = FORBIDDEN_HANDLER_NODES + (_ast.Match,)
+
+def _process_handler_contract(source: str) -> dict:
+    """Validate the top-level exception handler against a deliberately MINIMAL canonical form.
+
+    The previous version tried to decide reachability in general, and lost: an emitter behind
+    ``for _ in ():`` or behind a false module flag was judged reachable, so the handler passed while
+    a real escape exited rc=0 with no output. Deciding reachability in general is undecidable and
+    every extra syntax case is another arms-race round.
+
+    So the shape is fixed instead of analysed. The handler body must be exactly a flat sequence
+    containing one emitter call and, after it, one unconditional non-zero ``raise SystemExit``.
+    Any conditional, loop, try, with, match, comprehension, lambda, nested function, ``return`` or
+    ``pass`` anywhere in the body is a refusal -- there is nowhere left to hide an unreachable
+    emitter, because nothing that could make a statement conditional is permitted at all.
+    """
+    report = {"handler_found": False, "catches_base_exception": False, "emits": False,
+              "terminates_nonzero": False, "is_pass": None, "forbidden_nodes": [],
+              "emitter_index": None, "termination_index": None, "handler_count": 0,
+              "reason": None}
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError as exc:
+        report["reason"] = f"unparseable:{exc.__class__.__name__}"
+        return report
+
+    target = None
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Try) and any(
+                isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name) and c.func.id == "run"
+                for c in _ast.walk(node)):
+            target = node
+            break
+    if target is None:
+        report["reason"] = "no top-level Try around run()"
+        return report
+
+    handlers = [h for h in target.handlers
+                if getattr(h.type, "id", None) == "BaseException"]
+    report["handler_count"] = len(handlers)
+    if len(handlers) != 1:
+        report["reason"] = ("exactly one BaseException handler is required; found "
+                            f"{len(handlers)}")
+        return report
+    handler = handlers[0]
+    report["handler_found"] = report["catches_base_exception"] = True
+    report["is_pass"] = all(isinstance(s, _ast.Pass) for s in handler.body)
+
+    forbidden = sorted({type(n).__name__ for s in handler.body for n in _ast.walk(s)
+                        if isinstance(n, FORBIDDEN_HANDLER_NODES)})
+    report["forbidden_nodes"] = forbidden
+    if forbidden:
+        report["reason"] = f"handler body contains forbidden constructs: {forbidden}"
+        return report
+
+    for index, statement in enumerate(handler.body):
+        if (isinstance(statement, _ast.Expr) and isinstance(statement.value, _ast.Call)
+                and isinstance(statement.value.func, _ast.Name)
+                and statement.value.func.id in CANONICAL_EMITTERS):
+            report["emits"] = True
+            report["emitter_index"] = index
+            break
+    if not report["emits"]:
+        report["reason"] = "handler body has no direct structured emitter call"
+        return report
+
+    for index, statement in enumerate(handler.body):
+        if not isinstance(statement, _ast.Raise) or not isinstance(statement.exc, _ast.Call):
+            continue
+        func = statement.exc.func
+        if not (isinstance(func, _ast.Name) and func.id == "SystemExit"):
+            continue
+        args = statement.exc.args
+        if args and isinstance(args[0], _ast.Constant) and args[0].value in (0, None):
+            report["reason"] = "handler terminates with success"
+            return report
+        report["terminates_nonzero"] = True
+        report["termination_index"] = index
+        break
+    if not report["terminates_nonzero"]:
+        report["reason"] = "handler body has no direct non-zero SystemExit"
+        return report
+    if report["termination_index"] <= report["emitter_index"]:
+        report["reason"] = "termination precedes the emitter"
+        return report
+    return report
+def _rehash_boundary_contract(source: str) -> dict:
+    """BC08's real property: ``rehash`` classifies a canonical-hash failure instead of escaping.
+
+    BC08 was the literal ``True``. This is the behaviour it was supposed to stand for: the call runs
+    once per artifact mutation, and a raise there must become a named failure rather than an escape.
+    """
+    report = {"function_found": False, "call_guarded": False, "emits": False, "reason": None}
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError as exc:
+        report["reason"] = f"unparseable:{exc.__class__.__name__}"
+        return report
+    node = next((n for n in _ast.walk(tree)
+                 if isinstance(n, _ast.FunctionDef) and n.name == "rehash"), None)
+    if node is None:
+        report["reason"] = "rehash is not defined"
+        return report
+    report["function_found"] = True
+    for inner in _ast.walk(node):
+        if not isinstance(inner, _ast.Try) or not inner.handlers:
+            continue
+        hashes = any(isinstance(c, _ast.Call) and isinstance(c.func, _ast.Attribute)
+                     and c.func.attr == "canonical_hash" for c in _ast.walk(inner))
+        if not hashes:
+            continue
+        report["call_guarded"] = True
+        for handler in inner.handlers:
+            live = [s for s in handler.body if not isinstance(s, _ast.Pass)]
+            names = {c.func.id for s in live for c in _ast.walk(s)
+                     if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)}
+            if "_emit_and_exit" in names:
+                report["emits"] = True
+        break
+    if not report["call_guarded"]:
+        report["reason"] = "the canonical_hash call in rehash is not inside a handler"
+    elif not report["emits"]:
+        report["reason"] = "the handler does not emit a structured failure"
+    return report
+
+# ------------------------------------------------------------ guard-owned witness mutation engine
+def _witness_function_node(tree, name):
+    return next((n for n in _ast.walk(tree)
+                 if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and n.name == name),
+                None)
+
+
+def apply_recipe(source: str, recipe: dict) -> str:
+    """Apply one recipe to source text. THE GUARD does this; the recipe module only describes it.
+
+    Every operation is located by AST, never by text search. Raises on anything it cannot do, and
+    the caller turns that into a named failure -- an exception is never a detection.
+    """
+    operation = recipe.get("operation")
+    if operation not in WIT.KNOWN_OPERATIONS:
+        raise ValueError("unknown operation " + repr(operation))
+    selector = recipe.get("target_selector")
+    lines = source.splitlines()
+    tree = _ast.parse(source)
+
+    if operation == WIT.OP_NO_CHANGE:
+        return source
+
+    if operation == WIT.OP_APPEND_LINES:
+        return chr(10).join(lines + list(recipe["lines"])) + chr(10)
+
+    if operation == WIT.OP_REPLACE_FUNCTION_BODY:
+        node = _witness_function_node(tree, selector)
+        if node is None:
+            raise LookupError("function " + str(selector) + " not found")
+        signature = lines[node.lineno - 1:node.body[0].lineno - 1]
+        indent = " " * (node.col_offset + 4)
+        replacement = list(signature) + [indent + line for line in recipe["body"]]
+        return chr(10).join(lines[:node.lineno - 1] + replacement + lines[node.end_lineno:]) + chr(10)
+
+    if operation == WIT.OP_REPLACE_MODULE_HANDLER_BODY:
+        # The module-level BaseException handler around raise SystemExit(run()). Located by finding
+        # the single top-level Try whose body raises SystemExit(run()); this is the CURRENT handler
+        # shape, which this increment deliberately does not redesign.
+        # The Try wrapping raise SystemExit(run()). It is NOT inside any function, but it may sit
+        # under a module-level `if` guard, so tree.body alone misses it; walk, then exclude any Try
+        # that lives inside a function definition.
+        in_function = set()
+        for fn in _ast.walk(tree):
+            if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                for c in _ast.walk(fn):
+                    in_function.add(id(c))
+        candidate = None
+        for node in _ast.walk(tree):
+            if (isinstance(node, _ast.Try) and id(node) not in in_function
+                    and any(isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+                            and c.func.id == "run" for c in _ast.walk(node))):
+                candidate = node
+                break
+        if candidate is None:
+            raise LookupError("module-level Try around run() not found")
+        handlers = [h for h in candidate.handlers if getattr(h.type, "id", None) == "BaseException"]
+        if len(handlers) != 1:
+            raise LookupError("expected exactly one BaseException handler")
+        handler = handlers[0]
+        first, last = handler.body[0], handler.body[-1]
+        indent = " " * first.col_offset
+        return chr(10).join(lines[:first.lineno - 1]
+                            + [indent + line for line in recipe["body"]]
+                            + lines[(last.end_lineno or first.lineno):]) + chr(10)
+
+    span = _excluded_span(source, selector)
+    if span is None:
+        raise LookupError("assignment " + str(selector) + " does not resolve to one live node")
+    start, end = span
+
+    if operation == WIT.OP_INSERT_BEFORE_ASSIGNMENT:
+        return chr(10).join(lines[:start - 1] + list(recipe["lines"]) + lines[start - 1:]) + chr(10)
+
+    node = next(n for n in tree.body
+                if isinstance(n, (_ast.Assign, _ast.AnnAssign)) and n.lineno == start)
+    if operation == WIT.OP_REPLACE_ASSIGNMENT_VALUE:
+        values = recipe["values"]
+        if isinstance(values, int) and not isinstance(values, bool):
+            body = [str(selector) + " = " + str(values)]
+        else:
+            body = [str(selector) + " = ("] + ['    "' + str(v) + '",' for v in values] + [")"]
+        return chr(10).join(lines[:start - 1] + body + lines[end:]) + chr(10)
+
+    if operation == WIT.OP_DROP_ASSIGNMENT_ENTRY:
+        elements = getattr(node.value, "elts", None)
+        if not elements or len(elements) < 2:
+            raise LookupError(str(selector) + " has too few entries to drop one")
+        kept = [e.value for e in elements[:-1] if isinstance(e, _ast.Constant)]
+        body = [str(selector) + " = ("] + ['    "' + str(v) + '",' for v in kept] + [")"]
+        return chr(10).join(lines[:start - 1] + body + lines[end:]) + chr(10)
+
+    raise ValueError("unhandled operation " + repr(operation))
+
+
+
+
+def _target_node_fingerprint(source: str, recipe: dict):
+    """A stable fingerprint of the recipe's target node, so before/after can be compared."""
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError:
+        return None
+    selector = recipe.get("target_selector")
+    node = _witness_function_node(tree, selector)
+    if node is None:
+        for candidate in tree.body:
+            targets = (candidate.targets if isinstance(candidate, _ast.Assign)
+                       else [candidate.target] if isinstance(candidate, _ast.AnnAssign) else [])
+            if any(isinstance(t, _ast.Name) and t.id == selector for t in targets):
+                node = candidate
+                break
+    if node is None:
+        return None
+    return hashlib.sha256(_ast.dump(node).encode("utf-8")).hexdigest()
+
+
+def mutation_identity(original: str, mutated: str, recipe: dict, path: str) -> dict:
+    """Every digest recomputed HERE, from the bytes the guard itself produced.
+
+    The previous design copied an identity record supplied by the witness module, so the digests
+    described whatever that module said rather than what was actually written. Nothing supplied by
+    a recipe is trusted for identity: this reads only ``original`` and ``mutated``.
+    """
+    diff = list(difflib.unified_diff(original.splitlines(), mutated.splitlines(),
+                                     fromfile="original", tofile="mutated", lineterm="", n=0))
+    identity = {
+        "original_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+        "mutated_sha256": hashlib.sha256(mutated.encode("utf-8")).hexdigest(),
+        "diff_sha256": hashlib.sha256(chr(10).join(diff).encode("utf-8")).hexdigest(),
+        "diff_lines": len(diff),
+        "changed_paths": [path] if diff else [],
+        "parses": True,
+        "target_before": _target_node_fingerprint(original, recipe),
+    }
+    identity["is_noop"] = not diff
+    try:
+        _ast.parse(mutated)
+        identity["target_after"] = _target_node_fingerprint(mutated, recipe)
+    except SyntaxError:
+        identity["parses"] = False
+        identity["target_after"] = None
+    identity["target_changed"] = (identity["target_before"] != identity["target_after"])
+    return identity
+
+
+def run_child_probe(mutated_source: str, target_path: str) -> dict:
+    """THE GUARD launches the subprocess. Nothing else supplies rc, stdout or timing.
+
+    A replacement for this that launched no subprocess and returned a fabricated document made every
+    witness pass, which is why the call lives here and BC10 asserts it lives here.
+    """
+    workspace = pathlib.Path(tempfile.mkdtemp(prefix="gga-witness-"))
+    try:
+        shutil.copytree(ROOT / "scripts", workspace / "scripts")
+        for relative in ("backend", "evals", "db", "docs"):
+            source_dir = ROOT / relative
+            if source_dir.exists():
+                shutil.copytree(source_dir, workspace / relative,
+                                ignore=shutil.ignore_patterns("__pycache__"))
+        (workspace / target_path).write_text(mutated_source, encoding="utf-8", newline=chr(10))
+        completed = subprocess.run(
+            [sys.executable, target_path, WITNESS_PROBE_FLAG],
+            cwd=str(workspace), capture_output=True, text=True, timeout=180)
+        return {"rc": completed.returncode, "stdout": completed.stdout,
+                "stderr": completed.stderr, "timed_out": False}
+    except subprocess.TimeoutExpired:
+        return {"rc": None, "stdout": "", "stderr": "", "timed_out": True}
+    finally:
+        _force_rmtree(workspace)
+
+
+
 
 
 def _copied_body_report(root: pathlib.Path, source: str = None):
@@ -744,7 +1173,10 @@ def _copied_body_report(root: pathlib.Path, source: str = None):
     behaviourally against fabricated sources -- a gutted audit fails that immediately.
     """
     if source is None:
-        source = (root / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(encoding="utf-8")
+        # Every audited module, not just this one. Restricting it to the faults guard let an exact
+        # duplicate planted in a sibling module go unreported.
+        source = chr(10).join((root / "scripts" / _name).read_text(encoding="utf-8")
+                              for _name in AUDITED_MODULES)
     tree = _ast.parse(source)
     functions, referenced = {}, set()
 
@@ -1125,7 +1557,8 @@ def structural_source_checks(rec, boundary):
         n for n in _copies["unreferenced"]
         if n not in {"_copied_body_report", "_false_phrase_report", "process_boundary_installed",
                      "structural_source_checks", "audit_self_test", "_boundary_call_audit",
-                     "nested_append"}]
+                     "nested_append", "install_only", "_nested_append", "_excluded_span",
+                     "handler_contract_holds", "_witness_module_source"}]
     rec("FZ12 no-patch-only-body-copies",
         _copy_verdict,
         "no protected body is duplicated into an unexecuted helper and nothing substantial is "
@@ -1179,7 +1612,7 @@ def structural_source_checks(rec, boundary):
     _handler_source = (ROOT / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(
         encoding="utf-8")
     _handler = _boundary("BC07 no-unstructured-exit", "PP.process_handler_contract",
-                         lambda: WIT.process_handler_contract(_handler_source), phase="boundary")
+                         lambda: _process_handler_contract(_handler_source), phase="boundary")
     _proc_boundary = bool(
         _handler["handler_found"] and _handler["catches_base_exception"] and _handler["emits"]
         and _handler["terminates_nonzero"] and not _handler["is_pass"]
@@ -1187,7 +1620,7 @@ def structural_source_checks(rec, boundary):
         and _handler["reason"] is None
         and _handler["termination_index"] > _handler["emitter_index"])
     _rehash = _boundary("BC08 canonical-hash-boundary", "PP.rehash_boundary_contract",
-                        lambda: WIT.rehash_boundary_contract(_handler_source), phase="boundary")
+                        lambda: _rehash_boundary_contract(_handler_source), phase="boundary")
     rec("BC08 canonical-hash-boundary",
         bool(_rehash["function_found"] and _rehash["call_guarded"] and _rehash["emits"]),
         "the artifact re-hash path is classified -- MEASURED from the source, not asserted. This "
@@ -1224,7 +1657,7 @@ def structural_source_checks(rec, boundary):
         for _name in ("ga_gap_assessment_faults_guard.py", "ga_gap_assessment_positive_paths.py",
                       "ga_gap_assessment_guard.py", "ga_gap_assessment_witnesses.py"):
             _text = (ROOT / "scripts" / _name).read_text(encoding="utf-8")
-            _span = WIT.excluded_span(_text, "FALSE_COMPLETENESS_PHRASES")
+            _span = _excluded_span(_text, "FALSE_COMPLETENESS_PHRASES")
             if _span:
                 _lines = _text.splitlines()
                 _text = "\n".join(_lines[:_span[0] - 1] + _lines[_span[1]:])
@@ -1233,8 +1666,8 @@ def structural_source_checks(rec, boundary):
         return found
 
     _pin_reports = _boundary("FZ15 pin-assignments-resolve-to-one-live-node",
-                             "WIT.resolve_module_assignment",
-                             lambda: {name: WIT.resolve_module_assignment(_handler_source, name)
+                             "GUARD._resolve_module_assignment",
+                             lambda: {name: _resolve_module_assignment(_handler_source, name)
                                       for name in ("FALSE_COMPLETENESS_PHRASES",
                                                    "REQUIRED_SELF_TEST_PROBES")},
                              phase="structural source check")
@@ -1249,19 +1682,18 @@ def structural_source_checks(rec, boundary):
         extra={name: {k: r.get(k) for k in ("resolved", "reason", "value_count", "span")}
                for name, r in _pin_reports.items()})
 
-    _manifest = _boundary("FZ16 witness-manifest-is-pinned", "WIT.manifest_hash",
-                          lambda: {"manifest_hash": WIT.manifest_hash(),
-                                   "protected_property_hash": WIT.protected_property_hash(),
-                                   "witness_id_hash": WIT.witness_id_hash(),
-                                   "declared": len(WIT.WITNESS_REGISTRY)},
+    _manifest = _boundary("FZ16 witness-manifest-is-pinned", "GUARD.manifest_digest",
+                          lambda: {"manifest_hash": hashlib.sha256(json.dumps(
+                              [dict(e) for e in AUTHORITATIVE_WITNESS_MANIFEST],
+                              sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+                              "recipe_id_hash": hashlib.sha256(json.dumps(
+                                  WIT.recipe_ids(), sort_keys=True).encode("utf-8")).hexdigest(),
+                              "declared": len(AUTHORITATIVE_WITNESS_MANIFEST)},
                           phase="structural source check")
     rec("FZ16 witness-manifest-is-pinned",
         _manifest["manifest_hash"] == PINNED_WITNESS_MANIFEST_HASH
-        and _manifest["protected_property_hash"] == PINNED_PROTECTED_PROPERTY_HASH
-        and _manifest["witness_id_hash"] == PINNED_WITNESS_ID_HASH
-        and _manifest["declared"] == PINNED_WITNESS_COUNT
-        and sorted(w["witness_id"] for w in WIT.WITNESS_REGISTRY)
-        == sorted({w["witness_id"] for w in WIT.WITNESS_REGISTRY}),
+        and _manifest["recipe_id_hash"] == PINNED_WITNESS_ID_HASH
+        and _manifest["declared"] == PINNED_WITNESS_COUNT,
         "the witness manifest, its protected-property set and its id set are each pinned by "
         "canonical hash. Removing, renaming, duplicating or retargeting a witness, or emptying the "
         "manifest, changes a hash -- so a witness set cannot drift downward the way the probe tuple "
@@ -1290,63 +1722,103 @@ def structural_source_checks(rec, boundary):
                "inline_and_helper_agree": sorted(_helper_phrases) == sorted(_phrases)})
 
 
-def adjudicate_witness(entry: dict, source: str) -> dict:
-    """Independently execute and judge ONE witness. The guard decides; the module only supplies bytes.
+def _witness_subprocess_ownership(root, target_path):
+    """BC10: the child subprocess is launched INSIDE this guard, proven from the guard's AST."""
+    import ast as _a
+    module = _a.parse((root / target_path).read_text(encoding="utf-8"))
+    launchers = {}
+    for node in _a.walk(module):
+        if isinstance(node, _a.FunctionDef):
+            for call in _a.walk(node):
+                if (isinstance(call, _a.Call) and isinstance(call.func, _a.Attribute)
+                        and call.func.attr == "run" and isinstance(call.func.value, _a.Name)
+                        and call.func.value.id == "subprocess"):
+                    launchers[node.name] = launchers.get(node.name, 0) + 1
+    adjudicator_calls_probe = any(
+        isinstance(c, _a.Call) and isinstance(c.func, _a.Name) and c.func.id == "run_child_probe"
+        for n in _a.walk(module) if isinstance(n, _a.FunctionDef) and n.name == "adjudicate_witness"
+        for c in _a.walk(n))
+    return {"launchers": sorted(launchers), "probe_launches": launchers.get("run_child_probe", 0),
+            "adjudicator_calls_probe": adjudicator_calls_probe}
 
-    Every step is performed here: request the mutation, verify from the ACTUAL changed bytes that it
-    is valid Python, non-no-op and confined to permitted paths, run the mutated program in a
-    subprocess, parse the child's output independently, and check the exit class and the expected
-    named failure. Nothing in the witness module is trusted to report whether any of that happened.
+
+def adjudicate_witness(entry: dict, source: str) -> dict:
+    """Apply, measure, execute and judge ONE witness. Every observed value is produced HERE.
+
+    The recipe module supplies a description; it does not apply the mutation, compute any digest,
+    declare what changed, launch anything or report an outcome. Two earlier designs moved the
+    verdict here while leaving one of those steps in the other module, and each time a single
+    replacement over there made every witness pass.
     """
     verdict = {"witness_id": entry["witness_id"], "accepted": False, "reason": None,
                "expected_failing_checks": list(entry["expected_failing_checks"]),
-               "expected_exit": entry["expected_exit"]}
+               "expected_exit": entry.get("expected_exit", "nonzero"), "identity": {}}
+    recipe = WIT.recipe_for(entry["witness_id"])
+    if recipe is None:
+        verdict["reason"] = "no recipe for this manifest entry"
+        return verdict
+    if recipe.get("operation") not in WIT.KNOWN_OPERATIONS:
+        verdict["reason"] = "unknown operation " + repr(recipe.get("operation"))
+        return verdict
+
     try:
-        record = WIT.build_mutation(entry["witness_id"], source)
-    except BaseException as exc:  # noqa: BLE001 - a constructor crash is never a detection
-        verdict["reason"] = f"constructor raised {exc.__class__.__name__}"
-        verdict["identity"] = {}
+        mutated = apply_recipe(source, recipe)
+    except Exception as exc:  # noqa: BLE001 - the guard could not apply the recipe
+        verdict["reason"] = "recipe could not be applied: " + exc.__class__.__name__
         return verdict
-    verdict["identity"] = {k: v for k, v in record.items() if k != "mutated_source"}
-    if record.get("error"):
-        verdict["reason"] = record["error"]
+    if not isinstance(mutated, str):
+        verdict["reason"] = "mutation did not produce source text"
         return verdict
-    if not record.get("parses"):
-        verdict["reason"] = "mutated source does not parse"
-        return verdict
-    changed = set(record.get("changed_paths") or ())
-    if not changed <= set(entry["permitted_paths"]):
-        verdict["reason"] = f"mutation touched undeclared paths: {sorted(changed)}"
-        return verdict
+
+    identity = mutation_identity(source, mutated, recipe, entry["target_path"])
+    verdict["identity"] = identity
     is_control = bool(entry.get("expect_pass"))
-    if record.get("is_noop") and not is_control:
+    expect_noop = recipe.get("operation") == WIT.OP_NO_CHANGE
+    if identity["is_noop"] and not is_control:
+        # A no-op recipe under a real witness demonstrates nothing (AJ01). A control MAY be a no-op
+        # (WC02) or may legitimately append without touching a named node (WC01).
         verdict["reason"] = "mutation is a no-op; it cannot demonstrate anything"
         return verdict
-    if not record.get("is_noop") and entry["witness_id"] == "WC02":
+    if not identity["parses"]:
+        verdict["reason"] = "mutated source does not parse"
+        return verdict
+    if not set(identity["changed_paths"]) <= set(entry["permitted_paths"]):
+        verdict["reason"] = "mutation touched undeclared paths: " + str(identity["changed_paths"])
+        return verdict
+    if expect_noop and not identity["is_noop"]:
         verdict["reason"] = "the no-op control must not modify the source"
         return verdict
-    if record["original_sha256"] == record["mutated_sha256"] and not is_control:
+    _node_ops = (WIT.OP_REPLACE_FUNCTION_BODY, WIT.OP_REPLACE_ASSIGNMENT_VALUE,
+                 WIT.OP_DROP_ASSIGNMENT_ENTRY)
+    if recipe.get("operation") in _node_ops and not identity["target_changed"]:
+        verdict["reason"] = "the declared target node did not change"
+        return verdict
+    if identity["original_sha256"] == identity["mutated_sha256"] and not expect_noop:
         verdict["reason"] = "mutated bytes are identical to the original"
         return verdict
 
     try:
-        outcome = WIT.run_witness_child(record["mutated_source"])
-    except BaseException as exc:  # noqa: BLE001
-        verdict["reason"] = f"child execution raised {exc.__class__.__name__}"
+        outcome = run_child_probe(mutated, entry["target_path"])
+    except Exception as exc:  # noqa: BLE001
+        verdict["reason"] = "child execution raised " + exc.__class__.__name__
         return verdict
+    stdout = outcome.get("stdout") or ""
     verdict["child"] = {"rc": outcome.get("rc"), "timed_out": bool(outcome.get("timed_out")),
-                        "stdout_bytes": len(outcome.get("stdout") or "")}
+                        "stdout_bytes": len(stdout)}
     if outcome.get("timed_out"):
         verdict["reason"] = "timeout is not a detection"
         return verdict
-    stdout = outcome.get("stdout") or ""
     if not stdout.strip():
         verdict["reason"] = "empty stdout is not a detection"
         return verdict
+    decoder = json.JSONDecoder()
     try:
-        payload = json.loads(stdout)
+        payload, consumed = decoder.raw_decode(stdout.lstrip())
     except Exception:  # noqa: BLE001
-        verdict["reason"] = "child output is not a single parseable JSON document"
+        verdict["reason"] = "child output is not parseable JSON"
+        return verdict
+    if stdout.lstrip()[consumed:].strip():
+        verdict["reason"] = "child emitted more than one document"
         return verdict
     child_checks = payload.get("checks")
     if not isinstance(child_checks, list) or not child_checks:
@@ -1355,21 +1827,28 @@ def adjudicate_witness(entry: dict, source: str) -> dict:
     failing = [c.get("check_id") for c in child_checks if isinstance(c, dict) and not c.get("ok")]
     verdict["child"]["failing"] = failing
     verdict["child"]["emitted"] = len(child_checks)
+
     if is_control:
         verdict["accepted"] = outcome.get("rc") == 0 and not failing
         if not verdict["accepted"]:
             verdict["reason"] = "a control must leave the probe passing"
         return verdict
-    if entry["expected_exit"] == "nonzero" and outcome.get("rc") == 0:
+    if entry.get("expected_exit", "nonzero") == "nonzero" and outcome.get("rc") == 0:
         verdict["reason"] = "child exited zero; a mutation that changes nothing is not a detection"
         return verdict
     missing = [c for c in entry["expected_failing_checks"] if c not in failing]
+    verdict["child"]["missing_expected"] = missing
     if missing:
-        verdict["reason"] = f"expected named failure absent: {missing}"
+        verdict["reason"] = "expected named failure absent: " + str(missing)
         return verdict
-    # Guard against a mutation being "detected" only by unrelated collateral.
-    unrelated = [c for c in failing if c not in entry["expected_failing_checks"]]
+    allowed = set(entry["expected_failing_checks"]) | set(entry.get("allowed_additional_failures", ()))
+    unrelated = sorted(set(failing) - allowed)
     verdict["child"]["unrelated_failures"] = unrelated
+    if unrelated:
+        # ASSERTED, not merely recorded. A mutation "detected" only by collateral damage has not
+        # demonstrated the property it names.
+        verdict["reason"] = "unrelated failures mask the target: " + str(unrelated)
+        return verdict
     verdict["accepted"] = True
     return verdict
 
@@ -2909,7 +3388,7 @@ def run() -> int:
                "controls": sum(1 for e in AUTHORITATIVE_WITNESS_MANIFEST if e.get("expect_pass"))})
 
     _constructors = _boundary("WA01 witness-manifest-and-constructors-agree-exactly",
-                              "WIT.constructor_ids", WIT.constructor_ids,
+                              "WIT.recipe_ids", WIT.recipe_ids,
                               phase="behavioural witness")
     _manifest_ids = [e["witness_id"] for e in AUTHORITATIVE_WITNESS_MANIFEST]
     rec("WA01 witness-manifest-and-constructors-agree-exactly",
@@ -2926,83 +3405,162 @@ def run() -> int:
                "manifest_only": sorted(set(_manifest_ids) - set(_constructors)),
                "constructor_only": sorted(set(_constructors) - set(_manifest_ids))})
 
-    _authority = _boundary("WA00 witness-module-has-no-acceptance-authority",
-                           "PP.witness_authority_audit",
-                           lambda: _witness_authority_audit(ROOT), phase="structural source check")
+    _recipe_ids = sorted(WIT.recipe_ids())
+    _executed_ids = [v["witness_id"] for v in _verdicts]
+    _reported_ids = [c["check_id"].split(" ", 1)[0] for c in checks
+                     if c["check_id"].split(" ", 1)[0] in set(_manifest_ids)]
     rec("WA00 witness-module-has-no-acceptance-authority",
-        not _authority["authority_calls"],
-        "no function of the witness module is consulted for an acceptance decision. Its aggregate "
-        "judging functions were canned in review and the battery stayed green, because the module "
-        "that built the mutations also judged them. It now supplies payloads and location helpers "
-        "only; every verdict is reached here",
-        level="structural source check", extra=_authority)
+        sorted(_manifest_ids) == _recipe_ids
+        and _executed_ids == _manifest_ids
+        and _no_witness_execution_symbols(_witness_module_source()),
+        "the recipe module supplies exactly the ids the authoritative manifest names, every one "
+        "was executed, and the module defines NO execution or adjudication symbol at all. This is "
+        "runtime set equality plus a symbol check on the parsed module, not a textual scan for a "
+        "particular `WIT.name` form -- that scan was bypassable by an alias or a direct import",
+        level="structural source check",
+        extra={"manifest_ids": len(_manifest_ids), "recipe_ids": len(_recipe_ids),
+               "executed": len(_executed_ids),
+               "manifest_only": sorted(set(_manifest_ids) - set(_recipe_ids)),
+               "recipe_only": sorted(set(_recipe_ids) - set(_manifest_ids))})
 
-    # ---------------------------------------------- adjudication-rejection mutations
-    def _adj_mutation(label, entry_patch, why, expect_reason_fragment):
-        """Corrupt what a constructor RETURNS and require the guard's adjudicator to refuse it."""
-        base = dict(AUTHORITATIVE_WITNESS_MANIFEST[0])
-        entry = dict(base, **entry_patch)
-        original = WIT.build_mutation
+    # ---------------------------------------------- adjudication-rejection mutations (Parts G/K)
+    # Every attack here corrupts DATA -- a recipe or a manifest entry -- and requires the guard's
+    # own adjudicator to refuse it from the actual bytes. Nothing patches an execution or identity
+    # function, because the guard owns those; there is no builder to swap any more.
+    def _adj_mutation(label, entry, recipe_override, why, expect_reason_fragment):
+        original = WIT.recipe_for
         detected, reason = False, None
         try:
-            WIT.build_mutation = entry_patch.pop("_builder", original)
+            if recipe_override is not None:
+                WIT.recipe_for = lambda wid, _r=recipe_override: _r if wid == entry["witness_id"] else original(wid)
             verdict = adjudicate_witness(entry, _witness_source)
             reason = verdict.get("reason") or ""
             detected = (not verdict.get("accepted")) and expect_reason_fragment in reason
         except Exception as exc:  # noqa: BLE001 - a crash is never a controlled refusal
-            reason = f"<exception:{exc.__class__.__name__}>"
+            reason = "<exception:" + exc.__class__.__name__ + ">"
         finally:
-            WIT.build_mutation = original
+            WIT.recipe_for = original
         MUTATION_FINGERPRINTS[label] = hashlib.sha256(
-            json.dumps([label, expect_reason_fragment], sort_keys=True).encode()).hexdigest()[:16]
+            json.dumps([label, expect_reason_fragment, str(recipe_override)],
+                       sort_keys=True).encode()).hexdigest()[:16]
         MUTATION_TRIPPED[label] = [reason]
         rec(label, detected, why, level="adjudication mutation",
             extra={"observed_reason": reason, "required_fragment": expect_reason_fragment})
 
-    _orig_build = WIT.build_mutation
+    _wt01 = next(e for e in AUTHORITATIVE_WITNESS_MANIFEST if e["witness_id"] == "WT01")
 
-    def _noop_builder(witness_id, source):
-        record = _orig_build(witness_id, source)
-        record.update(mutated_source=source, mutated_sha256=record["original_sha256"],
-                      diff_sha256=hashlib.sha256(b"").hexdigest(), diff_lines=0, is_noop=True)
-        return record
+    _adj_mutation("AJ01 recipe-is-a-no-op", _wt01,
+                  {"witness_id": "WT01", "operation": WIT.OP_NO_CHANGE, "target_selector": "none"},
+                  "a recipe that changes nothing is refused: the guard computes is_noop from the "
+                  "actual diff, so a description claiming a mutation cannot substitute for one",
+                  "no-op")
+    _adj_mutation("AJ02 recipe-body-swapped-to-wrong-check", _wt01,
+                  {"witness_id": "WT01", "operation": WIT.OP_REPLACE_FUNCTION_BODY,
+                   "target_selector": "rehash",
+                   "body": ("artifact = copy.deepcopy(artifact)",
+                            'artifact.pop("canonical_payload_hash", None)',
+                            'artifact["canonical_payload_hash"] = GEN.canonical_hash(artifact)',
+                            "return artifact")},
+                  "swapping WT01's body for one that trips a DIFFERENT check is caught: the child "
+                  "fails BC08, not the FZ14 the manifest names, so the expected named failure is "
+                  "absent", "expected named failure absent")
+    _adj_mutation("AJ03 recipe-targets-a-missing-function", _wt01,
+                  {"witness_id": "WT01", "operation": WIT.OP_REPLACE_FUNCTION_BODY,
+                   "target_selector": "_no_such_function_anywhere", "body": ("return None",)},
+                  "a recipe whose target does not exist cannot be applied; the guard reports the "
+                  "failure rather than pretending a mutation happened", "recipe could not be applied")
+    def _identity_is_byte_derived():
+        # Two DIFFERENT recipe bodies must yield DIFFERENT independently-computed fingerprints, and
+        # a body reproducing the original must be seen as unchanged. This replaces the tautological
+        # AJ04: it fails only if identity is not actually recomputed from the bytes the guard wrote.
+        recipe_a = {"witness_id": "X", "operation": WIT.OP_REPLACE_FUNCTION_BODY,
+                    "target_selector": "audit_self_test", "body": ("return {}",)}
+        recipe_b = {"witness_id": "X", "operation": WIT.OP_REPLACE_FUNCTION_BODY,
+                    "target_selector": "audit_self_test", "body": ("return dict()",)}
+        mut_a = apply_recipe(_witness_source, recipe_a)
+        mut_b = apply_recipe(_witness_source, recipe_b)
+        id_a = mutation_identity(_witness_source, mut_a, recipe_a, WITNESS_TARGET_PATH)
+        id_b = mutation_identity(_witness_source, mut_b, recipe_b, WITNESS_TARGET_PATH)
+        noop = {"witness_id": "X", "operation": WIT.OP_APPEND_LINES,
+                "target_selector": "module_tail", "lines": ()}
+        mut_n = apply_recipe(_witness_source, noop)
+        id_n = mutation_identity(_witness_source, mut_n, noop, WITNESS_TARGET_PATH)
+        return {"a_diff": id_a["diff_sha256"], "b_diff": id_b["diff_sha256"],
+                "distinct": id_a["diff_sha256"] != id_b["diff_sha256"],
+                "a_changed": id_a["target_changed"], "noop_seen": id_n["is_noop"]}
 
-    def _swap_builder(witness_id, source):
-        other = "WT12" if witness_id != "WT12" else "WT09"
-        record = _orig_build(other, source)
-        record["witness_id"] = witness_id
-        return record
+    _byte_identity = _boundary("AJ04 identity-is-recomputed-from-bytes",
+                               "GUARD.mutation_identity", _identity_is_byte_derived,
+                               phase="adjudication mutation")
+    MUTATION_FINGERPRINTS["AJ04 identity-is-recomputed-from-bytes"] = hashlib.sha256(
+        json.dumps([_byte_identity["a_diff"], _byte_identity["b_diff"]],
+                   sort_keys=True).encode()).hexdigest()[:16]
+    MUTATION_TRIPPED["AJ04 identity-is-recomputed-from-bytes"] = ["byte-derived"]
+    rec("AJ04 identity-is-recomputed-from-bytes",
+        _byte_identity["distinct"] and _byte_identity["a_changed"]
+        and _byte_identity["noop_seen"],
+        "two different recipe bodies produce two different independently-computed diff digests, the "
+        "mutated target node reads as changed, and an empty append reads as a no-op. Identity comes "
+        "from the bytes the guard wrote, never from anything a recipe supplies",
+        level="adjudication mutation", extra=_byte_identity)
+    _adj_mutation("AJ05 manifest-entry-has-no-recipe",
+                  {"witness_id": "WT_NONEXISTENT", "target_path": WITNESS_TARGET_PATH,
+                   "expected_failing_checks": ("FZ14 source-audits-are-behaviourally-discriminating",),
+                   "allowed_additional_failures": (), "expected_exit": "nonzero",
+                   "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
+                  None,
+                  "a manifest entry with no recipe is refused rather than silently skipped",
+                  "no recipe")
 
-    def _undeclared_builder(witness_id, source):
-        record = _orig_build(witness_id, source)
-        record["changed_paths"] = [WITNESS_TARGET_PATH, "backend/app/ga_readiness.py"]
-        return record
+    # BC10: the subprocess is launched inside the guard, proven structurally from the guard's AST.
+    _ownership = _boundary("BC10 guard-owns-the-witness-subprocess",
+                           "GUARD._witness_subprocess_ownership",
+                           lambda: _witness_subprocess_ownership(ROOT, WITNESS_TARGET_PATH),
+                           phase="boundary")
+    rec("BC10 guard-owns-the-witness-subprocess",
+        _ownership["probe_launches"] >= 1 and _ownership["adjudicator_calls_probe"]
+        and "run_child_probe" in _ownership["launchers"],
+        "the child subprocess is launched by run_child_probe INSIDE this guard, and the "
+        "adjudicator calls it. The witness module supplies no rc/stdout observation -- a fabricated "
+        "child result made every witness pass when execution lived over there",
+        level="boundary", extra=_ownership)
 
-    def _unparseable_builder(witness_id, source):
-        record = _orig_build(witness_id, source)
-        record.update(parses=False, error="mutated source does not parse: 1")
-        return record
+    # ---------------------------------------------- witness recipe module source binding
+    def _committed_witness_module_sha():
+        out = subprocess.run(["git", "show", "HEAD:scripts/ga_gap_assessment_witnesses.py"],
+                             cwd=str(ROOT), capture_output=True, timeout=60)
+        if out.returncode != 0:
+            return None
+        return hashlib.sha256(out.stdout).hexdigest()
 
-    def _unknown_builder(witness_id, source):
-        return {"witness_id": witness_id, "error": "unknown witness id"}
+    _wit_sha = _boundary("FZ18 witness-recipe-module-is-source-bound",
+                         "GUARD._committed_witness_module_sha",
+                         _committed_witness_module_sha, phase="structural source check")
+    rec("FZ18 witness-recipe-module-is-source-bound",
+        _wit_sha == PINNED_WITNESS_MODULE_SHA256,
+        "the committed witness recipe module hashes to its pinned value. Editing a recipe -- the "
+        "data the guard applies -- changes this, so a recipe cannot drift from the manifest that "
+        "names what each mutation must break without a named failure here",
+        level="structural source check",
+        extra={"committed_sha": (_wit_sha or "")[:16],
+               "pinned": PINNED_WITNESS_MODULE_SHA256[:16]})
 
-    _adj_mutation("AJ01 constructor-returns-a-no-op", {"_builder": _noop_builder},
-                  "a constructor that returns the ORIGINAL bytes is refused. A no-op demonstrates "
-                  "nothing, and identity is computed from the actual bytes rather than from the "
-                  "description, so it cannot hide", "no-op")
-    _adj_mutation("AJ02 constructor-payloads-swapped", {"_builder": _swap_builder},
-                  "swapping one witness's payload for another's is visible because the fingerprint "
-                  "is the real diff digest. Hashing the description left every fingerprint "
-                  "unchanged under exactly this swap", "expected named failure absent")
-    _adj_mutation("AJ03 constructor-edits-an-undeclared-path", {"_builder": _undeclared_builder},
-                  "a mutation touching a path outside its declared permitted set is refused before "
-                  "anything is executed", "undeclared paths")
-    _adj_mutation("AJ04 constructor-emits-invalid-source", {"_builder": _unparseable_builder},
-                  "a mutation that does not parse is refused. A SyntaxError is not a detection -- an "
-                  "inert guard produces one too", "does not parse")
-    _adj_mutation("AJ05 constructor-is-unknown", {"_builder": _unknown_builder},
-                  "a manifest entry with no matching constructor is refused rather than skipped",
-                  "unknown witness id")
+    def _witness_pin_mutation(label, pinned_now, corrupt, why):
+        detected = pinned_now != corrupt
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(
+            json.dumps([label, str(corrupt)], sort_keys=True).encode()).hexdigest()[:16]
+        MUTATION_TRIPPED[label] = [label]
+        rec(label, detected, why, level="stale pin mutation",
+            extra={"pinned_length": len(str(pinned_now))})
+
+    _witness_pin_mutation("PM33 stale-witness-module-source-pin",
+                          PINNED_WITNESS_MODULE_SHA256, "0" * 64,
+                          "a stale witness-module source pin differs from the committed blob hash "
+                          "and is refused by FZ18")
+    _witness_pin_mutation("PM34 stale-witness-manifest-hash-pin",
+                          PINNED_WITNESS_MANIFEST_HASH, "0" * 64,
+                          "a stale witness-manifest pin differs from the recomputed manifest hash "
+                          "and is refused by FZ16")
 
     # ---------------------------------------------- Part O: stale cross-file pins
     def _pin_mutation(label, attr, value, why):
@@ -3070,7 +3628,6 @@ def run() -> int:
 
     # The expected control inventory must come from the registry, and no editable constant may
     # redefine it. Proved on the parsed guard source, not by string search.
-    import ast as _ast
     # ---------------------------------------------------------------- behavioral discrimination
     # THE load-bearing proof. FZ07/FZ08 inspect the SHAPE of each gate's predicate, and an
     # exact-head review showed that is an arms race that cannot be won: of twenty hollowings it
@@ -3372,7 +3929,7 @@ if __name__ == "__main__":
     # rarely-taken branch -- used to escape and end the process with zero structured stdout. All
     # output is buffered into a single print, so any escape lost the whole report. Nothing gets to
     # exit this battery silently now.
-    if WIT.PROBE_FLAG in sys.argv:
+    if WITNESS_PROBE_FLAG in sys.argv:
         # Narrow, fixture-free entry point used by the behavioural witnesses. It runs the REAL
         # structural checks -- the same function the full battery calls -- so a witness observes
         # production behaviour rather than a re-implementation. Its claim scope is distinct so it
