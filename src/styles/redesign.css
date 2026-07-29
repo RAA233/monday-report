@@ -1,0 +1,237 @@
+/* Redesign application styles.
+ *
+ * Extends tokens.css (the handoff design-system sheet, ported verbatim) with the
+ * app-level rules the prototypes declare in their own <style> block: the skeleton
+ * pulse, the shell breakpoints, and a small number of shared object classes so
+ * pages do not repeat the same inline styling.
+ *
+ * Everything here resolves through var(--*) tokens. Logical properties only, so
+ * dir="rtl" flips without a second stylesheet.
+ */
+
+body {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* ── skeletons ─────────────────────────────────────────────────────────────
+   One animation for every loading surface, disabled under reduced motion. */
+@keyframes mrPulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+[data-skeleton] {
+  animation: mrPulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-skeleton] {
+    animation: none !important;
+  }
+}
+
+.mr-skeleton-row {
+  height: 52px;
+  background: var(--color-neutral-200);
+}
+
+/* ── shell ─────────────────────────────────────────────────────────────────
+   236px rail on desktop; at ≤900px the sidebar becomes a horizontal scrolling
+   bar with 44px hit targets and the tenant card hides (identity stays in the
+   topbar). */
+.btn,
+[data-navbtn],
+[data-chip] {
+  white-space: nowrap;
+}
+
+[data-topbar] {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 1140px) {
+  [data-shell] {
+    grid-template-columns: 212px minmax(0, 1fr) !important;
+  }
+}
+
+@media (max-width: 900px) {
+  /* minmax(0,1fr), not 1fr: a bare 1fr track is minmax(auto,1fr), so a wide
+     min-content child (the 760px grid-tables) would widen the track past the
+     viewport and scroll the whole page sideways instead of scrolling itself. */
+  [data-shell] {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  [data-sidebar] {
+    position: static !important;
+    height: auto !important;
+    border-inline-end: none !important;
+    border-block-end: 1px solid var(--color-divider);
+  }
+  [data-navgroups] {
+    display: flex !important;
+    gap: 4px !important;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  [data-navgroup] {
+    display: flex !important;
+    gap: 4px !important;
+  }
+  [data-navlabel],
+  [data-tenantcard] {
+    display: none !important;
+  }
+  [data-navbtn] {
+    min-height: 44px !important;
+  }
+  [data-pagehead] {
+    flex-direction: column;
+    align-items: stretch !important;
+  }
+  [data-askgrid] {
+    grid-template-columns: 1fr !important;
+  }
+}
+
+/* ── shared objects ────────────────────────────────────────────────────────
+   Extracted so pages reuse one definition instead of repeating inline styles. */
+
+/* Hairline cell grid: a 1px divider showing through as the gap. */
+.mr-cells {
+  display: grid;
+  border-block-start: 1px solid var(--color-divider);
+  border-inline-start: 1px solid var(--color-divider);
+}
+
+.mr-cell {
+  background: var(--color-bg);
+  border-inline-end: 1px solid var(--color-divider);
+  border-block-end: 1px solid var(--color-divider);
+  padding: 10px 12px;
+}
+
+.mr-cell-label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--color-neutral-600);
+}
+
+.mr-cell-value {
+  display: block;
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+  font-size: 17px;
+  margin-top: 4px;
+}
+
+.mr-cell-detail {
+  display: block;
+  font-size: 11px;
+  color: var(--color-neutral-700);
+  margin-top: 2px;
+}
+
+/* Kicker + condensed uppercase page title. */
+.mr-kicker {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--color-accent-700);
+}
+
+.mr-title {
+  font-size: clamp(28px, 3.4vw, 40px);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin: 6px 0 0;
+}
+
+.mr-lede {
+  font-size: 13.5px;
+  margin: 8px 0 0;
+  max-width: 64ch;
+}
+
+/* Grid-table: role="table" rows sharing one column template per table. */
+.mr-table-head,
+.mr-table-row {
+  display: grid;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 10px;
+}
+
+.mr-table-head {
+  border-block-end: 1px solid var(--color-divider);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+}
+
+.mr-table-row {
+  border-block-end: 1px solid color-mix(in srgb, var(--color-text) 8%, transparent);
+}
+
+.mr-table-row:hover {
+  background: color-mix(in srgb, var(--color-text) 4%, transparent);
+}
+
+/* Wide content scrolls inside its own container. min-width:0 lets the container
+   shrink below its content's min-content width, which is what makes the inner
+   scrollbar appear instead of the page gaining one. */
+.mr-scroll-x {
+  overflow-x: auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Status tag that is never colour-alone: the word carries the meaning and
+   critical additionally inverts to a solid accent-900 fill. */
+.tag-critical {
+  background: var(--color-accent-900);
+  color: var(--color-bg);
+}
+
+/* Text/accent hover tints used by nav items, dock cells and snapshot cells. */
+.mr-hover-text:hover {
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
+}
+
+.mr-hover-accent:hover {
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+/* Visually hidden but announced. */
+.mr-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
