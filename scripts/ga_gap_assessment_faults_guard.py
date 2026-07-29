@@ -28,6 +28,7 @@ import difflib
 import hashlib
 import io
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -48,7 +49,7 @@ import synthetic_ga_evidence as SYN  # noqa: E402
 
 checks: list[dict] = []
 MUTATION_PREFIXES = ("MC", "MA", "MT", "MR", "MB", "MP", "MV", "MI", "MG", "MX", "PM",
-                     "WT", "AJ")
+                     "WT", "AJ", "PH")
 
 DB_ID, QUEUE_ID = "production-database-adapter", "production-queue-adapter"
 
@@ -192,7 +193,32 @@ EXPECTED_CHECK_IDS = [
     "BC04 temporary-state-observation-is-real",
     "BC05 tracked-state-observation-is-real",
     "BC06 every-heavy-operation-call-is-classified",
-    "BC07 no-unstructured-exit",
+    "BC07 canonical-process-entrypoint",
+    "BC11 internal-failure-is-observably-structured",
+    "PH01 handler-pass",
+    "PH02 handler-return",
+    "PH03 handler-fallthrough-no-exit",
+    "PH04 exit-zero-literal",
+    "PH05 exit-zero-named-constant",
+    "PH06 exit-code-via-rebound-named-constant",
+    "PH07 outer-try-inner-swallow",
+    "PH08 run-nested-in-inner-try",
+    "PH09 emitter-behind-empty-loop",
+    "PH10 emitter-behind-false-flag",
+    "PH11 emitter-behind-if-False",
+    "PH12 emitter-in-uncalled-nested-function",
+    "PH13 emitter-removed",
+    "PH14 emitter-returns-None",
+    "PH15 emitter-stderr-only",
+    "PH16 emitter-empty-stdout",
+    "PH17 emitter-malformed-json",
+    "PH18 emitter-two-documents",
+    "PH19 emitter-success-json",
+    "PH20 emitter-raises-before-output",
+    "PH21 exit-behind-condition",
+    "PH22 exit-behind-empty-loop",
+    "PH23 broad-wrapper-catches-systemexit",
+    "PH24 alternate-run-path-outside-entrypoint",
     "BC08 canonical-hash-boundary",
     "BC10 guard-owns-the-witness-subprocess",
     "FZ14 source-audits-are-behaviourally-discriminating",
@@ -214,7 +240,7 @@ EXPECTED_CHECK_IDS = [
 
 #: Witness-manifest pins. The manifest, its protected-property set and its id set are each
 #: hashed, so a witness cannot be removed, renamed, duplicated or retargeted quietly.
-PINNED_WITNESS_MANIFEST_HASH = "6e0b1d345ec31e45ae2853aed320bd53ad10f0b2b6f617b4fef247d19b6142d2"
+PINNED_WITNESS_MANIFEST_HASH = "058f31efd6d8f7403d1b47f163ed789bd2c2ce1f4d3465d53448b5f434800f54"
 PINNED_PROTECTED_PROPERTY_HASH = "95cf0977ef33ea5b483fc551016ddfa643b3d118d854914d72f8d10f0c924dc7"
 PINNED_WITNESS_ID_HASH = "4607f963e2ab18e85a96f43130a347bfc24776e7f36879c1ac40f6b7f0d130cb"
 PINNED_WITNESS_COUNT = 16
@@ -300,27 +326,27 @@ AUTHORITATIVE_WITNESS_MANIFEST = (
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT09", "target_path": WITNESS_TARGET_PATH,
-     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_failing_checks": ("BC07 canonical-process-entrypoint",),
      "allowed_additional_failures": ("FZ12 no-patch-only-body-copies",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT10", "target_path": WITNESS_TARGET_PATH,
-     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_failing_checks": ("BC07 canonical-process-entrypoint",),
      "allowed_additional_failures": ("FZ12 no-patch-only-body-copies",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT11", "target_path": WITNESS_TARGET_PATH,
-     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_failing_checks": ("BC07 canonical-process-entrypoint",),
      "allowed_additional_failures": ("FZ12 no-patch-only-body-copies",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT12", "target_path": WITNESS_TARGET_PATH,
-     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_failing_checks": ("BC07 canonical-process-entrypoint",),
      "allowed_additional_failures": ("FZ12 no-patch-only-body-copies",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT13", "target_path": WITNESS_TARGET_PATH,
-     "expected_failing_checks": ("BC07 no-unstructured-exit",),
+     "expected_failing_checks": ("BC07 canonical-process-entrypoint",),
      "expected_exit": "nonzero", "expected_output": "structured_json",
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": False},
     {"witness_id": "WT14", "target_path": WITNESS_TARGET_PATH,
@@ -338,8 +364,8 @@ AUTHORITATIVE_WITNESS_MANIFEST = (
      "permitted_paths": (WITNESS_TARGET_PATH,), "expect_pass": True},
 )
 
-EXPECTED_TOTAL_CHECKS = 191
-EXPECTED_MUTATION_COUNT = 134
+EXPECTED_TOTAL_CHECKS = 216
+EXPECTED_MUTATION_COUNT = 158
 PINNED_DRIFT_ID_SET_HASH = "f95936ca392966b9efa0e5dacb5a4378ac45af509658752a3a9e5541188571a4"
 PINNED_DRIFT_CHECK_COUNT = 92
 #: NOTE: this battery no longer pins its own id-set hash as an ACCEPTANCE AUTHORITY. Such a pin is
@@ -853,90 +879,6 @@ FORBIDDEN_HANDLER_NODES = (_ast.If, _ast.For, _ast.AsyncFor, _ast.While, _ast.Tr
 if hasattr(_ast, "Match"):  # pragma: no branch - version dependent
     FORBIDDEN_HANDLER_NODES = FORBIDDEN_HANDLER_NODES + (_ast.Match,)
 
-def _process_handler_contract(source: str) -> dict:
-    """Validate the top-level exception handler against a deliberately MINIMAL canonical form.
-
-    The previous version tried to decide reachability in general, and lost: an emitter behind
-    ``for _ in ():`` or behind a false module flag was judged reachable, so the handler passed while
-    a real escape exited rc=0 with no output. Deciding reachability in general is undecidable and
-    every extra syntax case is another arms-race round.
-
-    So the shape is fixed instead of analysed. The handler body must be exactly a flat sequence
-    containing one emitter call and, after it, one unconditional non-zero ``raise SystemExit``.
-    Any conditional, loop, try, with, match, comprehension, lambda, nested function, ``return`` or
-    ``pass`` anywhere in the body is a refusal -- there is nowhere left to hide an unreachable
-    emitter, because nothing that could make a statement conditional is permitted at all.
-    """
-    report = {"handler_found": False, "catches_base_exception": False, "emits": False,
-              "terminates_nonzero": False, "is_pass": None, "forbidden_nodes": [],
-              "emitter_index": None, "termination_index": None, "handler_count": 0,
-              "reason": None}
-    try:
-        tree = _ast.parse(source)
-    except SyntaxError as exc:
-        report["reason"] = f"unparseable:{exc.__class__.__name__}"
-        return report
-
-    target = None
-    for node in _ast.walk(tree):
-        if isinstance(node, _ast.Try) and any(
-                isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name) and c.func.id == "run"
-                for c in _ast.walk(node)):
-            target = node
-            break
-    if target is None:
-        report["reason"] = "no top-level Try around run()"
-        return report
-
-    handlers = [h for h in target.handlers
-                if getattr(h.type, "id", None) == "BaseException"]
-    report["handler_count"] = len(handlers)
-    if len(handlers) != 1:
-        report["reason"] = ("exactly one BaseException handler is required; found "
-                            f"{len(handlers)}")
-        return report
-    handler = handlers[0]
-    report["handler_found"] = report["catches_base_exception"] = True
-    report["is_pass"] = all(isinstance(s, _ast.Pass) for s in handler.body)
-
-    forbidden = sorted({type(n).__name__ for s in handler.body for n in _ast.walk(s)
-                        if isinstance(n, FORBIDDEN_HANDLER_NODES)})
-    report["forbidden_nodes"] = forbidden
-    if forbidden:
-        report["reason"] = f"handler body contains forbidden constructs: {forbidden}"
-        return report
-
-    for index, statement in enumerate(handler.body):
-        if (isinstance(statement, _ast.Expr) and isinstance(statement.value, _ast.Call)
-                and isinstance(statement.value.func, _ast.Name)
-                and statement.value.func.id in CANONICAL_EMITTERS):
-            report["emits"] = True
-            report["emitter_index"] = index
-            break
-    if not report["emits"]:
-        report["reason"] = "handler body has no direct structured emitter call"
-        return report
-
-    for index, statement in enumerate(handler.body):
-        if not isinstance(statement, _ast.Raise) or not isinstance(statement.exc, _ast.Call):
-            continue
-        func = statement.exc.func
-        if not (isinstance(func, _ast.Name) and func.id == "SystemExit"):
-            continue
-        args = statement.exc.args
-        if args and isinstance(args[0], _ast.Constant) and args[0].value in (0, None):
-            report["reason"] = "handler terminates with success"
-            return report
-        report["terminates_nonzero"] = True
-        report["termination_index"] = index
-        break
-    if not report["terminates_nonzero"]:
-        report["reason"] = "handler body has no direct non-zero SystemExit"
-        return report
-    if report["termination_index"] <= report["emitter_index"]:
-        report["reason"] = "termination precedes the emitter"
-        return report
-    return report
 def _rehash_boundary_contract(source: str) -> dict:
     """BC08's real property: ``rehash`` classifies a canonical-hash failure instead of escaping.
 
@@ -1012,26 +954,16 @@ def apply_recipe(source: str, recipe: dict) -> str:
         return chr(10).join(lines[:node.lineno - 1] + replacement + lines[node.end_lineno:]) + chr(10)
 
     if operation == WIT.OP_REPLACE_MODULE_HANDLER_BODY:
-        # The module-level BaseException handler around raise SystemExit(run()). Located by finding
-        # the single top-level Try whose body raises SystemExit(run()); this is the CURRENT handler
-        # shape, which this increment deliberately does not redesign.
-        # The Try wrapping raise SystemExit(run()). It is NOT inside any function, but it may sit
-        # under a module-level `if` guard, so tree.body alone misses it; walk, then exclude any Try
-        # that lives inside a function definition.
-        in_function = set()
-        for fn in _ast.walk(tree):
-            if isinstance(fn, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
-                for c in _ast.walk(fn):
-                    in_function.add(id(c))
-        candidate = None
-        for node in _ast.walk(tree):
-            if (isinstance(node, _ast.Try) and id(node) not in in_function
-                    and any(isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
-                            and c.func.id == "run" for c in _ast.walk(node))):
-                candidate = node
-                break
-        if candidate is None:
-            raise LookupError("module-level Try around run() not found")
+        # The BaseException handler inside the canonical process entry point. The handler used to
+        # sit at module scope; it now lives in _process_entrypoint, so the recipe targets the Try
+        # inside that function.
+        entry = _witness_function_node(tree, PROCESS_ENTRYPOINT_NAME)
+        if entry is None:
+            raise LookupError(PROCESS_ENTRYPOINT_NAME + " not found")
+        tries = [n for n in _ast.walk(entry) if isinstance(n, _ast.Try)]
+        if len(tries) != 1:
+            raise LookupError("expected exactly one Try in the entry point")
+        candidate = tries[0]
         handlers = [h for h in candidate.handlers if getattr(h.type, "id", None) == "BaseException"]
         if len(handlers) != 1:
             raise LookupError("expected exactly one BaseException handler")
@@ -1459,6 +1391,23 @@ def emit_structured_internal_failure(exc: BaseException) -> None:
                       "timed_out": False})
 
 
+def _process_entrypoint():
+    """The single process entry point. Uniquely named, so no outer Try can shadow it.
+
+    Exactly one Try, one direct run() call, one BaseException handler whose body is the flat
+    sequence emit-then-raise-SystemExit with a LITERAL non-zero code. A named exit constant was set
+    to zero, and rebound to zero after validation, and both let an internal failure exit 0 -- the
+    literal cannot be.
+    """
+    try:
+        raise SystemExit(run())
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - an escape is a battery fault, never a refusal
+        emit_structured_internal_failure(exc)
+        raise SystemExit(70)
+
+
 def _emit_and_exit(failure: dict = None) -> None:
     """Emit the structured report and exit non-zero.
 
@@ -1611,14 +1560,9 @@ def structural_source_checks(rec, boundary):
 
     _handler_source = (ROOT / "scripts" / "ga_gap_assessment_faults_guard.py").read_text(
         encoding="utf-8")
-    _handler = _boundary("BC07 no-unstructured-exit", "PP.process_handler_contract",
-                         lambda: _process_handler_contract(_handler_source), phase="boundary")
-    _proc_boundary = bool(
-        _handler["handler_found"] and _handler["catches_base_exception"] and _handler["emits"]
-        and _handler["terminates_nonzero"] and not _handler["is_pass"]
-        and not _handler["forbidden_nodes"] and _handler["handler_count"] == 1
-        and _handler["reason"] is None
-        and _handler["termination_index"] > _handler["emitter_index"])
+    _entry = _boundary("BC07 canonical-process-entrypoint", "GUARD.process_entrypoint_contract",
+                       lambda: process_entrypoint_contract(_handler_source), phase="boundary")
+    _proc_boundary = entrypoint_contract_holds(_entry)
     _rehash = _boundary("BC08 canonical-hash-boundary", "PP.rehash_boundary_contract",
                         lambda: _rehash_boundary_contract(_handler_source), phase="boundary")
     rec("BC08 canonical-hash-boundary",
@@ -1629,17 +1573,17 @@ def structural_source_checks(rec, boundary):
         "that emits a structured failure",
         level="boundary", extra=dict(_rehash, operation_id="GEN.canonical_hash"))
 
-    rec("BC07 no-unstructured-exit", _proc_boundary,
-        "the process-level boundary is validated on the HANDLER BODY, not on the whole Try. The "
-        "previous check walked the entire Try for a structured emitter, so a DEAD emitter parked in "
-        "the try body satisfied it while the handler itself was `pass` -- and an escape then exited "
-        "rc=0 with no output at all, a silent success in the audit chain. The handler must catch "
-        "BaseException, contain a REACHABLE emitter, terminate non-zero, not be pass, not return "
-        "success and not fall through",
+    rec("BC07 canonical-process-entrypoint", _proc_boundary,
+        "the process failure path is a UNIQUE named entry point located by identity, not by "
+        "searching for the first Try containing run(). An outer canonical-looking Try wrapping an "
+        "inner swallowing one satisfied that search while the real failure was discarded and the "
+        "process exited 0. The entry point must define exactly one Try, one direct run() call (the "
+        "only one in the module), one BaseException handler whose body is exactly "
+        "emit-then-raise-SystemExit with a LITERAL non-zero code -- a named constant was set to "
+        "zero and rebound to zero after validation, and the literal cannot be",
         level="boundary",
-        extra={"handler_contract": _handler,
-               "heavy_modules_audited": list(HEAVY_MODULES),
-               "boundary_observations": len(BOUNDARY_OBSERVATIONS)})
+        extra={"entrypoint_contract": _entry,
+               "heavy_modules_audited": list(HEAVY_MODULES)})
 
     # Scanned INLINE, with no helper to interpose on. A review replaced the helper with a stub that
     # delegated only when handed fabricated `sources=` -- exactly the self-test's calling convention
@@ -1740,6 +1684,321 @@ def _witness_subprocess_ownership(root, target_path):
         for c in _a.walk(n))
     return {"launchers": sorted(launchers), "probe_launches": launchers.get("run_child_probe", 0),
             "adjudicator_calls_probe": adjudicator_calls_probe}
+
+
+#: The single, uniquely named process entry point. Located by NAME, never by searching for a Try
+#: that happens to contain run(): an outer canonical-looking Try wrapping an inner swallowing one
+#: satisfied that search while the real failure was discarded and the process exited 0.
+PROCESS_ENTRYPOINT_NAME = "_process_entrypoint"
+#: The mandatory internal-error exit code, as a LITERAL in the handler. A named constant was set to
+#: zero, and rebound to zero after validation, and both left an internal failure exiting 0.
+PROCESS_INTERNAL_EXIT_LITERAL = 70
+#: Statements forbidden anywhere in the canonical handler body -- directly or nested. The contract
+#: is a whitelist, so no reachability inference is performed and there is nowhere to hide an
+#: emitter that never runs.
+PROCESS_HANDLER_FORBIDDEN = (_ast.If, _ast.For, _ast.AsyncFor, _ast.While, _ast.Try, _ast.With,
+                             _ast.AsyncWith, _ast.Return, _ast.Pass, _ast.Break, _ast.Continue,
+                             _ast.Lambda, _ast.ListComp, _ast.SetComp, _ast.DictComp,
+                             _ast.GeneratorExp, _ast.FunctionDef, _ast.AsyncFunctionDef,
+                             _ast.Yield, _ast.YieldFrom)
+if hasattr(_ast, "Match"):  # pragma: no branch - version dependent
+    PROCESS_HANDLER_FORBIDDEN = PROCESS_HANDLER_FORBIDDEN + (_ast.Match,)
+
+
+def process_entrypoint_contract(source: str) -> dict:
+    """Validate the uniquely named process entry point and its handler body.
+
+    Everything is anchored on the entry point's IDENTITY:
+
+    * exactly one module-level definition of it, and exactly one module-level invocation;
+    * exactly one ``Try`` inside it -- so an inner swallowing handler is a refusal, not something to
+      be searched past;
+    * exactly one ``run()`` call in the whole module, and it must be a direct top-level statement of
+      that ``Try`` body (an assignment of its result counts; a call nested in a conditional, loop,
+      nested function or second ``Try`` does not);
+    * exactly one ``BaseException`` handler whose body is the flat sequence
+      ``emit_structured_internal_failure(...)`` then ``raise SystemExit(<non-zero int literal>)``.
+
+    The exit code must be a literal. A name cannot be trusted: it can be defined as zero, or rebound
+    to zero after this check has run.
+    """
+    report = {"entrypoint_found": False, "entrypoint_defs": 0, "invocations": 0, "try_count": 0,
+              "run_calls_total": 0, "run_is_direct": False, "handler_count": 0, "emits": False,
+              "terminates_nonzero": False, "exit_literal": None, "forbidden_nodes": [],
+              "emitter_index": None, "termination_index": None, "extra_statements": [],
+              "reason": None}
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError as exc:
+        report["reason"] = "unparseable:" + exc.__class__.__name__
+        return report
+
+    defs = [n for n in _ast.walk(tree)
+            if isinstance(n, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+            and n.name == PROCESS_ENTRYPOINT_NAME]
+    report["entrypoint_defs"] = len(defs)
+    if len(defs) != 1:
+        report["reason"] = "exactly one " + PROCESS_ENTRYPOINT_NAME + " definition is required"
+        return report
+    entry = defs[0]
+    if not any(entry is node for node in tree.body):
+        report["reason"] = "the entry point must be defined at module scope"
+        return report
+    report["entrypoint_found"] = True
+
+    entry_lines = range(entry.lineno, (entry.end_lineno or entry.lineno) + 1)
+    report["invocations"] = sum(
+        1 for c in _ast.walk(tree)
+        if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+        and c.func.id == PROCESS_ENTRYPOINT_NAME and getattr(c, "lineno", 0) not in entry_lines)
+    if report["invocations"] != 1:
+        report["reason"] = ("exactly one invocation of the entry point is required; found "
+                            + str(report["invocations"]))
+        return report
+
+    run_calls = [c for c in _ast.walk(tree)
+                 if isinstance(c, _ast.Call) and isinstance(c.func, _ast.Name)
+                 and c.func.id == "run"]
+    report["run_calls_total"] = len(run_calls)
+    if len(run_calls) != 1:
+        report["reason"] = ("exactly one run() call may exist in the module; found "
+                            + str(len(run_calls)))
+        return report
+    if getattr(run_calls[0], "lineno", 0) not in entry_lines:
+        report["reason"] = "run() is called outside the entry point"
+        return report
+
+    tries = [n for n in _ast.walk(entry) if isinstance(n, _ast.Try)]
+    report["try_count"] = len(tries)
+    if len(tries) != 1:
+        report["reason"] = ("exactly one Try is required inside the entry point; found "
+                            + str(len(tries)))
+        return report
+    node = tries[0]
+
+    # run() must be a DIRECT top-level statement of the Try body -- an expression or the value of a
+    # simple assignment. Anything deeper is a nested path this contract does not govern.
+    for statement in node.body:
+        value = None
+        if isinstance(statement, _ast.Expr):
+            value = statement.value
+        elif isinstance(statement, _ast.Assign):
+            value = statement.value
+        elif isinstance(statement, _ast.Raise) and isinstance(statement.exc, _ast.Call):
+            value = statement.exc.args[0] if statement.exc.args else None
+        if (isinstance(value, _ast.Call) and isinstance(value.func, _ast.Name)
+                and value.func.id == "run"):
+            report["run_is_direct"] = True
+            break
+    if not report["run_is_direct"]:
+        report["reason"] = "run() is not a direct top-level statement of the Try body"
+        return report
+
+    # The FIRST handler must re-raise SystemExit unchanged, so run()'s own exit (and _emit_and_exit's
+    # SystemExit) propagates instead of being swallowed by the broad handler and turned into a fixed
+    # code. Removing it lets a SUCCESSFUL run be caught and reported as a failure, and is the
+    # broad-wrapper regression PH23 exercises.
+    se = [h for h in node.handlers if getattr(h.type, "id", None) == "SystemExit"]
+    report["reraises_systemexit"] = bool(
+        se and len(se[0].body) == 1 and isinstance(se[0].body[0], _ast.Raise)
+        and se[0].body[0].exc is None)
+    handlers = [h for h in node.handlers if getattr(h.type, "id", None) == "BaseException"]
+    report["handler_count"] = len(handlers)
+    if len(handlers) != 1:
+        report["reason"] = ("exactly one BaseException handler is required; found "
+                            + str(len(handlers)))
+        return report
+    if not report["reraises_systemexit"]:
+        report["reason"] = "the handler chain does not re-raise SystemExit before BaseException"
+        return report
+    if node.handlers.index(se[0]) > node.handlers.index(handlers[0]):
+        report["reason"] = "SystemExit is re-raised after the BaseException handler, not before"
+        return report
+    handler = handlers[0]
+
+    forbidden = sorted({type(n).__name__ for s in handler.body for n in _ast.walk(s)
+                        if isinstance(n, PROCESS_HANDLER_FORBIDDEN)})
+    report["forbidden_nodes"] = forbidden
+    if forbidden:
+        report["reason"] = "handler body contains forbidden constructs: " + str(forbidden)
+        return report
+
+    for index, statement in enumerate(handler.body):
+        if (isinstance(statement, _ast.Expr) and isinstance(statement.value, _ast.Call)
+                and isinstance(statement.value.func, _ast.Name)
+                and statement.value.func.id == "emit_structured_internal_failure"):
+            report["emits"] = True
+            report["emitter_index"] = index
+            break
+    if not report["emits"]:
+        report["reason"] = "handler body has no direct emit_structured_internal_failure call"
+        return report
+
+    for index, statement in enumerate(handler.body):
+        if not (isinstance(statement, _ast.Raise) and isinstance(statement.exc, _ast.Call)
+                and isinstance(statement.exc.func, _ast.Name)
+                and statement.exc.func.id == "SystemExit"):
+            continue
+        args = statement.exc.args
+        if not args or not isinstance(args[0], _ast.Constant):
+            report["reason"] = "the exit code must be an integer literal, not a name or expression"
+            return report
+        value = args[0].value
+        report["exit_literal"] = value
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            report["reason"] = "the exit code must be a positive integer literal; found " + repr(value)
+            return report
+        report["terminates_nonzero"] = True
+        report["termination_index"] = index
+        break
+    if not report["terminates_nonzero"]:
+        report["reason"] = "handler body has no direct positive-literal SystemExit"
+        return report
+    if report["termination_index"] <= report["emitter_index"]:
+        report["reason"] = "termination precedes the emitter"
+        return report
+
+    allowed = {report["emitter_index"], report["termination_index"]}
+    extra = [type(s).__name__ for i, s in enumerate(handler.body) if i not in allowed]
+    report["extra_statements"] = extra
+    if extra:
+        report["reason"] = "handler body has statements beyond emit-then-terminate: " + str(extra)
+        return report
+    return report
+
+
+def entrypoint_contract_holds(report: dict) -> bool:
+    """The contract's single predicate, so callers cannot accept a partially satisfied report."""
+    return bool(report.get("entrypoint_found") and report.get("entrypoint_defs") == 1
+                and report.get("reraises_systemexit")
+                and report.get("invocations") == 1 and report.get("try_count") == 1
+                and report.get("run_calls_total") == 1 and report.get("run_is_direct")
+                and report.get("handler_count") == 1 and report.get("emits")
+                and report.get("terminates_nonzero") and not report.get("forbidden_nodes")
+                and not report.get("extra_statements") and report.get("reason") is None)
+
+
+
+#: Env var the guard sets to make a CHILD copy fail deterministically inside run(), after the
+#: process contract is installed. Only the injected copy reads it; the tracked guard never does.
+PROCESS_FAILURE_PROBE_ENV = "MONDAY_REPORT_GA_FORCE_INTERNAL_FAILURE"
+
+
+def _inject_deterministic_failure(source: str):
+    """Make ``run()`` raise immediately when the probe env var is set. Returns None if not injectable."""
+    # Anchor on the MODULE-LEVEL definition (newline-bounded, column 0), not the bare marker text,
+    # which also appears as a string literal in this very function.
+    marker = chr(10) + "def run() -> int:" + chr(10)
+    if marker not in source:
+        return None
+    injected = (chr(10) + "def run() -> int:" + chr(10)
+                + "    import os as _probe_os" + chr(10)
+                + "    if _probe_os.environ.get(" + repr(PROCESS_FAILURE_PROBE_ENV) + ") == '1':"
+                + chr(10)
+                + "        raise RuntimeError('forced-internal-failure')" + chr(10))
+    return source.replace(marker, injected, 1)
+
+
+def observe_process_failure(mutated_source: str) -> dict:
+    """Run a child to a REAL internal failure and report only what the parent observed.
+
+    Every value here is produced by this process: the guard writes the copy, launches it, captures
+    rc/stdout/stderr and parses the stream itself. A child that emits nothing, emits twice, or emits
+    something unrelated cannot describe its own outcome.
+    """
+    observation = {"rc": None, "stdout_bytes": 0, "stderr_bytes": 0, "json_documents": 0,
+                   "stdout_present": False, "stderr_present": False, "json_shape_ok": False,
+                   "named_process_failure": False, "controlled_rejection": None,
+                   "exception_classification": None, "timed_out": False,
+                   "cleanup": "unknown", "reason": None}
+    injected = _inject_deterministic_failure(mutated_source)
+    if injected is None:
+        observation["reason"] = "could not inject the deterministic failure"
+        return observation
+    try:
+        _ast.parse(injected)
+    except SyntaxError:
+        observation["reason"] = "injected copy does not parse"
+        return observation
+
+    workspace = pathlib.Path(tempfile.mkdtemp(prefix="gga-process-"))
+    try:
+        shutil.copytree(ROOT / "scripts", workspace / "scripts")
+        for relative in ("backend", "evals", "db", "docs"):
+            if (ROOT / relative).exists():
+                shutil.copytree(ROOT / relative, workspace / relative,
+                                ignore=shutil.ignore_patterns("__pycache__"))
+        (workspace / WITNESS_TARGET_PATH).write_text(injected, encoding="utf-8", newline=chr(10))
+        environment = dict(os.environ)
+        environment[PROCESS_FAILURE_PROBE_ENV] = "1"
+        completed = subprocess.run([sys.executable, WITNESS_TARGET_PATH],
+                                   cwd=str(workspace), capture_output=True, text=True,
+                                   timeout=180, env=environment)
+        observation["rc"] = completed.returncode
+        stdout, stderr = completed.stdout or "", completed.stderr or ""
+    except subprocess.TimeoutExpired:
+        observation["timed_out"] = True
+        observation["reason"] = "the child timed out"
+        return observation
+    except Exception as exc:  # noqa: BLE001
+        observation["reason"] = "child execution raised " + exc.__class__.__name__
+        return observation
+    finally:
+        _force_rmtree(workspace)
+        observation["cleanup"] = "clean" if not workspace.exists() else "leftover"
+
+    observation["stdout_bytes"] = len(stdout)
+    observation["stderr_bytes"] = len(stderr)
+    observation["stdout_present"] = bool(stdout.strip())
+    observation["stderr_present"] = bool(stderr.strip())
+
+    decoder = json.JSONDecoder()
+    remaining, documents, first = stdout.lstrip(), 0, None
+    while remaining.strip():
+        try:
+            payload, consumed = decoder.raw_decode(remaining)
+        except Exception:  # noqa: BLE001
+            break
+        documents += 1
+        if first is None:
+            first = payload
+        remaining = remaining[consumed:].lstrip()
+    observation["json_documents"] = documents
+    if documents == 0:
+        observation["reason"] = "the child produced no parseable JSON document"
+        return observation
+    if documents != 1 or remaining.strip():
+        observation["reason"] = "the child produced more than one document"
+        return observation
+    if not isinstance(first, dict) or not isinstance(first.get("checks"), list):
+        observation["reason"] = "the document is not a guard report"
+        return observation
+    observation["json_shape_ok"] = True
+    observation["named_process_failure"] = any(
+        isinstance(c, dict) and not c.get("ok")
+        and str(c.get("check_id", "")).startswith("BC07")
+        for c in first["checks"])
+    contract = first.get("boundary_failure_contract") or {}
+    observation["controlled_rejection"] = contract.get("controlled_rejection")
+    observation["exception_classification"] = contract.get("exception_classification")
+    if not observation["named_process_failure"]:
+        observation["reason"] = "no named process-boundary failure in the child report"
+    elif observation["rc"] == 0:
+        observation["reason"] = "an internal failure exited zero"
+    elif contract.get("controlled_rejection") is not False:
+        observation["reason"] = "the internal failure was reported as a controlled rejection"
+    return observation
+
+
+def process_failure_contract_holds(observation: dict) -> bool:
+    """The intact contract: one document, non-zero exit, named failure, not a controlled rejection."""
+    return bool(observation.get("json_documents") == 1 and observation.get("json_shape_ok")
+                and observation.get("named_process_failure")
+                and observation.get("rc") not in (0, None)
+                and observation.get("controlled_rejection") is False
+                and not observation.get("timed_out")
+                and observation.get("reason") is None)
+
 
 
 def adjudicate_witness(entry: dict, source: str) -> dict:
@@ -3387,6 +3646,24 @@ def run() -> int:
                "accepted": sum(1 for v in _verdicts if v.get("accepted")),
                "controls": sum(1 for e in AUTHORITATIVE_WITNESS_MANIFEST if e.get("expect_pass"))})
 
+    # BC11 launches a subprocess, so it runs in the full battery only, never in the fast
+    # --witness-probe path (which is structural). It re-reads the tracked guard source.
+    _proc_source = (ROOT / WITNESS_TARGET_PATH).read_text(encoding="utf-8")
+    _process_obs = _boundary("BC11 internal-failure-is-observably-structured",
+                             "GUARD.observe_process_failure",
+                             lambda: observe_process_failure(_proc_source), phase="boundary")
+    rec("BC11 internal-failure-is-observably-structured",
+        process_failure_contract_holds(_process_obs),
+        "a REAL internal failure is forced in an isolated child and the PARENT observes exactly one "
+        "structured JSON document, a non-zero exit and a named process-boundary failure with "
+        "controlled_rejection=false. The handler's SHAPE says nothing about whether the emitter "
+        "emits: hollowing it to `return None` leaves the shape valid and produces rc=1 with zero "
+        "stdout, which only running it catches",
+        level="boundary",
+        extra={k: _process_obs.get(k) for k in
+               ("rc", "stdout_bytes", "stderr_bytes", "json_documents", "named_process_failure",
+                "controlled_rejection", "cleanup", "reason")})
+
     _constructors = _boundary("WA01 witness-manifest-and-constructors-agree-exactly",
                               "WIT.recipe_ids", WIT.recipe_ids,
                               phase="behavioural witness")
@@ -3561,6 +3838,132 @@ def run() -> int:
                           PINNED_WITNESS_MANIFEST_HASH, "0" * 64,
                           "a stale witness-manifest pin differs from the recomputed manifest hash "
                           "and is refused by FZ16")
+
+    # ---------------------------------------------- process-contract mutation matrix (PH01-PH24)
+    # Each mutation rewrites the canonical entry point, its handler, the emitter or the exit code,
+    # and requires the guard to DETECT it -- structurally (the entry-point contract rejects the
+    # shape) or behaviourally (a forced internal failure no longer yields one structured non-zero
+    # document). A crash, a timeout, empty stdout or an unrelated failure is not a detection.
+    _proc_src = (ROOT / WITNESS_TARGET_PATH).read_text(encoding="utf-8")
+
+    def _ph_entry_handler(source, body_lines):
+        tree = _ast.parse(source)
+        lines = source.splitlines()
+        entry = _witness_function_node(tree, PROCESS_ENTRYPOINT_NAME)
+        tries = [n for n in _ast.walk(entry) if isinstance(n, _ast.Try)]
+        handler = [h for h in tries[0].handlers
+                   if getattr(h.type, "id", None) == "BaseException"][0]
+        first, last = handler.body[0], handler.body[-1]
+        indent = " " * first.col_offset
+        return chr(10).join(lines[:first.lineno - 1]
+                            + [indent + b for b in body_lines]
+                            + lines[(last.end_lineno or first.lineno):]) + chr(10)
+
+    def _ph_entry_body(source, body_lines):
+        tree = _ast.parse(source)
+        lines = source.splitlines()
+        entry = _witness_function_node(tree, PROCESS_ENTRYPOINT_NAME)
+        sig = lines[entry.lineno - 1:entry.body[0].lineno - 1]
+        indent = " " * (entry.col_offset + 4)
+        return chr(10).join(lines[:entry.lineno - 1] + sig
+                            + [indent + b for b in body_lines]
+                            + lines[entry.end_lineno:]) + chr(10)
+
+    def _ph_emitter(source, body_lines):
+        tree = _ast.parse(source)
+        lines = source.splitlines()
+        fn = _witness_function_node(tree, "emit_structured_internal_failure")
+        sig = lines[fn.lineno - 1:fn.body[0].lineno - 1]
+        indent = " " * (fn.col_offset + 4)
+        return chr(10).join(lines[:fn.lineno - 1] + sig
+                            + [indent + b for b in body_lines]
+                            + lines[fn.end_lineno:]) + chr(10)
+
+    _CANON_HANDLER = ["emit_structured_internal_failure(exc)", "raise SystemExit(70)"]
+
+    def _ph_mutation(label, mutated):
+        detected, structural_ok, behavioural_ok, reason = False, None, None, None
+        try:
+            _ast.parse(mutated)
+            structural_ok = entrypoint_contract_holds(process_entrypoint_contract(mutated))
+            # Only pay for the behavioural probe when the shape passed -- if the structure already
+            # rejects it, the mutation is detected and running it adds nothing.
+            behavioural_ok = (process_failure_contract_holds(observe_process_failure(mutated))
+                              if structural_ok else False)
+            detected = (not structural_ok) or (not behavioural_ok)
+        except SyntaxError:
+            reason = "mutation does not parse"
+        MUTATION_FINGERPRINTS[label] = hashlib.sha256(
+            mutated.encode("utf-8")).hexdigest()[:16]
+        MUTATION_TRIPPED[label] = [label]
+        rec(label, detected and reason is None,
+            "a process-contract regression is detected structurally (the entry-point contract "
+            "rejects the shape) or behaviourally (a forced internal failure no longer yields one "
+            "structured non-zero document)",
+            level="process-contract mutation",
+            extra={"structural_holds": structural_ok, "behavioural_holds": behavioural_ok,
+                   "reason": reason})
+
+    _ph_mutation("PH01 handler-pass", _ph_entry_handler(_proc_src, ["pass"]))
+    _ph_mutation("PH02 handler-return", _ph_entry_handler(_proc_src, ["return"]))
+    _ph_mutation("PH03 handler-fallthrough-no-exit",
+                 _ph_entry_handler(_proc_src, ["emit_structured_internal_failure(exc)"]))
+    _ph_mutation("PH04 exit-zero-literal",
+                 _ph_entry_handler(_proc_src, ["emit_structured_internal_failure(exc)",
+                                               "raise SystemExit(0)"]))
+    _ph_mutation("PH05 exit-zero-named-constant",
+                 _ph_entry_handler(_proc_src, ["emit_structured_internal_failure(exc)",
+                                               "raise SystemExit(PROCESS_INTERNAL_EXIT_LITERAL)"]))
+    _ph_mutation("PH06 exit-code-via-rebound-named-constant",
+                 _ph_entry_handler(
+                     _proc_src.replace("PROCESS_INTERNAL_EXIT_LITERAL = 70",
+                                       "PROCESS_INTERNAL_EXIT_LITERAL = 0", 1),
+                     ["emit_structured_internal_failure(exc)",
+                      "raise SystemExit(PROCESS_INTERNAL_EXIT_LITERAL)"]))
+    _ph_mutation("PH07 outer-try-inner-swallow", _ph_entry_body(_proc_src, [
+        "try:", "    try:", "        raise SystemExit(run())", "    except SystemExit:",
+        "        raise", "    except BaseException:", "        pass", "except SystemExit:",
+        "    raise", "except BaseException as exc:",
+        "    emit_structured_internal_failure(exc)", "    raise SystemExit(70)"]))
+    _ph_mutation("PH08 run-nested-in-inner-try", _ph_entry_body(_proc_src, [
+        "try:", "    try:", "        raise SystemExit(run())", "    finally:", "        pass",
+        "except SystemExit:", "    raise", "except BaseException as exc:",
+        "    emit_structured_internal_failure(exc)", "    raise SystemExit(70)"]))
+    _ph_mutation("PH09 emitter-behind-empty-loop", _ph_entry_handler(_proc_src, [
+        "for _ in ():", "    emit_structured_internal_failure(exc)", "raise SystemExit(70)"]))
+    _ph_mutation("PH10 emitter-behind-false-flag", _ph_entry_handler(_proc_src, [
+        "if _PH_NEVER:", "    emit_structured_internal_failure(exc)", "raise SystemExit(70)"]).replace(
+        "def _process_entrypoint", "_PH_NEVER = False\n\n\ndef _process_entrypoint", 1))
+    _ph_mutation("PH11 emitter-behind-if-False", _ph_entry_handler(_proc_src, [
+        "if False:", "    emit_structured_internal_failure(exc)", "raise SystemExit(70)"]))
+    _ph_mutation("PH12 emitter-in-uncalled-nested-function", _ph_entry_handler(_proc_src, [
+        "def _e():", "    emit_structured_internal_failure(exc)", "raise SystemExit(70)"]))
+    _ph_mutation("PH13 emitter-removed", _ph_entry_handler(_proc_src, ["raise SystemExit(70)"]))
+    _ph_mutation("PH14 emitter-returns-None", _ph_emitter(_proc_src, ["return None"]))
+    _ph_mutation("PH15 emitter-stderr-only",
+                 _ph_emitter(_proc_src, ["import sys as _s", "_s.stderr.write('boom')"]))
+    _ph_mutation("PH16 emitter-empty-stdout", _ph_emitter(_proc_src, ["print('', end='')"]))
+    _ph_mutation("PH17 emitter-malformed-json", _ph_emitter(_proc_src, ["print('{not json')"]))
+    _ph_mutation("PH18 emitter-two-documents", _ph_emitter(_proc_src, ["print('{}')", "print('{}')"]))
+    _ph_mutation("PH19 emitter-success-json",
+                 _ph_emitter(_proc_src, ["print(chr(123) + chr(125))"]))
+    _ph_mutation("PH20 emitter-raises-before-output",
+                 _ph_emitter(_proc_src, ["raise RuntimeError('emitter-broke')"]))
+    _ph_mutation("PH21 exit-behind-condition", _ph_entry_handler(_proc_src, [
+        "emit_structured_internal_failure(exc)", "if True:", "    raise SystemExit(70)"]))
+    _ph_mutation("PH22 exit-behind-empty-loop", _ph_entry_handler(_proc_src, [
+        "emit_structured_internal_failure(exc)", "for _ in ():", "    raise SystemExit(70)"]))
+    _ph_mutation("PH23 broad-wrapper-catches-systemexit", _ph_entry_body(_proc_src, [
+        "try:", "    raise SystemExit(run())", "except BaseException as exc:",
+        "    emit_structured_internal_failure(exc)", "    raise SystemExit(70)"]))
+    def _ph_alternate_run(source):
+        # The literal "    _process_entrypoint()" also appears in this matrix's own source, so
+        # target the LAST occurrence -- the tail invocation -- and add a second run() before it.
+        anchor = "    _process_entrypoint()"
+        idx = source.rfind(anchor)
+        return source[:idx] + "    run()" + chr(10) + source[idx:]
+
+    _ph_mutation("PH24 alternate-run-path-outside-entrypoint", _ph_alternate_run(_proc_src))
 
     # ---------------------------------------------- Part O: stale cross-file pins
     def _pin_mutation(label, attr, value, why):
@@ -3977,10 +4380,4 @@ if __name__ == "__main__":
                          indent=2, sort_keys=True, ensure_ascii=False))
         raise SystemExit(0 if _probe_passed == len(checks) else 1)
 
-    try:
-        raise SystemExit(run())
-    except SystemExit:
-        raise
-    except BaseException as _exc:  # noqa: BLE001 - an escape is a battery fault, never a refusal
-        emit_structured_internal_failure(_exc)
-        raise SystemExit(INTERNAL_ERROR_EXIT_CODE)
+    _process_entrypoint()
