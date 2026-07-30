@@ -135,16 +135,26 @@ const DEMO_DDR = [
  */
 const isOpen = (task) => task.status === "open" || task.status === "conflict";
 
-/** Poll the API until the open-task count reaches `want` (or give up). */
-async function waitForOpenTaskCount(want, timeoutMs = 15000) {
+/**
+ * Poll the API until the SEEDED tasks have left the open set.
+ *
+ * Scoped to the ids this run created, not the tenant-wide count: an unrelated task
+ * opening mid-run would otherwise stall the wait and be reported as "the decision
+ * did not land", which is a different and misleading claim. Returns what it saw so
+ * a failure can say so.
+ */
+async function waitForSeededResolved(seededIds, wantRemaining, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
-  let seen = -1;
+  let remaining = -1;
+  let openIds = [];
   while (Date.now() < deadline) {
-    seen = (await apiJson("/validation-tasks")).filter(isOpen).length;
-    if (seen === want) return true;
+    const open = (await apiJson("/validation-tasks")).filter(isOpen);
+    openIds = open.map((task) => task.id);
+    remaining = openIds.filter((id) => seededIds.has(id)).length;
+    if (remaining === wantRemaining) return { ok: true, remaining, openIds };
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  return false;
+  return { ok: false, remaining, openIds };
 }
 
 async function seedOpenValidationTask(workspaceId) {
@@ -181,9 +191,10 @@ async function seedOpenValidationTask(workspaceId) {
  * Ensure a Monday report exists, so the gated Export button is actually rendered
  * and its disabled state is a real assertion rather than a silent skip.
  */
-async function ensureReport(workspaceId) {
+async function ensureReport(workspaceId, mutated) {
   const existing = await apiJson(`/monday-reports?workspace_id=${encodeURIComponent(workspaceId)}`);
   if (existing.length > 0) return existing;
+  if (mutated) mutated.value = true;
   const now = new Date();
   const monday = new Date(
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - ((now.getUTCDay() + 6) % 7))
@@ -206,6 +217,13 @@ async function ensureReport(workspaceId) {
 async function assertNoHorizontalScroll(page, label) {
   const overflow = await page.evaluate(() => {
     const de = document.documentElement;
+    // Rendered-content proof: a blank document has no overflow either, so these 24
+    // checks would otherwise be the largest vacuous block in the suite.
+    const rendered = {
+      elements: document.querySelectorAll("body *").length,
+      text: (document.body.innerText || "").trim().length,
+      headings: document.querySelectorAll("h1").length
+    };
     const offenders = [];
     const vw = de.clientWidth;
     for (const el of document.querySelectorAll("body *")) {
@@ -215,15 +233,18 @@ async function assertNoHorizontalScroll(page, label) {
         if (offenders.length >= 4) break;
       }
     }
-    return { scrollWidth: de.scrollWidth, clientWidth: de.clientWidth, offenders };
+    return { scrollWidth: de.scrollWidth, clientWidth: de.clientWidth, offenders, rendered };
   });
-  const ok = overflow.scrollWidth <= overflow.clientWidth + 1;
+  const painted = overflow.rendered.elements >= 10 && overflow.rendered.text >= 40;
+  const noOverflow = overflow.scrollWidth <= overflow.clientWidth + 1;
   check(
     `no-horizontal-scroll:${label}`,
-    ok,
-    ok
-      ? `${overflow.clientWidth}px viewport, no page-level overflow`
-      : `scrollWidth ${overflow.scrollWidth} > clientWidth ${overflow.clientWidth}; first offenders: ${overflow.offenders.join(", ") || "none in-flow"}`
+    painted && noOverflow,
+    !painted
+      ? `nothing rendered to measure (${overflow.rendered.elements} elements, ${overflow.rendered.text} chars) — the check would have passed vacuously`
+      : noOverflow
+        ? `${overflow.clientWidth}px viewport, ${overflow.rendered.elements} elements painted, no page-level overflow`
+        : `scrollWidth ${overflow.scrollWidth} > clientWidth ${overflow.clientWidth}; first offenders: ${overflow.offenders.join(", ") || "none in-flow"}`
   );
 }
 
@@ -238,9 +259,20 @@ async function main() {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
 
   const consoleErrors = [];
+  const thirdPartyErrors = [];
   const failedRequests = [];
+  const isThirdParty = (url) => Boolean(url) && !url.startsWith(WEB) && !url.startsWith(API) && url !== "";
   context.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push(`console: ${message.location().url}: ${message.text()}`);
+    if (message.type() !== "error") return;
+    const url = message.location().url ?? "";
+    // Third-party failures (the design system's Google Fonts @import, blocked
+    // offline or by a CSP) are not defects in this application. They are recorded
+    // separately so the run still discloses them.
+    if (isThirdParty(url)) {
+      thirdPartyErrors.push(`${url}: ${message.text()}`);
+      return;
+    }
+    consoleErrors.push(`console: ${url}: ${message.text()}`);
   });
   // Uncaught exceptions and unhandled rejections arrive as weberror, NOT as console
   // messages — without this they escaped the console-error assertion entirely.
@@ -251,11 +283,17 @@ async function main() {
     // Only same-origin app requests matter; an offline API is a separate assertion.
     if (request.url().startsWith(WEB)) failedRequests.push(`${request.url()} ${request.failure()?.errorText}`);
   });
-  // A same-origin 4xx/5xx is a real failure but never fires requestfailed.
+  // A same-origin 4xx/5xx is a real failure but never fires requestfailed. Two
+  // exclusions, both non-defects: /favicon.ico (this entry ships none) and Vite's
+  // transient 504 while it re-optimises a dependency on first request.
   context.on("response", (response) => {
-    if (response.url().startsWith(WEB) && response.status() >= 400) {
-      failedRequests.push(`${response.url()} -> HTTP ${response.status()}`);
-    }
+    const url = response.url();
+    if (!url.startsWith(WEB)) return;
+    const status = response.status();
+    if (status < 400) return;
+    if (new URL(url).pathname === "/favicon.ico") return;
+    if (status === 504 && url.includes("/node_modules/.vite/")) return;
+    failedRequests.push(`${url} -> HTTP ${status}`);
   });
 
   const page = await context.newPage();
@@ -266,20 +304,18 @@ async function main() {
   check("landing-hero", /Rig evidence in\.\s*Audited reports out\./i.test(h1), `h1 = ${JSON.stringify(h1)}`);
 
   const landingText = await page.locator("body").innerText();
-  check(
-    "landing-demo-disclosure",
-    landingText.includes("Demo workspace, demo data. No client data is stored."),
-    "demo-data disclosure present"
+  const found = (ok, what) => (ok ? `found: ${what}` : `MISSING: ${what}`);
+  const hasDemoLine = landingText.includes("Demo workspace, demo data. No client data is stored.");
+  check("landing-demo-disclosure", hasDemoLine, found(hasDemoLine, "the demo-data disclosure"));
+  const hasNoClaims = landingText.includes(
+    "No certification, compliance, or production-acceptance claims are made here."
   );
-  check(
-    "landing-no-certification-claim",
-    landingText.includes("No certification, compliance, or production-acceptance claims are made here."),
-    "trust section carries the no-claims line"
-  );
+  check("landing-no-certification-claim", hasNoClaims, found(hasNoClaims, "the no-claims line"));
+  const hasIllustration = /An illustration of the draft the Studio produces/i.test(landingText);
   check(
     "landing-preview-labelled-illustration",
-    /An illustration of the draft the Studio produces/i.test(landingText),
-    "product preview is labelled an illustration, not live data"
+    hasIllustration,
+    found(hasIllustration, "the preview's illustration caption")
   );
   const anchorIds = ["capabilities", "workflow", "security"];
   const anchorsFound = [];
@@ -336,10 +372,13 @@ async function main() {
     draftDeep?.status() === 200 && (await page.locator("h1").count()) === 1 && /draft$/i.test(draftHeading),
     `GET /app/reports/MR-2026.W31/draft -> ${draftDeep?.status()}, h1 = ${JSON.stringify(draftHeading)}`
   );
+  // NotFound renders the pathname, so "the id appears somewhere" proves nothing.
+  // Assert the Studio's own issue-target disclosure, which only it renders.
+  const draftBody = await page.locator("body").innerText();
   check(
     "deep-route-kicker-carries-report-id",
-    (await page.locator("body").innerText()).includes("MR-2026.W31"),
-    "the Studio shows the report id from the URL, proving the Studio route matched"
+    /Issue target: report/i.test(draftBody) && draftBody.includes("MR-2026.W31"),
+    "the Studio's issue-target line names the report id from the URL, so the Studio route matched"
   );
 
   // A query string must not be misclassified as an asset request.
@@ -372,10 +411,13 @@ async function main() {
   for (const route of STAGE2_ROUTES) {
     await page.goto(`${WEB}${route}`, { waitUntil: "networkidle" });
     const text = await page.locator("body").innerText();
+    const declares = /not implemented in this increment/i.test(text) && /Redesign pending/i.test(text);
     check(
       `stage2-declared-pending:${route}`,
-      /not implemented in this increment/i.test(text) && /Redesign pending/i.test(text),
-      "route declares itself unimplemented"
+      declares,
+      declares
+        ? "route declares itself unimplemented"
+        : "route does NOT declare itself unimplemented — it may read as a working surface"
     );
   }
 
@@ -386,6 +428,9 @@ async function main() {
   // stack already holds open tasks it did not create — resolving somebody else's
   // review queue (with reviewer attribution, into an append-only audit chain, and
   // unlocking official export) is not something a smoke test may do.
+  // Set as soon as the flow performs its first write, so the summary reports a
+  // mutation even when a later assertion fails.
+  const mutated = { value: false };
   const gateChecked = await runGateFlow();
 
   async function runGateFlow() {
@@ -415,17 +460,45 @@ async function main() {
 
       // A report must exist or Exports renders no format cards, which would make the
       // disabled-button assertion silently vanish.
-      const reports = await ensureReport(workspaceId);
+      const reports = await ensureReport(workspaceId, mutated);
       check("export-gate-report-present", reports.length > 0, `${reports.length} report(s) available to export`);
 
+      mutated.value = true;
       const open = await seedOpenValidationTask(workspaceId);
       check(
         "export-gate-seeded-real-task",
         open.length > 0,
-        `seeded demo evidence through /uploads/direct + worker; ${open.length} open task(s)`
+        open.length > 0
+          ? `seeded demo evidence through /uploads/direct + worker; ${open.length} open task(s)`
+          : "seeding produced NO open validation task — the extractor did not fire"
       );
       if (open.length === 0) return false;
       const seededIds = new Set(open.map((task) => task.id));
+
+      // The worker drains the WHOLE queue, so a job someone else queued before our
+      // upload would also produce tasks. Confirm every open task traces to a failure
+      // extracted from our own document before resolving anything.
+      const failures = await apiJson("/failures");
+      const ours = new Set(
+        failures
+          .filter((failure) =>
+            (failure.citations ?? []).some((citation) =>
+              JSON.stringify(citation.locator ?? {}).includes("demo_ddr_smoke.txt")
+            )
+          )
+          .map((failure) => failure.id)
+      );
+      const foreign = open.filter(
+        (task) => task.target_type !== "failure" || !ours.has(task.target_id)
+      );
+      check(
+        "export-gate-seeded-tasks-are-ours",
+        foreign.length === 0,
+        foreign.length === 0
+          ? `all ${open.length} open task(s) trace to this run's own demo document`
+          : `${foreign.length} open task(s) do NOT trace to this run's document — refusing to resolve them`
+      );
+      if (foreign.length > 0) return false;
 
       await page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
       const gatedText = await page.locator("body").innerText();
@@ -460,14 +533,26 @@ async function main() {
         // "Recording…" while the PATCH is in flight, so any DOM predicate counting
         // "Validate" buttons is satisfied before the decision has actually landed.
         const want = seededIds.size - i - 1;
-        await waitForOpenTaskCount(want);
+        const settled = await waitForSeededResolved(seededIds, want);
+        check(
+          `validation-decision-landed-${i + 1}`,
+          settled.ok,
+          settled.ok
+            ? `decision ${i + 1} landed; ${want} seeded task(s) still open`
+            : `decision ${i + 1} not observed within 15s: wanted ${want} seeded task(s) open, saw ${settled.remaining}; ` +
+              `open ids now = [${settled.openIds.join(", ")}], seeded = [${[...seededIds].join(", ")}]`
+        );
       }
 
       const remaining = (await apiJson("/validation-tasks")).filter(isOpen);
+      const seededStillOpen = remaining.filter((task) => seededIds.has(task.id));
       check(
         "validation-resolved-only-seeded",
-        remaining.length === 0,
-        `${seededIds.size} seeded task(s) resolved; ${remaining.length} open task(s) remain`
+        seededStillOpen.length === 0 && remaining.length === 0,
+        seededStillOpen.length === 0 && remaining.length === 0
+          ? `all ${seededIds.size} seeded task(s) resolved and nothing else is open`
+          : `${seededIds.size - seededStillOpen.length} of ${seededIds.size} seeded task(s) resolved; ` +
+            `${seededStillOpen.length} seeded and ${remaining.length - seededStillOpen.length} unrelated task(s) still open`
       );
 
       // Re-enter the view so the assertion reads a settled render, not whatever
@@ -645,9 +730,11 @@ async function main() {
     ...STAGE2_ROUTES.map((route) => `stage2-declared-pending:${route}`),
     "export-gate-report-present",
     "export-gate-seeded-real-task",
+    "export-gate-seeded-tasks-are-ours",
     "export-gate-closed-copy",
     "export-disabled-while-gated",
     "validation-card-present",
+    "validation-decision-landed-1",
     "validation-resolved-only-seeded",
     "validation-unlocks-gate",
     "export-gate-clear-after-validation",
@@ -673,10 +760,15 @@ async function main() {
   const unexpected = [...emitted].filter((id) => !EXPECTED_CHECK_IDS.includes(id));
   check(
     "coverage-complete",
-    missing.length === 0,
-    missing.length === 0
-      ? `all ${EXPECTED_CHECK_IDS.length} declared checks ran`
-      : `${missing.length} declared check(s) did not run: ${missing.slice(0, 8).join(", ")}`
+    missing.length === 0 && unexpected.length === 0,
+    missing.length === 0 && unexpected.length === 0
+      ? `all ${EXPECTED_CHECK_IDS.length} declared checks ran and nothing undeclared appeared`
+      : [
+          missing.length ? `${missing.length} declared check(s) did not run: ${missing.slice(0, 8).join(", ")}` : "",
+          unexpected.length ? `${unexpected.length} undeclared check id(s): ${unexpected.slice(0, 8).join(", ")}` : ""
+        ]
+          .filter(Boolean)
+          .join(" ;; ")
   );
 
   const summary = {
@@ -685,7 +777,7 @@ async function main() {
     web_base: WEB,
     api_base: API,
     export_gate_exercised: gateChecked,
-    mutates_target_stack: gateChecked,
+    mutates_target_stack: mutated.value,
     screenshots: SHOT_DIR || null,
     expected_check_count: EXPECTED_CHECK_IDS.length + 1,
     unexpected_check_ids: unexpected,
@@ -704,6 +796,22 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(JSON.stringify({ guard: "ui_redesign_e2e", fatal: String(error?.stack ?? error) }, null, 2));
+  // Report what DID run rather than discarding it: a mid-run locator failure used
+  // to throw away every result collected up to that point.
+  check("suite-completed", false, `aborted: ${String(error?.message ?? error).slice(0, 400)}`);
+  console.error(
+    JSON.stringify(
+      {
+        guard: "ui_redesign_e2e",
+        fatal: String(error?.stack ?? error),
+        checked: results.length,
+        passed: results.filter((entry) => entry.status === "pass").length,
+        failed,
+        results
+      },
+      null,
+      2
+    )
+  );
   process.exit(1);
 });
