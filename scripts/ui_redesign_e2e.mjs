@@ -25,9 +25,9 @@
  * Usage:
  *   node scripts/ui_redesign_e2e.mjs
  *
- * Environment:
- *   MONDAY_REPORT_WEB_BASE   default http://127.0.0.1:5174
- *   MONDAY_REPORT_API_BASE   default http://127.0.0.1:8000
+ * Environment (the first five are REQUIRED - the gate refuses a default):
+ *   MONDAY_REPORT_WEB_BASE   the isolated web origin (never the live v1 port 5173)
+ *   MONDAY_REPORT_API_BASE   the isolated API origin, explicit port, never 8000
  *   MONDAY_REPORT_API_KEY    API key the served frontend was built/run with
  *   MONDAY_REPORT_SHOT_DIR   optional; write screenshots and the JSON summary here.
  *                            A path inside the repository is REFUSED (not written to)
@@ -61,24 +61,117 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 // Hard verification-isolation gate (Part E): fail closed BEFORE launching a browser,
-// issuing a request, or spawning the worker, so a misconfigured run of this suite can
-// never touch the live web/API/state. This suite MUTATES its target - it creates a
-// Monday report, uploads demo evidence and resolves the validation task that evidence
-// raises - and without this gate its defaults (API 127.0.0.1:8000, state
-// ./.local_data) pointed straight at the live runtime. The frozen v1 suite has carried
-// the same gate since before this branch; delegating to the same single Python
-// preflight keeps one definition of "isolated".
-try {
-  execFileSync(
-    "python",
-    [path.join(REPO_ROOT, "scripts", "verification_isolation.py"), "--context", "test-ui-redesign"],
-    { stdio: "inherit" }
-  );
-} catch {
+// issuing a request, or spawning the worker. This suite MUTATES its target - it creates
+// a Monday report, uploads demo evidence and resolves the validation task that evidence
+// raises - and without a gate its defaults (API 127.0.0.1:8000, state ./.local_data)
+// point straight at the live runtime.
+//
+// TWO layers, because the shared preflight alone is not sufficient for a mutating suite
+// and this file must not modify the shared module:
+//
+//   1. The repository's single Python preflight, so there is one definition of
+//      "isolated" and this suite cannot drift from the frozen v1 suite.
+//   2. A local re-assertion of the same substantive facts, which closes three gaps the
+//      shared module leaves open for a MUTATING caller:
+//        - MONDAY_REPORT_ALLOW_LIVE_TARGET=1 excuses every violation, and the PID
+//          branch it cannot excuse is unreachable from the CLI entry point;
+//        - the ".local_data" test is a case-sensitive substring test, so
+//          ./.Local_Data (the same directory on Windows) passes;
+//        - a relative root passes and materialises uploaded bytes inside the tree.
+//      This layer never RELAXES the preflight; it only refuses more.
+//
+// It still cannot prove the already-running SERVER is isolated - that is asserted
+// separately against the browser's own traffic in `assertBrowserTargetsGatedApi`,
+// before the first mutation.
+function refuseNotIsolated(reason, detail) {
+  console.error(`FAIL: verification isolation - ${reason}`);
+  if (detail) console.error(detail);
   console.error(
-    "FAIL: verification isolation - refusing to run test:ui-redesign against a non-isolated target."
+    "test:ui-redesign mutates its target, so it refuses to run without an explicitly isolated stack."
   );
   process.exit(2);
+}
+
+try {
+  // `process.env.PYTHON`, matching the worker spawn below and this file's own
+  // documented override; stdout is CAPTURED, not inherited, because stdout carries the
+  // JSON summary; and a bounded timeout, so a blocking interpreter cannot hang the run.
+  execFileSync(
+    process.env.PYTHON ?? "python",
+    [path.join(REPO_ROOT, "scripts", "verification_isolation.py"), "--context", "test-ui-redesign"],
+    { stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, encoding: "utf8" }
+  );
+} catch (error) {
+  const stderr = (error && error.stderr) || "";
+  const stdout = (error && error.stdout) || "";
+  if (error && error.status === 2) {
+    refuseNotIsolated("the repository preflight refused this environment.", `${stdout}${stderr}`);
+  }
+  // ENOENT / EINVAL / ETIMEDOUT are NOT isolation verdicts. Reporting them as one sent
+  // an operator with a correct stack to debug variables that were already right.
+  refuseNotIsolated(
+    `the preflight could not be executed (${(error && (error.code || error.message)) || "unknown"}).`,
+    `${stdout}${stderr}`.trim() || "Set PYTHON to a spawnable interpreter, or fix the preflight."
+  );
+}
+
+{
+  // Layer 2. Every one of these must hold on its own terms, regardless of any override.
+  const required = [
+    "MONDAY_REPORT_STATE_PATH",
+    "MONDAY_REPORT_STORAGE_ROOT",
+    "MONDAY_REPORT_EXPORT_ROOT",
+    "MONDAY_REPORT_API_BASE",
+    "MONDAY_REPORT_WEB_BASE"
+  ];
+  const unset = required.filter((name) => !(process.env[name] ?? "").trim());
+  if (unset.length > 0) {
+    refuseNotIsolated(
+      `these must be set explicitly, with no default: ${unset.join(", ")}.`,
+      "An override such as MONDAY_REPORT_ALLOW_LIVE_TARGET does not excuse them for a mutating suite."
+    );
+  }
+  const liveState = path.resolve(REPO_ROOT, ".local_data");
+  const insideOrEqual = (candidate, root) => {
+    const rel = path.relative(root, candidate);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  };
+  for (const name of required.slice(0, 3)) {
+    const raw = process.env[name];
+    // Case-insensitive and path-resolved: a substring test passes ./.Local_Data, which
+    // is the SAME directory on Windows, and passes a relative root that lands in the
+    // working tree. Both are refused here.
+    const resolved = path.resolve(raw);
+    if (!path.isAbsolute(raw)) {
+      refuseNotIsolated(`${name} must be an absolute path (got "${raw}").`);
+    }
+    if (insideOrEqual(resolved.toLowerCase(), liveState.toLowerCase())) {
+      refuseNotIsolated(`${name} resolves inside the live state directory (${resolved}).`);
+    }
+    if (insideOrEqual(resolved.toLowerCase(), REPO_ROOT.toLowerCase())) {
+      refuseNotIsolated(
+        `${name} resolves inside the repository (${resolved}); uploaded bytes and exports must not land in the tree.`
+      );
+    }
+  }
+  const port = (value) => {
+    try {
+      return new URL(value).port;
+    } catch {
+      return "";
+    }
+  };
+  if (port(process.env.MONDAY_REPORT_API_BASE) === "" ) {
+    refuseNotIsolated(
+      `MONDAY_REPORT_API_BASE must name an explicit port (got "${process.env.MONDAY_REPORT_API_BASE}").`
+    );
+  }
+  if (port(process.env.MONDAY_REPORT_API_BASE) === "8000") {
+    refuseNotIsolated("MONDAY_REPORT_API_BASE is the live API port 8000.");
+  }
+  if (port(process.env.MONDAY_REPORT_WEB_BASE) === "5173") {
+    refuseNotIsolated("MONDAY_REPORT_WEB_BASE is the live v1 web port 5173.");
+  }
 }
 
 const WEB = (process.env.MONDAY_REPORT_WEB_BASE ?? "http://127.0.0.1:5174").replace(/\/$/, "");
@@ -196,32 +289,63 @@ async function waitForSeededResolved(seededIds, wantRemaining, timeoutMs = 15000
   return { ok: false, remaining, openIds };
 }
 
-async function seedOpenValidationTask(workspaceId) {
+/**
+ * A 1x1 PNG. Uploading an image makes `_should_route_to_ocr` fire, which raises a
+ * validation task whose target_type is `file` - the one task class the export gate
+ * deliberately does NOT count. Seeding it is what makes the gate-scope check below
+ * discriminating rather than an assertion about an empty set.
+ */
+const DEMO_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+async function uploadDemoFile(workspaceId, fileName, blob) {
   const form = new FormData();
   form.append("workspace_id", workspaceId);
-  form.append("file_name", "demo_ddr_smoke.txt");
+  form.append("file_name", fileName);
   form.append("source_type", "files");
-  form.append("file", new Blob([DEMO_DDR], { type: "text/plain" }), "demo_ddr_smoke.txt");
-
+  form.append("file", blob, fileName);
   const response = await fetch(`${API}/uploads/direct`, {
     method: "POST",
     headers: {
       "X-Monday-Report-Key": API_KEY,
-      "Idempotency-Key": `ui-redesign-smoke-${Date.now()}`
+      "Idempotency-Key": `ui-redesign-smoke-${fileName}-${Date.now()}`
     },
     body: form
   });
-  if (!response.ok) throw new Error(`POST /uploads/direct -> ${response.status}`);
+  if (!response.ok) throw new Error(`POST /uploads/direct (${fileName}) -> ${response.status}`);
+}
 
+function runWorkerOnce() {
   const worker = spawnSync(process.env.PYTHON ?? "python", ["-m", "backend.app.worker"], {
-    cwd: process.cwd(),
+    cwd: REPO_ROOT,
     encoding: "utf8",
     env: process.env
   });
   if (worker.status !== 0) {
     throw new Error(`worker exited ${worker.status}: ${(worker.stderr || worker.stdout || "").slice(0, 300)}`);
   }
+}
 
+/** Seed an image so the OCR route raises a `file`-targeted task. */
+async function seedOcrFileTask(workspaceId) {
+  const bytes = Uint8Array.from(atob(DEMO_PNG_BASE64), (c) => c.charCodeAt(0));
+  await uploadDemoFile(workspaceId, "demo_scan_smoke.png", new Blob([bytes], { type: "image/png" }));
+  runWorkerOnce();
+  const tasks = await apiJson("/validation-tasks");
+  return tasks.filter(isOpen).filter((task) => task.target_type === "file");
+}
+
+async function seedOpenValidationTask(workspaceId) {
+  await uploadDemoFile(
+    workspaceId,
+    "demo_ddr_smoke.txt",
+    new Blob([DEMO_DDR], { type: "text/plain" })
+  );
+  // REPO_ROOT, not process.cwd(): `-m backend.app.worker` only resolves from the
+  // repository root, and the gate is deliberately cwd-independent. With cwd() a run
+  // started from any other directory passed the gate, uploaded evidence, and only THEN
+  // failed with ModuleNotFoundError - leaving the mutation behind.
+  runWorkerOnce();
   const tasks = await apiJson("/validation-tasks");
   return tasks.filter(isOpen);
 }
@@ -345,6 +469,21 @@ async function main() {
     // Only same-origin app requests matter; an offline API is a separate assertion.
     if (request.url().startsWith(WEB)) failedRequests.push(`${request.url()} ${request.failure()?.errorText}`);
   });
+  // Every origin the BROWSER contacts, so the served bundle's API target can be proven
+  // before this suite mutates anything. The isolation gate binds MONDAY_REPORT_API_BASE,
+  // which governs only this script's own fetches; the app resolves its API from the
+  // build-time VITE_API_BASE_URL, and the two are independent. Without this the suite
+  // could pass the gate while the browser - which performs the validation decision -
+  // wrote to a completely different, possibly live, API.
+  const browserOrigins = new Set();
+  context.on("request", (request) => {
+    try {
+      const origin = new URL(request.url()).origin;
+      if (origin !== new URL(WEB).origin) browserOrigins.add(origin);
+    } catch {
+      /* non-URL schemes (data:, blob:) are not an origin we can bind */
+    }
+  });
   // A same-origin 4xx/5xx is a real failure but never fires requestfailed. Two
   // exclusions, both non-defects: /favicon.ico (this entry ships none) and Vite's
   // transient 504 while it re-optimises a dependency on first request.
@@ -389,6 +528,45 @@ async function main() {
     anchorsFound.length === anchorIds.length,
     `in-page anchors present: ${anchorsFound.join(", ") || "none"}`
   );
+  // The queue's real sources, and no claim the backend does not implement. No creation
+  // path keys on ambiguity: the three ValidationTask sites are a high-severity extracted
+  // failure, a file routed to OCR, and a Critical benchmark anomaly.
+  const workflowNamesRealSources =
+    /high-severity extracted failure/i.test(landingText) &&
+    /file that needed OCR/i.test(landingText) &&
+    /Critical benchmark anomaly/i.test(landingText);
+  const workflowClaimsAmbiguity = /ambiguous/i.test(landingText);
+  check(
+    "landing-workflow-names-real-queue-sources",
+    workflowNamesRealSources && !workflowClaimsAmbiguity,
+    `names all three real sources: ${workflowNamesRealSources}; claims "ambiguous": ${workflowClaimsAmbiguity}` +
+      (workflowClaimsAmbiguity
+        ? ` — offending sentence: ${JSON.stringify((/[^.]*ambiguous[^.]*\./i.exec(landingText) ?? ["?"])[0].trim())}`
+        : "")
+  );
+  // Every route that renders the not-implemented page must be named as pending.
+  const pendingNamed = ["Well schematics", "upload", "benchmarking", "failure explorer", "audit-chain", "settings"];
+  const pendingMissing = pendingNamed.filter((name) => !new RegExp(name, "i").test(landingText));
+  check(
+    "landing-names-every-pending-surface",
+    pendingMissing.length === 0,
+    pendingMissing.length === 0
+      ? `all ${pendingNamed.length} pending surfaces are named in the closing copy`
+      : `the closing copy omits: ${pendingMissing.join(", ")}`
+  );
+  // A per-field citation chip on a NARRATIVE block would assert provenance the payload
+  // does not carry; the page's own capability card says so.
+  const heroClaimsPerFieldNarrativeProvenance = /Present operations[\s\S]{0,400}?p\.\s*\d+\s*·\s*\d+% confidence/i.test(
+    landingText
+  );
+  check(
+    "landing-hero-no-per-field-narrative-provenance",
+    !heroClaimsPerFieldNarrativeProvenance,
+    heroClaimsPerFieldNarrativeProvenance
+      ? "the hero preview pins a page/confidence chip to the drafted narrative, which the payload does not carry"
+      : "the drafted narrative block carries no per-field page/confidence chip"
+  );
+
   const stageBandValues = await page.locator("section[aria-label='Monday Report, by the numbers'] p").allInnerTexts();
   check("landing-stat-band", stageBandValues.includes("1:1"), `stat band rendered ${stageBandValues.length} lines`);
   await shoot(page, "landing-desktop");
@@ -506,6 +684,25 @@ async function main() {
   // unlocking official export) is not something a smoke test may do.
   // Set as soon as the flow performs its first write, so the summary reports a
   // mutation even when a later assertion fails.
+  // ── the served bundle must target the SAME API the gate authorised ──────────
+  //
+  // Runs after the route sweep above (so the app has issued its probe reads) and
+  // BEFORE any mutation. A mismatch means the isolation gate certified one target while
+  // the browser writes to another, so the gate flow is refused rather than run.
+  const apiOrigin = new URL(API).origin;
+  const foreignOrigins = [...browserOrigins].filter((origin) => origin !== apiOrigin);
+  const browserContactedApi = browserOrigins.has(apiOrigin);
+  check(
+    "browser-targets-gated-api",
+    browserContactedApi && foreignOrigins.length === 0,
+    !browserContactedApi
+      ? `the served bundle never contacted the gated API origin ${apiOrigin}; observed [${[...browserOrigins].join(", ") || "none"}]. It was probably built with a different VITE_API_BASE_URL.`
+      : foreignOrigins.length > 0
+        ? `the served bundle also contacted [${foreignOrigins.join(", ")}], which the isolation gate did not authorise (gated origin ${apiOrigin})`
+        : `the served bundle contacted only the gated API origin ${apiOrigin}`
+  );
+  const browserBoundToGatedApi = browserContactedApi && foreignOrigins.length === 0;
+
   const mutated = { value: false };
   // How many tasks the seed actually raised. The per-decision check ids are declared
   // from this, so a document that yields two tasks does not break the coverage pin.
@@ -515,6 +712,16 @@ async function main() {
   async function runGateFlow() {
     if (!API_KEY) {
       check("export-gate-precondition", false, "not run: MONDAY_REPORT_API_KEY is not set");
+      return false;
+    }
+    if (!browserBoundToGatedApi) {
+      check(
+        "export-gate-precondition",
+        false,
+        "not run: the served bundle does not target the gated API origin, so a UI-driven " +
+          "mutation would land on an unauthorised stack. Rebuild the redesign entry with " +
+          "VITE_API_BASE_URL set to MONDAY_REPORT_API_BASE."
+      );
       return false;
     }
     try {
@@ -543,6 +750,38 @@ async function main() {
       check("export-gate-report-present", reports.length > 0, `${reports.length} report(s) available to export`);
 
       mutated.value = true;
+
+      // ── the export gate counts SOME task types, not all of them ─────────────
+      //
+      // Seed an OCR `file` task FIRST and prove the gate ignores it, then seed the
+      // failure task and prove the gate counts that one. Without the first half the
+      // "gate closed" assertion below could not distinguish "counts the right classes"
+      // from "counts everything".
+      const ocrTasks = await seedOcrFileTask(workspaceId);
+      check(
+        "ocr-file-task-seeded",
+        ocrTasks.length === 1,
+        ocrTasks.length === 1
+          ? `one open file-targeted task raised by the OCR route (${ocrTasks[0].id})`
+          : `expected exactly 1 open file-targeted task from the image upload, saw ${ocrTasks.length}`
+      );
+      if (ocrTasks.length !== 1) return false;
+
+      await page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
+      const gateWithOnlyOcr = await page.locator("body").innerText();
+      const clearWithOcrOpen =
+        /export gate clear/i.test(gateWithOnlyOcr) &&
+        !gateWithOnlyOcr.includes("before exporting an official Monday Report");
+      check(
+        "ocr-file-task-does-not-block-export",
+        clearWithOcrOpen,
+        clearWithOcrOpen
+          ? "an open file-targeted OCR task leaves the export gate clear, matching _open_validation_tasks_for_workspace"
+          : `the gate is NOT clear while the only open task is file-targeted; banner reads ${JSON.stringify(
+              (/Export gate[^\n]*/i.exec(gateWithOnlyOcr) ?? ["<no gate banner>"])[0]
+            )}`
+      );
+
       const open = await seedOpenValidationTask(workspaceId);
       check(
         "export-gate-seeded-real-task",
@@ -552,7 +791,11 @@ async function main() {
           : "seeding produced NO open validation task — the extractor did not fire"
       );
       if (open.length === 0) return false;
-      const seededIds = new Set(open.map((task) => task.id));
+      const ocrTaskIds = new Set(ocrTasks.map((task) => task.id));
+      // Only the gate-counted tasks are resolved through the UI. The OCR file task is
+      // deliberately still open here - that is what makes the "gate ignores it" check
+      // above discriminating - and is cleared through the API after the flow.
+      const seededIds = new Set(open.filter((task) => !ocrTaskIds.has(task.id)).map((task) => task.id));
       seeded.count = seededIds.size;
 
       // The worker drains the WHOLE queue, so a job someone else queued before our
@@ -569,7 +812,8 @@ async function main() {
           .map((failure) => failure.id)
       );
       const foreign = open.filter(
-        (task) => task.target_type !== "failure" || !ours.has(task.target_id)
+        (task) =>
+          !ocrTaskIds.has(task.id) && (task.target_type !== "failure" || !ours.has(task.target_id))
       );
       check(
         "export-gate-seeded-tasks-are-ours",
@@ -582,7 +826,16 @@ async function main() {
 
       await page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
       const gatedText = await page.locator("body").innerText();
-      const wantedCopy = gateCopy(open.length);
+      const failureTasks = open.filter((task) => !ocrTaskIds.has(task.id));
+      check(
+        "failure-task-blocks-export",
+        failureTasks.length === 1 && open.length === 2,
+        `${open.length} open task(s) total, of which ${failureTasks.length} are gate-counted ` +
+          `(expected 2 and 1: one file-targeted OCR task the gate ignores plus one failure task it counts)`
+      );
+      // The committed copy must carry the GATE's count, not the queue's: the OCR task is
+      // open at this moment and must not appear in the number.
+      const wantedCopy = gateCopy(failureTasks.length);
       const copyPresent = gatedText.includes(wantedCopy);
       check(
         "export-gate-closed-copy",
@@ -602,6 +855,26 @@ async function main() {
         buttonPresent
           ? `Export PDF rendered, disabled=${gatedDisabled}`
           : "no Export PDF button was rendered, so the gated state could not be asserted"
+      );
+
+      // The OCR task has now served its purpose (gate clear with it open, gate closed
+      // once the failure task exists), so clear it through the API BEFORE the UI loop.
+      // Leaving it open would put a second card in the queue, where a positional click
+      // could resolve the wrong task, and it is queue work the UI flow is not about.
+      for (const task of ocrTasks) {
+        await apiJson(`/validation-tasks/${task.id}`, {
+          method: "PATCH",
+          headers: { "Idempotency-Key": `ui-redesign-ocr-cleanup-${task.id}` },
+          body: JSON.stringify({ status: "validated", resolution_note: "Smoke-test cleanup." })
+        });
+      }
+      const queueAfterOcrCleanup = (await apiJson("/validation-tasks")).filter(isOpen);
+      check(
+        "ocr-task-cleared-before-ui-decisions",
+        queueAfterOcrCleanup.length === seededIds.size &&
+          queueAfterOcrCleanup.every((task) => seededIds.has(task.id)),
+        `${queueAfterOcrCleanup.length} open task(s) remain before the UI decisions ` +
+          `(expected exactly the ${seededIds.size} gate-counted task(s) this run seeded)`
       );
 
       // Resolve through the UI so the unlock is the product's own behaviour, and
@@ -642,9 +915,12 @@ async function main() {
               : `expected ${seededIds.size - i} Validate control(s) after decision ${i}, still see ${settledDom.seen}`
           );
         }
-        const button = page.locator("button", { hasText: /^Validate$/ }).first();
+        // By accessible name, not by position: the name carries the card's own target,
+        // so a click cannot land on a different task's card.
+        const button = page.locator('button[aria-label^="Validate: "]').first();
         await button.waitFor({ state: "visible", timeout: 15000 }).catch(() => {});
         if ((await button.count()) === 0) break;
+        const clickedLabel = await button.getAttribute("aria-label");
         await button.click();
         // Wait on the SERVER, not the DOM. The button's own label flips to
         // "Recording…" while the PATCH is in flight, so any DOM predicate counting
@@ -655,7 +931,7 @@ async function main() {
           `validation-decision-landed-${i + 1}`,
           settled.ok,
           settled.ok
-            ? `decision ${i + 1} landed; ${want} seeded task(s) still open`
+            ? `decision ${i + 1} landed on ${JSON.stringify(clickedLabel)}; ${want} seeded task(s) still open`
             : `decision ${i + 1} not observed within 15s: wanted ${want} seeded task(s) open, saw ${settled.remaining}; ` +
               `open ids now = [${settled.openIds.join(", ")}], seeded = [${[...seededIds].join(", ")}]`
         );
@@ -667,7 +943,7 @@ async function main() {
         "validation-resolved-only-seeded",
         seededStillOpen.length === 0 && remaining.length === 0,
         seededStillOpen.length === 0 && remaining.length === 0
-          ? `all ${seededIds.size} seeded task(s) resolved and nothing else is open`
+          ? `all ${seededIds.size} gate-counted task(s) resolved through the UI, the seeded OCR task cleared through the API, and nothing else is open`
           : `${seededIds.size - seededStillOpen.length} of ${seededIds.size} seeded task(s) resolved; ` +
             `${seededStillOpen.length} seeded and ${remaining.length - seededStillOpen.length} unrelated task(s) still open`
       );
@@ -771,6 +1047,192 @@ async function main() {
         : "MISSING the explicit-drafting disclosure ('runs only when you ask for it') from the Studio body"
     );
   }
+
+  // ── an operator-cleared draft field must STAY cleared ─────────────────────
+  //
+  // Three states must stay distinct: not loaded, empty by operator choice, and a
+  // backend value. Filtering "edited" on non-empty collapsed the middle one, so a
+  // re-draft silently wrote the drafted text back over a field the operator had
+  // deliberately emptied - while the panel still counted it as changed locally.
+  {
+    await page.goto(`${WEB}/app/studio`, { waitUntil: "networkidle" });
+    const build = page.locator("button", { hasText: /^Build source-backed draft$/ }).first();
+    const canDraft = (await build.count()) > 0 && !(await build.isDisabled());
+    if (!canDraft) {
+      check("studio-cleared-field-stays-empty", false, "the draft button was not available, so nothing was proven");
+    } else {
+      await build.click();
+      const well = page.locator("#st-well");
+      // Wait for the draft to populate the field; a field that never populates would
+      // make the clear-and-redraft assertion vacuous.
+      const populated = await well
+        .waitFor({ state: "visible", timeout: 15000 })
+        .then(async () => {
+          const deadline = Date.now() + 15000;
+          while (Date.now() < deadline) {
+            if (((await well.inputValue()) ?? "").trim().length > 0) return true;
+            await page.waitForTimeout(200);
+          }
+          return false;
+        })
+        .catch(() => false);
+      if (!populated) {
+        check(
+          "studio-cleared-field-stays-empty",
+          false,
+          "the draft never populated #st-well, so clearing it would prove nothing"
+        );
+      } else {
+        const before = await well.inputValue();
+        await well.fill("");
+        const afterClear = await well.inputValue();
+        // Re-draft: the operator's clear must survive it.
+        await build.click();
+        await page.waitForTimeout(1500);
+        const afterRedraft = await well.inputValue();
+        const body = await page.locator("body").innerText();
+        const disclosed = /field\(s\) you cleared were left empty/i.test(body);
+        check(
+          "studio-cleared-field-stays-empty",
+          afterClear === "" && afterRedraft === "" && disclosed,
+          `drafted ${JSON.stringify(before)} -> cleared ${JSON.stringify(afterClear)} -> after re-draft ` +
+            `${JSON.stringify(afterRedraft)} (expected ""); the run disclosed the cleared field: ${disclosed}`
+        );
+      }
+    }
+  }
+
+  // ── profile disclosure: contained, RTL-correct, keyboard-operable ──────────
+  for (const direction of ["ltr", "rtl"]) {
+    for (const width of [390, 768, 1440]) {
+      await page.setViewportSize({ width, height: 820 });
+      await page.goto(`${WEB}/app/reports`, { waitUntil: "networkidle" });
+      await page.evaluate((dir) => {
+        document.documentElement.dir = dir;
+      }, direction);
+      const trigger = page.locator('button[aria-controls="mr-profile-disclosure"]').first();
+      await trigger.click();
+      const geometry = await page.evaluate(() => {
+        const panel = document.getElementById("mr-profile-disclosure");
+        if (!panel) return null;
+        const rect = panel.getBoundingClientRect();
+        return {
+          left: Math.round(rect.left),
+          right: Math.round(rect.right),
+          viewport: window.innerWidth,
+          docScrolls: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1
+        };
+      });
+      const contained =
+        geometry !== null &&
+        geometry.left >= -1 &&
+        geometry.right <= geometry.viewport + 1 &&
+        !geometry.docScrolls;
+      check(
+        `profile-panel-contained:${direction}:${width}`,
+        contained,
+        geometry === null
+          ? "the panel did not render, so containment could not be measured"
+          : `panel spans ${geometry.left}..${geometry.right} in a ${geometry.viewport}px viewport; page scrolls sideways: ${geometry.docScrolls}`
+      );
+      await page.keyboard.press("Escape");
+    }
+  }
+  await page.evaluate(() => {
+    document.documentElement.dir = "ltr";
+  });
+
+  {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${WEB}/app/reports`, { waitUntil: "networkidle" });
+    const trigger = page.locator('button[aria-controls="mr-profile-disclosure"]').first();
+    await trigger.click();
+    const focusInside = await page.evaluate(() =>
+      Boolean(document.getElementById("mr-profile-disclosure")?.contains(document.activeElement))
+    );
+    // Tab must not leave the open panel.
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Tab");
+    const stillInside = await page.evaluate(() =>
+      Boolean(document.getElementById("mr-profile-disclosure")?.contains(document.activeElement))
+    );
+    await page.keyboard.press("Escape");
+    const closedAndRestored = await page.evaluate(() => ({
+      closed: document.getElementById("mr-profile-disclosure") === null,
+      onTrigger: document.activeElement?.getAttribute("aria-controls") === "mr-profile-disclosure"
+    }));
+    check(
+      "profile-panel-keyboard",
+      focusInside && stillInside && closedAndRestored.closed && closedAndRestored.onTrigger,
+      `focus moved into the panel: ${focusInside}; still inside after 3 Tabs: ${stillInside}; ` +
+        `Escape closed it: ${closedAndRestored.closed}; focus returned to the trigger: ${closedAndRestored.onTrigger}`
+    );
+  }
+
+  // ── the mobile navigation focus ring must not be clipped ───────────────────
+  {
+    await page.setViewportSize({ width: 390, height: 812 });
+    await page.goto(`${WEB}/app/reports`, { waitUntil: "networkidle" });
+    // Focus a nav item with a REAL Tab press first: :focus-visible does not match a
+    // programmatic .focus(), and an unfocused element reports the UA's default
+    // `medium` outline rather than the ring the design system actually paints.
+    let focusedNavItem = false;
+    for (let i = 0; i < 20 && !focusedNavItem; i += 1) {
+      await page.keyboard.press("Tab");
+      focusedNavItem = await page.evaluate(() =>
+        Boolean(document.activeElement?.hasAttribute?.("data-navbtn"))
+      );
+    }
+    const ring = await page.evaluate(() => {
+      const groups = document.querySelector("[data-navgroups]");
+      const btn = document.activeElement;
+      if (!groups || !btn || !btn.hasAttribute("data-navbtn")) return null;
+      const gs = getComputedStyle(groups);
+      const bs = getComputedStyle(btn);
+      const pad = {
+        top: parseFloat(gs.paddingTop) || 0,
+        bottom: parseFloat(gs.paddingBottom) || 0,
+        left: parseFloat(gs.paddingLeft) || 0,
+        right: parseFloat(gs.paddingRight) || 0
+      };
+      return {
+        overflowX: gs.overflowX,
+        matchesFocusVisible: btn.matches(":focus-visible"),
+        outline: `${bs.outlineStyle} ${bs.outlineWidth} offset ${bs.outlineOffset}`,
+        pad,
+        // The ring reaches outlineWidth + outlineOffset beyond the border box.
+        reach: (parseFloat(bs.outlineWidth) || 0) + (parseFloat(bs.outlineOffset) || 0)
+      };
+    });
+    const clears =
+      ring !== null &&
+      ring.matchesFocusVisible &&
+      ring.reach > 0 &&
+      ring.pad.top >= ring.reach &&
+      ring.pad.bottom >= ring.reach &&
+      ring.pad.left >= ring.reach &&
+      ring.pad.right >= ring.reach;
+    check(
+      "mobile-nav-focus-ring-not-clipped",
+      clears,
+      ring === null
+        ? "Tab never reached a nav item, so the focus ring could not be measured"
+        : `focused nav item matches :focus-visible: ${ring.matchesFocusVisible}, ring ${ring.outline} ` +
+          `reaching ${ring.reach}px outside the button; scroll container overflow-x ${ring.overflowX} ` +
+          `with padding t/b/l/r ${ring.pad.top}/${ring.pad.bottom}/${ring.pad.left}/${ring.pad.right}px`
+    );
+  }
+
+  // ── 200% zoom: the reflow target, at every Stage 1 route ───────────────────
+  //
+  // 1440x900 at 200% is 720x450 CSS px, which is what a zoomed desktop actually is.
+  for (const route of ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"]) {
+    await page.setViewportSize({ width: 720, height: 450 });
+    await page.goto(`${WEB}${route}`, { waitUntil: "networkidle" });
+    await assertNoHorizontalScroll(page, `zoom200${route}`);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
 
   // ── the API chip must not claim a local fallback this entry does not have ──
   await page.goto(`${WEB}/app`, { waitUntil: "networkidle" });
@@ -928,6 +1390,10 @@ async function main() {
    */
   const GATE_FLOW_IDS = [
     "export-gate-report-present",
+    "ocr-file-task-seeded",
+    "ocr-file-task-does-not-block-export",
+    "failure-task-blocks-export",
+    "ocr-task-cleared-before-ui-decisions",
     "export-gate-seeded-real-task",
     "export-gate-seeded-tasks-are-ours",
     "export-gate-closed-copy",
@@ -966,8 +1432,21 @@ async function main() {
     "chat-redirects-to-ask",
     "unknown-route-in-shell",
     ...STAGE2_ROUTES.map((route) => `stage2-declared-pending:${route}`),
+    "landing-workflow-names-real-queue-sources",
+    "landing-names-every-pending-surface",
+    "landing-hero-no-per-field-narrative-provenance",
+    "browser-targets-gated-api",
     "studio-does-not-draft-on-mount",
     "studio-discloses-explicit-drafting",
+    "studio-cleared-field-stays-empty",
+    ...["ltr", "rtl"].flatMap((dir) =>
+      [390, 768, 1440].map((width) => `profile-panel-contained:${dir}:${width}`)
+    ),
+    "profile-panel-keyboard",
+    "mobile-nav-focus-ring-not-clipped",
+    ...["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"].map(
+      (route) => `no-horizontal-scroll:zoom200${route}`
+    ),
     "api-chip-no-false-local-fallback",
     ...VIEWPORTS.flatMap((viewport) =>
       ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"].map(
