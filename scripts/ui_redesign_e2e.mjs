@@ -42,12 +42,44 @@
  * The web and API servers must already be running. This script starts and stops no
  * server; it does run `python -m backend.app.worker` once when it needs to raise a
  * validation task, which is the product's own processing path.
+ *
+ * Because it mutates its target, it refuses to start at all unless
+ * `scripts/verification_isolation.py` certifies the environment as isolated from the
+ * live runtime - the same fail-closed preflight the committed v1 suite runs.
  */
 import { chromium } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+// fileURLToPath, not a hand-rolled pathname fix-up: `import.meta.url` is
+// percent-ENCODED, so a repository path containing a space resolved to
+// "…/Monday%20Report" and every real subdirectory then looked OUTSIDE it. And
+// path.relative rather than a string prefix, because Windows paths are
+// case-insensitive while `startsWith` is not.
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// Hard verification-isolation gate (Part E): fail closed BEFORE launching a browser,
+// issuing a request, or spawning the worker, so a misconfigured run of this suite can
+// never touch the live web/API/state. This suite MUTATES its target - it creates a
+// Monday report, uploads demo evidence and resolves the validation task that evidence
+// raises - and without this gate its defaults (API 127.0.0.1:8000, state
+// ./.local_data) pointed straight at the live runtime. The frozen v1 suite has carried
+// the same gate since before this branch; delegating to the same single Python
+// preflight keeps one definition of "isolated".
+try {
+  execFileSync(
+    "python",
+    [path.join(REPO_ROOT, "scripts", "verification_isolation.py"), "--context", "test-ui-redesign"],
+    { stdio: "inherit" }
+  );
+} catch {
+  console.error(
+    "FAIL: verification isolation - refusing to run test:ui-redesign against a non-isolated target."
+  );
+  process.exit(2);
+}
 
 const WEB = (process.env.MONDAY_REPORT_WEB_BASE ?? "http://127.0.0.1:5174").replace(/\/$/, "");
 const API = (process.env.MONDAY_REPORT_API_BASE ?? "http://127.0.0.1:8000").replace(/\/$/, "");
@@ -265,12 +297,6 @@ async function assertNoHorizontalScroll(page, label) {
  * summary's `screenshots` field so a run cannot hide that it wrote somewhere
  * unexpected.
  */
-// fileURLToPath, not a hand-rolled pathname fix-up: `import.meta.url` is
-// percent-ENCODED, so a repository path containing a space resolved to
-// "…/Monday%20Report" and every real subdirectory then looked OUTSIDE it. And
-// path.relative rather than a string prefix, because Windows paths are
-// case-insensitive while `startsWith` is not.
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 function resolveShotDir() {
   if (!SHOT_DIR) return { dir: "", note: "not set: no screenshot or summary file is written" };
   const dir = path.resolve(SHOT_DIR);
