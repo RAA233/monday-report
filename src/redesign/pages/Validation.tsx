@@ -110,7 +110,7 @@ export function Validation() {
       <PageHeader
         kicker="Human-in-the-loop"
         title="Validation queue"
-        lede="High-severity, low-confidence, and conflicting extractions wait here. Decisions are recorded with server-derived reviewer attribution — verified-reviewer only when the session authenticates a per-user credential — and resolving one moves the export gate."
+        lede="A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each raise a task here. Decisions are recorded with server-derived reviewer attribution — verified-reviewer only when the session authenticates a per-user credential — and resolving one moves the export gate."
         actions={
           <Tag
             tone={openQueueTasks === null ? "neutral" : openQueueTasks > 0 ? "critical" : "outline"}
@@ -171,7 +171,7 @@ export function Validation() {
           title="All extracted events are resolved"
           body={
             validationTasks.data.length === 0
-              ? "No validation tasks exist for this tenant yet. This queue is tenant-wide; tasks appear when extraction finds high-severity, low-confidence, or conflicting evidence."
+              ? "No validation tasks exist for this tenant yet. This queue is tenant-wide; a task is raised for a high-severity extracted failure, for a file that needed OCR, and for a Critical benchmark anomaly."
               : "Every task in the tenant queue is resolved. The export gate is evaluated per workspace on the Exports view."
           }
           action={

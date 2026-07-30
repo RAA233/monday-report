@@ -14,8 +14,9 @@ import { navItemForPath } from "../shell/navigation";
 /**
  * Reserved views whose workflow DOES exist in the v1 interface, so telling the
  * operator to go there is true. Settings is deliberately absent: v1 has no settings
- * view and the backend exposes no settings route, so claiming the capability is
- * "still reachable" would send someone looking for a surface that has never existed.
+ * view, so claiming the capability is "still reachable" would send someone looking for
+ * a surface that has never existed. (Administration ROUTES do exist on the backend;
+ * no interface in this increment calls them, which is what that page now says.)
  */
 const REACHABLE_IN_V1 = new Set([
   "Well schematics",
@@ -51,7 +52,7 @@ export function PendingStage() {
         <p className="text-muted" style={{ fontSize: 13, lineHeight: 1.6, margin: 0 }}>
           {REACHABLE_IN_V1.has(name)
             ? "The underlying capability is unchanged in the backend and still reachable through the existing interface."
-            : "Neither this interface nor the existing one has a surface for it today, and no backend route exposes it — nothing is hidden behind this page."}{" "}
+            : "No redesigned surface exists for it, and the existing interface has no settings view either. The backend does expose administration routes; nothing in this increment calls them."}{" "}
           The redesigned surface arrives in a later increment.
         </p>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

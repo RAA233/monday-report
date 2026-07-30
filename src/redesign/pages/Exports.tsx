@@ -187,7 +187,7 @@ function isGateRefusal(error: unknown): boolean {
 }
 
 export function Exports() {
-  const { activeWorkspace, gate, reloadGate, reloadValidationTasks, readOnly, can, showToast, apiStatus } =
+  const { activeWorkspace, gate, reloadGate, readOnly, can, showToast, apiStatus } =
     useWorkspace();
   const [searchParams] = useSearchParams();
   const workspaceId = activeWorkspace?.id ?? null;
@@ -415,7 +415,9 @@ export function Exports() {
           <p className="text-muted" style={{ fontSize: 12.5, margin: "6px 0 0" }}>
             {requested
               ? "This is the report you arrived from."
-              : "No report was named, so this is the newest report in the workspace."}{" "}
+              : requestedButMissing
+                ? "The report named in the link is not in this workspace, so this is the newest report here instead."
+                : "No report was named, so this is the newest report in the workspace."}{" "}
             Five official formats. Each export records byte size and SHA-256, and appends to the audit
             chain. Report status: {target.status}.
           </p>

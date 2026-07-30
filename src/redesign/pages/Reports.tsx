@@ -145,6 +145,18 @@ export function Reports() {
         actions={newReportButton}
       />
 
+      {!readOnly && !canCreate ? (
+        // Visible, not only in a `title=`: a disabled button is not hoverable in most
+        // browsers and is skipped by keyboard focus, so the reason was unreachable.
+        <p
+          role="status"
+          style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
+        >
+          This session lacks <strong>generate_reports</strong>, so new Monday reports cannot be
+          created here. The backend refuses the create route without it.
+        </p>
+      ) : null}
+
       {value.state === "loading" ? <Skeleton rows={3} label="Loading Monday reports" /> : null}
 
       {value.state === "error" ? (

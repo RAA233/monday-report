@@ -425,14 +425,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         if (refusal) {
           const misconfigured = refusal[1] === "503";
           setApiStatus(misconfigured ? "misconfigured" : "refused");
-          setValidationTasks(
-            misconfigured
-              ? {
-                  state: "error",
-                  message: "The workspace API is not configured to serve client data yet."
-                }
-              : { state: "unauthorized" }
-          );
+          // Not `unauthorized`: the Validation view renders that as "this session lacks
+          // view_validation_queue", and a probe refusal on /auth/session or /workspaces
+          // tests neither that route nor that permission. Report what was observed.
+          setValidationTasks({
+            state: "error",
+            message: `${apiUnreadReason(misconfigured ? "misconfigured" : "refused")}, so the validation queue was not read.`
+          });
           return;
         }
         setApiStatus("offline");

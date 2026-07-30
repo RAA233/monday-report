@@ -207,6 +207,9 @@ figcaption {
      the boundary that identifies a control, so it needs the 3:1 non-text floor. */
   border: 1px solid var(--color-neutral-600); border-radius: var(--radius-md);
 }
+/* Authored, because the UA default placeholder grey is below 4.5:1 on both surface
+   and bg. neutral-700 measures 5.41:1 on --color-surface and 5.87:1 on --color-bg. */
+.input::placeholder { color: var(--color-neutral-700); opacity: 1; }
 .input:hover { border-color: var(--color-neutral-700); }
 .input:focus-visible { border-color: var(--color-accent-700); outline-offset: 0; }
 textarea.input { min-height: 90px; resize: vertical; }
@@ -354,8 +357,10 @@ textarea.input { min-height: 90px; resize: vertical; }
    as AUTHOR declarations, so the UA sheet's own :disabled greying never applies —
    without this a read-only Studio field is pixel-identical to an editable one. The
    border keeps its 3:1 boundary; the fill and the text carry the state. */
+/* neutral-300, not neutral-200: neutral-200 (#e7e7ea) against the enabled fill
+   (#e9e9ea) is a 1.01:1 difference, i.e. no visible change at all. */
 .input:disabled {
-  color: var(--color-neutral-700); background: var(--color-neutral-200);
+  color: var(--color-neutral-700); background: var(--color-neutral-300);
   cursor: not-allowed;
 }
 .input:disabled::placeholder { color: var(--color-neutral-600); }

@@ -26,7 +26,7 @@ const PREVIEW_META = [
 
 const STATS = [
   { value: "5", label: "Report variants — DDR, BHA, mud, survey, directional" },
-  { value: "6", label: "Pipeline stages, scan to index — upload, parse, extraction and validation each audited" },
+  { value: "6", label: "Pipeline stages modelled — upload, parse, extraction and validation each audited" },
   { value: "5", label: "Export formats, checksummed and validation-gated" },
   { value: "1:1", label: "Extracted records to source citations — drafted narrative is labelled, never passed off as evidence" }
 ];
@@ -53,7 +53,7 @@ const CAPABILITIES = [
   {
     title: "Validation workflow",
     body:
-      "High-severity, low-confidence, and conflicting extractions queue for human review. Decisions carry server-derived reviewer attribution into the record; verified-reviewer attribution requires a session authenticated with a per-user credential.",
+      "A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each queue for human review. Decisions carry server-derived reviewer attribution into the record; verified-reviewer attribution requires a session authenticated with a per-user credential.",
     tags: ["Human-in-the-loop", "Reviewer attribution"]
   },
   {
@@ -82,7 +82,7 @@ const WORKFLOW = [
     num: "02",
     title: "Extract and cite",
     body:
-      "The pipeline parses, classifies, and extracts failures, NPT, tools, and report fields. Every extracted record is pinned to its source file, its in-file locator (a page for PDFs and scans, a row for CSVs, a sheet, a section or a chunk otherwise) and a confidence; the drafted narrative carries the draft's citation list, not a per-field source.",
+      "The pipeline parses each file into chunks and cites them. Every extracted record carries its source file, the locator the parser recorded for that chunk (a page for PDFs, a chunk index otherwise) and a confidence. Extraction itself is a deterministic keyword rule in this increment, not a model: it recognises one failure pattern, so treat the extracted set as a demonstration rather than full coverage.",
     surface: "Pipeline"
   },
   {
@@ -425,19 +425,19 @@ export function Landing() {
                     />
                     <path d="M176 446 L236 446 L236 528 L176 528 Z" fill="none" stroke="var(--color-text)" strokeWidth="2" strokeLinejoin="round" />
                     <path d="M30 422 L222 422" fill="none" stroke="var(--color-text)" strokeWidth="1.5" strokeDasharray="6 6" />
-                    <text x="20" y="32" fill="var(--color-text)" fontSize="11" fontWeight="600" fontFamily="Barlow Condensed, sans-serif">
+                    <text x="20" y="32" fill="var(--color-text)" fontSize="11" fontWeight="600" fontFamily="var(--font-heading)">
                       CASING / DIRECTIONAL
                     </text>
-                    <text x="20" y="114" fill="var(--color-neutral-700)" fontSize="10" fontFamily="Barlow, sans-serif">
+                    <text x="20" y="114" fill="var(--color-neutral-700)" fontSize="10" fontFamily="var(--font-body)">
                       13 3/8 in shoe
                     </text>
-                    <text x="20" y="306" fill="var(--color-neutral-700)" fontSize="10" fontFamily="Barlow, sans-serif">
+                    <text x="20" y="306" fill="var(--color-neutral-700)" fontSize="10" fontFamily="var(--font-body)">
                       9 5/8 in shoe
                     </text>
-                    <text x="20" y="444" fill="var(--color-neutral-700)" fontSize="10" fontFamily="Barlow, sans-serif">
+                    <text x="20" y="444" fill="var(--color-neutral-700)" fontSize="10" fontFamily="var(--font-body)">
                       MD 8,620 ft
                     </text>
-                    <text x="176" y="544" fill="var(--color-text)" fontSize="11" fontWeight="600" fontFamily="Barlow Condensed, sans-serif">
+                    <text x="176" y="544" fill="var(--color-text)" fontSize="11" fontWeight="600" fontFamily="var(--font-heading)">
                       TARGET
                     </text>
                   </svg>

@@ -135,10 +135,16 @@ export function Ask() {
       // the read has not been attempted yet, which is `loading` - printing "Not read"
       // there asserts a finished attempt. Only a connected session with no workspace
       // is a real dead end.
-      const reason = apiUnreadReason(apiStatus);
-      const pending: Loadable<never> = reason
-        ? { state: "loading" }
-        : { state: "error", message: "No workspace is resolved, so there was nothing to read." };
+      // Only `checking` is a read still in flight. `refused`, `misconfigured` and
+      // `offline` are SETTLED outcomes, and leaving them on "Checking…" told the
+      // operator a read was in progress that will never complete.
+      const pending: Loadable<never> =
+        apiStatus === "checking"
+          ? { state: "loading" }
+          : {
+              state: "error",
+              message: `${apiUnreadReason(apiStatus) ?? "No workspace is resolved"}, so there was nothing to read.`
+            };
       setLatestReport(pending);
       setRate(pending);
       return;
@@ -229,7 +235,9 @@ export function Ask() {
           // was recorded" was false for a refusal: a 403 appends `permission_denied`
           // and a 423 appends `client_data.operation_blocked` to the audit chain.
           const nothingDrafted = " No report, draft or extraction was produced.";
-          const refusalRecorded = nothingDrafted + " The refusal itself is recorded in the audit chain.";
+          // "is recorded" would be an absolute the client cannot observe: both refusal
+          // audits are best-effort on the backend and their success is never reported.
+          const refusalRecorded = nothingDrafted + " The backend records refusals like this in the audit chain.";
           const text =
             status === "403"
               ? "This session is not permitted to ask: the chat route requires the generate_reports permission." +
@@ -238,8 +246,11 @@ export function Ask() {
                 ? "The backend is holding client-data mutations until its readiness checks pass, so this question was not processed." +
                   refusalRecorded
                 : status === "503"
-                  ? "The workspace API is not configured to serve client data yet, so this question was not processed." +
-                    nothingDrafted
+                  ? /snapshot write conflict|please retry/i.test(message)
+                    ? "The backend hit a concurrent-write conflict and did not process this question. Ask again." +
+                      nothingDrafted
+                    : "The workspace API is not configured to serve client data yet, so this question was not processed." +
+                      nothingDrafted
                   : status
                     ? `The workspace API refused this question: ${errorText(caught)}.` + nothingDrafted
                     : "The workspace API did not answer, so this question was not processed." +
