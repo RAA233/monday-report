@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { Link, Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
@@ -19,7 +20,18 @@ export function AppShell() {
   // read-only app with no banner at all.
   const refused = apiStatus === "refused";
   const misconfigured = apiStatus === "misconfigured";
-  const degraded = apiStatus === "offline" || refused || misconfigured;
+  const reachable = apiStatus === "offline" || refused || misconfigured;
+  // `retry()` sets apiStatus to "checking" as its FIRST act, which used to make this
+  // banner - and the "Retry connection" button inside it that the operator had just
+  // pressed - vanish, dropping focus to <body>. Once the banner has been shown, it
+  // stays mounted through the re-probe and the button reports itself as retrying,
+  // so the same element is still under the keyboard user's cursor when the probe
+  // fails. It leaves only when the API is actually reachable again.
+  const shownOnce = useRef(false);
+  if (reachable) shownOnce.current = true;
+  const retrying = apiStatus === "checking" && shownOnce.current;
+  if (apiStatus === "connected") shownOnce.current = false;
+  const degraded = reachable || retrying;
 
   return (
     <div
@@ -82,8 +94,10 @@ export function AppShell() {
                 className="btn btn-ghost"
                 style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}
                 onClick={retry}
+                disabled={retrying}
+                aria-disabled={retrying || undefined}
               >
-                Retry connection
+                {retrying ? "Reconnecting…" : "Retry connection"}
               </button>
             )}
           </div>

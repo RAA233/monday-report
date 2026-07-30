@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { getReportDraft, type ApiReportDraft } from "../../lib/api";
+import {
+  getReportDraft,
+  type ApiReportDraft,
+  type ApiTrajectoryCoordinateReference
+} from "../../lib/api";
 import {
   reportFormatVariants,
   reportVariantSchemaVersion,
@@ -16,7 +20,8 @@ import {
   Skeleton,
   StatusLine,
   Tag,
-  type CellSpec
+  type CellSpec,
+  useRetryPresence
 } from "../components/primitives";
 import {
   apiUnreadReason,
@@ -95,6 +100,19 @@ const EMPTY_FORM: FormState = {
 // grid container, so an `auto` track sizes to that row's own tag and the header drifts
 // out of alignment with the cells.
 const CASING_TEMPLATE = "1.3fr 0.7fr 0.7fr 0.7fr 104px";
+/**
+ * Is the calculated TVD an OFFSET rather than a depth?
+ *
+ * `backend/app/trajectory.py` anchors the accumulation to a source station's TVD when
+ * one exists and otherwise starts from 0.0, recording which it did in
+ * `coordinate_reference.tvd`. `backend/app/schemas.py` is explicit that
+ * `relative_first_station` values "must never be presented as absolute well
+ * coordinates" - so the column has to say which kind of number it is holding.
+ */
+function tvdIsRelative(reference: ApiTrajectoryCoordinateReference): boolean {
+  return reference.tvd === "relative_first_station";
+}
+
 const SURVEY_TEMPLATE = "0.8fr 0.6fr 0.6fr 0.9fr 0.9fr 128px";
 const HYDRAULICS_TEMPLATE = "1fr 0.8fr 1.4fr 96px";
 
@@ -257,6 +275,13 @@ export function Studio() {
     setForm(EMPTY_FORM);
     setEditedKeys(new Set());
     setState("idle");
+    // The message belongs to the workspace that produced it. Without this, a successful
+    // draft's "ready from N document(s), N chunk(s), N citation(s)" survived the switch
+    // and was read as the NEW workspace's state - three wrong numbers stated as fact,
+    // directly above a readiness board that said "Not loaded". A failed draft stranded
+    // its error in neutral tone, and an in-flight one stranded "Building..." forever,
+    // because both resolution paths drop a response for a workspace already left.
+    setMessage("");
     // A draft belongs to one workspace, and so does the report the route names. Dropping
     // the id keeps the "Issue target" line and the Exports link from carrying a report
     // that belongs to the workspace the operator just left.
@@ -436,6 +461,8 @@ export function Studio() {
     ];
   }, [draft]);
 
+  const draftRetry = useRetryPresence(state);
+
   return (
     <>
       {/* The draft is WORKSPACE-scoped: GET /workspaces/{id}/report-draft. Naming a
@@ -525,10 +552,17 @@ export function Studio() {
 
       {evidenceCells.length > 0 ? <Cells items={evidenceCells} label="Loaded evidence" /> : null}
 
-      {state === "loading" && !draft ? <Skeleton rows={4} label="Building the draft" /> : null}
+      {state === "loading" && !draft && !draftRetry.show ? (
+        <Skeleton rows={4} label="Building the draft" />
+      ) : null}
 
-      {state === "error" ? (
-        <ErrorState title="Draft not built" message={message} onRetry={() => void sourceDraft()} />
+      {draftRetry.show ? (
+        <ErrorState
+          title="Draft not built"
+          message={draftRetry.retrying ? "The draft is being built again." : message}
+          onRetry={() => void sourceDraft()}
+          retrying={draftRetry.retrying}
+        />
       ) : null}
 
       <div
@@ -930,7 +964,13 @@ export function Studio() {
                           <span role="cell">{deg(station.inclination_deg)}</span>
                           <span role="cell">{deg(station.azimuth_deg)}</span>
                           <span role="cell">{ft(station.true_vertical_depth_ft)}</span>
-                          <span role="cell">{calculated ? ft(calculated.tvd_ft) : "—"}</span>
+                          <span role="cell">
+                            {calculated
+                              ? tvdIsRelative(calculated.coordinate_reference)
+                                ? `+${ft(calculated.tvd_ft)} rel.`
+                                : ft(calculated.tvd_ft)
+                              : "—"}
+                          </span>
                           <span role="cell">
                             {station.conflict ? (
                               <Tag tone="critical">conflict — review</Tag>
@@ -946,6 +986,9 @@ export function Studio() {
                 {draft.trajectory_source === "calculated" ? (
                   <p className="text-muted" style={{ fontSize: 11, margin: "6px 0 0" }}>
                     Calculated · minimum curvature · review required · not certified.
+                    {draft.trajectory && tvdIsRelative(draft.trajectory.coordinate_reference)
+                      ? " TVD calc is marked “rel.” because no source station carried a TVD to anchor to: those figures are offsets from the first calculated station, not absolute well coordinates."
+                      : null}
                   </p>
                 ) : null}
               </div>

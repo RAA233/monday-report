@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 /**
@@ -295,17 +296,45 @@ export function EmptyState({
 }
 
 /**
+ * Keep an ErrorState mounted across the retry it starts.
+ *
+ * Every retry handler leaves the owner's `error` state synchronously, so an
+ * ErrorState rendered only for `error` DELETES itself the moment it is pressed and
+ * focus falls to <body>. Pass the owner's state string; render the ErrorState while
+ * `show` is true and hand it `retrying`, and the same button element survives the
+ * attempt - disabled and self-describing - instead of being replaced by a skeleton.
+ */
+export function useRetryPresence(state: string): { show: boolean; retrying: boolean } {
+  const wasError = useRef(false);
+  if (state === "error") wasError.current = true;
+  if (state !== "error" && state !== "loading") wasError.current = false;
+  const retrying = state === "loading" && wasError.current;
+  return { show: state === "error" || retrying, retrying };
+}
+
+/**
  * Error state. Clear language, a retry, and no raw backend detail beyond the
  * short message the API client already sanitised.
  */
 export function ErrorState({
   title,
   message,
-  onRetry
+  onRetry,
+  retrying = false
 }: {
   title: string;
   message: string;
   onRetry?: () => void;
+  /**
+   * The owner is re-running the request this button started.
+   *
+   * Every `onRetry` here leaves the owner's error state synchronously, so rendering
+   * the button only while `error` meant pressing it DELETED it - focus fell to
+   * <body>, and a retry that failed re-created the button as a new node the keyboard
+   * user had to Tab the whole rail to reach again. The owner now keeps this region
+   * mounted across the attempt and passes `retrying`, so the same element stays put.
+   */
+  retrying?: boolean;
 }) {
   return (
     <Frame role="alert" style={{ display: "grid", gap: 6, padding: 20 }}>
@@ -320,8 +349,15 @@ export function ErrorState({
       </strong>
       <span style={{ fontSize: 13 }}>{message}</span>
       {onRetry ? (
-        <button type="button" className="btn btn-secondary" style={{ justifySelf: "start" }} onClick={onRetry}>
-          Retry
+        <button
+          type="button"
+          className="btn btn-secondary"
+          style={{ justifySelf: "start" }}
+          onClick={onRetry}
+          disabled={retrying}
+          aria-disabled={retrying || undefined}
+        >
+          {retrying ? "Retrying…" : "Retry"}
         </button>
       ) : null}
     </Frame>

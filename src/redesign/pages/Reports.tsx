@@ -10,7 +10,8 @@ import {
   GridTable,
   PageHeader,
   Skeleton,
-  Tag
+  Tag,
+  useRetryPresence
 } from "../components/primitives";
 import {
   apiUnreadReason,
@@ -136,6 +137,8 @@ export function Reports() {
     </button>
   );
 
+  const listRetry = useRetryPresence(value.state);
+
   return (
     <>
       <PageHeader
@@ -157,13 +160,20 @@ export function Reports() {
         </p>
       ) : null}
 
-      {value.state === "loading" ? <Skeleton rows={3} label="Loading Monday reports" /> : null}
+      {value.state === "loading" && !listRetry.show ? (
+        <Skeleton rows={3} label="Loading Monday reports" />
+      ) : null}
 
-      {value.state === "error" ? (
+      {listRetry.show ? (
         <ErrorState
           title="Report list failed to load"
-          message={`${value.message} The list is unavailable — retry, or check that the backend is running.`}
+          message={
+            listRetry.retrying
+              ? "The list is being read again."
+              : `${value.state === "error" ? value.message : ""} The list is unavailable — retry, or check that the backend is running.`
+          }
           onRetry={reload}
+          retrying={listRetry.retrying}
         />
       ) : null}
 

@@ -2,7 +2,15 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { getFailures, updateValidationTask, type ApiFailureRecord, type ApiValidationTask } from "../../lib/api";
 import { formatSourceCitation } from "../../lib/citationFormat";
-import { EmptyState, ErrorState, Frame, PageHeader, Skeleton, Tag } from "../components/primitives";
+import {
+  EmptyState,
+  ErrorState,
+  Frame,
+  PageHeader,
+  Skeleton,
+  Tag,
+  useRetryPresence
+} from "../components/primitives";
 import {
   apiUnreadReason,
   errorText,
@@ -86,6 +94,7 @@ export function Validation() {
     (): ApiValidationTask[] => (visibleTasks ? visibleTasks.filter(isOpenValidationTask) : []),
     [visibleTasks]
   );
+  const queueRetry = useRetryPresence(validationTasks.state);
 
   async function decide(task: ApiValidationTask, status: "validated" | "rejected") {
     if (decisionsBlocked || busyId) return;
@@ -108,6 +117,12 @@ export function Validation() {
         status === "validated" ? "Validated" : "Rejected",
         `Decision recorded with ${attribution} and appended to the audit chain.`
       );
+      // Drop the decided task from the retained snapshot BEFORE the refetch. Retention
+      // is what keeps the surrounding cards (and the keyboard user's place) on screen,
+      // but it also kept THIS card on screen with its buttons live, so a second click
+      // recorded a second audited decision for one operator intent.
+      lastReadTasks.current =
+        lastReadTasks.current?.filter((candidate) => candidate.id !== task.id) ?? null;
       reloadValidationTasks();
       // The resolved card is about to leave the list, taking the focused button with it.
       // Move focus to the page heading so the keyboard user lands somewhere meaningful
@@ -178,10 +193,14 @@ export function Validation() {
         />
       ) : null}
 
-      {validationTasks.state === "error" ? (
+      {queueRetry.show ? (
         <ErrorState
           title="Validation queue failed to load"
-          message={`${validationTasks.message} The queue is unavailable, so it cannot be shown — this is not a statement that it is empty.`}
+          message={
+            queueRetry.retrying
+              ? "The queue is being read again."
+              : `${validationTasks.state === "error" ? validationTasks.message : ""} The queue is unavailable, so it cannot be shown — this is not a statement that it is empty.`
+          }
           // A queue-only retry cannot reconcile `apiStatus`: `loadValidationTasks` has no
           // connectivity guard, so a successful read would render live task cards under
           // the shell banner that says nothing can be read. While degraded the shell
@@ -189,6 +208,7 @@ export function Validation() {
           // offline, "Check the session" for a refusal or a 503), so no second and
           // dishonest retry is offered here.
           onRetry={apiStatus === "connected" ? reloadValidationTasks : undefined}
+          retrying={queueRetry.retrying}
         />
       ) : null}
 

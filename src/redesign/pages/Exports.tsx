@@ -16,7 +16,8 @@ import {
   GridTable,
   PageHeader,
   Skeleton,
-  Tag
+  Tag,
+  useRetryPresence
 } from "../components/primitives";
 import {
   apiUnreadReason,
@@ -26,6 +27,7 @@ import {
   newestReport,
   useLoadable,
   useWorkspace,
+  type ApiStatus,
   type GateState
 } from "../lib/workspace";
 
@@ -66,7 +68,15 @@ interface Issued extends ApiReportExport {
  * was not read and that the backend still enforces it. Neither is presented as an
  * empty queue.
  */
-function GateBanner({ gate, onRetry }: { gate: GateState; onRetry: () => void }) {
+function GateBanner({
+  gate,
+  onRetry,
+  apiStatus
+}: {
+  gate: GateState;
+  onRetry: () => void;
+  apiStatus: ApiStatus;
+}) {
   // An unread gate is NOT a breach: it is styled neutrally, never like a closed gate.
   const frame = (accent: boolean) => ({
     display: "flex" as const,
@@ -150,11 +160,23 @@ function GateBanner({ gate, onRetry }: { gate: GateState; onRetry: () => void })
       </div>
     );
   }
+  // Four different reasons the gate is not on screen, and only ONE of them means the
+  // workspace is genuinely absent. Saying "nothing to export" while the probe is still
+  // in flight - or while the session was refused - states as fact something this view
+  // has not read.
+  const unread = apiUnreadReason(apiStatus);
+
   return (
     <div role="status" style={frame(false)}>
-      <strong style={heading(false)}>Export gate unavailable</strong>
+      <strong style={heading(false)}>
+        {apiStatus === "checking" ? "Checking the export gate" : "Export gate unavailable"}
+      </strong>
       <span style={{ fontSize: 13 }}>
-        No workspace is resolved, so there is no gate to evaluate and nothing to export.
+        {apiStatus === "checking"
+          ? "The workspace API is still being reached, so the gate has not been read yet."
+          : unread
+            ? `${unread}, so the gate has not been read. That is not a statement that the queue is empty — the backend enforces it on every export.`
+            : "No workspace is resolved, so there is no gate to evaluate and nothing to export."}
       </span>
     </div>
   );
@@ -227,12 +249,24 @@ export function Exports() {
   // ?report=<id>), THAT report is the target — silently exporting whichever is
   // newest would issue a different report than the one the operator was drafting.
   // The id is only honoured if it is actually in this workspace's list.
+  // A11Y-EXPORTS-FOCUS-LOSS: hold the last successfully read list, so a background
+  // refetch after an export does not unmount the panel - and the button the operator
+  // just pressed - dropping focus to <body>. Same shape as the validation queue.
+  const lastReadReports = useRef<ApiMondayReport[] | null>(null);
+  if (reports.state === "ready") lastReadReports.current = reports.data;
+  const visibleReports =
+    reports.state === "ready"
+      ? reports.data
+      : reports.state === "loading"
+        ? lastReadReports.current
+        : null;
   const requestedReportId = searchParams.get("report");
   const requested =
-    reports.state === "ready" && requestedReportId
-      ? (reports.data.find((report) => report.id === requestedReportId) ?? null)
+    visibleReports && requestedReportId
+      ? (visibleReports.find((report) => report.id === requestedReportId) ?? null)
       : null;
-  const target = reports.state === "ready" ? (requested ?? newestReport(reports.data)) : null;
+  const target = visibleReports ? (requested ?? newestReport(visibleReports)) : null;
+  const reportsRetry = useRetryPresence(reports.state);
   // `loadReports()` returns [] WITHOUT calling the API when no workspace is resolved,
   // so a `ready` empty list is not evidence that the named report is absent. Without
   // this guard the page asserted "not in this workspace's report list" directly above
@@ -358,7 +392,7 @@ export function Exports() {
         lede="Official exports are validation-gated, checksummed, audit-logged, and fetched only through expiring signed URLs."
       />
 
-      <GateBanner gate={gate} onRetry={reloadGate} />
+      <GateBanner gate={gate} onRetry={reloadGate} apiStatus={apiStatus} />
 
       {!readOnly && !canIssueExport ? (
         <p
@@ -390,13 +424,20 @@ export function Exports() {
         </p>
       ) : null}
 
-      {reports.state === "loading" ? <Skeleton rows={2} label="Loading reports" /> : null}
+      {reports.state === "loading" && !reportsRetry.show && !visibleReports ? (
+        <Skeleton rows={2} label="Loading reports" />
+      ) : null}
 
-      {reports.state === "error" ? (
+      {reportsRetry.show ? (
         <ErrorState
           title="Reports failed to load"
-          message={`${reports.message} Without the report list there is nothing to export.`}
+          message={
+            reportsRetry.retrying
+              ? "The report list is being read again."
+              : `${reports.state === "error" ? reports.message : ""} Without the report list there is nothing to export.`
+          }
           onRetry={reload}
+          retrying={reportsRetry.retrying}
         />
       ) : null}
 

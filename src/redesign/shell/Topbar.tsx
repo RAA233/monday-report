@@ -83,6 +83,13 @@ export function Topbar() {
   }, [profileOpen]);
 
   const offline = apiStatus === "offline";
+  // Same shape as the shell banner: retry() flips apiStatus to "checking" first, which
+  // used to delete this button mid-press and drop focus to <body>. Once shown, it stays
+  // until the API is reachable again.
+  const offlineShownOnce = useRef(false);
+  if (offline) offlineShownOnce.current = true;
+  const retrying = apiStatus === "checking" && offlineShownOnce.current;
+  if (apiStatus === "connected") offlineShownOnce.current = false;
   // NOT "Local fallback": that is v1's label, and v1 really does degrade to local
   // data. This entry has no fallback dataset, so the chip must not imply one — the
   // shell banner beside it says the same thing.
@@ -216,14 +223,16 @@ export function Topbar() {
           <circle cx="5" cy="5" r="4" fill={apiDotFill} stroke="var(--color-text)" strokeOpacity="0.35" strokeWidth="1" />
         </svg>
         {apiLabel}
-        {offline ? (
+        {offline || retrying ? (
           <button
             type="button"
             className="btn btn-ghost"
             style={{ minHeight: 0, padding: "0 4px", fontSize: 12 }}
             onClick={retry}
+            disabled={retrying}
+            aria-disabled={retrying || undefined}
           >
-            Retry
+            {retrying ? "Retrying…" : "Retry"}
           </button>
         ) : null}
       </span>

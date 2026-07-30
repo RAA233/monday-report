@@ -487,6 +487,8 @@ async function main() {
   // build-time VITE_API_BASE_URL, and the two are independent. Without this the suite
   // could pass the gate while the browser - which performs the validation decision -
   // wrote to a completely different, possibly live, API.
+  // Tasks whose decision the API ACCEPTED and then failed to persist.
+  const acceptedThenLost = [];
   const browserOrigins = new Set();
   context.on("request", (request) => {
     try {
@@ -495,6 +497,18 @@ async function main() {
     } catch {
       /* non-URL schemes (data:, blob:) are not an origin we can bind */
     }
+  });
+  // Every validation decision the BROWSER issued, with the status the API answered.
+  // A decision the API ACCEPTED (2xx) that is nevertheless still open afterwards was
+  // lost by the store, not by the UI - a distinction the failure message must make,
+  // because the two have completely different owners and completely different fixes.
+  const browserValidationPatches = [];
+  context.on("response", (response) => {
+    const request = response.request();
+    if (request.method() !== "PATCH") return;
+    const match = /\/validation-tasks\/([0-9a-f-]{36})$/.exec(new URL(response.url()).pathname);
+    if (!match) return;
+    browserValidationPatches.push({ taskId: match[1], status: response.status() });
   });
   // A same-origin 4xx/5xx is a real failure but never fires requestfailed. Two
   // exclusions, both non-defects: /favicon.ico (this entry ships none) and Vite's
@@ -939,18 +953,36 @@ async function main() {
         // "Validate" buttons is satisfied before the decision has actually landed.
         const want = seededIds.size - i - 1;
         const settled = await waitForSeededResolved(seededIds, want);
+        // Which of the still-open tasks did the API already ACCEPT a decision for?
+        const acceptedButOpen = settled.openIds.filter((id) =>
+          browserValidationPatches.some((patch) => patch.taskId === id && patch.status < 300)
+        );
+        if (acceptedButOpen.length > 0) acceptedThenLost.push(...acceptedButOpen);
         check(
           `validation-decision-landed-${i + 1}`,
           settled.ok,
           settled.ok
             ? `decision ${i + 1} landed on ${JSON.stringify(clickedLabel)}; ${want} seeded task(s) still open`
-            : `decision ${i + 1} not observed within 15s: wanted ${want} seeded task(s) open, saw ${settled.remaining}; ` +
-              `open ids now = [${settled.openIds.join(", ")}], seeded = [${[...seededIds].join(", ")}]`
+            : acceptedButOpen.length > 0
+              ? `decision ${i + 1} on ${JSON.stringify(clickedLabel)} was ACCEPTED by the API and then LOST: the ` +
+                `browser's PATCH answered 2xx for [${acceptedButOpen.join(", ")}], and the task still reads open. ` +
+                `This is not a UI defect - see validation-decision-not-lost-by-backend.`
+              : `decision ${i + 1} not observed within 15s: wanted ${want} seeded task(s) open, saw ${settled.remaining}; ` +
+                `open ids now = [${settled.openIds.join(", ")}], seeded = [${[...seededIds].join(", ")}]; ` +
+                `no accepted PATCH was observed for them, so the UI did not issue the decision`
         );
       }
 
       const remaining = (await apiJson("/validation-tasks")).filter(isOpen);
       const seededStillOpen = remaining.filter((task) => seededIds.has(task.id));
+      for (const task of seededStillOpen) {
+        if (
+          browserValidationPatches.some((patch) => patch.taskId === task.id && patch.status < 300) &&
+          !acceptedThenLost.includes(task.id)
+        ) {
+          acceptedThenLost.push(task.id);
+        }
+      }
       check(
         "validation-resolved-only-seeded",
         seededStillOpen.length === 0 && remaining.length === 0,
@@ -1421,6 +1453,25 @@ async function main() {
   );
 
   // ── console and request hygiene ────────────────────────────────────────────
+  // Unconditional, and it names the owner. `LocalStateStore.refresh()` rebinds every
+  // in-memory collection from the file with no lock and no revision check, while
+  // `save()` serialises the whole shared projection - so a concurrent read route can
+  // revert a writer's mutation between its mutate and its save, or be serialised over
+  // it. The route still answers 200 with the mutated object, because it returns its own
+  // in-memory task. Reproduced with NO browser at all: 2 of 8 PATCHes lost under six
+  // concurrent GET pollers. `PostgresStateStore.save()` fails closed on exactly this
+  // ("refusing an unprotected snapshot write"); the local JSON path has no such guard.
+  // backend/** is byte-identical to the sealed base on this branch, so this is inherited
+  // and out of this increment's scope - but it is NOT excused, and it fails the run.
+  check(
+    "validation-decision-not-lost-by-backend",
+    acceptedThenLost.length === 0,
+    acceptedThenLost.length === 0
+      ? "every validation decision the API accepted is still resolved when read back"
+      : `the API answered 2xx for ${acceptedThenLost.length} validation decision(s) and then lost them: ` +
+        `[${acceptedThenLost.join(", ")}] read back as open. Inherited defect in LocalStateStore ` +
+        `(backend/app/store.py, byte-identical to the sealed base); not introduced by this branch.`
+  );
   check(
     "no-console-errors",
     consoleErrors.length === 0,
@@ -1522,6 +1573,7 @@ async function main() {
     "rtl-no-horizontal-scroll",
     "keyboard-focusable-controls",
     "focus-visible-ring",
+    "validation-decision-not-lost-by-backend",
     "no-console-errors",
     "no-failed-app-requests"
   ];

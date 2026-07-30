@@ -304,7 +304,7 @@ export function Ask() {
               .join(" · ") || "No workspace resolved"
           }
           title="Ask Monday Report"
-          lede="Chat is the workflow: plan, extract, draft, draw, and audit from here. Every answer carries its citations, and official exports stay gated until validation clears."
+          lede="Chat is the workflow: plan, extract, draft, draw, and audit from here. An answer carries whatever citations this workspace's parsed evidence supports, and says so when there are none. Official exports stay gated until validation clears."
         />
 
         <form
@@ -441,7 +441,7 @@ export function Ask() {
                 Nothing has been asked yet.{" "}
                 {apiUnreadReason(apiStatus)
                   ? `${apiUnreadReason(apiStatus)}, so questions cannot be answered right now.`
-                  : "Use a command above or ask a question — answers come from this workspace's parsed evidence with citations attached."}
+                  : "Use a command above or ask a question — answers come from this workspace's parsed evidence, with the citations that evidence supports."}
               </p>
             </Frame>
           ) : null}
