@@ -1228,12 +1228,32 @@ async function main() {
     const offenders = [];
     for (const file of sources) {
       const text = readFileSync(file, "utf8");
+      // Matching identifier NAMES alone is not enough: `exportsBlocked` was a local alias
+      // for a predicate containing a transient gate term, so the offending term sat one
+      // hop away and the scan walked past it. Expand every identifier through its
+      // same-file `const <id> = ...` definition, transitively, before testing - an alias
+      // must not be able to launder an in-flight term.
+      const defs = new Map();
+      for (const def of text.matchAll(/^\s*const\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]*);/gm)) {
+        defs.set(def[1], def[2]);
+      }
+      const expand = (expr, seen) =>
+        expr.replace(/[A-Za-z_$][\w$]*/g, (id) => {
+          if (seen.has(id) || !defs.has(id)) return id;
+          const next = new Set(seen);
+          next.add(id);
+          return expand(defs.get(id), next);
+        });
       text.split(/\r?\n/).forEach((line, index) => {
         // `aria-disabled=` is the correct carrier and is deliberately not matched.
         const match = /(?<!aria-)\bdisabled=\{([^}]*)\}/.exec(line);
         if (!match) return;
-        if (IN_FLIGHT.test(match[1])) {
-          offenders.push(`${file.slice(REPO_ROOT.length + 1)}:${index + 1} disabled={${match[1]}}`);
+        const expanded = expand(match[1], new Set());
+        if (IN_FLIGHT.test(expanded)) {
+          offenders.push(
+            `${file.slice(REPO_ROOT.length + 1)}:${index + 1} disabled={${match[1]}}` +
+              (expanded === match[1] ? "" : ` (expands to: ${expanded.slice(0, 150)})`)
+          );
         }
       });
     }

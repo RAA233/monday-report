@@ -202,14 +202,14 @@ export function Studio() {
     // The button stays focusable while drafting (aria-disabled, not `disabled`), so the
     // handler is what makes it inert. Without this a second Enter would append a second
     // report_draft.generate to the audit chain for one operator intent.
-    if (draftInFlight.current) return;
+    if (draftInFlight.current === workspaceId) return;
     if (!workspaceId) {
       setState("error");
       setMessage("No workspace is selected, so there is no evidence to draft from.");
       return;
     }
     const askedFor = workspaceId;
-    draftInFlight.current = true;
+    draftInFlight.current = askedFor;
     setState("loading");
     setMessage("Building a source-backed draft from parsed documents, citations, and validation tasks…");
     try {
@@ -254,10 +254,10 @@ export function Studio() {
       setState("error");
       setMessage(`The draft was not built. ${errorText(caught)}`);
     } finally {
-      // `finally`, not a tail assignment: both the success and the failure path can
-      // return early when the operator switched workspace mid-request, and leaving the
-      // flag set there would disable drafting for the rest of the session.
-      draftInFlight.current = false;
+      // Release only OUR request. A later draft for a different workspace may already
+      // own the flag; clearing it unconditionally would let a second request through
+      // while the first is still running.
+      if (draftInFlight.current === askedFor) draftInFlight.current = null;
     }
   }, [workspaceId]);
 
@@ -276,9 +276,10 @@ export function Studio() {
   // connection" after typing a report discarded every character with no prompt and no
   // undo - even when the retry then failed. The null -> first-workspace resolution is
   // not a change either: it is the same workspace becoming known.
-  // Mirrors the in-flight half of `state` for the handler guard, which must read the
-  // current value rather than the one captured when the callback was created.
-  const draftInFlight = useRef(false);
+  // Which WORKSPACE has a draft in flight, not merely "one exists". A bare boolean
+  // made the guard outlive its request: it blocked the button for whatever workspace
+  // the operator had switched to, and the primary action became a silent no-op.
+  const draftInFlight = useRef<string | null>(null);
   const previousWorkspaceIdRef = useRef<string | null>(workspaceId);
   useEffect(() => {
     const previous = previousWorkspaceIdRef.current;

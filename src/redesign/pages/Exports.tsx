@@ -299,6 +299,9 @@ export function Exports() {
     visibleReports && requestedReportId
       ? (visibleReports.find((report) => report.id === requestedReportId) ?? null)
       : null;
+  // ONE predicate, used by every consumer, so they cannot disagree about whether the
+  // list on screen was read for the workspace on screen.
+  const readyForThisWorkspace = reports.state === "ready" && reports.data.workspaceId === workspaceId;
   const target = visibleReports ? (requested ?? newestReport(visibleReports)) : null;
   const reportsRetry = useRetryPresence(reports.state);
   const gateRetry = useRetryPresence(gate.state);
@@ -315,11 +318,7 @@ export function Exports() {
   // this guard the page asserted "not in this workspace's report list" directly above
   // its own "Report list not read" empty state.
   const requestedButMissing =
-    Boolean(requestedReportId) &&
-    reports.state === "ready" &&
-    reports.data.workspaceId === workspaceId &&
-    workspaceId !== null &&
-    !requested;
+    Boolean(requestedReportId) && readyForThisWorkspace && workspaceId !== null && !requested;
 
   // The two routes require DIFFERENT permissions; the backend checks them
   // separately, so the UI must not collapse them into one capability.
@@ -341,7 +340,13 @@ export function Exports() {
   // time an awaited request rejects.
   const gateRef = useRef(gate);
   gateRef.current = gate;
-  const exportsBlocked = readOnly || !canIssueExport || gateBlocksExport;
+  // Split, because the two halves need different mechanisms. `gate.state === "loading"`
+  // is TRANSIENT and a refused export flips the gate into it - so folding it into the
+  // native attribute put `disabled` on the button the operator had just pressed and
+  // blurred them to <body>. Standing terms stay native; the transient one is carried
+  // by aria-disabled, with `exportsBlocked` still the single predicate the handlers use.
+  const exportsStandingBlocked = readOnly || !canIssueExport || gateIsClosed(gate);
+  const exportsBlocked = exportsStandingBlocked || gateBlocksExport;
 
   async function runExport(format: ApiReportExport["format"]) {
     // aria-disabled keeps these focusable, so the handler is what actually makes them
@@ -474,10 +479,7 @@ export function Exports() {
         </p>
       ) : null}
 
-      {(reports.state === "loading" ||
-        (reports.state === "ready" && reports.data.workspaceId !== workspaceId)) &&
-      !reportsRetry.show &&
-      !visibleReports ? (
+      {!readyForThisWorkspace && reports.state !== "error" && !reportsRetry.show && !visibleReports ? (
         <Skeleton rows={2} label="Loading reports" />
       ) : null}
 
@@ -555,8 +557,8 @@ export function Exports() {
                     type="button"
                     className="btn btn-secondary"
                     onClick={() => void runExport(entry.format)}
-                    disabled={exportsBlocked}
-                        aria-disabled={busy !== null || undefined}
+                    disabled={exportsStandingBlocked}
+                        aria-disabled={busy !== null || gate.state === "loading" || undefined}
                   >
                     {busy === entry.format ? "Exporting…" : `Export ${entry.label}`}
                   </button>

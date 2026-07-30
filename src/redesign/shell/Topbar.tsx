@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ChevronDown, ShieldCheck } from "lucide-react";
-import { useWorkspace } from "../lib/workspace";
+import { apiUnreadReason, useWorkspace } from "../lib/workspace";
 import { routeLabel } from "./navigation";
 
 /**
@@ -117,13 +117,18 @@ export function Topbar() {
   const displayName = identity?.display_name ?? session?.user.full_name ?? "Signed-out session";
   const email = identity?.email ?? session?.user.email ?? "No session identity";
   const roles = identity?.roles ?? session?.user.roles ?? [];
-  const actorSource = identity?.actor_source ?? "system";
+  // `?? "system"` substituted a value the backend never sent and then stated a fact
+  // about it. An unread session is not a session with no identity - the rest of the
+  // shell is careful about exactly this distinction, and this line was not.
+  const actorSource = identity?.actor_source ?? (session ? "unreported" : null);
   const actorNote =
-    actorSource === "authenticated"
-      ? "actions are attributed to a verified authenticated identity."
-      : actorSource === "demo_bootstrap"
-        ? "a shared-key demo bootstrap, so actions are not verified-reviewer attributed."
-        : "no authenticated identity is attached to this session.";
+    actorSource === null
+      ? `not read — ${apiUnreadReason(apiStatus) ?? "the session has not resolved"}, so this session's identity is unknown.`
+      : actorSource === "authenticated"
+        ? "actions are attributed to a verified authenticated identity."
+        : actorSource === "demo_bootstrap"
+          ? "a shared-key demo bootstrap, so actions are not verified-reviewer attributed."
+          : "the session reported no authenticated identity.";
 
   const initials = displayName
     .split(/\s+/)

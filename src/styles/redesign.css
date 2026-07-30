@@ -301,6 +301,11 @@ html {
  * STANDING conditions, where nothing is focused when it is applied.
  */
 [aria-disabled="true"] {
-  opacity: 0.55;
+  /* NOT `opacity`. Group opacity fades the focus ring with the control, taking the
+     indicator to ~1.9:1 - defeating the focus contract this rule exists to serve,
+     since the whole point is that these controls STAY focusable. Dim the ink and the
+     fill instead, and leave the outline at full strength. */
+  color: var(--color-neutral-700);
+  background-color: var(--color-neutral-200);
   cursor: not-allowed;
 }

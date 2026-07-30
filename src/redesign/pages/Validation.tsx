@@ -133,7 +133,9 @@ export function Validation() {
     } catch (caught) {
       showToast(
         "Not recorded",
-        `The decision was not recorded, so the gate is unchanged. ${errorText(caught)}`
+        /^API \d{3}\b/.test(errorText(caught))
+          ? `The decision was not recorded, so the gate is unchanged. ${errorText(caught)}`
+          : `The request did not complete, so whether it reached the backend is unknown — reload the queue before deciding again. ${errorText(caught)}`
       );
     } finally {
       setBusyId(null);
@@ -348,8 +350,12 @@ export function Validation() {
                       rows={2}
                       value={notes[task.id] ?? ""}
                       placeholder="Required to reject; recorded with the decision either way."
+                      // No `aria-disabled` here. A decision in flight on ANOTHER card does
+                      // not make this note field unavailable, and announcing a state the
+                      // element does not have - while it stays editable and dims - is worse
+                      // than announcing nothing. `decisionsBlocked` is a standing permission
+                      // condition and is correctly native.
                       disabled={decisionsBlocked}
-                          aria-disabled={busyId !== null || undefined}
                       onChange={(event) =>
                         setNotes((current) => ({ ...current, [task.id]: event.target.value }))
                       }

@@ -68,7 +68,10 @@ const COMMANDS = [
   },
   {
     label: "Draw",
-    detail: "Prepare schematics.",
+    // The lede no longer claims this app draws. Labelled the way every other Stage 2
+    // affordance is (Studio "Well schematics (next increment)", Topbar "Settings &
+    // session (next increment)"), so the dock cannot promise more than the answer gives.
+    detail: "Describe what a casing schematic needs — drawing arrives with the Well view (next increment).",
     prompt: "Build casing schematic with hole sections, shoe depths, current MD, and risk markers."
   },
   {
