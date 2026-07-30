@@ -199,12 +199,17 @@ export function Studio() {
   );
 
   const sourceDraft = useCallback(async () => {
+    // The button stays focusable while drafting (aria-disabled, not `disabled`), so the
+    // handler is what makes it inert. Without this a second Enter would append a second
+    // report_draft.generate to the audit chain for one operator intent.
+    if (draftInFlight.current) return;
     if (!workspaceId) {
       setState("error");
       setMessage("No workspace is selected, so there is no evidence to draft from.");
       return;
     }
     const askedFor = workspaceId;
+    draftInFlight.current = true;
     setState("loading");
     setMessage("Building a source-backed draft from parsed documents, citations, and validation tasks…");
     try {
@@ -248,6 +253,11 @@ export function Studio() {
       if (askedFor !== workspaceIdRef.current) return;
       setState("error");
       setMessage(`The draft was not built. ${errorText(caught)}`);
+    } finally {
+      // `finally`, not a tail assignment: both the success and the failure path can
+      // return early when the operator switched workspace mid-request, and leaving the
+      // flag set there would disable drafting for the rest of the session.
+      draftInFlight.current = false;
     }
   }, [workspaceId]);
 
@@ -266,6 +276,9 @@ export function Studio() {
   // connection" after typing a report discarded every character with no prompt and no
   // undo - even when the retry then failed. The null -> first-workspace resolution is
   // not a change either: it is the same workspace becoming known.
+  // Mirrors the in-flight half of `state` for the handler guard, which must read the
+  // current value rather than the one captured when the callback was created.
+  const draftInFlight = useRef(false);
   const previousWorkspaceIdRef = useRef<string | null>(workspaceId);
   useEffect(() => {
     const previous = previousWorkspaceIdRef.current;
@@ -478,7 +491,8 @@ export function Studio() {
               type="button"
               className="btn btn-primary"
               onClick={() => void sourceDraft()}
-              disabled={state === "loading" || apiStatus !== "connected"}
+              disabled={apiStatus !== "connected"}
+              aria-disabled={state === "loading" || undefined}
             >
               {state === "loading" ? "Building draft…" : "Build source-backed draft"}
             </button>

@@ -348,7 +348,8 @@ export function Validation() {
                       rows={2}
                       value={notes[task.id] ?? ""}
                       placeholder="Required to reject; recorded with the decision either way."
-                      disabled={decisionsBlocked || busyId !== null}
+                      disabled={decisionsBlocked}
+                          aria-disabled={busyId !== null || undefined}
                       onChange={(event) =>
                         setNotes((current) => ({ ...current, [task.id]: event.target.value }))
                       }
@@ -371,7 +372,8 @@ export function Validation() {
                       busyId === task.id ? `Recording… Validate: ${cardTitle}` : `Validate: ${cardTitle}`
                     }
                     onClick={() => void decide(task, "validated")}
-                    disabled={decisionsBlocked || busyId !== null}
+                    disabled={decisionsBlocked}
+                          aria-disabled={busyId !== null || undefined}
                   >
                     {busyId === task.id ? "Recording…" : "Validate"}
                   </button>
@@ -380,7 +382,8 @@ export function Validation() {
                     className="btn btn-secondary"
                     aria-label={`Reject: ${cardTitle}`}
                     onClick={() => void decide(task, "rejected")}
-                    disabled={decisionsBlocked || busyId !== null}
+                    disabled={decisionsBlocked}
+                          aria-disabled={busyId !== null || undefined}
                   >
                     Reject
                   </button>

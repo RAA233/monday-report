@@ -126,7 +126,8 @@ export function Reports() {
       type="button"
       className="btn btn-primary"
       onClick={() => void createReport()}
-      disabled={readOnly || !canCreate || creating || !workspaceId}
+      disabled={readOnly || !canCreate || !workspaceId}
+      aria-disabled={creating || undefined}
       title={
         !readOnly && !canCreate
           ? "This session lacks the generate_reports permission."

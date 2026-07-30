@@ -311,7 +311,7 @@ export function Ask() {
               .join(" · ") || "No workspace resolved"
           }
           title="Ask Monday Report"
-          lede="Chat is the workflow: plan, extract, draft, draw, and audit from here. An answer carries whatever citations this workspace's parsed evidence supports, and says so when there are none. Official exports stay gated until validation clears."
+          lede="Chat is the workflow: plan, extract, draft and audit from here. An answer carries whatever citations this workspace's parsed evidence supports, and says so when there are none. Official exports stay gated until validation clears."
         />
 
         <form
@@ -331,6 +331,7 @@ export function Ask() {
             disabled={askUnavailable}
             readOnly={busy}
             aria-busy={busy || undefined}
+            aria-disabled={busy || undefined}
           />
           <button
             type="submit"
@@ -362,7 +363,8 @@ export function Ask() {
               // stated explicitly rather than left to content concatenation.
               aria-label={`${command.label} — ${command.detail}`}
               onClick={() => submit(command.prompt)}
-              disabled={askDisabled}
+              disabled={askUnavailable}
+              aria-disabled={busy || undefined}
               // No inline `background`: an inline value always beats the stylesheet,
               // which made the .mr-hover-accent tint inert. `.mr-cell-bg` carries the
               // resting fill instead.
@@ -404,7 +406,8 @@ export function Ask() {
               key={starter}
               className="mr-hover-accent"
               onClick={() => submit(starter)}
-              disabled={askDisabled}
+              disabled={askUnavailable}
+              aria-disabled={busy || undefined}
               // neutral-600 (3.82:1), not --color-divider (1.38:1): this border is the
               // only thing that identifies the chip as a control. No inline
               // background, so the hover tint applies.
@@ -462,7 +465,8 @@ export function Ask() {
               turn={turn}
               onNavigate={navigate}
               onSubmit={submit}
-              disabled={askDisabled}
+              standingDisabled={askUnavailable}
+              busy={busy}
               gate={gate}
             />
           ))}
@@ -685,13 +689,19 @@ function ChatTurn({
   turn,
   onNavigate,
   onSubmit,
-  disabled,
+  standingDisabled,
+  busy,
   gate
 }: {
   turn: Turn;
   onNavigate: (path: string) => void;
   onSubmit: (prompt: string) => void;
-  disabled: boolean;
+  /** A STANDING condition (no permission / API not connected): native `disabled` is
+   *  correct, because nothing is focused at the moment it becomes true. */
+  standingDisabled: boolean;
+  /** IN-FLIGHT: it becomes true because the operator just pressed one of these, so it
+   *  must never take the native attribute - that would blur them to <body>. */
+  busy: boolean;
   gate: GateState;
 }) {
   const isUser = turn.role === "user";
@@ -897,7 +907,8 @@ function ChatTurn({
                       className="btn btn-secondary"
                       title={action.detail}
                       aria-label={`${action.label} — ${action.detail}`}
-                      disabled={disabled && !route}
+                      disabled={standingDisabled && !route}
+                      aria-disabled={(busy && !route) || undefined}
                       onClick={() => (route ? onNavigate(route) : onSubmit(action.prompt))}
                     >
                       {action.label}
@@ -923,7 +934,8 @@ function ChatTurn({
                     type="button"
                     key={followup}
                     className="mr-hover-accent"
-                    disabled={disabled}
+                    disabled={standingDisabled}
+                    aria-disabled={busy || undefined}
                     onClick={() => onSubmit(followup)}
                     // neutral-600 and no inline background: as the starter chips above.
                     style={{
@@ -931,7 +943,7 @@ function ChatTurn({
                       color: "var(--color-neutral-800)",
                       padding: "6px 11px",
                       fontSize: 12,
-                      cursor: disabled ? "not-allowed" : "pointer",
+                      cursor: standingDisabled || busy ? "not-allowed" : "pointer",
                       fontFamily: "var(--font-body)",
                       textAlign: "start"
                     }}

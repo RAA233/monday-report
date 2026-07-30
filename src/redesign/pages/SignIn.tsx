@@ -38,6 +38,10 @@ export function SignIn() {
   } | null>(null);
 
   async function verify() {
+    // The button stays focusable while the probe runs (aria-disabled, not `disabled`,
+    // so pressing it does not blur the operator to <body>), which makes this guard the
+    // thing that actually stops a second probe.
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -256,7 +260,7 @@ export function SignIn() {
               }
               void verify();
             }}
-            disabled={busy}
+            aria-disabled={busy || undefined}
           >
             {busy ? "Checking credential…" : resolved ? "Continue to the workspace" : "Check credential"}
           </button>

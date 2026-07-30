@@ -89,7 +89,7 @@ const WORKFLOW = [
     num: "03",
     title: "Draft the report",
     body:
-      "The Studio assembles the report variant you need, pulling a source-backed draft with the casing program, survey stations, and hydraulics observations.",
+      "The Studio pulls a source-backed draft — the casing program, survey stations and hydraulics observations — and lists the sections the format variant you pick requires. Variant-specific assembly arrives with a later increment.",
     surface: "Report Studio"
   },
   {
@@ -441,9 +441,11 @@ export function Landing() {
               </div>
             </div>
             <figcaption style={{ marginTop: "var(--space-2)" }}>
-              An illustration of the draft the Studio produces, using demo-workspace values: a
-              casing and directional schematic with the 13 3/8 in and 9 5/8 in shoes, current depth
-              MD 8,620 ft, and the target box. Not live data and not a real survey computation.
+              A design illustration using demo-workspace values — a casing and directional
+              schematic with the 13 3/8 in and 9 5/8 in shoes, current depth MD 8,620 ft, and the
+              target box. The Studio's draft carries the casing program, survey stations and
+              hydraulics as tables; the drawn schematic arrives with the Well view. Not live data
+              and not a real survey computation.
             </figcaption>
           </figure>
         </section>

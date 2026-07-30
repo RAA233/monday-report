@@ -49,6 +49,7 @@
  */
 import { chromium } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
+import { readFileSync, readdirSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -538,11 +539,21 @@ async function main() {
     "No certification, compliance, or production-acceptance claims are made here."
   );
   check("landing-no-certification-claim", hasNoClaims, found(hasNoClaims, "the no-claims line"));
-  const hasIllustration = /An illustration of the draft the Studio produces/i.test(landingText);
+  // Asserts the PROPERTY, not one sentence. The previous form pinned the literal string
+  // "An illustration of the draft the Studio produces" - which review UC-04 showed was
+  // itself a false claim: the drawn schematic is NOT part of the Studio's draft, which
+  // renders the casing program, survey stations and hydraulics as TABLES. So the check
+  // now requires the figure to be labelled an illustration AND to disclaim live data
+  // AND for that specific false attribution to be absent.
+  const labelledIllustration = /\billustration\b/i.test(landingText);
+  const disclaimsLiveData = /Not live data and not a real survey computation/i.test(landingText);
+  const claimsStudioDrawsIt = /illustration of the draft the Studio produces/i.test(landingText);
+  const illustrationOk = labelledIllustration && disclaimsLiveData && !claimsStudioDrawsIt;
   check(
     "landing-preview-labelled-illustration",
-    hasIllustration,
-    found(hasIllustration, "the preview's illustration caption")
+    illustrationOk,
+    `labelled an illustration: ${labelledIllustration}; disclaims live data: ${disclaimsLiveData}; ` +
+      `still attributes the drawn schematic to the Studio's draft (it must not): ${claimsStudioDrawsIt}`
   );
   const anchorIds = ["capabilities", "workflow", "security"];
   const anchorsFound = [];
@@ -1191,6 +1202,52 @@ async function main() {
     );
   }
 
+  // ── no in-flight state may take the native `disabled` attribute ──────────
+  //
+  // STRUCTURAL, because the runtime check below can only press the controls it knows
+  // about. A disabled control is not focusable, so applying the native attribute to a
+  // control the operator has just activated blurs them to <body>. Three rounds of
+  // review fixed these one call site at a time and each round found the ones that had
+  // been missed; this enumerates them instead.
+  //
+  // The rule: a native `disabled=` predicate may name only STANDING conditions
+  // (permission, connectivity, a closed gate, an empty list) - things that are already
+  // true before the operator acts. Anything that becomes true BECAUSE they acted must
+  // be `aria-disabled` plus an early return in the handler.
+  {
+    const IN_FLIGHT = /\b(busy|busyId|creating|minting|retrying|askDisabled|inFlight|submitting|saving|pending)\b|state\s*===\s*"loading"/;
+    const sources = [];
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (/\.tsx?$/.test(entry.name)) sources.push(full);
+      }
+    };
+    walk(path.join(REPO_ROOT, "src", "redesign"));
+    const offenders = [];
+    for (const file of sources) {
+      const text = readFileSync(file, "utf8");
+      text.split(/\r?\n/).forEach((line, index) => {
+        // `aria-disabled=` is the correct carrier and is deliberately not matched.
+        const match = /(?<!aria-)\bdisabled=\{([^}]*)\}/.exec(line);
+        if (!match) return;
+        if (IN_FLIGHT.test(match[1])) {
+          offenders.push(`${file.slice(REPO_ROOT.length + 1)}:${index + 1} disabled={${match[1]}}`);
+        }
+      });
+    }
+    check(
+      "no-native-disabled-for-in-flight-state",
+      sources.length > 0 && offenders.length === 0,
+      sources.length === 0
+        ? "no redesign sources were read, so nothing was proven"
+        : offenders.length === 0
+          ? `${sources.length} redesign source file(s) scanned; every native disabled= predicate names only standing conditions`
+          : `${offenders.length} control(s) take the native disabled attribute for an in-flight state, which blurs the pressed control to <body>: ${offenders.join(" ;; ")}`
+    );
+  }
+
   // ── pressing a retry must not throw the keyboard user back to <body> ─────
   //
   // Keeping the affordance MOUNTED across the attempt is necessary but not sufficient,
@@ -1596,6 +1653,7 @@ async function main() {
     "studio-cleared-field-stays-empty",
     "studio-local-edit-survives-reconnect",
     "retry-press-keeps-focus",
+    "no-native-disabled-for-in-flight-state",
     ...["ltr", "rtl"].flatMap((dir) =>
       [390, 768, 1440].map((width) => `profile-panel-contained:${dir}:${width}`)
     ),

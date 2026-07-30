@@ -125,7 +125,10 @@ function GateBanner({
       </div>
     );
   }
-  if (gate.state === "loading") {
+  // `retrying` must win over `loading`: a re-read started from THIS banner puts the
+  // gate into `loading`, and letting that branch answer first swapped the button for a
+  // different node - the self-deletion this branch exists to prevent.
+  if (gate.state === "loading" && !retrying) {
     return (
       <div role="status" style={frame(false)}>
         <strong style={heading(false)}>Checking the export gate</strong>
@@ -195,6 +198,9 @@ function GateBanner({
   );
 }
 
+/** A report list together with the workspace whose read produced it. */
+type ReportsForWorkspace = { workspaceId: string | null; data: ApiMondayReport[] };
+
 function shortSha(sha: string): string {
   return sha.slice(0, 12);
 }
@@ -251,9 +257,13 @@ export function Exports() {
     setMinting(null);
   }, [workspaceId]);
 
-  const loadReports = useCallback(async () => {
-    if (!workspaceId) return [] as ApiMondayReport[];
-    return getMondayReports(workspaceId);
+  // Resolve the workspace the read was ISSUED for alongside its rows, so a consumer
+  // can tell a stale-but-ready result from a current one. Keying on the render's
+  // workspaceId cannot do that: the render that first carries the new workspace still
+  // holds the old workspace's completed fetch.
+  const loadReports = useCallback(async (): Promise<ReportsForWorkspace> => {
+    if (!workspaceId) return { workspaceId, data: [] as ApiMondayReport[] };
+    return { workspaceId, data: await getMondayReports(workspaceId) };
   }, [workspaceId]);
 
   const { value: reports, reload } = useLoadable(loadReports, [workspaceId]);
@@ -266,19 +276,24 @@ export function Exports() {
   // not unmount the panel - and the button the operator just pressed - dropping focus
   // to <body>.
   //
-  // KEYED BY WORKSPACE, unlike the validation queue: `/validation-tasks` is tenant-wide,
-  // but this list is `getMondayReports(workspaceId)`. Retaining it unkeyed meant that for
-  // the whole of a workspace switch the PREVIOUS workspace's newest report rendered as
-  // this workspace's export target - and `runExport` captures `target.id`, so an
-  // official, audited export could be issued for a report the operator had just left.
-  const lastReadReports = useRef<{ workspaceId: string | null; data: ApiMondayReport[] } | null>(null);
-  if (reports.state === "ready") lastReadReports.current = { workspaceId, data: reports.data };
+  // Every workspace test below is against `reports.data.workspaceId`, the workspace the
+  // READ was issued for. `/validation-tasks` is tenant-wide, but this list is
+  // `getMondayReports(workspaceId)`, so a result from another workspace must not be
+  // shown or exported: `runExport` captures `target.id`, and an official, audited
+  // export of a report the operator had just left is the outcome this prevents. A
+  // ready-but-stale result is treated exactly like no result - skeleton, null target.
+  const lastReadReports = useRef<ReportsForWorkspace | null>(null);
+  if (reports.state === "ready" && reports.data.workspaceId === workspaceId) {
+    lastReadReports.current = reports.data;
+  }
   const retained =
     lastReadReports.current && lastReadReports.current.workspaceId === workspaceId
       ? lastReadReports.current.data
       : null;
   const visibleReports =
-    reports.state === "ready" ? reports.data : reports.state === "loading" ? retained : null;
+    reports.state === "ready" && reports.data.workspaceId === workspaceId
+      ? reports.data.data
+      : retained;
   const requestedReportId = searchParams.get("report");
   const requested =
     visibleReports && requestedReportId
@@ -300,7 +315,11 @@ export function Exports() {
   // this guard the page asserted "not in this workspace's report list" directly above
   // its own "Report list not read" empty state.
   const requestedButMissing =
-    Boolean(requestedReportId) && reports.state === "ready" && workspaceId !== null && !requested;
+    Boolean(requestedReportId) &&
+    reports.state === "ready" &&
+    reports.data.workspaceId === workspaceId &&
+    workspaceId !== null &&
+    !requested;
 
   // The two routes require DIFFERENT permissions; the backend checks them
   // separately, so the UI must not collapse them into one capability.
@@ -325,6 +344,9 @@ export function Exports() {
   const exportsBlocked = readOnly || !canIssueExport || gateBlocksExport;
 
   async function runExport(format: ApiReportExport["format"]) {
+    // aria-disabled keeps these focusable, so the handler is what actually makes them
+    // inert: the `busy` term below is what stops a second Enter issuing a second
+    // audited export.
     if (!target || exportsBlocked || busy) return;
     // Captured so a resolution arriving after a workspace switch cannot attribute
     // this export, its toast, or its status text to the new workspace.
@@ -452,7 +474,10 @@ export function Exports() {
         </p>
       ) : null}
 
-      {reports.state === "loading" && !reportsRetry.show && !visibleReports ? (
+      {(reports.state === "loading" ||
+        (reports.state === "ready" && reports.data.workspaceId !== workspaceId)) &&
+      !reportsRetry.show &&
+      !visibleReports ? (
         <Skeleton rows={2} label="Loading reports" />
       ) : null}
 
@@ -530,7 +555,8 @@ export function Exports() {
                     type="button"
                     className="btn btn-secondary"
                     onClick={() => void runExport(entry.format)}
-                    disabled={exportsBlocked || busy !== null}
+                    disabled={exportsBlocked}
+                        aria-disabled={busy !== null || undefined}
                   >
                     {busy === entry.format ? "Exporting…" : `Export ${entry.label}`}
                   </button>
@@ -615,7 +641,8 @@ export function Exports() {
                       type="button"
                       className="btn btn-ghost"
                       onClick={() => void mintUrl(item)}
-                      disabled={readOnly || !canFetchEvidence || minting !== null}
+                      disabled={readOnly || !canFetchEvidence}
+                          aria-disabled={minting !== null || undefined}
                       // Rows repeat this label, so the name states which export - built by
                       // suffixing the EXACT visible string, which WCAG 2.5.3 requires the
                       // accessible name to contain.
