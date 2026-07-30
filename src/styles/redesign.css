@@ -132,7 +132,8 @@ html {
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--color-neutral-600);
+  /* neutral-700, not 600: micro-labels need >=4.5:1 (600 is 3.8:1). */
+  color: var(--color-neutral-700);
 }
 
 .mr-cell-value {
@@ -187,7 +188,7 @@ html {
   font-size: 11px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+  color: color-mix(in srgb, var(--color-text) 75%, transparent);
 }
 
 .mr-table-row {

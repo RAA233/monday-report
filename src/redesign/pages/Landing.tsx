@@ -117,7 +117,7 @@ const TRUST = [
   {
     title: "Audit-chain visibility",
     body:
-      "Every action appends to a hash-chained audit log with keyed-HMAC integrity — and the app shows the chain's sealed/legacy/broken state instead of hiding it."
+      "Every action appends to a hash-chained audit log — keyed with HMAC when a signing key is configured — and the app shows the chain's sealed, legacy, or broken state instead of hiding it."
   },
   {
     title: "Local-first AI",
@@ -139,6 +139,7 @@ const SHELL_WIDTH = {
 
 const SECTION_KICKER = {
   display: "block",
+  margin: 0,
   fontSize: 13,
   letterSpacing: "0.08em",
   textTransform: "uppercase",
@@ -172,6 +173,9 @@ export function Landing() {
         </Link>
       </nav>
 
+      {/* Single main landmark for the whole page body; the nav and footer sit
+          outside it so "skip to content" and landmark navigation behave. */}
+      <main>
       <div style={SHELL_WIDTH}>
         <section
           aria-label="Monday Report"
@@ -282,7 +286,7 @@ export function Landing() {
                         fontSize: 9,
                         letterSpacing: "0.08em",
                         textTransform: "uppercase",
-                        color: "var(--color-neutral-600)"
+                        color: "var(--color-neutral-700)"
                       }}
                     >
                       {meta.label}
@@ -420,13 +424,13 @@ export function Landing() {
                     <text x="20" y="32" fill="var(--color-text)" fontSize="11" fontWeight="600" fontFamily="Barlow Condensed, sans-serif">
                       CASING / DIRECTIONAL
                     </text>
-                    <text x="20" y="114" fill="var(--color-neutral-600)" fontSize="10" fontFamily="Barlow, sans-serif">
+                    <text x="20" y="114" fill="var(--color-neutral-700)" fontSize="10" fontFamily="Barlow, sans-serif">
                       13 3/8 in shoe
                     </text>
-                    <text x="20" y="306" fill="var(--color-neutral-600)" fontSize="10" fontFamily="Barlow, sans-serif">
+                    <text x="20" y="306" fill="var(--color-neutral-700)" fontSize="10" fontFamily="Barlow, sans-serif">
                       9 5/8 in shoe
                     </text>
-                    <text x="20" y="444" fill="var(--color-neutral-600)" fontSize="10" fontFamily="Barlow, sans-serif">
+                    <text x="20" y="444" fill="var(--color-neutral-700)" fontSize="10" fontFamily="Barlow, sans-serif">
                       MD 8,620 ft
                     </text>
                     <text x="176" y="544" fill="var(--color-text)" fontSize="11" fontWeight="600" fontFamily="Barlow Condensed, sans-serif">
@@ -491,7 +495,7 @@ export function Landing() {
 
       <div style={SHELL_WIDTH}>
         <section id="capabilities" aria-label="Capabilities" style={{ paddingBlock: "72px 60px" }}>
-          <span style={SECTION_KICKER}>What the system does</span>
+          <h2 style={SECTION_KICKER}>What the system does</h2>
           <hr style={{ ...RULE, margin: "0 0 32px" }} />
           <div
             style={{
@@ -506,7 +510,7 @@ export function Landing() {
                 <i className="corner tr" />
                 <i className="corner bl" />
                 <i className="corner br" />
-                <h2
+                <h3
                   style={{
                     fontSize: 21,
                     lineHeight: 1.15,
@@ -516,7 +520,7 @@ export function Landing() {
                   }}
                 >
                   {capability.title}
-                </h2>
+                </h3>
                 <p style={{ fontSize: 15, lineHeight: 1.55, margin: "14px 0 0", color: BODY_TEXT }}>
                   {capability.body}
                 </p>
@@ -533,7 +537,7 @@ export function Landing() {
         </section>
 
         <section id="workflow" aria-label="Workflow" style={{ paddingBlock: "24px 72px" }}>
-          <span style={SECTION_KICKER}>How a report gets issued</span>
+          <h2 style={SECTION_KICKER}>How a report gets issued</h2>
           <hr style={{ ...RULE, margin: "0 0 8px" }} />
           <div style={{ display: "grid" }}>
             {WORKFLOW.map((step) => (
@@ -584,7 +588,7 @@ export function Landing() {
         </section>
 
         <section id="security" aria-label="Security" style={{ paddingBlock: "0 72px" }}>
-          <span style={SECTION_KICKER}>Trust, as enforced by the code</span>
+          <h2 style={SECTION_KICKER}>Trust, as enforced by the code</h2>
           <hr style={{ ...RULE, margin: "0 0 32px" }} />
           <div
             style={{
@@ -614,7 +618,7 @@ export function Landing() {
         </section>
 
         <section aria-label="Open the demo workspace" style={{ paddingBlock: "0 48px" }}>
-          <span style={SECTION_KICKER}>The next Monday</span>
+          <h2 style={SECTION_KICKER}>The next Monday</h2>
           <hr style={{ ...RULE, margin: "0 0 28px" }} />
           <div
             style={{
@@ -647,7 +651,10 @@ export function Landing() {
             </Link>
           </div>
         </section>
+      </div>
+      </main>
 
+      <div style={SHELL_WIDTH}>
         <footer
           style={{
             display: "grid",

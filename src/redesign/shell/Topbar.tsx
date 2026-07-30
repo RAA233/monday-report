@@ -137,7 +137,7 @@ export function Topbar() {
         style={{
           fontFamily: "var(--font-heading)",
           fontSize: 12,
-          color: "var(--color-neutral-600)",
+          color: "var(--color-neutral-700)",
           letterSpacing: "0.04em"
         }}
       >
@@ -181,8 +181,10 @@ export function Topbar() {
           type="button"
           className="mr-hover-text"
           onClick={() => setProfileOpen((open) => !open)}
+          // A plain disclosure, not role="menu": two actions plus identity text
+          // are not menu content, and Tab is the right navigation model here.
           aria-expanded={profileOpen}
-          aria-haspopup="true"
+          aria-controls="mr-profile-disclosure"
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -217,7 +219,7 @@ export function Topbar() {
 
         {profileOpen ? (
           <div
-            role="menu"
+            id="mr-profile-disclosure"
             className="elev-md"
             style={{
               position: "absolute",
@@ -252,7 +254,6 @@ export function Topbar() {
             <div style={{ display: "grid", gap: 6 }}>
               <button
                 type="button"
-                role="menuitem"
                 className="btn btn-secondary"
                 onClick={() => {
                   setProfileOpen(false);
@@ -261,12 +262,8 @@ export function Topbar() {
               >
                 Settings &amp; session
               </button>
-              {/* Returns to the sign-in surface. There is no logout endpoint and the
-                  browser holds no session token, so the surface itself discloses how
-                  this client authenticates rather than implying a revoked credential. */}
               <button
                 type="button"
-                role="menuitem"
                 className="btn btn-ghost"
                 onClick={() => {
                   setProfileOpen(false);
@@ -275,6 +272,12 @@ export function Topbar() {
               >
                 Sign out
               </button>
+              {/* No logout endpoint exists and the credential is build-time, so
+                  "sign out" cannot revoke anything — say so instead of implying it. */}
+              <span className="text-muted" style={{ fontSize: 10.5, lineHeight: 1.45 }}>
+                Returns to the sign-in surface. The build-time credential stays active — there is no
+                session token to revoke.
+              </span>
             </div>
           </div>
         ) : null}

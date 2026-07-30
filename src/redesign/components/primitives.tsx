@@ -111,7 +111,11 @@ export function PageHeader({
     >
       <div>
         {kicker ? <span className="mr-kicker">{kicker}</span> : null}
-        <h1 className="mr-title">{title}</h1>
+        {/* tabIndex -1 so the route-change hook can move focus here without
+            making the heading a tab stop. */}
+        <h1 className="mr-title" tabIndex={-1}>
+          {title}
+        </h1>
         {lede ? (
           <p className="text-muted mr-lede">{lede}</p>
         ) : null}
@@ -144,7 +148,9 @@ export function Cells({
   return (
     <div
       className="mr-cells"
-      aria-label={label}
+      // role=group so the aria-label is actually exposed: a name on a plain <div>
+      // with no role is dropped by assistive technology.
+      {...(label ? { role: "group", "aria-label": label } : {})}
       style={{ gridTemplateColumns: `repeat(auto-fit, minmax(min(${min}px, 100%), 1fr))`, ...style }}
     >
       {items.map((item) => (
@@ -318,26 +324,33 @@ export function ErrorState({
   );
 }
 
-/** Segmented control. Radio inputs so arrow keys and labels work natively. */
+/**
+ * Segmented control — always a native radiogroup.
+ *
+ * An earlier version accepted role="tablist" and put role="tab" on the <label>
+ * wrapping each radio. That is an invalid ARIA composition: a tab may not contain
+ * a focusable widget, and the tablist had no tabpanel, no roving tabindex, and no
+ * arrow-key handling of its own. Native radios already give arrow-key selection,
+ * correct checked-state announcement, and label association, so the tab variant is
+ * gone rather than half-implemented.
+ */
 export function SegControl<T extends string>({
   name,
   label,
   options,
   value,
-  onChange,
-  role = "radiogroup"
+  onChange
 }: {
   name: string;
   label: string;
   options: Array<{ id: T; label: string }>;
   value: T;
   onChange: (id: T) => void;
-  role?: "radiogroup" | "tablist";
 }) {
   return (
-    <div className="seg" role={role} aria-label={label}>
+    <div className="seg" role="radiogroup" aria-label={label}>
       {options.map((option) => (
-        <label className="seg-opt" key={option.id} {...(role === "tablist" ? { role: "tab", "aria-selected": option.id === value } : {})}>
+        <label className="seg-opt" key={option.id}>
           <input
             type="radio"
             name={name}

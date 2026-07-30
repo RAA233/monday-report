@@ -1,4 +1,19 @@
 /* Industry — design-system tokens and component classes. This file is the source of truth for the system's look; retune it here and see readme.md. */
+
+/* Ported COMPLETE and deliberately so. A review noted that Stage 1 references only
+   part of this sheet (.card*, .dialog*, .table, .radio, .elev-sm, .tag-accent-2,
+   .dot and the texture classes are currently unused). They are kept because this is
+   the design system, not page CSS: the Stage 2 surfaces (Well, Upload,
+   Benchmarking, Audit chain, Settings) use them in the handoff prototypes, and
+   pruning now would only force a re-port and let the sheet drift from the handoff.
+   The unreferenced rules add ~2 kB gzipped and affect nothing at runtime. */
+
+/* Webfonts are a PROGRESSIVE ENHANCEMENT here, not a dependency. Monday Report is
+   documented as running fully offline, so this @import must never gate rendering:
+   `display=swap` paints the fallback immediately, and the stacks below name real
+   condensed/humanist fallbacks so an offline build keeps a deliberate voice rather
+   than dropping to a generic sans. If the third-party request is unacceptable in a
+   given deployment, delete this line — nothing else depends on it. */
 @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;600&display=swap');
 
 :root {
@@ -41,9 +56,12 @@
   --color-accent-2-800: #314457;
   --color-accent-2-900: #1f2d3a;
 
-  --font-heading: "Barlow Condensed", system-ui, sans-serif;
+  /* Fallbacks are real condensed / humanist faces, in order, so an offline build
+     keeps the intended proportions instead of collapsing to a generic sans. */
+  --font-heading: "Barlow Condensed", "Roboto Condensed", "Archivo Narrow", "Liberation Sans Narrow",
+    "Arial Narrow", system-ui, sans-serif;
   --font-heading-weight: 600;
-  --font-body: "Barlow", system-ui, sans-serif;
+  --font-body: "Barlow", "Roboto", "Segoe UI", system-ui, -apple-system, sans-serif;
 
   --space-1: 3.4px;
   --space-2: 6.8px;
@@ -118,14 +136,19 @@ h5 { font-size: 16px; }
 h6 { font-size: 13px; }
 h6 { letter-spacing: 0.08em; text-transform: uppercase; }
 p { margin: 0 0 var(--space-3); }
-a { color: var(--color-accent); text-underline-offset: 3px; }
+/* Contrast retune (WCAG AA + the handoff's own Part H requirement of >=5.8:1 for
+   muted text, "accent-700 for small accent text"). The exported sheet shipped a
+   55% mix (~3.6:1) and bare accent (~3.7:1) for small type, contradicting the
+   handoff report; the handoff's stated targets win over its exported values.
+   75% mix = 6.8:1 on bg / 6.3:1 on surface; accent-700 = 5.8:1 on bg. */
+a { color: var(--color-accent-700); text-underline-offset: 3px; }
 img { display: block; max-width: 100%; }
 figure { margin: 0; }
 figcaption {
   font-size: 11px; margin-top: var(--space-1);
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: color-mix(in srgb, var(--color-text) 75%, transparent);
 }
-.text-muted { color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.text-muted { color: color-mix(in srgb, var(--color-text) 75%, transparent); }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
 ::selection { background: color-mix(in srgb, var(--color-accent) 30%, transparent); }
@@ -148,13 +171,18 @@ figcaption {
 }
 .btn svg { display: block; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn-primary { background: var(--color-accent); color: var(--color-bg); }
-.btn-primary:hover { background: var(--color-accent-600); }
-.btn-primary:active { background: var(--color-accent-700); }
+/* Contrast retune: the exported sheet filled primary buttons with bare accent,
+   which puts their light label at 3.71:1 — below AA for 13px text. accent-700
+   carries the same label at 5.78:1; hover/active darken from there so the
+   affordance still reads and never drops back under the floor. */
+.btn-primary { background: var(--color-accent-700); color: var(--color-bg); }
+.btn-primary:hover { background: var(--color-accent-800); }
+.btn-primary:active { background: var(--color-accent-900); }
 .btn-secondary { border-color: var(--color-divider); }
 .btn-secondary:hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
 .btn-secondary:active { background: color-mix(in srgb, var(--color-text) 14%, transparent); }
-.btn-ghost { color: var(--color-accent); padding-inline: var(--space-1); }
+/* accent-700, not accent: ghost buttons are 11.5-13px text (contrast retune). */
+.btn-ghost { color: var(--color-accent-700); padding-inline: var(--space-1); }
 .btn-ghost:hover { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
 .btn-ghost:active { background: color-mix(in srgb, var(--color-accent) 18%, transparent); }
 .btn-icon { width: 34px; height: 34px; padding: 0; }
@@ -229,7 +257,8 @@ textarea.input { min-height: 90px; resize: vertical; }
 .tag-accent { background: var(--color-accent-100); color: var(--color-accent-800); }
 .tag-accent-2 { background: var(--color-accent-2-100); color: var(--color-accent-2-800); }
 .tag-neutral { background: var(--color-neutral-100); color: var(--color-neutral-800); }
-.tag-outline { border: 1px solid var(--color-accent); color: var(--color-accent); }
+/* accent-700 for small accent text (contrast retune, see above). */
+.tag-outline { border: 1px solid var(--color-accent); color: var(--color-accent-700); }
 
 /* — navigation — */
 .nav {
@@ -242,7 +271,12 @@ textarea.input { min-height: 90px; resize: vertical; }
   font-size: 18px; margin-right: auto;
 }
 .nav a { color: inherit; text-decoration: none; font-size: 14px; }
-.nav a:hover, .nav a[aria-current='page'] { color: var(--color-accent); }
+.nav a:hover, .nav a[aria-current='page'] { color: var(--color-accent-700); }
+/* `.nav a` (0,1,1) outranks `.btn-primary` (0,1,0), so a CTA rendered as a link
+   inside the nav inherited dark body text onto the accent fill (3.99:1). These
+   restore each button variant's own label colour inside the nav. */
+.nav a.btn-primary, .nav a.btn-primary:hover { color: var(--color-bg); }
+.nav a.btn-ghost, .nav a.btn-ghost:hover { color: var(--color-accent-700); }
 
 /* — tables — */
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }

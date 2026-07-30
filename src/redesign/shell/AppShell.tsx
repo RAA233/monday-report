@@ -12,7 +12,7 @@ import { useWorkspace } from "../lib/workspace";
  * read-only, rather than showing empty lists that look like real "no data".
  */
 export function AppShell() {
-  const { apiStatus, retry, toast, dismissToast } = useWorkspace();
+  const { apiStatus, retry, toast, dismissToast, pauseToast, resumeToast } = useWorkspace();
   const offline = apiStatus === "offline";
 
   return (
@@ -83,48 +83,61 @@ export function AppShell() {
         </main>
       </div>
 
-      {toast ? (
-        <div
-          role="status"
-          aria-live="polite"
-          className="elev-lg"
-          style={{
-            position: "fixed",
-            insetBlockEnd: 18,
-            insetInlineEnd: 18,
-            zIndex: 60,
-            maxWidth: "min(420px, calc(100vw - 36px))",
-            background: "var(--color-bg)",
-            border: "1px solid var(--color-divider)",
-            padding: "12px 14px",
-            display: "grid",
-            gap: 4
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-            <strong
-              style={{
-                fontFamily: "var(--font-heading)",
-                textTransform: "uppercase",
-                letterSpacing: "0.05em",
-                fontSize: 12.5
-              }}
-            >
-              {toast.kind}
-            </strong>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              aria-label="Dismiss notification"
-              style={{ minHeight: 0, padding: "0 4px", fontSize: 12, marginInlineStart: "auto" }}
-              onClick={dismissToast}
-            >
-              Dismiss
-            </button>
-          </div>
-          <span style={{ fontSize: 12.5, lineHeight: 1.5 }}>{toast.text}</span>
-        </div>
-      ) : null}
+      {/* Permanently-mounted live region: a region created together with its
+          content is often not announced, so only the CONTENT is conditional.
+          Hover or focus holds the toast open instead of racing its timer. */}
+      <div
+        role="status"
+        aria-live="polite"
+        className={toast ? "elev-lg" : undefined}
+        onMouseEnter={pauseToast}
+        onMouseLeave={resumeToast}
+        onFocus={pauseToast}
+        onBlur={resumeToast}
+        style={{
+          position: "fixed",
+          insetBlockEnd: 18,
+          insetInlineEnd: 18,
+          zIndex: 60,
+          maxWidth: "min(420px, calc(100vw - 36px))",
+          ...(toast
+            ? {
+                background: "var(--color-bg)",
+                border: "1px solid var(--color-divider)",
+                padding: "12px 14px",
+                display: "grid",
+                gap: 4
+              }
+            : {})
+        }}
+      >
+        {toast ? (
+          <>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+              <strong
+                style={{
+                  fontFamily: "var(--font-heading)",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                  fontSize: 12.5
+                }}
+              >
+                {toast.kind}
+              </strong>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                aria-label="Dismiss notification"
+                style={{ minHeight: 0, padding: "0 4px", fontSize: 12, marginInlineStart: "auto" }}
+                onClick={dismissToast}
+              >
+                Dismiss
+              </button>
+            </div>
+            <span style={{ fontSize: 12.5, lineHeight: 1.5 }}>{toast.text}</span>
+          </>
+        ) : null}
+      </div>
     </div>
   );
 }

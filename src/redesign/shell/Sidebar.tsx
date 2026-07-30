@@ -59,7 +59,7 @@ export function Sidebar() {
                 fontSize: 10,
                 letterSpacing: "0.12em",
                 textTransform: "uppercase",
-                color: "var(--color-neutral-600)",
+                color: "var(--color-neutral-700)",
                 padding: "0 8px 6px"
               }}
             >
@@ -129,6 +129,7 @@ export function Sidebar() {
         data-tenantcard=""
         className="blueprint"
         style={{ marginTop: "auto", padding: 12 }}
+        role="group"
         aria-label="Tenant status"
       >
         <i className="corner tl" />
@@ -141,7 +142,7 @@ export function Sidebar() {
             fontSize: 10,
             letterSpacing: "0.12em",
             textTransform: "uppercase",
-            color: "var(--color-neutral-600)"
+            color: "var(--color-neutral-700)"
           }}
         >
           Tenant
@@ -162,10 +163,14 @@ export function Sidebar() {
             ? [activeWorkspace.name, activeWorkspace.asset].filter(Boolean).join(" · ")
             : "Connect the workspace API to read tenant scope"}
         </span>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-          <Tag tone="accent">Isolated</Tag>
-          <Tag tone="neutral">RLS-ready</Tag>
-        </div>
+        {/* Tenant-scoping properties describe a resolved tenant. With none
+            resolved there is nothing for them to be true of, so they are not shown. */}
+        {tenantName ? (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+            <Tag tone="accent">Isolated</Tag>
+            <Tag tone="neutral">RLS-ready</Tag>
+          </div>
+        ) : null}
       </div>
     </aside>
   );

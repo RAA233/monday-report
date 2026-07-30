@@ -9,6 +9,7 @@ import { Validation } from "./pages/Validation";
 import { Exports } from "./pages/Exports";
 import { PendingStage } from "./pages/PendingStage";
 import { NotFound } from "./pages/NotFound";
+import { useRouteAnnounce } from "./lib/useRouteAnnounce";
 
 /**
  * Route contract for the redesigned entry.
@@ -31,6 +32,9 @@ import { NotFound } from "./pages/NotFound";
  * document.
  */
 export function AppRoutes() {
+  // Route changes set the document title and move focus to the new view's h1.
+  useRouteAnnounce();
+
   return (
     <Routes>
       <Route path="/" element={<Landing />} />
