@@ -64,7 +64,11 @@ const STAGE1_ROUTES = [
   { path: "/app/signin", heading: "Sign in to the workspace", label: "signin" },
   { path: "/app", heading: "Ask Monday Report", label: "ask" },
   { path: "/app/reports", heading: "Monday reports", label: "reports" },
-  { path: "/app/studio", heading: null, label: "studio" },
+  // The Studio h1 is "<variant label> draft" and the variant is user-selectable, so
+  // the assertion is the shape. `heading: null` used to reduce this check to "some
+  // page with one h1", which NotFound and PendingStage also satisfy — deleting the
+  // Studio route kept the suite green.
+  { path: "/app/studio", headingPattern: /draft$/i, label: "studio" },
   { path: "/app/validation", heading: "Validation queue", label: "validation" },
   { path: "/app/exports", heading: "Exports", label: "exports" }
 ];
@@ -100,7 +104,12 @@ async function apiJson(pathname, init = {}) {
  * The deterministic extractor keys on MWD + signal loss, so this text produces one
  * High-severity failure record and one open validation task through the product's
  * own intake → parse → extract path. Every value here is invented demo data; it is
- * not client data and it is never presented to a user as evidence of anything.
+ * not client data.
+ *
+ * It IS persistent: the upload, the parsed document, the failure record and the
+ * resolved task all remain in the target workspace after the run, and each run adds
+ * another set. That is why the gate flow refuses to run against a stack that already
+ * holds open validation tasks it did not create (see runGateFlow).
  */
 const DEMO_DDR = [
   "DAILY DRILLING REPORT - DEMO DATA ONLY",
@@ -124,6 +133,20 @@ const DEMO_DDR = [
  * environment, which must therefore carry the same MONDAY_REPORT_* state pointers
  * the running API uses.
  */
+const isOpen = (task) => task.status === "open" || task.status === "conflict";
+
+/** Poll the API until the open-task count reaches `want` (or give up). */
+async function waitForOpenTaskCount(want, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let seen = -1;
+  while (Date.now() < deadline) {
+    seen = (await apiJson("/validation-tasks")).filter(isOpen).length;
+    if (seen === want) return true;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
 async function seedOpenValidationTask(workspaceId) {
   const form = new FormData();
   form.append("workspace_id", workspaceId);
@@ -151,7 +174,32 @@ async function seedOpenValidationTask(workspaceId) {
   }
 
   const tasks = await apiJson("/validation-tasks");
-  return tasks.filter((task) => task.status === "open" || task.status === "conflict");
+  return tasks.filter(isOpen);
+}
+
+/**
+ * Ensure a Monday report exists, so the gated Export button is actually rendered
+ * and its disabled state is a real assertion rather than a silent skip.
+ */
+async function ensureReport(workspaceId) {
+  const existing = await apiJson(`/monday-reports?workspace_id=${encodeURIComponent(workspaceId)}`);
+  if (existing.length > 0) return existing;
+  const now = new Date();
+  const monday = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - ((now.getUTCDay() + 6) % 7))
+  );
+  const sunday = new Date(monday);
+  sunday.setUTCDate(monday.getUTCDate() + 6);
+  await apiJson("/monday-reports", {
+    method: "POST",
+    headers: { "Idempotency-Key": `ui-redesign-smoke-report-${Date.now()}` },
+    body: JSON.stringify({
+      workspace_id: workspaceId,
+      period_start: monday.toISOString().slice(0, 10),
+      period_end: sunday.toISOString().slice(0, 10)
+    })
+  });
+  return apiJson(`/monday-reports?workspace_id=${encodeURIComponent(workspaceId)}`);
 }
 
 /** Layout invariant: the document itself must never scroll sideways. */
@@ -192,11 +240,22 @@ async function main() {
   const consoleErrors = [];
   const failedRequests = [];
   context.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push(`${message.location().url}: ${message.text()}`);
+    if (message.type() === "error") consoleErrors.push(`console: ${message.location().url}: ${message.text()}`);
+  });
+  // Uncaught exceptions and unhandled rejections arrive as weberror, NOT as console
+  // messages — without this they escaped the console-error assertion entirely.
+  context.on("weberror", (error) => {
+    consoleErrors.push(`uncaught: ${String(error.error()).slice(0, 300)}`);
   });
   context.on("requestfailed", (request) => {
     // Only same-origin app requests matter; an offline API is a separate assertion.
     if (request.url().startsWith(WEB)) failedRequests.push(`${request.url()} ${request.failure()?.errorText}`);
+  });
+  // A same-origin 4xx/5xx is a real failure but never fires requestfailed.
+  context.on("response", (response) => {
+    if (response.url().startsWith(WEB) && response.status() >= 400) {
+      failedRequests.push(`${response.url()} -> HTTP ${response.status()}`);
+    }
   });
 
   const page = await context.newPage();
@@ -247,10 +306,14 @@ async function main() {
     const headings = await page.locator("h1").allInnerTexts();
     const one = headings.length === 1;
     const text = headings.map((value) => value.replace(/\s+/g, " ").trim()).join(" | ");
-    const matches = route.heading
-      ? text.toLowerCase().includes(route.heading.toLowerCase().replace(/\s+/g, " "))
-      : headings.length === 1;
-    check(`route-renders:${route.label}`, one && matches, `single h1 = ${JSON.stringify(text)}`);
+    const matches = route.headingPattern
+      ? route.headingPattern.test(text)
+      : text.toLowerCase().includes(route.heading.toLowerCase().replace(/\s+/g, " "));
+    check(
+      `route-renders:${route.label}`,
+      one && matches,
+      `single h1 = ${JSON.stringify(text)} (expected ${route.headingPattern ?? JSON.stringify(route.heading)})`
+    );
     await shoot(page, `route-${route.label}`);
   }
 
@@ -265,11 +328,27 @@ async function main() {
     `after reload url=${page.url()} h1=${JSON.stringify(afterReload.trim())}`
   );
 
-  const draftDeep = await page.goto(`${WEB}/app/reports/some-report-id/draft`, { waitUntil: "networkidle" });
+  // A report id containing a dot also exercises the middleware's extension test.
+  const draftDeep = await page.goto(`${WEB}/app/reports/MR-2026.W31/draft`, { waitUntil: "networkidle" });
+  const draftHeading = (await page.locator("h1").allInnerTexts()).join(" | ").trim();
   check(
     "deep-route-refresh:studio-param",
-    draftDeep?.status() === 200 && (await page.locator("h1").count()) === 1,
-    `GET /app/reports/:id/draft -> ${draftDeep?.status()}`
+    draftDeep?.status() === 200 && (await page.locator("h1").count()) === 1 && /draft$/i.test(draftHeading),
+    `GET /app/reports/MR-2026.W31/draft -> ${draftDeep?.status()}, h1 = ${JSON.stringify(draftHeading)}`
+  );
+  check(
+    "deep-route-kicker-carries-report-id",
+    (await page.locator("body").innerText()).includes("MR-2026.W31"),
+    "the Studio shows the report id from the URL, proving the Studio route matched"
+  );
+
+  // A query string must not be misclassified as an asset request.
+  const queried = await page.goto(`${WEB}/app/reports?tab=all`, { waitUntil: "networkidle" });
+  const queriedHeading = (await page.locator("h1").first().innerText()).trim();
+  check(
+    "deep-route-with-query-string",
+    queried?.status() === 200 && /monday reports/i.test(queriedHeading),
+    `GET /app/reports?tab=all -> ${queried?.status()}, h1 = ${JSON.stringify(queriedHeading)}`
   );
 
   // ── redirect and not-found ────────────────────────────────────────────────
@@ -301,75 +380,124 @@ async function main() {
   }
 
   // ── export gate: closed with the committed copy, then unlocked ────────────
-  let gateChecked = false;
-  if (API_KEY) {
+  //
+  // This flow MUTATES the target stack: it uploads demo evidence and resolves the
+  // validation task that evidence raises. It therefore refuses to run when the
+  // stack already holds open tasks it did not create — resolving somebody else's
+  // review queue (with reviewer attribution, into an append-only audit chain, and
+  // unlocking official export) is not something a smoke test may do.
+  const gateChecked = await runGateFlow();
+
+  async function runGateFlow() {
+    if (!API_KEY) {
+      check("export-gate-precondition", false, "not run: MONDAY_REPORT_API_KEY is not set");
+      return false;
+    }
     try {
       const workspaces = await apiJson("/workspaces");
       const workspaceId = workspaces[0]?.id;
-      const before = await apiJson("/validation-tasks");
-      let open = before.filter((task) => task.status === "open" || task.status === "conflict");
-
-      // The gate assertions resolve every open task, so a repeat run starts clear.
-      // Seed one through the real intake path rather than skipping the coverage.
-      if (workspaceId && open.length === 0) {
-        open = await seedOpenValidationTask(workspaceId);
-        check(
-          "export-gate-seeded-real-task",
-          open.length > 0,
-          `seeded demo evidence through /uploads/direct + worker; ${open.length} open task(s)`
-        );
+      if (!workspaceId) {
+        check("export-gate-precondition", false, "not run: the API reported no workspace");
+        return false;
       }
 
-      if (workspaceId && open.length > 0) {
-        await page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
-        const gatedText = await page.locator("body").innerText();
-        check(
-          "export-gate-closed-copy",
-          gatedText.includes(gateCopy(open.length)),
-          `gate copy for ${open.length} open task(s) present`
-        );
-        const exportButton = page.locator("button", { hasText: /^Export PDF$/ }).first();
-        if (await exportButton.count()) {
-          check("export-disabled-while-gated", await exportButton.isDisabled(), "Export PDF is disabled while gated");
-        }
-
-        // Resolve through the UI so the unlock is the product's own behaviour.
-        await page.goto(`${WEB}/app/validation`, { waitUntil: "networkidle" });
-        const validate = page.locator("button", { hasText: /^Validate$/ }).first();
-        check("validation-card-present", (await validate.count()) > 0, "an open task card is rendered");
-        for (let i = 0; i < open.length; i += 1) {
-          const button = page.locator("button", { hasText: /^Validate$/ }).first();
-          if (!(await button.count())) break;
-          await button.click();
-          await page.waitForTimeout(400);
-        }
-        const clearedText = await page.locator("body").innerText();
-        check(
-          "validation-unlocks-gate",
-          /all extracted events are resolved/i.test(clearedText),
-          "queue reports every event resolved after validating"
-        );
-
-        await page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
-        const clearGate = await page.locator("body").innerText();
-        check(
-          "export-gate-clear-after-validation",
-          /export gate clear/i.test(clearGate) && !clearGate.includes("before exporting an official Monday Report"),
-          "gate reads clear and the blocking copy is gone"
-        );
-        gateChecked = true;
-      } else {
+      const preExisting = (await apiJson("/validation-tasks")).filter(isOpen);
+      if (preExisting.length > 0) {
         check(
           "export-gate-precondition",
           false,
-          `skipped: needs a workspace and >=1 open validation task (found workspace=${Boolean(workspaceId)}, open=${open.length})`
+          `not run: ${preExisting.length} validation task(s) are already open on this stack. This flow resolves ` +
+            `only tasks it raises itself, and it will not resolve pre-existing ones. Point ` +
+            `MONDAY_REPORT_API_BASE at a stack with a clear queue.`
         );
+        return false;
       }
+
+      // A report must exist or Exports renders no format cards, which would make the
+      // disabled-button assertion silently vanish.
+      const reports = await ensureReport(workspaceId);
+      check("export-gate-report-present", reports.length > 0, `${reports.length} report(s) available to export`);
+
+      const open = await seedOpenValidationTask(workspaceId);
+      check(
+        "export-gate-seeded-real-task",
+        open.length > 0,
+        `seeded demo evidence through /uploads/direct + worker; ${open.length} open task(s)`
+      );
+      if (open.length === 0) return false;
+      const seededIds = new Set(open.map((task) => task.id));
+
+      await page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
+      const gatedText = await page.locator("body").innerText();
+      check(
+        "export-gate-closed-copy",
+        gatedText.includes(gateCopy(open.length)),
+        `gate copy for ${open.length} open task(s) present verbatim`
+      );
+
+      const exportButton = page.locator("button", { hasText: /^Export PDF$/ }).first();
+      const buttonPresent = (await exportButton.count()) > 0;
+      check(
+        "export-disabled-while-gated",
+        buttonPresent && (await exportButton.isDisabled()),
+        buttonPresent
+          ? "Export PDF is rendered and disabled while gated"
+          : "FAILED: no Export PDF button was rendered, so the gated state could not be asserted"
+      );
+
+      // Resolve through the UI so the unlock is the product's own behaviour, and
+      // resolve ONLY the tasks this run seeded.
+      await page.goto(`${WEB}/app/validation`, { waitUntil: "networkidle" });
+      const validate = page.locator("button", { hasText: /^Validate$/ }).first();
+      check("validation-card-present", (await validate.count()) > 0, "an open task card is rendered");
+
+      for (let i = 0; i < seededIds.size; i += 1) {
+        const button = page.locator("button", { hasText: /^Validate$/ }).first();
+        await button.waitFor({ state: "visible", timeout: 15000 }).catch(() => {});
+        if ((await button.count()) === 0) break;
+        await button.click();
+        // Wait on the SERVER, not the DOM. The button's own label flips to
+        // "Recording…" while the PATCH is in flight, so any DOM predicate counting
+        // "Validate" buttons is satisfied before the decision has actually landed.
+        const want = seededIds.size - i - 1;
+        await waitForOpenTaskCount(want);
+      }
+
+      const remaining = (await apiJson("/validation-tasks")).filter(isOpen);
+      check(
+        "validation-resolved-only-seeded",
+        remaining.length === 0,
+        `${seededIds.size} seeded task(s) resolved; ${remaining.length} open task(s) remain`
+      );
+
+      // Re-enter the view so the assertion reads a settled render, not whatever
+      // frame the click left behind.
+      await page.goto(`${WEB}/app/validation`, { waitUntil: "networkidle" });
+      const clearedText = await page.locator("body").innerText();
+      check(
+        "validation-unlocks-gate",
+        /all extracted events are resolved/i.test(clearedText),
+        "the queue itself reports every event resolved after the UI decisions"
+      );
+
+      await page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
+      const clearGate = await page.locator("body").innerText();
+      check(
+        "export-gate-clear-after-validation",
+        /export gate clear/i.test(clearGate) && !clearGate.includes("before exporting an official Monday Report"),
+        "gate reads clear and the blocking copy is gone"
+      );
+      const enabledButton = page.locator("button", { hasText: /^Export PDF$/ }).first();
+      check(
+        "export-enabled-after-unlock",
+        (await enabledButton.count()) > 0 && !(await enabledButton.isDisabled()),
+        "Export PDF became enabled once the gate cleared"
+      );
+      return true;
     } catch (error) {
-      check("export-gate-precondition", false, `skipped: ${error.message}`);
+      check("export-gate-precondition", false, `not run: ${error.message}`);
+      return false;
     }
-  } else {
-    check("export-gate-precondition", false, "skipped: MONDAY_REPORT_API_KEY is not set");
   }
 
   // ── responsive: no page-level horizontal scroll at any viewport ───────────
@@ -408,7 +536,13 @@ async function main() {
     mobile.sidebarPosition === "static" && mobile.navOverflowX === "auto",
     `sidebar ${mobile.sidebarPosition}, nav overflow-x ${mobile.navOverflowX}, columns ${mobile.columns}`
   );
-  check("mobile-nav-hit-targets", mobile.minHeight >= 44, `smallest of ${mobile.count} nav targets is ${mobile.minHeight}px`);
+  // The count is asserted too: Math.min() of an empty selector is Infinity, so a
+  // missing nav used to satisfy ">= 44".
+  check(
+    "mobile-nav-hit-targets",
+    mobile.count >= 11 && Number.isFinite(mobile.minHeight) && mobile.minHeight >= 44,
+    `${mobile.count} nav targets found (expected >= 11); smallest is ${mobile.minHeight}px`
+  );
   check(
     "mobile-nav-chrome-hidden",
     mobile.labelHidden && mobile.tenantHidden,
@@ -451,16 +585,28 @@ async function main() {
     return focusable.length;
   });
   check("keyboard-focusable-controls", reached > 10, `${reached} focusable controls in the shell`);
+
+  // Focus must be driven by a REAL Tab press: :focus-visible does not match a
+  // programmatic .focus(), so the previous version measured no ring at all and
+  // asserted only that .focus() worked — an assertion that cannot fail.
+  await page.keyboard.press("Tab");
   const ringed = await page.evaluate(() => {
-    const first = document.querySelector("[data-navbtn]");
-    first.focus();
-    const style = getComputedStyle(first);
-    return { active: document.activeElement === first, outlineWidth: style.outlineWidth, outlineStyle: style.outlineStyle };
+    const el = document.activeElement;
+    if (!el || el === document.body) return { none: true };
+    const style = getComputedStyle(el);
+    return {
+      tag: el.tagName,
+      matchesFocusVisible: el.matches(":focus-visible"),
+      outlineStyle: style.outlineStyle,
+      outlineWidth: parseFloat(style.outlineWidth) || 0
+    };
   });
   check(
     "focus-visible-ring",
-    ringed.active,
-    `programmatic focus lands on the first nav item (outline ${ringed.outlineStyle} ${ringed.outlineWidth})`
+    !ringed.none && ringed.matchesFocusVisible && ringed.outlineStyle !== "none" && ringed.outlineWidth > 0,
+    ringed.none
+      ? "Tab moved focus nowhere"
+      : `${ringed.tag} matches :focus-visible with a ${ringed.outlineStyle} ${ringed.outlineWidth}px outline`
   );
 
   // ── console and request hygiene ────────────────────────────────────────────
@@ -477,13 +623,72 @@ async function main() {
 
   await browser.close();
 
+  // Every check id emitted by a fully-exercised run. Declared so a caller can pin
+  // the suite's coverage: a check that silently disappears (deleted, or skipped by a
+  // conditional branch) is reported here rather than shrinking the totals unnoticed.
+  const EXPECTED_CHECK_IDS = [
+    "landing-hero",
+    "landing-demo-disclosure",
+    "landing-no-certification-claim",
+    "landing-preview-labelled-illustration",
+    "landing-sections",
+    "landing-stat-band",
+    "landing-cta-navigates",
+    ...STAGE1_ROUTES.map((route) => `route-renders:${route.label}`),
+    "deep-route-status",
+    "deep-route-refresh",
+    "deep-route-refresh:studio-param",
+    "deep-route-kicker-carries-report-id",
+    "deep-route-with-query-string",
+    "chat-redirects-to-ask",
+    "unknown-route-in-shell",
+    ...STAGE2_ROUTES.map((route) => `stage2-declared-pending:${route}`),
+    "export-gate-report-present",
+    "export-gate-seeded-real-task",
+    "export-gate-closed-copy",
+    "export-disabled-while-gated",
+    "validation-card-present",
+    "validation-resolved-only-seeded",
+    "validation-unlocks-gate",
+    "export-gate-clear-after-validation",
+    "export-enabled-after-unlock",
+    ...VIEWPORTS.flatMap((viewport) =>
+      ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"].map(
+        (route) => `no-horizontal-scroll:${viewport.name}${route}`
+      )
+    ),
+    "mobile-nav-single-column",
+    "mobile-nav-hit-targets",
+    "mobile-nav-chrome-hidden",
+    "rtl-flips-shell",
+    "rtl-no-horizontal-scroll",
+    "keyboard-focusable-controls",
+    "focus-visible-ring",
+    "no-console-errors",
+    "no-failed-app-requests"
+  ];
+
+  const emitted = new Set(results.map((entry) => entry.id));
+  const missing = EXPECTED_CHECK_IDS.filter((id) => !emitted.has(id));
+  const unexpected = [...emitted].filter((id) => !EXPECTED_CHECK_IDS.includes(id));
+  check(
+    "coverage-complete",
+    missing.length === 0,
+    missing.length === 0
+      ? `all ${EXPECTED_CHECK_IDS.length} declared checks ran`
+      : `${missing.length} declared check(s) did not run: ${missing.slice(0, 8).join(", ")}`
+  );
+
   const summary = {
     guard: "ui_redesign_e2e",
     claim_scope: "redesign-frontend-routes-and-states-only",
     web_base: WEB,
     api_base: API,
     export_gate_exercised: gateChecked,
+    mutates_target_stack: gateChecked,
     screenshots: SHOT_DIR || null,
+    expected_check_count: EXPECTED_CHECK_IDS.length + 1,
+    unexpected_check_ids: unexpected,
     checked: results.length,
     passed: results.filter((entry) => entry.status === "pass").length,
     failed,
