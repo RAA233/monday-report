@@ -333,6 +333,14 @@ export function ErrorState({
    * <body>, and a retry that failed re-created the button as a new node the keyboard
    * user had to Tab the whole rail to reach again. The owner now keeps this region
    * mounted across the attempt and passes `retrying`, so the same element stays put.
+   *
+   * Staying mounted is necessary but NOT sufficient, and an earlier revision stopped
+   * there: it also set the native `disabled` attribute, and a disabled control is not
+   * focusable, so the UA blurred the very button the operator had just pressed and
+   * `document.activeElement` became <body> anyway - the same defect, one step later.
+   * The in-flight state is therefore `aria-disabled` plus an inert handler; the
+   * element keeps its focus, and `[aria-disabled="true"]` in redesign.css carries the
+   * inert appearance.
    */
   retrying?: boolean;
 }) {
@@ -353,8 +361,10 @@ export function ErrorState({
           type="button"
           className="btn btn-secondary"
           style={{ justifySelf: "start" }}
-          onClick={onRetry}
-          disabled={retrying}
+          onClick={() => {
+            if (retrying) return;
+            onRetry();
+          }}
           aria-disabled={retrying || undefined}
         >
           {retrying ? "Retrying…" : "Retry"}

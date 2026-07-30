@@ -95,6 +95,8 @@ export function Validation() {
     [visibleTasks]
   );
   const queueRetry = useRetryPresence(validationTasks.state);
+  // The failure-evidence retry inside each card has the same self-deleting shape.
+  const failuresRetry = useRetryPresence(failures.state);
 
   async function decide(task: ApiValidationTask, status: "validated" | "rejected") {
     if (decisionsBlocked || busyId) return;
@@ -312,16 +314,20 @@ export function Validation() {
                       This task targets failure <code>{task.target_id}</code>, but the failure list{" "}
                       {failures.state === "loading" ? "is still loading" : "could not be read"}, so its
                       evidence is unavailable — this is not a statement that no record exists.
-                      {failures.state === "error" ? (
+                      {failuresRetry.show ? (
                         <>
                           {" "}
                           <button
                             type="button"
                             className="btn btn-ghost"
                             style={{ minHeight: 0, padding: "0 4px", fontSize: 12 }}
-                            onClick={reloadFailures}
+                            onClick={() => {
+                              if (failuresRetry.retrying) return;
+                              reloadFailures();
+                            }}
+                            aria-disabled={failuresRetry.retrying || undefined}
                           >
-                            Retry
+                            {failuresRetry.retrying ? "Retrying…" : "Retry"}
                           </button>
                         </>
                       ) : null}

@@ -228,8 +228,10 @@ export function Topbar() {
             type="button"
             className="btn btn-ghost"
             style={{ minHeight: 0, padding: "0 4px", fontSize: 12 }}
-            onClick={retry}
-            disabled={retrying}
+            onClick={() => {
+              if (retrying) return;
+              retry();
+            }}
             aria-disabled={retrying || undefined}
           >
             {retrying ? "Retrying…" : "Retry"}

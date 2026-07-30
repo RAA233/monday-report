@@ -71,11 +71,14 @@ interface Issued extends ApiReportExport {
 function GateBanner({
   gate,
   onRetry,
-  apiStatus
+  apiStatus,
+  retrying
 }: {
   gate: GateState;
   onRetry: () => void;
   apiStatus: ApiStatus;
+  /** A re-read started from this banner is in flight; keep the button mounted. */
+  retrying: boolean;
 }) {
   // An unread gate is NOT a breach: it is styled neutrally, never like a closed gate.
   const frame = (accent: boolean) => ({
@@ -146,16 +149,26 @@ function GateBanner({
       </div>
     );
   }
-  if (gate.state === "error") {
+  if (gate.state === "error" || retrying) {
     return (
       <div role="status" style={frame(false)}>
         <strong style={heading(false)}>Export gate unknown</strong>
         <span style={{ fontSize: 13 }}>
-          The gate could not be read, so it cannot be shown. This is not a statement that the queue is
-          empty — the backend still enforces it on every export.
+          {retrying
+            ? "The gate is being read again. Until it answers this is not a statement that the queue is empty — the backend still enforces it on every export."
+            : "The gate could not be read, so it cannot be shown. This is not a statement that the queue is empty — the backend still enforces it on every export."}
         </span>
-        <button type="button" className="btn btn-ghost" style={{ minHeight: 0, padding: "0 4px" }} onClick={onRetry}>
-          Retry
+        <button
+          type="button"
+          className="btn btn-ghost"
+          style={{ minHeight: 0, padding: "0 4px" }}
+          onClick={() => {
+            if (retrying) return;
+            onRetry();
+          }}
+          aria-disabled={retrying || undefined}
+        >
+          {retrying ? "Retrying…" : "Retry"}
         </button>
       </div>
     );
@@ -249,17 +262,23 @@ export function Exports() {
   // ?report=<id>), THAT report is the target — silently exporting whichever is
   // newest would issue a different report than the one the operator was drafting.
   // The id is only honoured if it is actually in this workspace's list.
-  // A11Y-EXPORTS-FOCUS-LOSS: hold the last successfully read list, so a background
-  // refetch after an export does not unmount the panel - and the button the operator
-  // just pressed - dropping focus to <body>. Same shape as the validation queue.
-  const lastReadReports = useRef<ApiMondayReport[] | null>(null);
-  if (reports.state === "ready") lastReadReports.current = reports.data;
+  // Hold the last successfully read list, so a background refetch after an export does
+  // not unmount the panel - and the button the operator just pressed - dropping focus
+  // to <body>.
+  //
+  // KEYED BY WORKSPACE, unlike the validation queue: `/validation-tasks` is tenant-wide,
+  // but this list is `getMondayReports(workspaceId)`. Retaining it unkeyed meant that for
+  // the whole of a workspace switch the PREVIOUS workspace's newest report rendered as
+  // this workspace's export target - and `runExport` captures `target.id`, so an
+  // official, audited export could be issued for a report the operator had just left.
+  const lastReadReports = useRef<{ workspaceId: string | null; data: ApiMondayReport[] } | null>(null);
+  if (reports.state === "ready") lastReadReports.current = { workspaceId, data: reports.data };
+  const retained =
+    lastReadReports.current && lastReadReports.current.workspaceId === workspaceId
+      ? lastReadReports.current.data
+      : null;
   const visibleReports =
-    reports.state === "ready"
-      ? reports.data
-      : reports.state === "loading"
-        ? lastReadReports.current
-        : null;
+    reports.state === "ready" ? reports.data : reports.state === "loading" ? retained : null;
   const requestedReportId = searchParams.get("report");
   const requested =
     visibleReports && requestedReportId
@@ -267,6 +286,15 @@ export function Exports() {
       : null;
   const target = visibleReports ? (requested ?? newestReport(visibleReports)) : null;
   const reportsRetry = useRetryPresence(reports.state);
+  const gateRetry = useRetryPresence(gate.state);
+  // The byte size and SHA-256 in `statuses` describe ONE report. They were cleared only
+  // on a WORKSPACE change, so switching target inside a workspace left report A's digest
+  // rendering under report B's heading.
+  const targetId = target?.id ?? null;
+  useEffect(() => {
+    setStatuses({});
+    setBusy(null);
+  }, [targetId]);
   // `loadReports()` returns [] WITHOUT calling the API when no workspace is resolved,
   // so a `ready` empty list is not evidence that the named report is absent. Without
   // this guard the page asserted "not in this workspace's report list" directly above
@@ -392,7 +420,7 @@ export function Exports() {
         lede="Official exports are validation-gated, checksummed, audit-logged, and fetched only through expiring signed URLs."
       />
 
-      <GateBanner gate={gate} onRetry={reloadGate} apiStatus={apiStatus} />
+      <GateBanner gate={gate} onRetry={reloadGate} apiStatus={apiStatus} retrying={gateRetry.retrying} />
 
       {!readOnly && !canIssueExport ? (
         <p

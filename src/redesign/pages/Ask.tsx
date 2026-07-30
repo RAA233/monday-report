@@ -267,7 +267,14 @@ export function Ask() {
 
 
   // The chat route is gated on generate_reports by the backend.
-  const askDisabled = busy || apiStatus !== "connected" || !can("generate_reports");
+  // Two different reasons this composer goes inert, and they need different mechanisms.
+  // `askUnavailable` is STANDING - nothing is focused at the moment it becomes true, so
+  // the native `disabled` attribute is correct and gives the right semantics. `busy` is
+  // IN-FLIGHT and arrives while the caret is in the field: `disabled` would blur it to
+  // <body> on every question, so that state is carried by readOnly/aria-disabled and an
+  // inert submit handler instead.
+  const askUnavailable = apiStatus !== "connected" || !can("generate_reports");
+  const askDisabled = busy || askUnavailable;
 
   // The gate label is the backend's own report; Ask never re-derives it.
   const gateText = gateLabel(gate);
@@ -321,15 +328,18 @@ export function Ask() {
             placeholder="Ask about failures, NPT, tools, drilling rate, or source evidence…"
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            disabled={askDisabled}
+            disabled={askUnavailable}
+            readOnly={busy}
+            aria-busy={busy || undefined}
           />
           <button
             type="submit"
             className="btn btn-primary"
             style={{ minHeight: 46, paddingInline: 18 }}
-            disabled={askDisabled}
+            disabled={askUnavailable}
+            aria-disabled={busy || undefined}
           >
-            Ask
+            {busy ? "Asking…" : "Ask"}
           </button>
         </form>
 

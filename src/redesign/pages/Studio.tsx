@@ -986,8 +986,10 @@ export function Studio() {
                 {draft.trajectory_source === "calculated" ? (
                   <p className="text-muted" style={{ fontSize: 11, margin: "6px 0 0" }}>
                     Calculated · minimum curvature · review required · not certified.
-                    {draft.trajectory && tvdIsRelative(draft.trajectory.coordinate_reference)
-                      ? " TVD calc is marked “rel.” because no source station carried a TVD to anchor to: those figures are offsets from the first calculated station, not absolute well coordinates."
+                    {(draft.trajectory?.stations ?? []).some((candidate) =>
+                      tvdIsRelative(candidate.coordinate_reference)
+                    )
+                      ? " Rows marked “rel.” are offsets from the first station of their own calculated segment, not absolute well coordinates: that segment began without a source TVD to anchor to."
                       : null}
                   </p>
                 ) : null}

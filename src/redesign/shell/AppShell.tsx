@@ -20,7 +20,7 @@ export function AppShell() {
   // read-only app with no banner at all.
   const refused = apiStatus === "refused";
   const misconfigured = apiStatus === "misconfigured";
-  const reachable = apiStatus === "offline" || refused || misconfigured;
+  const unreachable = apiStatus === "offline" || refused || misconfigured;
   // `retry()` sets apiStatus to "checking" as its FIRST act, which used to make this
   // banner - and the "Retry connection" button inside it that the operator had just
   // pressed - vanish, dropping focus to <body>. Once the banner has been shown, it
@@ -28,10 +28,10 @@ export function AppShell() {
   // so the same element is still under the keyboard user's cursor when the probe
   // fails. It leaves only when the API is actually reachable again.
   const shownOnce = useRef(false);
-  if (reachable) shownOnce.current = true;
+  if (unreachable) shownOnce.current = true;
   const retrying = apiStatus === "checking" && shownOnce.current;
   if (apiStatus === "connected") shownOnce.current = false;
-  const degraded = reachable || retrying;
+  const degraded = unreachable || retrying;
 
   return (
     <div
@@ -70,13 +70,17 @@ export function AppShell() {
                 fontSize: 12.5
               }}
             >
-              {refused
-                ? "API refused this session"
-                : misconfigured
-                  ? "API not configured for client data"
-                  : "API unreachable"}
+              {retrying
+                ? "Reconnecting to the API"
+                : refused
+                  ? "API refused this session"
+                  : misconfigured
+                    ? "API not configured for client data"
+                    : "API unreachable"}
             </strong>
-            {refused
+            {retrying
+              ? "The last probe did not reach the workspace API and it is being re-checked, so nothing can be read or recorded until it answers. Empty lists below mean \"not read\", not \"none exist\"."
+              : refused
               ? "The workspace API answered and refused this session's credential, so no workspace data can be read and nothing can be recorded. The service is running — the API key or the role has to change. Empty lists below mean \"not read\", not \"none exist\"."
               : misconfigured
                 ? "The workspace API answered, but it is not configured to serve client data yet — it reports a missing client API key or audit key. Nothing can be read or recorded until that is configured on the backend. Empty lists below mean \"not read\", not \"none exist\"."
@@ -93,8 +97,10 @@ export function AppShell() {
                 type="button"
                 className="btn btn-ghost"
                 style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}
-                onClick={retry}
-                disabled={retrying}
+                onClick={() => {
+                  if (retrying) return;
+                  retry();
+                }}
                 aria-disabled={retrying || undefined}
               >
                 {retrying ? "Reconnecting…" : "Retry connection"}

@@ -289,3 +289,18 @@ html {
   white-space: nowrap;
   border: 0;
 }
+
+/*
+ * Inert-but-focusable.
+ *
+ * A control that goes inert WHILE THE OPERATOR IS STANDING ON IT must not take the
+ * native `disabled` attribute: a disabled control is not focusable, so the UA blurs it
+ * and focus falls to <body> - which is the very defect the retry affordances were
+ * changed to avoid. Those controls carry `aria-disabled` instead, and this rule gives
+ * them the inert appearance the attribute would have. `disabled` remains correct for
+ * STANDING conditions, where nothing is focused when it is applied.
+ */
+[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

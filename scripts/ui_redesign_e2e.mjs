@@ -1191,6 +1191,49 @@ async function main() {
     );
   }
 
+  // ── pressing a retry must not throw the keyboard user back to <body> ─────
+  //
+  // Keeping the affordance MOUNTED across the attempt is necessary but not sufficient,
+  // and an earlier revision stopped there: it also set the native `disabled`, and a
+  // disabled control is not focusable, so the UA blurred the very button that had just
+  // been pressed. That revision passed every check in this suite. This one measures the
+  // thing that actually matters - where focus IS after the press.
+  {
+    const failApi = (route) => route.abort();
+    simulatingApiOutage = true;
+    await page.route(`${new URL(API).origin}/**`, failApi);
+    await page.goto(`${WEB}/app`, { waitUntil: "networkidle" });
+    const retry = page.locator("button", { hasText: /^Retry connection$/ }).first();
+    const reached = (await retry.count()) > 0;
+    let focusedTheButton = false;
+    if (reached) {
+      // Real Tab, not .focus(): the claim is about what the UA does to a FOCUSED element.
+      for (let i = 0; i < 40 && !focusedTheButton; i += 1) {
+        await page.keyboard.press("Tab");
+        focusedTheButton = await page.evaluate(() =>
+          /^Retry connection$/.test(document.activeElement?.textContent?.trim() ?? "")
+        );
+      }
+    }
+    if (focusedTheButton) await page.keyboard.press("Enter");
+    await page.waitForTimeout(200);
+    const after = focusedTheButton
+      ? await page.evaluate(() => ({
+          isBody: document.activeElement === document.body,
+          onARetry: /Retry connection|Reconnecting/.test(document.activeElement?.textContent?.trim() ?? ""),
+          text: document.activeElement?.textContent?.trim()?.slice(0, 40) ?? null
+        }))
+      : null;
+    await page.unroute(`${new URL(API).origin}/**`, failApi);
+    simulatingApiOutage = false;
+    check(
+      "retry-press-keeps-focus",
+      reached && focusedTheButton && Boolean(after) && !after.isBody && after.onARetry,
+      `reached the degraded shell: ${reached}; Tab landed on "Retry connection": ${focusedTheButton}; ` +
+        `after pressing it document.activeElement is ${after ? (after.isBody ? "<body>" : JSON.stringify(after.text)) : "n/a"}`
+    );
+  }
+
   // ── profile disclosure: contained, RTL-correct, keyboard-operable ──────────
   for (const direction of ["ltr", "rtl"]) {
     for (const width of [390, 768, 1440]) {
@@ -1552,6 +1595,7 @@ async function main() {
     "studio-discloses-explicit-drafting",
     "studio-cleared-field-stays-empty",
     "studio-local-edit-survives-reconnect",
+    "retry-press-keeps-focus",
     ...["ltr", "rtl"].flatMap((dir) =>
       [390, 768, 1440].map((width) => `profile-panel-contained:${dir}:${width}`)
     ),
