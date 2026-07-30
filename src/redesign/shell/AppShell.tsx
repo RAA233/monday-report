@@ -7,9 +7,10 @@ import { useWorkspace } from "../lib/workspace";
  * The authenticated application frame: rail + topbar + the offline banner + a
  * single <main> landmark that every route renders into.
  *
- * The banner is the honest-degradation contract carried over from v1: when the
- * workspace API is unreachable the app says so in words and marks itself
- * read-only, rather than showing empty lists that look like real "no data".
+ * The banner is the honest-degradation contract: when the workspace API is
+ * unreachable the app says so in words and marks itself read-only. It does NOT
+ * claim a local fallback dataset — this entry has none, and every view states that
+ * an empty list means "not read" rather than "none exist".
  */
 export function AppShell() {
   const { apiStatus, retry, toast, dismissToast, pauseToast, resumeToast } = useWorkspace();
@@ -52,10 +53,10 @@ export function AppShell() {
                 fontSize: 12.5
               }}
             >
-              Local fallback
+              API unreachable
             </strong>
-            The workspace API is unreachable. Views show local, read-only context; uploads, drafts, and
-            exports need the backend.
+            The workspace API is unreachable, so no workspace data can be read and nothing can be
+            recorded. Empty lists below mean "not read", not "none exist".
             <button
               type="button"
               className="btn btn-ghost"
@@ -100,6 +101,9 @@ export function AppShell() {
           insetInlineEnd: 18,
           zIndex: 60,
           maxWidth: "min(420px, calc(100vw - 36px))",
+          // The empty container still has a box; without this it would sit over the
+          // page corner and swallow clicks on whatever is underneath.
+          pointerEvents: toast ? "auto" : "none",
           ...(toast
             ? {
                 background: "var(--color-bg)",

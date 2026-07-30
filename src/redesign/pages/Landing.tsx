@@ -28,7 +28,7 @@ const STATS = [
   { value: "5", label: "Report variants — DDR, BHA, mud, survey, directional" },
   { value: "6", label: "Pipeline stages, scan to index, each one audited" },
   { value: "5", label: "Export formats, checksummed and validation-gated" },
-  { value: "1:1", label: "Drafted claims to source citations — nothing uncited" }
+  { value: "1:1", label: "Drafted claims to source citations — reference values labelled, never passed off as evidence" }
 ];
 
 const CAPABILITIES = [
@@ -122,7 +122,7 @@ const TRUST = [
   {
     title: "Local-first AI",
     body:
-      "Classification, extraction, and drafting route to a local model first (Ollama or LM Studio); hosted fallback stays policy-controlled per tenant. No training by default."
+      "The analysis path runs locally and offline first: a local model (Ollama or LM Studio) is used when configured, and the deterministic path runs without one. Hosted fallback stays policy-controlled per tenant, off by default. No training by default."
   },
   {
     title: "Controlled evidence and exports",
@@ -189,6 +189,8 @@ export function Landing() {
         >
           <div>
             <h1
+              tabIndex={-1}
+              data-page-heading=""
               style={{
                 fontFamily: "var(--font-heading)",
                 fontWeight: "var(--font-heading-weight)" as never,
@@ -229,6 +231,7 @@ export function Landing() {
             <i className="corner bl" />
             <i className="corner br" />
             <div
+              role="group"
               aria-label="Product preview: an illustrated morning drilling report"
               style={{ display: "grid", gap: "var(--space-3)" }}
             >

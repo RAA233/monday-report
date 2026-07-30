@@ -112,8 +112,9 @@ export function PageHeader({
       <div>
         {kicker ? <span className="mr-kicker">{kicker}</span> : null}
         {/* tabIndex -1 so the route-change hook can move focus here without
-            making the heading a tab stop. */}
-        <h1 className="mr-title" tabIndex={-1}>
+            making the heading a tab stop. data-page-heading is what the hook
+            targets, so surfaces outside the shell can opt in the same way. */}
+        <h1 className="mr-title" tabIndex={-1} data-page-heading="">
           {title}
         </h1>
         {lede ? (

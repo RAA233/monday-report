@@ -14,7 +14,7 @@ import { useWorkspace } from "../lib/workspace";
  * credential in here and having it take effect. A token field would therefore be
  * theatre.
  *
- * So this surface does the real equivalent: it calls `GET /session` and reports
+ * So this surface does the real equivalent: it calls `GET /auth/session` and reports
  * the identity the server derived from the configured credential — tenant,
  * display name, roles, authentication source, and actor source. That is a genuine
  * authorization check whose failure mode is genuine too, and it states plainly how
@@ -96,7 +96,11 @@ export function SignIn() {
           <i className="corner bl" />
           <i className="corner br" />
 
-          <h1 style={{ fontSize: 26, letterSpacing: "0.02em", textTransform: "uppercase", margin: 0 }}>
+          <h1
+            tabIndex={-1}
+            data-page-heading=""
+            style={{ fontSize: 26, letterSpacing: "0.02em", textTransform: "uppercase", margin: 0 }}
+          >
             Sign in to the workspace
           </h1>
           <p className="text-muted" style={{ fontSize: 13, lineHeight: 1.55, margin: "8px 0 0" }}>
