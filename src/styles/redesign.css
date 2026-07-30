@@ -51,6 +51,16 @@ html {
   background: var(--color-neutral-200);
 }
 
+/* Decorative busy indicator. The pulse belongs on this, never on text: mrPulse
+   drops opacity to 0.45, which would put real copy near 2:1 for half its cycle. */
+.mr-pulse-dot {
+  display: inline-block;
+  inline-size: 8px;
+  block-size: 8px;
+  flex: none;
+  background: var(--color-accent-700);
+}
+
 /* ── shell ─────────────────────────────────────────────────────────────────
    236px rail on desktop; at ≤900px the sidebar becomes a horizontal scrolling
    bar with 44px hit targets and the tenant card hides (identity stays in the

@@ -71,8 +71,14 @@ export function Sidebar() {
               const current = isCurrent(item, pathname);
               const Icon = item.icon;
               const badge =
-                item.showsValidationCount && openQueueTasks > 0
-                  ? String(openQueueTasks)
+                // "?" when the queue was not read: an absent badge would read as
+                // "nothing to review", which an unread queue does not establish.
+                item.showsValidationCount
+                  ? openQueueTasks === null
+                    ? "?"
+                    : openQueueTasks > 0
+                      ? String(openQueueTasks)
+                      : null
                   : null;
               return (
                 <Link
@@ -82,7 +88,13 @@ export function Sidebar() {
                   aria-current={current ? "page" : undefined}
                   // The count is a bare visual number, so it is folded into the
                   // accessible name rather than left to be read as loose text.
-                  aria-label={badge ? `${item.label}, ${badge} open` : undefined}
+                  aria-label={
+                    badge === "?"
+                      ? `${item.label}, queue not read`
+                      : badge
+                        ? `${item.label}, ${badge} open`
+                        : undefined
+                  }
                   className="mr-hover-text"
                   style={{
                     display: "flex",

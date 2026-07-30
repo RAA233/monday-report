@@ -28,7 +28,7 @@ const STATS = [
   { value: "5", label: "Report variants — DDR, BHA, mud, survey, directional" },
   { value: "6", label: "Pipeline stages, scan to index, each one audited" },
   { value: "5", label: "Export formats, checksummed and validation-gated" },
-  { value: "1:1", label: "Drafted claims to source citations — reference values labelled, never passed off as evidence" }
+  { value: "1:1", label: "Extracted records to source citations — drafted narrative is labelled, never passed off as evidence" }
 ];
 
 const CAPABILITIES = [
@@ -122,7 +122,7 @@ const TRUST = [
   {
     title: "Local-first AI",
     body:
-      "The analysis path runs locally and offline first: a local model (Ollama or LM Studio) is used when configured, and the deterministic path runs without one. Hosted fallback stays policy-controlled per tenant, off by default. No training by default."
+      "Classification, extraction and drafting are deterministic and run fully offline — no request leaves the tenant. A local model runtime (Ollama or LM Studio) is detected and its status reported, but it does not yet perform the analysis. Hosted fallback stays policy-controlled per tenant and off by default. No training by default."
   },
   {
     title: "Controlled evidence and exports",

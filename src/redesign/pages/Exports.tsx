@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   createReportExportSignedUrl,
   exportMondayReport,
@@ -20,6 +20,7 @@ import {
 } from "../components/primitives";
 import {
   exportGateMessage,
+  gateIsClosed,
   newestReport,
   useLoadable,
   useWorkspace,
@@ -61,6 +62,7 @@ interface Issued extends ApiReportExport {
  * empty queue.
  */
 function GateBanner({ gate, onRetry }: { gate: GateState; onRetry: () => void }) {
+  // An unread gate is NOT a breach: it is styled neutrally, never like a closed gate.
   const frame = (accent: boolean) => ({
     display: "flex" as const,
     gap: 12,
@@ -176,6 +178,7 @@ function isGateRefusal(error: unknown): boolean {
 export function Exports() {
   const { activeWorkspace, gate, reloadGate, reloadValidationTasks, readOnly, can, showToast, apiStatus } =
     useWorkspace();
+  const [searchParams] = useSearchParams();
   const workspaceId = activeWorkspace?.id ?? null;
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
@@ -201,9 +204,17 @@ export function Exports() {
 
   const { value: reports, reload } = useLoadable(loadReports, [workspaceId]);
 
-  // Export the newest report in the workspace — the one the Studio drafts against.
-  // Ordered explicitly; array position is not a documented ordering.
-  const target = reports.state === "ready" ? newestReport(reports.data) : null;
+  // The report to export. When a caller names one (the Studio links here with
+  // ?report=<id>), THAT report is the target — silently exporting whichever is
+  // newest would issue a different report than the one the operator was drafting.
+  // The id is only honoured if it is actually in this workspace's list.
+  const requestedReportId = searchParams.get("report");
+  const requested =
+    reports.state === "ready" && requestedReportId
+      ? (reports.data.find((report) => report.id === requestedReportId) ?? null)
+      : null;
+  const target = reports.state === "ready" ? (requested ?? newestReport(reports.data)) : null;
+  const requestedButMissing = Boolean(requestedReportId) && reports.state === "ready" && !requested;
 
   // The two routes require DIFFERENT permissions; the backend checks them
   // separately, so the UI must not collapse them into one capability.
@@ -217,8 +228,11 @@ export function Exports() {
   // backend still enforces the gate and answers 409, which is surfaced verbatim —
   // because a session that may export but may not read the queue must not be
   // stranded, and the banner says plainly that the gate is not being shown.
-  const gateReadable = gate.state === "ready";
-  const gateBlocksExport = gate.state === "ready" && !gate.clear;
+  const gateBlocksExport = gateIsClosed(gate);
+  // Read inside async handlers: the captured render-time `gate` is stale by the
+  // time an awaited request rejects.
+  const gateRef = useRef(gate);
+  gateRef.current = gate;
   const exportsBlocked = readOnly || !canIssueExport || gateBlocksExport;
 
   async function runExport(format: ApiReportExport["format"]) {
@@ -256,9 +270,13 @@ export function Exports() {
         // "Resolve 0 validation task(s)…").
         reloadGate();
         reloadValidationTasks();
+        // The refusal itself mutates the report (status -> "review" plus a
+        // validation block), so the panel's status line is stale until re-read.
+        reload();
+        const live = gateRef.current;
         text =
-          gate.state === "ready" && gate.openTasks > 0
-            ? exportGateMessage(gate.openTasks)
+          live.state === "ready" && live.openTasks > 0
+            ? exportGateMessage(live.openTasks)
             : "Export refused: the backend reports unresolved validation tasks for this report. Re-reading the gate — open Validation to resolve them.";
       } else {
         text =
@@ -268,7 +286,9 @@ export function Exports() {
       }
       setStatuses((current) => ({ ...current, [format]: { tone: "bad", text } }));
     } finally {
-      if (forWorkspace === workspaceIdRef.current) setBusy(null);
+      // Clear unconditionally: the reset effect also clears `busy`, and guarding on
+      // workspace identity could leave a format pinned as "Exporting…" forever.
+      setBusy((current) => (current === format ? null : current));
     }
   }
 
@@ -276,9 +296,13 @@ export function Exports() {
     // Guard the in-flight request: a second click would mint a second token and
     // append a second audit event for one user intent.
     if (readOnly || !canFetchEvidence || minting) return;
+    const forWorkspace = workspaceIdRef.current;
     setMinting(item.id);
     try {
       const signed = await createReportExportSignedUrl(item.id);
+      // A workspace switch clears `issued`; without this the late response would
+      // re-add the row under the new workspace.
+      if (forWorkspace !== workspaceIdRef.current) return;
       setIssued((current) =>
         current.map((row) =>
           row.id === item.id ? { ...row, signedUrl: signed.url, expiresAt: signed.expires_at } : row
@@ -292,7 +316,7 @@ export function Exports() {
       const message = caught instanceof Error ? caught.message : "The request did not complete.";
       showToast("No URL issued", `A signed reference was not issued. ${message}`);
     } finally {
-      setMinting(null);
+      setMinting((current) => (current === item.id ? null : current));
     }
   }
 
@@ -323,6 +347,16 @@ export function Exports() {
         >
           This session can create exports but lacks <strong>export_evidence</strong>, so signed
           references cannot be issued from here.
+        </p>
+      ) : null}
+
+      {requestedButMissing ? (
+        <p
+          role="status"
+          style={{ fontSize: 13, border: "1px solid var(--color-text)", padding: "10px 14px", margin: 0 }}
+        >
+          The report named in the link is not in this workspace's report list, so it is not the target
+          below. Check the workspace selector before exporting.
         </p>
       ) : null}
 
@@ -358,6 +392,9 @@ export function Exports() {
             New export — <span title={target.id}>{shortId(target.id)}</span>
           </h2>
           <p className="text-muted" style={{ fontSize: 12.5, margin: "6px 0 0" }}>
+            {requested
+              ? "This is the report you arrived from."
+              : "No report was named, so this is the newest report in the workspace."}{" "}
             Five official formats. Each export records byte size and SHA-256, and appends to the audit
             chain. Report status: {target.status}.
           </p>

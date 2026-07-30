@@ -365,8 +365,14 @@ export function Ask() {
 
         {/* Outside the log container: its own status, not a logged entry. */}
         {busy ? (
-          <p data-skeleton="" className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
-            Reasoning over workspace evidence…
+          // No data-skeleton here: the pulse animates opacity down to 0.45, which
+          // drops this real sentence to about 2:1 for half of every cycle. The
+          // decorative bar pulses; the text stays legible.
+          <p style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+            <span data-skeleton="" aria-hidden="true" className="mr-pulse-dot" />
+            <span className="text-muted" style={{ fontSize: 12.5 }}>
+              Reasoning over workspace evidence…
+            </span>
           </p>
         ) : null}
       </div>

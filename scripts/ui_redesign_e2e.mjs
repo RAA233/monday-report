@@ -585,6 +585,44 @@ async function main() {
     }
   }
 
+  // ── the Studio must not draft on mount (that call writes an audit event) ──
+  {
+    const before = await apiJson("/audit-logs?limit=200").catch(() => []);
+    const draftEventsBefore = Array.isArray(before)
+      ? before.filter((entry) => entry.action === "report_draft.generate").length
+      : -1;
+    await page.goto(`${WEB}/app/studio`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(1200);
+    const after = await apiJson("/audit-logs?limit=200").catch(() => []);
+    const draftEventsAfter = Array.isArray(after)
+      ? after.filter((entry) => entry.action === "report_draft.generate").length
+      : -2;
+    check(
+      "studio-does-not-draft-on-mount",
+      draftEventsBefore >= 0 && draftEventsAfter === draftEventsBefore,
+      draftEventsBefore < 0
+        ? "could not read the audit log to verify"
+        : draftEventsAfter === draftEventsBefore
+          ? `no report_draft.generate audit event was appended by navigation (${draftEventsBefore} before and after)`
+          : `navigation appended ${draftEventsAfter - draftEventsBefore} report_draft.generate audit event(s)`
+    );
+    const studioBody = await page.locator("body").innerText();
+    check(
+      "studio-discloses-explicit-drafting",
+      /runs only when you ask for it/i.test(studioBody),
+      "the Studio states that drafting is an explicit, audited action"
+    );
+  }
+
+  // ── the API chip must not claim a local fallback this entry does not have ──
+  await page.goto(`${WEB}/app`, { waitUntil: "networkidle" });
+  const chipText = await page.locator("[data-chip]").first().innerText();
+  check(
+    "api-chip-no-false-local-fallback",
+    !/local fallback/i.test(chipText),
+    `API chip reads ${JSON.stringify(chipText.trim())} — it must not claim a local fallback dataset`
+  );
+
   // ── responsive: no page-level horizontal scroll at any viewport ───────────
   for (const viewport of VIEWPORTS) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
@@ -739,6 +777,9 @@ async function main() {
     "validation-unlocks-gate",
     "export-gate-clear-after-validation",
     "export-enabled-after-unlock",
+    "studio-does-not-draft-on-mount",
+    "studio-discloses-explicit-drafting",
+    "api-chip-no-false-local-fallback",
     ...VIEWPORTS.flatMap((viewport) =>
       ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"].map(
         (route) => `no-horizontal-scroll:${viewport.name}${route}`

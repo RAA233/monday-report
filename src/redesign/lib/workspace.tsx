@@ -42,6 +42,8 @@ export type ApiStatus = "checking" | "connected" | "offline";
 export type Loadable<T> =
   | { state: "loading" }
   | { state: "ready"; data: T }
+  /** The session may not read this surface (403). A retry cannot help. */
+  | { state: "unauthorized" }
   | { state: "error"; message: string };
 
 export interface WorkspaceContextValue {
@@ -55,8 +57,12 @@ export interface WorkspaceContextValue {
    * Count of unresolved tasks in the tenant's validation QUEUE — what the
    * Validation view lists and the sidebar badge counts. This is NOT the export
    * gate: see `gate` below.
+   *
+   * `null` when the queue was not read (loading, unauthorized, or failed). Callers
+   * must render the absence, never substitute 0: "0 open" is a positive claim that
+   * the queue is empty, and an unread queue is not evidence of that.
    */
-  openQueueTasks: number;
+  openQueueTasks: number | null;
   /**
    * The export gate, computed with the BACKEND's exact predicate.
    *
@@ -263,6 +269,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // A monotonic token: only the newest queue read may publish its result, so a
   // slow earlier read cannot overwrite a newer one.
   const queueToken = useRef(0);
+  // Bumped only when a queue read reaches a TERMINAL state. The gate effect keys on
+  // this scalar instead of the Loadable object, whose identity changes on the
+  // intermediate "loading" transition too and re-ran the gate's three fetches twice.
+  const [queueVersion, setQueueVersion] = useState(0);
 
   const loadValidationTasks = useCallback(async () => {
     const token = ++queueToken.current;
@@ -271,9 +281,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       const tasks = await getValidationTasks();
       if (token !== queueToken.current) return;
       setValidationTasks({ state: "ready", data: tasks });
+      setQueueVersion((n) => n + 1);
     } catch (error) {
       if (token !== queueToken.current) return;
+      // A 403 is not a load failure: retrying cannot help, and offering Retry
+      // implies it could. GET /validation-tasks requires view_validation_queue.
+      const message = error instanceof Error ? error.message : "";
+      if (/\b403\b/.test(message)) {
+        setValidationTasks({ state: "unauthorized" });
+        setQueueVersion((n) => n + 1);
+        return;
+      }
       setValidationTasks({ state: "error", message: errorText(error) });
+      setQueueVersion((n) => n + 1);
     }
   }, []);
 
@@ -348,7 +368,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
 
   const openQueueTasks = useMemo(() => {
-    if (validationTasks.state !== "ready") return 0;
+    if (validationTasks.state !== "ready") return null;
     return validationTasks.data.filter(isOpenValidationTask).length;
   }, [validationTasks]);
 
@@ -371,10 +391,12 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     void (async () => {
       try {
         const [tasks, failures] = await Promise.all([getValidationTasks(), getFailures()]);
-        // Anomaly-targeted tasks also hold the gate. This read is workspace-scoped
-        // and read-only; if it is unavailable, anomaly-targeted tasks are COUNTED
-        // (fail closed) rather than silently dropped from the gate.
-        let anomalyIds: Set<string> | null = null;
+        // Anomaly-targeted tasks also hold the gate, and only this workspace-scoped
+        // read maps an anomaly to its workspace. Without it there is no defensible
+        // count: counting every tenant anomaly task would inflate the number printed
+        // in the committed gate copy, and dropping them would understate the gate.
+        // So the gate is reported as UNREADABLE rather than guessed.
+        let anomalyIds: Set<string>;
         try {
           const benchmarking = await getWorkspaceBenchmarking(activeWorkspaceId);
           anomalyIds = new Set(
@@ -382,8 +404,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
               (anomaly) => anomaly.id
             )
           );
-        } catch {
-          anomalyIds = null;
+        } catch (benchmarkingError) {
+          if (token !== gateToken.current) return;
+          const message = benchmarkingError instanceof Error ? benchmarkingError.message : "";
+          setGate(
+            /\b403\b/.test(message)
+              ? { state: "unauthorized" }
+              : {
+                  state: "error",
+                  message:
+                    "Anomaly scope could not be read, so the gate count cannot be attributed to this workspace."
+                }
+          );
+          return;
         }
         if (token !== gateToken.current) return;
 
@@ -395,9 +428,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         const holding = tasks.filter((task) => {
           if (task.status !== "open") return false; // the backend counts `open` only
           if (task.target_type === "failure") return workspaceFailureIds.has(task.target_id);
-          if (task.target_type === "anomaly_event") {
-            return anomalyIds === null ? true : anomalyIds.has(task.target_id);
-          }
+          if (task.target_type === "anomaly_event") return anomalyIds.has(task.target_id);
           return false; // every other target type is outside the gate
         });
         setGate({ state: "ready", openTasks: holding.length, clear: holding.length === 0 });
@@ -412,7 +443,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setGate({ state: "error", message: errorText(error) });
       }
     })();
-  }, [apiStatus, activeWorkspaceId, gateTick, validationTasks]);
+  }, [apiStatus, activeWorkspaceId, gateTick, queueVersion]);
 
   const value = useMemo<WorkspaceContextValue>(
     () => ({

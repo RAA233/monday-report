@@ -80,7 +80,9 @@ const ALL_ITEMS = NAV_GROUPS.flatMap((group) => group.items);
  */
 export function routeLabel(pathname: string): string {
   if (pathname === "/app" || pathname === "/app/") return "/app";
-  if (/^\/app\/reports\/[^/]+\/draft\/?$/.test(pathname)) return pathname.replace(/\/$/, "");
+  // Collapse the report id: the raw UUID is unreadable in a 12px chip, and the
+  // Studio already discloses the full id beside its heading.
+  if (/^\/app\/reports\/[^/]+\/draft\/?$/.test(pathname)) return "/app/reports/…/draft";
   const match = ALL_ITEMS.filter((item) => item.path !== "/app").find((item) =>
     pathname === item.path || pathname.startsWith(`${item.path}/`)
   );

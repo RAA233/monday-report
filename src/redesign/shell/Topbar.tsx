@@ -49,8 +49,11 @@ export function Topbar() {
   }, [profileOpen]);
 
   const offline = apiStatus === "offline";
+  // NOT "Local fallback": that is v1's label, and v1 really does degrade to local
+  // data. This entry has no fallback dataset, so the chip must not imply one — the
+  // shell banner beside it says the same thing.
   const apiLabel =
-    apiStatus === "connected" ? "API connected" : apiStatus === "checking" ? "Checking API" : "Local fallback";
+    apiStatus === "connected" ? "API connected" : apiStatus === "checking" ? "Checking API" : "API unreachable";
   const apiDotFill =
     apiStatus === "connected"
       ? "var(--color-accent)"

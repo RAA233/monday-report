@@ -88,10 +88,19 @@ export function Validation() {
       <PageHeader
         kicker="Human-in-the-loop"
         title="Validation queue"
-        lede="High-severity, low-confidence, and conflicting extractions wait here. Decisions carry verified-reviewer attribution and unlock the export gate."
+        lede="High-severity, low-confidence, and conflicting extractions wait here. Decisions are recorded with server-derived reviewer attribution — verified-reviewer only when the session authenticates a per-user credential — and resolving one moves the export gate."
         actions={
-          <Tag tone={openQueueTasks > 0 ? "critical" : "outline"} style={{ fontSize: 13, padding: "6px 12px" }}>
-            {openQueueTasks} open
+          <Tag
+            tone={openQueueTasks === null ? "neutral" : openQueueTasks > 0 ? "critical" : "outline"}
+            style={{ fontSize: 13, padding: "6px 12px" }}
+          >
+            {/* Never "0 open" for an unread queue: that is a positive claim the
+                read did not establish. */}
+            {openQueueTasks === null
+              ? validationTasks.state === "loading"
+                ? "Checking…"
+                : "Queue not read"
+              : `${openQueueTasks} open`}
           </Tag>
         }
       />
@@ -101,7 +110,9 @@ export function Validation() {
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          {apiStatus !== "connected" ? (
+          {apiStatus === "checking" ? (
+            <>Checking the workspace API — decisions are disabled until the session resolves.</>
+          ) : apiStatus !== "connected" ? (
             <>The workspace API is unreachable, so no decision can be recorded and the queue is read-only.</>
           ) : (
             <>
@@ -116,10 +127,17 @@ export function Validation() {
 
       {validationTasks.state === "loading" ? <Skeleton rows={3} label="Loading the validation queue" /> : null}
 
+      {validationTasks.state === "unauthorized" ? (
+        <ErrorState
+          title="Queue not visible to this session"
+          message="This session lacks the view_validation_queue permission, so the validation queue cannot be read here. This is not a statement that the queue is empty, and retrying cannot change it — ask a workspace admin for validator access."
+        />
+      ) : null}
+
       {validationTasks.state === "error" ? (
         <ErrorState
           title="Validation queue failed to load"
-          message={`${validationTasks.message} The queue is unavailable, so the export gate cannot be evaluated here.`}
+          message={`${validationTasks.message} The queue is unavailable, so it cannot be shown — this is not a statement that it is empty.`}
           onRetry={reloadValidationTasks}
         />
       ) : null}
@@ -129,8 +147,8 @@ export function Validation() {
           title="All extracted events are resolved"
           body={
             validationTasks.data.length === 0
-              ? "No validation tasks exist in this workspace yet. Tasks appear when extraction finds high-severity, low-confidence, or conflicting evidence."
-              : "The export gate is clear. Official Monday Report exports are unlocked until new evidence raises tasks."
+              ? "No validation tasks exist for this tenant yet. This queue is tenant-wide; tasks appear when extraction finds high-severity, low-confidence, or conflicting evidence."
+              : "Every task in the tenant queue is resolved. The export gate is evaluated per workspace on the Exports view."
           }
           action={
             <Link className="btn btn-primary" to="/app/exports">

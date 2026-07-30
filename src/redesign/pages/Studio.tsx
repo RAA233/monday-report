@@ -157,6 +157,9 @@ export function Studio() {
     "Source draft pulls parsed workspace evidence into this editable report."
   );
   const [editedKeys, setEditedKeys] = useState<Set<keyof FormState>>(new Set());
+  // Read inside sourceDraft, which must not re-create on every keystroke.
+  const editedKeysRef = useRef(editedKeys);
+  editedKeysRef.current = editedKeys;
 
   const activeVariant = useMemo(
     () => reportFormatVariants.find((item) => item.id === variant) ?? reportFormatVariants[0],
@@ -179,11 +182,23 @@ export function Studio() {
       // otherwise workspace A's well, citations and readiness render under B.
       if (askedFor !== workspaceIdRef.current) return;
       setDraft(next);
-      setForm((previous) => formFromDraft(next, previous));
-      setEditedKeys(new Set());
+      // Locally edited fields are PRESERVED. Overwriting them silently discarded
+      // work the same panel was counting ("N field(s) changed locally").
+      const kept: Array<keyof FormState> = [];
+      setForm((previous) => {
+        const drafted = formFromDraft(next, previous);
+        for (const key of editedKeysRef.current) {
+          if (previous[key].trim().length > 0) {
+            drafted[key] = previous[key];
+            kept.push(key);
+          }
+        }
+        return drafted;
+      });
       setState("ready");
       setMessage(
-        `Source-backed draft ready from ${next.source_document_count} document(s), ${next.source_chunk_count} chunk(s), and ${next.citation_count} citation(s).`
+        `Source-backed draft ready from ${next.source_document_count} document(s), ${next.source_chunk_count} chunk(s), and ${next.citation_count} citation(s).` +
+          (kept.length > 0 ? ` ${kept.length} locally edited field(s) were kept.` : "")
       );
     } catch (caught) {
       if (askedFor !== workspaceIdRef.current) return;
@@ -196,22 +211,24 @@ export function Studio() {
     }
   }, [workspaceId]);
 
-  // ONE effect for the workspace-scoped view: clear the previous workspace's draft
-  // AND its form, then load. Two separate effects meant the clear ran after the
-  // loader had already set "loading", cancelling the skeleton; and clearing only
-  // `draft` left the previous workspace's well, rig and operator text on screen
-  // under the new workspace's name.
+  // Clear the workspace-scoped view when the workspace changes, and DO NOT auto-load.
+  //
+  // `GET /workspaces/{id}/report-draft` calls store.audit("report_draft.generate"),
+  // so fetching it on mount would append an audit event claiming a draft was
+  // generated every time someone merely navigated here -- a write on a hash-chained
+  // trust surface caused by navigation. Drafting is an explicit action, which is
+  // also what the handoff specifies ("Source draft" is a button).
   useEffect(() => {
     setDraft(null);
     setForm(EMPTY_FORM);
     setEditedKeys(new Set());
-    if (workspaceId && apiStatus === "connected") {
-      void sourceDraft();
-    } else {
-      setState("idle");
-      setMessage("Source draft pulls parsed workspace evidence into this editable report.");
-    }
-  }, [workspaceId, apiStatus, sourceDraft]);
+    setState("idle");
+    setMessage(
+      workspaceId && apiStatus === "connected"
+        ? "Build a source-backed draft to pull this workspace's parsed evidence into the report. Drafting is recorded in the audit chain, so it runs only when you ask for it."
+        : "Source draft pulls parsed workspace evidence into this editable report."
+    );
+  }, [workspaceId, apiStatus]);
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -235,14 +252,19 @@ export function Studio() {
     const narrativeReady =
       form.presentOps.trim().length > 0 && form.nextOps.trim().length > 0 && form.safety.trim().length > 0;
     const gateKnownAndClear = gateIsClear(gate);
-    const issueReady = narrativeReady && completeness === 100 && gateKnownAndClear;
+    // Evidence is a precondition for issuance: without it, "Ready" would mean a
+    // fully typed but wholly unsourced report.
+    const evidenceReady = Boolean(draft && draft.source_document_count > 0 && draft.citation_count > 0);
+    const issueReady = evidenceReady && narrativeReady && completeness === 100 && gateKnownAndClear;
 
     return [
       {
+        // No check glyph: the selector picks which MR-SCHEMA-1 variant's required
+        // sections apply, but the draft payload is not variant-specific, so this
+        // cell reports a selection -- it is not a satisfied requirement.
         label: "Format",
         value: activeVariant.shortLabel,
-        detail: `${activeVariant.label} · ${reportVariantSchemaVersion}`,
-        ok: true
+        detail: `${activeVariant.label} · ${activeVariant.requiredSections.length} required sections`
       },
       {
         label: "Source",
@@ -280,10 +302,12 @@ export function Studio() {
         label: "Issue",
         value: issueReady ? "Ready" : "Gated",
         detail: issueReady
-          ? "Draft text complete and the gate is clear"
-          : !gateKnownAndClear
-            ? "Held by the validation gate"
-            : "Held by incomplete draft fields",
+          ? "Evidence loaded, draft text complete, and the gate is clear"
+          : !evidenceReady
+            ? "Held by missing source evidence -- build a source-backed draft"
+            : !gateKnownAndClear
+              ? "Held by the validation gate"
+              : "Held by incomplete draft fields",
         ok: issueReady
       }
     ];
@@ -292,15 +316,24 @@ export function Studio() {
   /** Second row: what the loaded evidence actually contains. */
   const evidenceCells: CellSpec[] = useMemo(() => {
     if (!draft) return [];
+    const casingRows = draft.casing_strings ?? [];
+    const casingSourceRows = casingRows.filter((row) => row.source === "source").length;
     return [
       {
+        // Derived from the ROWS, not from draft.schematic_source: that flag also
+        // covers the activity timeline, so it can read "source" while every casing
+        // row is a labelled reference value.
         label: "Casing",
-        value: draft.schematic_source === "source" ? `${draft.casing_strings?.length ?? 0} strings` : "Reference",
+        value: casingRows.length === 0 ? "None" : `${casingRows.length} strings`,
         detail:
-          draft.schematic_source === "source"
-            ? "From source evidence"
-            : "Labelled reference values, not evidence",
-        ok: draft.schematic_source === "source"
+          casingRows.length === 0
+            ? "No casing rows in the draft"
+            : casingSourceRows === casingRows.length
+              ? "All rows from source evidence"
+              : casingSourceRows === 0
+                ? "All rows are labelled reference values, not evidence"
+                : `${casingSourceRows} of ${casingRows.length} rows from source; the rest are labelled reference`,
+        ok: casingRows.length > 0 && casingSourceRows === casingRows.length
       },
       {
         label: "Survey",
@@ -346,7 +379,12 @@ export function Studio() {
             >
               {state === "loading" ? "Building draft…" : "Build source-backed draft"}
             </button>
-            <Link className="btn btn-secondary" to="/app/exports">
+            {/* Carries the report id so Exports issues THIS report rather than
+                whichever happens to be newest. */}
+            <Link
+              className="btn btn-secondary"
+              to={reportId ? `/app/exports?report=${encodeURIComponent(reportId)}` : "/app/exports"}
+            >
               Exports
             </Link>
             <Link className="btn btn-secondary" to="/app/well">
@@ -360,7 +398,7 @@ export function Studio() {
         <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
           Issue target: report <code title={reportId}>{reportId}</code>. This draft is built from the
           workspace's parsed evidence, not from that report's stored content — the report is where an
-          export is issued.
+          export is issued, and the Exports button below carries this id.
         </p>
       ) : null}
 
@@ -466,7 +504,9 @@ export function Studio() {
               className="text-muted"
               style={{ fontSize: 12, margin: 0, border: "1px solid var(--color-divider)", padding: "8px 10px" }}
             >
-              Read-only: the workspace API is unreachable, so no edit can be recorded.
+              {apiStatus === "checking"
+                ? "Checking the workspace API — editing is disabled until the session resolves."
+                : "Read-only: the workspace API is unreachable, so no edit can be recorded."}
             </p>
           ) : (
             <p
@@ -577,6 +617,34 @@ export function Studio() {
                 { label: "Mud", value: form.mudWeight || "—" }
               ]}
             />
+
+            {/* Executive summary: the handoff's preview sheet leads with it, and
+                the draft payload already carries the computed lines. */}
+            {draft && draft.evidence_summary.length > 0 ? (
+              <div style={{ border: "1px solid var(--color-divider)", padding: "9px 10px" }}>
+                <strong
+                  style={{ display: "block", fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}
+                >
+                  Executive summary
+                </strong>
+                <ul
+                  style={{
+                    margin: "5px 0 0",
+                    paddingInlineStart: 18,
+                    fontSize: 12,
+                    lineHeight: 1.5,
+                    color: "var(--color-neutral-700)"
+                  }}
+                >
+                  {draft.evidence_summary.map((line) => (
+                    <li key={line}>{line}</li>
+                  ))}
+                </ul>
+                <span className="text-muted" style={{ fontSize: 10.5 }}>
+                  Computed from the parsed evidence, not written by hand.
+                </span>
+              </div>
+            ) : null}
 
             <PreviewSection title="Present operations" body={form.presentOps} />
             <PreviewSection title="Next 24 hr plan" body={form.nextOps} />
