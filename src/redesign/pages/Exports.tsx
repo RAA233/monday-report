@@ -33,8 +33,11 @@ import {
  * Exports.
  *
  * The gate here is not a client-side courtesy. `POST /monday-reports/{id}/exports`
- * answers 409 while any validation task is open, and this view surfaces that
- * refusal verbatim through the committed gate copy. The button is also disabled
+ * answers 409 while an OPEN validation task targeting a `failure` or an
+ * `anomaly_event` in that report's workspace exists - the predicate is
+ * `_open_validation_tasks_for_workspace`, which counts neither an OCR `file` task nor
+ * a task parked as `conflict` - and this view surfaces that refusal verbatim through
+ * the committed gate copy. The button is also disabled
  * while the gate is closed, so the two agree — but the backend remains the
  * authority, and a 409 arriving anyway is displayed rather than swallowed.
  *
@@ -127,7 +130,8 @@ function GateBanner({ gate, onRetry }: { gate: GateState; onRetry: () => void })
         <span style={{ fontSize: 13 }}>
           This session may not read the validation gate, so it is not shown here. That is not a
           statement that the queue is empty — the backend enforces the gate on every export and
-          refuses the export while any task remains open.
+          refuses it while an open failure- or anomaly-targeted validation task exists for this
+          report's workspace.
         </span>
       </div>
     );

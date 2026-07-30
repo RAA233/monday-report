@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { getFailures, updateValidationTask, type ApiFailureRecord, type ApiValidationTask } from "../../lib/api";
 import { formatSourceCitation } from "../../lib/citationFormat";
@@ -70,9 +70,21 @@ export function Validation() {
     return map;
   }, [failures]);
 
+  // The last list that was actually read, held across a refetch. Without it, resolving a
+  // task set the queue to `loading`, every card unmounted - including the button that had
+  // focus - and focus fell to <body>, so a keyboard user lost their place in the queue
+  // and a screen-reader user was told nothing about what had happened.
+  const lastReadTasks = useRef<ApiValidationTask[] | null>(null);
+  if (validationTasks.state === "ready") lastReadTasks.current = validationTasks.data;
+  const visibleTasks =
+    validationTasks.state === "ready"
+      ? validationTasks.data
+      : validationTasks.state === "loading"
+        ? lastReadTasks.current
+        : null;
   const openTasks = useMemo(
-    () => (validationTasks.state === "ready" ? validationTasks.data.filter(isOpenValidationTask) : []),
-    [validationTasks]
+    (): ApiValidationTask[] => (visibleTasks ? visibleTasks.filter(isOpenValidationTask) : []),
+    [visibleTasks]
   );
 
   async function decide(task: ApiValidationTask, status: "validated" | "rejected") {
@@ -97,6 +109,10 @@ export function Validation() {
         `Decision recorded with ${attribution} and appended to the audit chain.`
       );
       reloadValidationTasks();
+      // The resolved card is about to leave the list, taking the focused button with it.
+      // Move focus to the page heading so the keyboard user lands somewhere meaningful
+      // instead of on <body>, and the change is announced.
+      document.querySelector<HTMLElement>("[data-page-heading]")?.focus();
     } catch (caught) {
       showToast(
         "Not recorded",
@@ -151,7 +167,9 @@ export function Validation() {
         </p>
       ) : null}
 
-      {validationTasks.state === "loading" ? <Skeleton rows={3} label="Loading the validation queue" /> : null}
+      {validationTasks.state === "loading" && lastReadTasks.current === null ? (
+        <Skeleton rows={3} label="Loading the validation queue" />
+      ) : null}
 
       {validationTasks.state === "unauthorized" ? (
         <ErrorState

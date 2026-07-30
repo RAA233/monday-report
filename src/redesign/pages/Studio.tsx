@@ -240,15 +240,37 @@ export function Studio() {
   // generated every time someone merely navigated here -- a write on a hash-chained
   // trust surface caused by navigation. Drafting is an explicit action, which is
   // also what the handoff specifies ("Source draft" is a button).
+  //
+  // Reset ONLY on a real workspace change - both ids present and different. It used to
+  // key on `apiStatus` too, which was harmless while the fields were inert but became a
+  // silent wipe the moment they went live: `retry()` is the one affordance the degraded
+  // shell offers, and it moves apiStatus offline -> checking, so clicking "Retry
+  // connection" after typing a report discarded every character with no prompt and no
+  // undo - even when the retry then failed. The null -> first-workspace resolution is
+  // not a change either: it is the same workspace becoming known.
+  const previousWorkspaceIdRef = useRef<string | null>(workspaceId);
   useEffect(() => {
+    const previous = previousWorkspaceIdRef.current;
+    previousWorkspaceIdRef.current = workspaceId;
+    if (previous === null || workspaceId === null || previous === workspaceId) return;
     setDraft(null);
     setForm(EMPTY_FORM);
     setEditedKeys(new Set());
     setState("idle");
-    setMessage(
-      workspaceId && apiStatus === "connected"
-        ? "Build a source-backed draft to pull this workspace's parsed evidence into the report. Drafting is recorded in the audit chain, so it runs only when you ask for it."
-        : "Source draft pulls parsed workspace evidence into this editable report."
+    // A draft belongs to one workspace, and so does the report the route names. Dropping
+    // the id keeps the "Issue target" line and the Exports link from carrying a report
+    // that belongs to the workspace the operator just left.
+    if (reportId) navigate("/app/studio", { replace: true });
+  }, [workspaceId, reportId, navigate]);
+
+  // The idle message depends on connectivity but must never touch the form.
+  useEffect(() => {
+    setMessage((current) =>
+      current === "" || current.startsWith("Source draft pulls") || current.startsWith("Build a source-backed draft")
+        ? workspaceId && apiStatus === "connected"
+          ? "Build a source-backed draft to pull this workspace's parsed evidence into the report. Drafting is recorded in the audit chain, so it runs only when you ask for it."
+          : "Source draft pulls parsed workspace evidence into this editable report."
+        : current
     );
   }, [workspaceId, apiStatus]);
 

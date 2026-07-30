@@ -65,7 +65,7 @@ const CAPABILITIES = [
   {
     title: "Audited exports",
     body:
-      "Official PDF, XLSX, HTML, JSON, and CSV exports are blocked while validation tasks stay open — then checksummed and served by expiring signed URL.",
+      "Official PDF, XLSX, HTML, JSON, and CSV exports are blocked while an open failure- or anomaly-targeted validation task exists for the workspace — then checksummed and served by expiring signed URL.",
     tags: ["SHA-256", "Signed URLs"]
   }
 ];
@@ -89,7 +89,7 @@ const WORKFLOW = [
     num: "03",
     title: "Draft the report",
     body:
-      "The Studio assembles the report variant you need, pulling a source-backed draft with casing schematic, survey stations, and hydraulics observations.",
+      "The Studio assembles the report variant you need, pulling a source-backed draft with the casing program, survey stations, and hydraulics observations.",
     surface: "Report Studio"
   },
   {
@@ -430,28 +430,20 @@ export function Landing() {
                     />
                     <path d="M176 446 L236 446 L236 528 L176 528 Z" fill="none" stroke="var(--color-text)" strokeWidth="2" strokeLinejoin="round" />
                     <path d="M30 422 L222 422" fill="none" stroke="var(--color-text)" strokeWidth="1.5" strokeDasharray="6 6" />
-                    <text x="20" y="32" fill="var(--color-text)" fontSize="11" fontWeight="600" fontFamily="var(--font-heading)">
-                      CASING / DIRECTIONAL
-                    </text>
-                    <text x="20" y="114" fill="var(--color-neutral-700)" fontSize="10" fontFamily="var(--font-body)">
-                      13 3/8 in shoe
-                    </text>
-                    <text x="20" y="306" fill="var(--color-neutral-700)" fontSize="10" fontFamily="var(--font-body)">
-                      9 5/8 in shoe
-                    </text>
-                    <text x="20" y="444" fill="var(--color-neutral-700)" fontSize="10" fontFamily="var(--font-body)">
-                      MD 8,620 ft
-                    </text>
-                    <text x="176" y="544" fill="var(--color-text)" fontSize="11" fontWeight="600" fontFamily="var(--font-heading)">
-                      TARGET
-                    </text>
+                    {/* No <text> here. These are viewBox units, and this figure's rendered
+                        scale falls to about 0.38 at the narrow breakpoint, which put the
+                        labels at 3.8-6.0 CSS px - while `role="img"` hid the same words
+                        from assistive technology, so they were unreadable AND unannounced.
+                        The wording lives in the figcaption below, as real text at a real
+                        size that a screen reader also reaches. */}
                   </svg>
                 </figure>
               </div>
             </div>
             <figcaption style={{ marginTop: "var(--space-2)" }}>
-              An illustration of the draft the Studio produces, using demo-workspace values. Not live
-              data and not a real survey computation.
+              An illustration of the draft the Studio produces, using demo-workspace values: a
+              casing and directional schematic with the 13 3/8 in and 9 5/8 in shoes, current depth
+              MD 8,620 ft, and the target box. Not live data and not a real survey computation.
             </figcaption>
           </figure>
         </section>

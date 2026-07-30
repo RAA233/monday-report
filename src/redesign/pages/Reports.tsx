@@ -141,7 +141,7 @@ export function Reports() {
       <PageHeader
         kicker={activeWorkspace?.name ?? "No workspace"}
         title="Monday reports"
-        lede="A report opens as a draft, or directly as review when the workspace already has open validation tasks; a refused export also moves it to review, and a completed export marks it exported. Official export stays blocked while validation tasks are open."
+        lede="A report opens as a draft, or directly as review when the workspace already has open validation tasks; a refused export also moves it to review, and a completed export marks it exported. Official export stays blocked while an open failure- or anomaly-targeted validation task exists for this workspace."
         actions={newReportButton}
       />
 

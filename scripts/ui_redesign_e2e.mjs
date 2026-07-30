@@ -444,6 +444,14 @@ async function main() {
 
   const consoleErrors = [];
   const thirdPartyErrors = [];
+  // The reconnect check deliberately aborts API requests to reach the degraded shell for
+  // real. Chromium logs each aborted fetch as a resource error, so those are set aside
+  // while - and ONLY while - the outage is being simulated, and only when the failure is
+  // the API resource itself. An exception thrown by the app during that window still
+  // arrives through `weberror`, or through `console` with a bundle-origin location, and
+  // is NOT set aside. Every one of them is printed in the summary, so none can hide.
+  let simulatingApiOutage = false;
+  const deliberateOutageErrors = [];
   const failedRequests = [];
   const isThirdParty = (url) => Boolean(url) && !url.startsWith(WEB) && !url.startsWith(API) && url !== "";
   context.on("console", (message) => {
@@ -456,6 +464,10 @@ async function main() {
     // empty array; anything in it means something new reached off-origin.
     if (isThirdParty(url)) {
       thirdPartyErrors.push(`${url}: ${message.text()}`);
+      return;
+    }
+    if (simulatingApiOutage && url.startsWith(API)) {
+      deliberateOutageErrors.push(`${url}: ${message.text()}`);
       return;
     }
     consoleErrors.push(`console: ${url}: ${message.text()}`);
@@ -1054,7 +1066,15 @@ async function main() {
   // backend value. Filtering "edited" on non-empty collapsed the middle one, so a
   // re-draft silently wrote the drafted text back over a field the operator had
   // deliberately emptied - while the panel still counted it as changed locally.
-  {
+  if (!browserBoundToGatedApi) {
+    // Same binding as the gate flow: clicking "Build source-backed draft" is a UI-driven
+    // call the backend AUDITS, so it must not reach an unauthorised stack either.
+    check(
+      "studio-draft-precondition",
+      false,
+      "not run: the served bundle does not target the gated API origin, so a UI-driven draft would be audited on an unauthorised stack"
+    );
+  } else {
     await page.goto(`${WEB}/app/studio`, { waitUntil: "networkidle" });
     const build = page.locator("button", { hasText: /^Build source-backed draft$/ }).first();
     const canDraft = (await build.count()) > 0 && !(await build.isDisabled());
@@ -1100,6 +1120,43 @@ async function main() {
         );
       }
     }
+  }
+
+  // ── a local edit must survive the reconnect the degraded shell invites ────
+  //
+  // The Studio editor is local-only and stays editable while the API is degraded, so the
+  // one affordance that state offers - the shell's "Retry connection" - must not discard
+  // what was typed. It did: the reset effect keyed on apiStatus, so any re-probe (even a
+  // failing one) wiped every field with no prompt and no undo.
+  //
+  // The degraded state is produced for real by failing ONLY the API origin, so the app
+  // loads from the web server and its probe genuinely fails.
+  {
+    const failApi = (route) => route.abort();
+    simulatingApiOutage = true;
+    await page.route(`${new URL(API).origin}/**`, failApi);
+    await page.goto(`${WEB}/app/studio`, { waitUntil: "networkidle" });
+    const degradedRetry = page.locator("button", { hasText: /^Retry connection$/ }).first();
+    const reachedDegraded = (await degradedRetry.count()) > 0;
+    const typed = "Operator note typed while the API was unreachable.";
+    const fieldEditable = reachedDegraded ? await page.locator("#st-present").isEditable() : false;
+    if (fieldEditable) await page.locator("#st-present").fill(typed);
+    await page.unroute(`${new URL(API).origin}/**`, failApi);
+    simulatingApiOutage = false;
+    if (reachedDegraded) await degradedRetry.click();
+    await page.waitForTimeout(2000);
+    const survived = reachedDegraded ? await page.locator("#st-present").inputValue() : "";
+    const reconnected = await page
+      .locator("[data-chip]", { hasText: /API connected/ })
+      .count()
+      .then((n) => n > 0);
+    check(
+      "studio-local-edit-survives-reconnect",
+      reachedDegraded && fieldEditable && survived === typed && reconnected,
+      `reached the degraded shell: ${reachedDegraded}; the field was editable while degraded: ${fieldEditable}; ` +
+        `after clicking "Retry connection" the API chip reads connected: ${reconnected}; the field holds ` +
+        `${JSON.stringify(survived)} (expected ${JSON.stringify(typed)})`
+    );
   }
 
   // ── profile disclosure: contained, RTL-correct, keyboard-operable ──────────
@@ -1406,7 +1463,11 @@ async function main() {
     ...Array.from({ length: seeded.count }, (_, index) => `validation-decision-landed-${index + 1}`),
     ...Array.from({ length: Math.max(0, seeded.count - 1) }, (_, index) => `validation-card-cleared-${index + 1}`)
   ];
-  const GATE_REFUSAL_IDS = ["export-gate-precondition", "export-gate-flow-aborted"];
+  const GATE_REFUSAL_IDS = [
+    "export-gate-precondition",
+    "export-gate-flow-aborted",
+    "studio-draft-precondition"
+  ];
   const gateRefusals = GATE_REFUSAL_IDS.filter((id) => emitted.has(id));
   const gateFlowRan = GATE_FLOW_IDS.filter((id) => emitted.has(id));
   const gateFlowMissing = GATE_FLOW_IDS.filter((id) => !emitted.has(id));
@@ -1439,6 +1500,7 @@ async function main() {
     "studio-does-not-draft-on-mount",
     "studio-discloses-explicit-drafting",
     "studio-cleared-field-stays-empty",
+    "studio-local-edit-survives-reconnect",
     ...["ltr", "rtl"].flatMap((dir) =>
       [390, 768, 1440].map((width) => `profile-panel-contained:${dir}:${width}`)
     ),
@@ -1502,6 +1564,7 @@ async function main() {
     // Fonts @import, blocked offline or by a CSP) is not a defect in this application,
     // but the run must still disclose it rather than swallow it.
     third_party_console_errors: thirdPartyErrors,
+    deliberate_outage_console_errors: deliberateOutageErrors,
     unconditional_check_count: EXPECTED_CHECK_IDS.length,
     gate_flow_check_ids: GATE_FLOW_IDS.length,
     unexpected_check_ids: unexpected,
