@@ -8,7 +8,16 @@ import {
 } from "../../lib/api";
 import { formatSourceCitation } from "../../lib/citationFormat";
 import { Cells, ErrorState, Frame, PageHeader, Tag } from "../components/primitives";
-import { gateIsClear, gateLabel, newestReport, useWorkspace } from "../lib/workspace";
+import {
+  apiUnreadReason,
+  exportGateMessage,
+  gateIsClear,
+  gateIsClosed,
+  gateLabel,
+  newestReport,
+  useWorkspace,
+  type GateState
+} from "../lib/workspace";
 
 /**
  * Ask — the chat-first home.
@@ -274,7 +283,9 @@ export function Ask() {
                 borderBlockEnd: "1px solid var(--color-divider)",
                 padding: "10px 12px",
                 textAlign: "start",
-                cursor: "pointer",
+                // Inline, so it must be conditional: an inline `pointer` would beat
+                // the stylesheet's disabled cursor and keep advertising a live cell.
+                cursor: askDisabled ? "not-allowed" : "pointer",
                 fontFamily: "var(--font-body)",
                 color: "inherit"
               }}
@@ -309,7 +320,7 @@ export function Ask() {
                 color: "var(--color-neutral-800)",
                 padding: "6px 11px",
                 fontSize: 12,
-                cursor: "pointer",
+                cursor: askDisabled ? "not-allowed" : "pointer",
                 fontFamily: "var(--font-body)"
               }}
             >
@@ -345,9 +356,9 @@ export function Ask() {
             <Frame style={{ padding: 16 }}>
               <p style={{ fontSize: 13.5, lineHeight: 1.55, margin: 0 }}>
                 Nothing has been asked yet.{" "}
-                {apiStatus === "connected"
-                  ? "Use a command above or ask a question — answers come from this workspace's parsed evidence with citations attached."
-                  : "The workspace API is unreachable, so questions cannot be answered right now."}
+                {apiUnreadReason(apiStatus)
+                  ? `${apiUnreadReason(apiStatus)}, so questions cannot be answered right now.`
+                  : "Use a command above or ask a question — answers come from this workspace's parsed evidence with citations attached."}
               </p>
             </Frame>
           ) : null}
@@ -359,6 +370,7 @@ export function Ask() {
               onNavigate={navigate}
               onSubmit={submit}
               disabled={askDisabled}
+              gate={gate}
             />
           ))}
         </div>
@@ -531,19 +543,38 @@ function SnapshotCell({
   );
 }
 
+/**
+ * `export_actions` is the backend's own token list. Only `monday_report_<fmt>` for
+ * the five committed formats names something the Exports view can issue; other
+ * tokens (`benchmark_evidence_json`, `moc_evidence_pdf`) name artifacts no export
+ * route produces, so they are disclosed as text rather than turned into a control
+ * that would lead nowhere.
+ */
+const MONDAY_REPORT_EXPORT = /^monday_report_(pdf|xlsx|html|csv|json)$/;
+
 function ChatTurn({
   turn,
   onNavigate,
   onSubmit,
-  disabled
+  disabled,
+  gate
 }: {
   turn: Turn;
   onNavigate: (path: string) => void;
   onSubmit: (prompt: string) => void;
   disabled: boolean;
+  gate: GateState;
 }) {
   const isUser = turn.role === "user";
   const answer = turn.answer;
+  const exportTokens = answer?.export_actions ?? [];
+  const issuableExports = exportTokens.flatMap((token) => {
+    const match = MONDAY_REPORT_EXPORT.exec(token);
+    return match ? [{ token, format: match[1] }] : [];
+  });
+  const otherExports = exportTokens.filter((token) => !MONDAY_REPORT_EXPORT.test(token));
+  // Only a gate the backend reported CLOSED blocks the control. Unread is not closed.
+  const exportGated = gateIsClosed(gate);
 
   return (
     <article
@@ -718,8 +749,11 @@ function ChatTurn({
               </ul>
             ) : null}
 
-            {/* The answer's own tool_actions decide the follow-on buttons — the
-                backend's command-aware routing, not a fixed client list. */}
+            {/* The follow-on buttons come from the response's own `tool_actions`
+                rather than a hard-coded client list. That is not command-aware
+                routing: `chat_tool_actions()` takes no arguments and returns the
+                same four kinds for every prompt — only the narrative, workflow
+                steps and insight cards vary with what was asked. */}
             {answer.tool_actions.length > 0 ? (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 {answer.tool_actions.map((action) => {
@@ -765,7 +799,7 @@ function ChatTurn({
                       color: "var(--color-neutral-800)",
                       padding: "6px 11px",
                       fontSize: 12,
-                      cursor: "pointer",
+                      cursor: disabled ? "not-allowed" : "pointer",
                       fontFamily: "var(--font-body)",
                       textAlign: "start"
                     }}
@@ -777,10 +811,47 @@ function ChatTurn({
             ) : null}
 
             {answer.export_actions.length > 0 ? (
-              <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
-                Export actions offered by this answer: {answer.export_actions.join(", ")}. Exports are
-                issued from the Exports view so the validation gate and audit entry apply.
-              </span>
+              <div style={{ display: "grid", gap: 6 }}>
+                {issuableExports.length > 0 ? (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    {issuableExports.map(({ token, format }) =>
+                      // The gate, in the answer. A closed gate disables the control and
+                      // states the committed refusal copy; an unread gate leaves it
+                      // available, because the backend is the authority and refuses on
+                      // its own. Issuance itself happens on the Exports view — that is
+                      // where the report is named and the audit entry is written.
+                      exportGated ? (
+                        <button
+                          key={token}
+                          type="button"
+                          className="btn btn-secondary"
+                          disabled
+                          title={exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)}
+                        >
+                          Export {format.toUpperCase()}
+                        </button>
+                      ) : (
+                        <Link
+                          key={token}
+                          className="btn btn-secondary"
+                          to="/app/exports"
+                          aria-label={`Open Exports to issue the ${format.toUpperCase()} export`}
+                        >
+                          Export {format.toUpperCase()}
+                        </Link>
+                      )
+                    )}
+                  </div>
+                ) : null}
+                <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
+                  {exportGated
+                    ? exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)
+                    : "Issued from the Exports view, where the validation gate is enforced, the SHA-256 is recorded, and the issuance is appended to the audit chain."}
+                  {otherExports.length > 0
+                    ? ` This answer also names ${otherExports.join(", ")}, which are not Monday-report exports and are not issued from that view.`
+                    : ""}
+                </span>
+              </div>
             ) : null}
           </div>
         ) : null}

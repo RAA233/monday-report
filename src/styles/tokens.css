@@ -234,9 +234,18 @@ textarea.input { min-height: 90px; resize: vertical; }
    on bare accent (contrast retune). */
 .seg-opt:has(input:checked) { background: var(--color-accent-700); color: var(--color-bg); }
 .seg-opt:not(:has(input:checked)):hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
-/* The ring must contrast with BOTH states. An inset accent ring on an accent fill
-   was invisible on the checked option, which is the one keyboard users land on. */
-.seg-opt:has(input:focus-visible) { outline: 2px solid var(--color-text); outline-offset: -3px; }
+/* The ring is drawn INSET because `.seg` clips overflow, so its two neighbouring
+   colours are always the option's own fill — one ring colour therefore cannot clear
+   3:1 in both states. It is state-dependent instead: --color-text on the unfilled
+   option (14.79:1) and --color-bg on the accent-700 fill (5.78:1). A single
+   --color-text ring measured 2.56:1 on the checked option, which is the one keyboard
+   focus actually lands on. */
+.seg-opt:not(:has(input:checked)):has(input:focus-visible) {
+  outline: 2px solid var(--color-text); outline-offset: -3px;
+}
+.seg-opt:has(input:checked):has(input:focus-visible) {
+  outline: 2px solid var(--color-bg); outline-offset: -3px;
+}
 
 /* — cards — */
 .card {
@@ -322,7 +331,23 @@ textarea.input { min-height: 90px; resize: vertical; }
      and .corner above) — square, transparent, hairline-bordered — */
 .card, .btn, .input, .tag, .seg, .dialog { border-radius: 0; }
 .card, .dialog { background: transparent; border: 1px solid var(--color-divider); }
-.btn { border: 1px solid var(--color-divider); }
+/* neutral-600 (3.82:1 on bg, 3.53:1 on surface), not --color-divider (1.38:1), for
+   the same reason as `.input` and `.seg`: on `.btn-secondary` — the only unfilled
+   variant — this hairline IS the boundary that identifies a control, so it carries
+   the 3:1 non-text floor. Set in the shorthand: a `border` shorthand this late in
+   the file would otherwise reset a border-color rule declared above. */
+.btn { border: 1px solid var(--color-neutral-600); }
 .btn-primary { border-color: var(--color-accent); }
+/* Ghost buttons need no boundary: their accent-700 label is 5.78:1 on its own. */
 .btn-ghost { border-color: transparent; }
+
+/* Disabled controls must not read as live ones. `.input` sets colour and background
+   as AUTHOR declarations, so the UA sheet's own :disabled greying never applies —
+   without this a read-only Studio field is pixel-identical to an editable one. The
+   border keeps its 3:1 boundary; the fill and the text carry the state. */
+.input:disabled {
+  color: var(--color-neutral-700); background: var(--color-neutral-200);
+  cursor: not-allowed;
+}
+.input:disabled::placeholder { color: var(--color-neutral-600); }
 

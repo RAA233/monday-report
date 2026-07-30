@@ -18,7 +18,16 @@ import {
   Tag,
   type CellSpec
 } from "../components/primitives";
-import { exportGateMessage, gateIsClear, gateIsClosed, gateLabel, useWorkspace } from "../lib/workspace";
+import {
+  apiUnreadReason,
+  errorText,
+  exportGateMessage,
+  gateIsClear,
+  gateIsClosed,
+  gateLabel,
+  useWorkspace,
+  type GateState
+} from "../lib/workspace";
 
 /**
  * Report Studio.
@@ -160,6 +169,8 @@ export function Studio() {
   // Read inside sourceDraft, which must not re-create on every keystroke.
   const editedKeysRef = useRef(editedKeys);
   editedKeysRef.current = editedKeys;
+  const formRef = useRef(form);
+  formRef.current = form;
 
   const activeVariant = useMemo(
     () => reportFormatVariants.find((item) => item.id === variant) ?? reportFormatVariants[0],
@@ -184,17 +195,15 @@ export function Studio() {
       setDraft(next);
       // Locally edited fields are PRESERVED. Overwriting them silently discarded
       // work the same panel was counting ("N field(s) changed locally").
-      const kept: Array<keyof FormState> = [];
-      setForm((previous) => {
-        const drafted = formFromDraft(next, previous);
-        for (const key of editedKeysRef.current) {
-          if (previous[key].trim().length > 0) {
-            drafted[key] = previous[key];
-            kept.push(key);
-          }
-        }
-        return drafted;
-      });
+      //
+      // Computed from a ref BEFORE the update, never by pushing into a closure from
+      // inside a state updater: React runs the updater during the following render,
+      // so `kept.length` read here was always 0 and the disclosure never printed.
+      const previous = formRef.current;
+      const kept = [...editedKeysRef.current].filter((key) => previous[key].trim().length > 0);
+      const drafted = formFromDraft(next, previous);
+      for (const key of kept) drafted[key] = previous[key];
+      setForm(drafted);
       setState("ready");
       setMessage(
         `Source-backed draft ready from ${next.source_document_count} document(s), ${next.source_chunk_count} chunk(s), and ${next.citation_count} citation(s).` +
@@ -203,11 +212,7 @@ export function Studio() {
     } catch (caught) {
       if (askedFor !== workspaceIdRef.current) return;
       setState("error");
-      setMessage(
-        caught instanceof Error && caught.message
-          ? `The draft was not built. ${caught.message}`
-          : "The draft was not built. The workspace API did not answer."
-      );
+      setMessage(`The draft was not built. ${errorText(caught)}`);
     }
   }, [workspaceId]);
 
@@ -235,10 +240,33 @@ export function Studio() {
     setEditedKeys((current) => new Set(current).add(key));
   }
 
-  // The gate is the backend's own report for this workspace, never re-derived.
-  const gateBlocked = gateIsClosed(gate);
-  const gateKnown = gate.state === "ready";
-  const gateText = gateLabel(gate);
+  /**
+   * The gate this screen reports. Two backend sources, never a client re-derivation:
+   *
+   *  1. `gate` — the provider's reconstruction of `_open_validation_tasks_for_workspace`
+   *     from read-only endpoints. Live, but needs `view_validation_queue`, which
+   *     MANAGER and ENGINEER do not hold.
+   *  2. `draft.open_validation_tasks` — the backend's OWN count for this workspace,
+   *     via the identical predicate, returned by `GET /workspaces/{id}/report-draft`
+   *     (which needs only `view_reports`).
+   *
+   * (2) is used only as a fallback, and only once a draft exists: that route audits a
+   * write, so it is never called on navigation — but when the operator has asked for
+   * the draft, the write has already happened and refusing to read its number while
+   * printing it two rows below was simply contradictory.
+   */
+  const draftGateSource = gate.state !== "ready" ? draft : null;
+  const gateFromDraft = draftGateSource !== null;
+  const boardGate: GateState = draftGateSource
+    ? {
+        state: "ready",
+        openTasks: draftGateSource.open_validation_tasks,
+        clear: draftGateSource.open_validation_tasks === 0
+      }
+    : gate;
+  const gateBlocked = gateIsClosed(boardGate);
+  const gateKnown = boardGate.state === "ready";
+  const gateText = gateLabel(boardGate);
 
   /**
    * Issue readiness board — the handoff's six cells (Format, Source, Draft,
@@ -251,7 +279,7 @@ export function Studio() {
     const completeness = Math.round((filled / COMPLETENESS_FIELDS.length) * 100);
     const narrativeReady =
       form.presentOps.trim().length > 0 && form.nextOps.trim().length > 0 && form.safety.trim().length > 0;
-    const gateKnownAndClear = gateIsClear(gate);
+    const gateKnownAndClear = gateIsClear(boardGate);
     // Evidence is a precondition for issuance: without it, "Ready" would mean a
     // fully typed but wholly unsourced report.
     const evidenceReady = Boolean(draft && draft.source_document_count > 0 && draft.citation_count > 0);
@@ -291,11 +319,18 @@ export function Studio() {
       {
         label: "Validation",
         value: gateText,
-        detail: !gateKnown
-          ? "The backend gate could not be read — not a claim that it is clear"
-          : gateBlocked
-            ? "Export blocked until resolved"
-            : "No open tasks for this workspace",
+        // "Could not be read" is reserved for a read that FAILED. While it is still
+        // in flight the cell says so instead.
+        detail:
+          boardGate.state === "loading"
+            ? "Reading the gate from the backend"
+            : !gateKnown
+              ? "The backend gate could not be read — not a claim that it is clear"
+              : gateFromDraft
+                ? "The backend's own count for this workspace, from the draft you built"
+                : gateBlocked
+                  ? "Export blocked until resolved"
+                  : "No open tasks for this workspace",
         ok: gateKnownAndClear
       },
       {
@@ -305,13 +340,15 @@ export function Studio() {
           ? "Evidence loaded, draft text complete, and the gate is clear"
           : !evidenceReady
             ? "Held by missing source evidence -- build a source-backed draft"
-            : !gateKnownAndClear
+            : gateBlocked
               ? "Held by the validation gate"
-              : "Held by incomplete draft fields",
+              : !gateKnownAndClear
+                ? "Held open until the gate is read — the backend decides on export"
+                : "Held by incomplete draft fields",
         ok: issueReady
       }
     ];
-  }, [activeVariant, draft, form, gate, gateBlocked, gateKnown, gateText]);
+  }, [activeVariant, boardGate, draft, form, gateBlocked, gateFromDraft, gateKnown, gateText]);
 
   /** Second row: what the loaded evidence actually contains. */
   const evidenceCells: CellSpec[] = useMemo(() => {
@@ -506,7 +543,7 @@ export function Studio() {
             >
               {apiStatus === "checking"
                 ? "Checking the workspace API — editing is disabled until the session resolves."
-                : "Read-only: the workspace API is unreachable, so no edit can be recorded."}
+                : `Read-only: ${apiUnreadReason(apiStatus) ?? "no workspace session is resolved"}, so no edit can be recorded.`}
             </p>
           ) : (
             <p
@@ -696,17 +733,25 @@ export function Studio() {
                 Issue gate
               </strong>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
-                <Tag tone={gateIsClear(gate) ? "accent" : "critical"}>
-                  Validation · {gateKnown ? (gateBlocked ? `${gate.openTasks} open` : "clear") : gateText.toLowerCase()}
+                {/* `critical` is reserved for a gate the backend reported CLOSED. An
+                    unread gate is neutral here, matching the Export chip beside it and
+                    the Exports banner — the two chips used to disagree on the same row. */}
+                <Tag tone={gateIsClear(boardGate) ? "accent" : gateBlocked ? "critical" : "neutral"}>
+                  Validation ·{" "}
+                  {gateKnown
+                    ? gateBlocked
+                      ? `${boardGate.state === "ready" ? boardGate.openTasks : 0} open`
+                      : "clear"
+                    : gateText.toLowerCase()}
                 </Tag>
-                <Tag tone={gateIsClear(gate) ? "accent" : "neutral"}>
-                  Export · {gateIsClear(gate) ? "available" : gateBlocked ? "gated" : "gate not read"}
+                <Tag tone={gateIsClear(boardGate) ? "accent" : "neutral"}>
+                  Export · {gateIsClear(boardGate) ? "available" : gateBlocked ? "gated" : "gate not read"}
                 </Tag>
                 <Tag tone="outline">{reportVariantSchemaVersion}</Tag>
               </div>
               {gateBlocked ? (
                 <p role="status" style={{ fontSize: 12, margin: "8px 0 0", color: "var(--color-accent-800)" }}>
-                  {exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)}{" "}
+                  {exportGateMessage(boardGate.state === "ready" ? boardGate.openTasks : 0)}{" "}
                   <button
                     type="button"
                     className="btn btn-ghost"
@@ -798,8 +843,16 @@ export function Studio() {
                       <span role="columnheader">Evidence</span>
                     </div>
                     {draft.survey_stations.map((station, index) => {
-                      const calculated = draft.trajectory?.stations.find(
-                        (candidate) => candidate.measured_depth_ft === station.measured_depth_ft
+                      // Join on the id the payload carries for exactly this purpose.
+                      // Depth equality is the fallback and must be tolerant: the
+                      // backend rounds the CALCULATED station's MD to 2 dp while the
+                      // source station keeps the raw parsed float, so `===` missed
+                      // every station quoted to three decimals and printed "—" for a
+                      // value that exists.
+                      const calculated = draft.trajectory?.stations.find((candidate) =>
+                        station.station_id != null && candidate.source_station_id != null
+                          ? candidate.source_station_id === station.station_id
+                          : Math.abs(candidate.measured_depth_ft - station.measured_depth_ft) < 0.01
                       );
                       return (
                         <div

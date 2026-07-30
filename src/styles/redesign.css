@@ -234,6 +234,19 @@ html {
   background: color-mix(in srgb, var(--color-accent) 8%, transparent);
 }
 
+/* These cells are bare <button>s (command dock, starters, follow-ups), so `.btn`'s
+   disabled rule does not reach them and they looked fully live while disabled. The
+   hover tint is cancelled too, otherwise pointing at a dead cell still lights it. */
+.mr-hover-accent:disabled,
+.mr-hover-text:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.mr-hover-accent:disabled:hover,
+.mr-hover-text:disabled:hover {
+  background: transparent;
+}
+
 /* Visually hidden but announced. */
 .mr-visually-hidden {
   position: absolute;

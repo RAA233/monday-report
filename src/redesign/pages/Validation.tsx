@@ -3,7 +3,13 @@ import { Link } from "react-router-dom";
 import { getFailures, updateValidationTask, type ApiFailureRecord, type ApiValidationTask } from "../../lib/api";
 import { formatSourceCitation } from "../../lib/citationFormat";
 import { EmptyState, ErrorState, Frame, PageHeader, Skeleton, Tag } from "../components/primitives";
-import { isOpenValidationTask, useLoadable, useWorkspace } from "../lib/workspace";
+import {
+  apiUnreadReason,
+  errorText,
+  isOpenValidationTask,
+  useLoadable,
+  useWorkspace
+} from "../lib/workspace";
 
 /**
  * Validation queue.
@@ -76,8 +82,10 @@ export function Validation() {
       );
       reloadValidationTasks();
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "The request did not complete.";
-      showToast("Not recorded", `The decision was not recorded, so the gate is unchanged. ${message}`);
+      showToast(
+        "Not recorded",
+        `The decision was not recorded, so the gate is unchanged. ${errorText(caught)}`
+      );
     } finally {
       setBusyId(null);
     }
@@ -113,7 +121,9 @@ export function Validation() {
           {apiStatus === "checking" ? (
             <>Checking the workspace API — decisions are disabled until the session resolves.</>
           ) : apiStatus !== "connected" ? (
-            <>The workspace API is unreachable, so no decision can be recorded and the queue is read-only.</>
+            <>
+              {apiUnreadReason(apiStatus)}, so no decision can be recorded and the queue is read-only.
+            </>
           ) : (
             <>
               This session lacks the <strong>resolve_validation</strong> permission, so the queue is

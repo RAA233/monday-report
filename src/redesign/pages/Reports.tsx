@@ -13,6 +13,8 @@ import {
   Tag
 } from "../components/primitives";
 import {
+  apiUnreadReason,
+  errorText,
   exportGateMessage,
   gateIsClear,
   gateIsClosed,
@@ -71,6 +73,18 @@ export function Reports() {
   // re-derivation: only "ready" can say clear or give a count.
   const gateText = gateLabel(gate);
   const gateIsGood = gateIsClear(gate);
+  /**
+   * `critical` is the design system's reserved solid inverted treatment, so it is
+   * spent only on a gate the backend reported CLOSED. An unread gate (loading,
+   * unauthorized, error, unavailable) is neutral — the same rule the Exports banner
+   * follows — otherwise every row paints as a breach on first load, and permanently
+   * for a session that may export but may not read the queue.
+   */
+  const gateTone = gate.state !== "ready" ? "neutral" : gateIsGood ? "outline" : "critical";
+  // `load()` returns [] WITHOUT calling the API when no workspace is resolved, so an
+  // empty array is not evidence that the workspace has no reports.
+  const listWasRead = value.state === "ready" && workspaceId !== null;
+  const unreadReason = apiUnreadReason(apiStatus) ?? "No workspace is resolved";
 
   async function createReport() {
     if (!workspaceId || readOnly || !canCreate || creating) return;
@@ -97,8 +111,7 @@ export function Reports() {
       );
       reload();
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "The request did not complete.";
-      showToast("Not created", `The report was not created. ${message}`);
+      showToast("Not created", `The report was not created. ${errorText(caught)}`);
     } finally {
       setCreating(false);
     }
@@ -139,14 +152,17 @@ export function Reports() {
         />
       ) : null}
 
-      {value.state === "ready" && value.data.length === 0 ? (
+      {value.state === "ready" && !listWasRead ? (
+        <EmptyState
+          title="Report list not read"
+          body={`${unreadReason}, so no report list could be read. This is not a confirmation that the workspace is empty.`}
+        />
+      ) : null}
+
+      {listWasRead && value.data.length === 0 ? (
         <EmptyState
           title="No Monday reports yet"
-          body={
-            apiStatus === "connected"
-              ? "Create the first report for this workspace, or build a source-backed draft in the Studio once evidence is processed."
-              : "The workspace API is unreachable, so no report list could be read. This is not a confirmation that the workspace is empty."
-          }
+          body="Create the first report for this workspace, or build a source-backed draft in the Studio once evidence is processed."
           action={newReportButton}
         />
       ) : null}
@@ -172,7 +188,7 @@ export function Reports() {
                     <Tag tone={STATUS_TONE[report.status]}>{report.status}</Tag>
                   </GridCell>
                   <GridCell>
-                    <Tag tone={gateIsGood ? "outline" : "critical"} style={{ whiteSpace: "nowrap" }}>
+                    <Tag tone={gateTone} style={{ whiteSpace: "nowrap" }}>
                       {gateText}
                     </Tag>
                   </GridCell>

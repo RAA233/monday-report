@@ -26,7 +26,10 @@
  *   MONDAY_REPORT_WEB_BASE   default http://127.0.0.1:5174
  *   MONDAY_REPORT_API_BASE   default http://127.0.0.1:8000
  *   MONDAY_REPORT_API_KEY    API key the served frontend was built/run with
- *   MONDAY_REPORT_SHOT_DIR   optional; write screenshots here (never committed)
+ *   MONDAY_REPORT_SHOT_DIR   optional; write screenshots and the JSON summary here.
+ *                            A path inside the repository is REFUSED (not written to)
+ *                            and the refusal is reported in the summary's `screenshots`
+ *                            field, so these artifacts cannot end up committed.
  *   MONDAY_REPORT_STATE_PATH, MONDAY_REPORT_STORAGE_ROOT, MONDAY_REPORT_EXPORT_ROOT
  *                            the same state pointers the running API uses — needed
  *                            because the gate assertions seed demo evidence and then
@@ -248,10 +251,27 @@ async function assertNoHorizontalScroll(page, label) {
   );
 }
 
+/**
+ * Screenshots and the JSON summary are working artifacts and must never land in the
+ * tree. The docstring promised that; nothing enforced it. Resolving the directory and
+ * refusing anything inside the repository does — and `containment` is reported in the
+ * summary so a run cannot hide that it wrote somewhere unexpected.
+ */
+const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+function resolveShotDir() {
+  if (!SHOT_DIR) return { dir: "", note: "not set: no screenshot or summary file is written" };
+  const dir = path.resolve(SHOT_DIR);
+  const inside = dir === REPO_ROOT || dir.startsWith(REPO_ROOT + path.sep);
+  return inside
+    ? { dir: "", note: `REFUSED ${dir}: inside the repository at ${REPO_ROOT}` }
+    : { dir, note: `writing to ${dir} (outside ${REPO_ROOT})` };
+}
+const SHOTS = resolveShotDir();
+
 async function shoot(page, name) {
-  if (!SHOT_DIR) return;
-  await mkdir(SHOT_DIR, { recursive: true });
-  await page.screenshot({ path: path.join(SHOT_DIR, `${name}.png`), fullPage: true });
+  if (!SHOTS.dir) return;
+  await mkdir(SHOTS.dir, { recursive: true });
+  await page.screenshot({ path: path.join(SHOTS.dir, `${name}.png`), fullPage: true });
 }
 
 async function main() {
@@ -331,10 +351,20 @@ async function main() {
   check("landing-stat-band", stageBandValues.includes("1:1"), `stat band rendered ${stageBandValues.length} lines`);
   await shoot(page, "landing-desktop");
 
-  // Landing CTA must navigate, never silently redirect.
+  // Landing CTA must navigate, never silently redirect. The wait is caught rather
+  // than awaited bare: an unhandled rejection would abort the whole suite instead of
+  // failing this one check, and the assertion after it would be unreachable.
   await page.locator("nav a", { hasText: "Open the app" }).first().click();
-  await page.waitForURL(`${WEB}/app`);
-  check("landing-cta-navigates", page.url() === `${WEB}/app`, `cta landed on ${page.url()}`);
+  const ctaLanded = await page
+    .waitForURL(`${WEB}/app`, { timeout: 10000 })
+    .then(() => true)
+    .catch(() => false);
+  check(
+    "landing-cta-navigates",
+    ctaLanded && page.url() === `${WEB}/app`,
+    `cta landed on ${page.url()} (expected ${WEB}/app)`
+  );
+  if (!ctaLanded) await page.goto(`${WEB}/app`, { waitUntil: "networkidle" });
 
   // ── every Stage 1 route renders ───────────────────────────────────────────
   for (const route of STAGE1_ROUTES) {
@@ -375,10 +405,12 @@ async function main() {
   // NotFound renders the pathname, so "the id appears somewhere" proves nothing.
   // Assert the Studio's own issue-target disclosure, which only it renders.
   const draftBody = await page.locator("body").innerText();
+  const targetLine = /Issue target: report/i.test(draftBody);
+  const carriesId = draftBody.includes("MR-2026.W31");
   check(
     "deep-route-kicker-carries-report-id",
-    /Issue target: report/i.test(draftBody) && draftBody.includes("MR-2026.W31"),
-    "the Studio's issue-target line names the report id from the URL, so the Studio route matched"
+    targetLine && carriesId,
+    `issue-target line present: ${targetLine}; body names MR-2026.W31: ${carriesId}`
   );
 
   // A query string must not be misclassified as an asset request.
@@ -431,6 +463,9 @@ async function main() {
   // Set as soon as the flow performs its first write, so the summary reports a
   // mutation even when a later assertion fails.
   const mutated = { value: false };
+  // How many tasks the seed actually raised. The per-decision check ids are declared
+  // from this, so a document that yields two tasks does not break the coverage pin.
+  const seeded = { count: 0 };
   const gateChecked = await runGateFlow();
 
   async function runGateFlow() {
@@ -474,6 +509,7 @@ async function main() {
       );
       if (open.length === 0) return false;
       const seededIds = new Set(open.map((task) => task.id));
+      seeded.count = seededIds.size;
 
       // The worker drains the WHOLE queue, so a job someone else queued before our
       // upload would also produce tasks. Confirm every open task traces to a failure
@@ -502,10 +538,15 @@ async function main() {
 
       await page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
       const gatedText = await page.locator("body").innerText();
+      const wantedCopy = gateCopy(open.length);
+      const copyPresent = gatedText.includes(wantedCopy);
       check(
         "export-gate-closed-copy",
-        gatedText.includes(gateCopy(open.length)),
-        `gate copy for ${open.length} open task(s) present verbatim`
+        copyPresent,
+        copyPresent
+          ? `present verbatim: ${JSON.stringify(wantedCopy)}`
+          : `MISSING ${JSON.stringify(wantedCopy)}; the page's gate sentence reads ` +
+            `${JSON.stringify((/Resolve [^\n]*/.exec(gatedText) ?? ["<no 'Resolve …' sentence>"])[0])}`
       );
 
       const exportButton = page.locator("button", { hasText: /^Export PDF$/ }).first();
@@ -521,10 +562,38 @@ async function main() {
       // Resolve through the UI so the unlock is the product's own behaviour, and
       // resolve ONLY the tasks this run seeded.
       await page.goto(`${WEB}/app/validation`, { waitUntil: "networkidle" });
-      const validate = page.locator("button", { hasText: /^Validate$/ }).first();
-      check("validation-card-present", (await validate.count()) > 0, "an open task card is rendered");
+      const validateCount = await page.locator("button", { hasText: /^Validate$/ }).count();
+      check(
+        "validation-card-present",
+        validateCount > 0,
+        `${validateCount} open task card(s) offer a Validate control`
+      );
+
+      // The card of a landed decision leaves the DOM only after the queue reload
+      // resolves, so a second iteration could otherwise re-click the same card while
+      // a genuinely open task stayed untouched.
+      const waitForCardCount = async (want) => {
+        const deadline = Date.now() + 15000;
+        let seen = -1;
+        while (Date.now() < deadline) {
+          seen = await page.locator("button", { hasText: /^Validate$/ }).count();
+          if (seen === want) return { ok: true, seen };
+          await page.waitForTimeout(200);
+        }
+        return { ok: false, seen };
+      };
 
       for (let i = 0; i < seededIds.size; i += 1) {
+        if (i > 0) {
+          const settledDom = await waitForCardCount(seededIds.size - i);
+          check(
+            `validation-card-cleared-${i}`,
+            settledDom.ok,
+            settledDom.ok
+              ? `the resolved card left the queue; ${seededIds.size - i} card(s) remain`
+              : `expected ${seededIds.size - i} Validate control(s) after decision ${i}, still see ${settledDom.seen}`
+          );
+        }
         const button = page.locator("button", { hasText: /^Validate$/ }).first();
         await button.waitFor({ state: "visible", timeout: 15000 }).catch(() => {});
         if ((await button.count()) === 0) break;
@@ -559,58 +628,87 @@ async function main() {
       // frame the click left behind.
       await page.goto(`${WEB}/app/validation`, { waitUntil: "networkidle" });
       const clearedText = await page.locator("body").innerText();
+      const queueReportsResolved = /all extracted events are resolved/i.test(clearedText);
       check(
         "validation-unlocks-gate",
-        /all extracted events are resolved/i.test(clearedText),
-        "the queue itself reports every event resolved after the UI decisions"
+        queueReportsResolved,
+        queueReportsResolved
+          ? "the queue itself reports every event resolved after the UI decisions"
+          : `the queue does NOT report every event resolved; its state line reads ` +
+            `${JSON.stringify((/(No open[^\n]*|\d+ open[^\n]*|Queue not read[^\n]*)/.exec(clearedText) ?? ["<no queue state line>"])[0])}`
       );
 
       await page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
       const clearGate = await page.locator("body").innerText();
+      const readsClear = /export gate clear/i.test(clearGate);
+      const blockingCopyGone = !clearGate.includes("before exporting an official Monday Report");
       check(
         "export-gate-clear-after-validation",
-        /export gate clear/i.test(clearGate) && !clearGate.includes("before exporting an official Monday Report"),
-        "gate reads clear and the blocking copy is gone"
+        readsClear && blockingCopyGone,
+        `banner says "export gate clear": ${readsClear}; blocking copy gone: ${blockingCopyGone}`
       );
       const enabledButton = page.locator("button", { hasText: /^Export PDF$/ }).first();
+      const enabledPresent = (await enabledButton.count()) > 0;
+      const stillDisabled = enabledPresent ? await enabledButton.isDisabled() : true;
       check(
         "export-enabled-after-unlock",
-        (await enabledButton.count()) > 0 && !(await enabledButton.isDisabled()),
-        "Export PDF became enabled once the gate cleared"
+        enabledPresent && !stillDisabled,
+        enabledPresent
+          ? `Export PDF rendered, disabled=${stillDisabled}`
+          : "no Export PDF button was rendered, so the unlocked state could not be asserted"
       );
       return true;
     } catch (error) {
-      check("export-gate-precondition", false, `not run: ${error.message}`);
+      // Two different facts, two different ids. Before the first write, the flow
+      // genuinely did not run. After it, the stack HAS been mutated and a seeded task
+      // may still be open — which blocks every later run of this suite, so it has to
+      // be said out loud rather than filed under "precondition".
+      if (mutated.value) {
+        check(
+          "export-gate-flow-aborted",
+          false,
+          `aborted AFTER seeding: ${error.message}. Demo evidence was uploaded and a validation task ` +
+            `may still be open on ${API}; this suite refuses to resolve tasks it cannot attribute, so ` +
+            `clear the queue (or point at a fresh stack) before the next run.`
+        );
+      } else {
+        check("export-gate-precondition", false, `not run: ${error.message}`);
+      }
       return false;
     }
   }
 
   // ── the Studio must not draft on mount (that call writes an audit event) ──
   {
-    const before = await apiJson("/audit-logs?limit=200").catch(() => []);
-    const draftEventsBefore = Array.isArray(before)
-      ? before.filter((entry) => entry.action === "report_draft.generate").length
-      : -1;
+    // `.catch(() => null)`, NOT `=> []`: substituting an array made both counts 0, so
+    // an UNREADABLE audit log passed this check while proving nothing.
+    const countDraftEvents = async () => {
+      const page_ = await apiJson("/audit-logs?limit=200").catch(() => null);
+      if (!Array.isArray(page_)) return null;
+      return page_.filter((entry) => entry.action === "report_draft.generate").length;
+    };
+    const draftEventsBefore = await countDraftEvents();
     await page.goto(`${WEB}/app/studio`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
-    const after = await apiJson("/audit-logs?limit=200").catch(() => []);
-    const draftEventsAfter = Array.isArray(after)
-      ? after.filter((entry) => entry.action === "report_draft.generate").length
-      : -2;
+    const draftEventsAfter = await countDraftEvents();
+    const readable = draftEventsBefore !== null && draftEventsAfter !== null;
     check(
       "studio-does-not-draft-on-mount",
-      draftEventsBefore >= 0 && draftEventsAfter === draftEventsBefore,
-      draftEventsBefore < 0
-        ? "could not read the audit log to verify"
+      readable && draftEventsAfter === draftEventsBefore,
+      !readable
+        ? `could not read the audit log, so nothing was verified (before=${draftEventsBefore}, after=${draftEventsAfter})`
         : draftEventsAfter === draftEventsBefore
           ? `no report_draft.generate audit event was appended by navigation (${draftEventsBefore} before and after)`
           : `navigation appended ${draftEventsAfter - draftEventsBefore} report_draft.generate audit event(s)`
     );
     const studioBody = await page.locator("body").innerText();
+    const explicitDrafting = /runs only when you ask for it/i.test(studioBody);
     check(
       "studio-discloses-explicit-drafting",
-      /runs only when you ask for it/i.test(studioBody),
-      "the Studio states that drafting is an explicit, audited action"
+      explicitDrafting,
+      explicitDrafting
+        ? "the Studio states that drafting is an explicit, audited action"
+        : "MISSING the explicit-drafting disclosure ('runs only when you ask for it') from the Studio body"
     );
   }
 
@@ -654,10 +752,14 @@ async function main() {
       tenantHidden: tenant ? getComputedStyle(tenant).display === "none" : false
     };
   });
+  // The single column is now ASSERTED, not merely measured: the rule that produces it
+  // (`[data-shell] { grid-template-columns: minmax(0,1fr) }`) is separate from the one
+  // that unpins the sidebar, so the check was passing while its own name went unproven.
+  const shellTracks = mobile.columns.trim().split(/\s+/).filter(Boolean);
   check(
     "mobile-nav-single-column",
-    mobile.sidebarPosition === "static" && mobile.navOverflowX === "auto",
-    `sidebar ${mobile.sidebarPosition}, nav overflow-x ${mobile.navOverflowX}, columns ${mobile.columns}`
+    shellTracks.length === 1 && mobile.sidebarPosition === "static" && mobile.navOverflowX === "auto",
+    `shell resolves to ${shellTracks.length} column track(s) [${mobile.columns}], sidebar ${mobile.sidebarPosition}, nav overflow-x ${mobile.navOverflowX}`
   );
   // The count is asserted too: Math.min() of an empty selector is Infinity, so a
   // missing nav used to satisfy ">= 44".
@@ -669,7 +771,7 @@ async function main() {
   check(
     "mobile-nav-chrome-hidden",
     mobile.labelHidden && mobile.tenantHidden,
-    "group labels and the tenant card hide on mobile"
+    `group label display:none = ${mobile.labelHidden}; tenant card display:none = ${mobile.tenantHidden}`
   );
   await shoot(page, "reports-mobile-nav");
 
@@ -691,9 +793,13 @@ async function main() {
   check(
     "rtl-flips-shell",
     rtl.onRight && rtl.borderLeft === "1px" && rtl.borderRight === "0px",
-    `sidebar on the right with the divider on its inline-start (left ${rtl.borderLeft} / right ${rtl.borderRight})`
+    `sidebar reaches the right edge: ${rtl.onRight}; divider left ${rtl.borderLeft} / right ${rtl.borderRight} (expected 1px / 0px)`
   );
-  check("rtl-no-horizontal-scroll", !rtl.scrolls, "no page-level overflow under dir=rtl");
+  check(
+    "rtl-no-horizontal-scroll",
+    !rtl.scrolls,
+    rtl.scrolls ? "the document scrolls horizontally under dir=rtl" : "no page-level overflow under dir=rtl"
+  );
   await shoot(page, "reports-rtl");
   await page.evaluate(() => {
     document.documentElement.dir = "ltr";
@@ -729,7 +835,7 @@ async function main() {
     !ringed.none && ringed.matchesFocusVisible && ringed.outlineStyle !== "none" && ringed.outlineWidth > 0,
     ringed.none
       ? "Tab moved focus nowhere"
-      : `${ringed.tag} matches :focus-visible with a ${ringed.outlineStyle} ${ringed.outlineWidth}px outline`
+      : `${ringed.tag}: :focus-visible=${ringed.matchesFocusVisible}, outline ${ringed.outlineStyle} ${ringed.outlineWidth}px`
   );
 
   // ── console and request hygiene ────────────────────────────────────────────
@@ -746,8 +852,39 @@ async function main() {
 
   await browser.close();
 
-  // Every check id emitted by a fully-exercised run. Declared so a caller can pin
-  // the suite's coverage: a check that silently disappears (deleted, or skipped by a
+  const emitted = new Set(results.map((entry) => entry.id));
+
+  /**
+   * The gate flow's ids, which are conditional by design: the flow refuses to run on
+   * a stack whose queue it did not seed. Coverage is therefore an EITHER/OR — the flow
+   * ran and emitted all of these, or it refused/aborted and said so with one of the
+   * refusal ids. A silent partial is neither, and still fails.
+   *
+   * The per-decision ids scale with the number of tasks the seed actually raised, so a
+   * document that yields two tasks does not read as an undeclared check.
+   */
+  const GATE_FLOW_IDS = [
+    "export-gate-report-present",
+    "export-gate-seeded-real-task",
+    "export-gate-seeded-tasks-are-ours",
+    "export-gate-closed-copy",
+    "export-disabled-while-gated",
+    "validation-card-present",
+    "validation-resolved-only-seeded",
+    "validation-unlocks-gate",
+    "export-gate-clear-after-validation",
+    "export-enabled-after-unlock",
+    ...Array.from({ length: seeded.count }, (_, index) => `validation-decision-landed-${index + 1}`),
+    ...Array.from({ length: Math.max(0, seeded.count - 1) }, (_, index) => `validation-card-cleared-${index + 1}`)
+  ];
+  const GATE_REFUSAL_IDS = ["export-gate-precondition", "export-gate-flow-aborted"];
+  const gateRefusals = GATE_REFUSAL_IDS.filter((id) => emitted.has(id));
+  const gateFlowRan = GATE_FLOW_IDS.filter((id) => emitted.has(id));
+  const gateFlowMissing = GATE_FLOW_IDS.filter((id) => !emitted.has(id));
+  const gateComplete = gateRefusals.length > 0 ? true : gateFlowMissing.length === 0;
+
+  // Every check id an unconditional run emits. Declared so a caller can pin the
+  // suite's coverage: a check that silently disappears (deleted, or skipped by a
   // conditional branch) is reported here rather than shrinking the totals unnoticed.
   const EXPECTED_CHECK_IDS = [
     "landing-hero",
@@ -766,17 +903,6 @@ async function main() {
     "chat-redirects-to-ask",
     "unknown-route-in-shell",
     ...STAGE2_ROUTES.map((route) => `stage2-declared-pending:${route}`),
-    "export-gate-report-present",
-    "export-gate-seeded-real-task",
-    "export-gate-seeded-tasks-are-ours",
-    "export-gate-closed-copy",
-    "export-disabled-while-gated",
-    "validation-card-present",
-    "validation-decision-landed-1",
-    "validation-resolved-only-seeded",
-    "validation-unlocks-gate",
-    "export-gate-clear-after-validation",
-    "export-enabled-after-unlock",
     "studio-does-not-draft-on-mount",
     "studio-discloses-explicit-drafting",
     "api-chip-no-false-local-fallback",
@@ -796,17 +922,25 @@ async function main() {
     "no-failed-app-requests"
   ];
 
-  const emitted = new Set(results.map((entry) => entry.id));
+  const declared = new Set([...EXPECTED_CHECK_IDS, ...GATE_FLOW_IDS, ...GATE_REFUSAL_IDS, "coverage-complete"]);
   const missing = EXPECTED_CHECK_IDS.filter((id) => !emitted.has(id));
-  const unexpected = [...emitted].filter((id) => !EXPECTED_CHECK_IDS.includes(id));
+  const unexpected = [...emitted].filter((id) => !declared.has(id));
+  const complete = missing.length === 0 && unexpected.length === 0 && gateComplete;
   check(
     "coverage-complete",
-    missing.length === 0 && unexpected.length === 0,
-    missing.length === 0 && unexpected.length === 0
-      ? `all ${EXPECTED_CHECK_IDS.length} declared checks ran and nothing undeclared appeared`
+    complete,
+    complete
+      ? `all ${EXPECTED_CHECK_IDS.length} unconditional check(s) ran, nothing undeclared appeared, and the gate flow ` +
+        (gateRefusals.length > 0
+          ? `declared itself not run (${gateRefusals.join(", ")})`
+          : `emitted all ${GATE_FLOW_IDS.length} of its ids`)
       : [
           missing.length ? `${missing.length} declared check(s) did not run: ${missing.slice(0, 8).join(", ")}` : "",
-          unexpected.length ? `${unexpected.length} undeclared check id(s): ${unexpected.slice(0, 8).join(", ")}` : ""
+          unexpected.length ? `${unexpected.length} undeclared check id(s): ${unexpected.slice(0, 8).join(", ")}` : "",
+          gateComplete
+            ? ""
+            : `the gate flow neither completed nor declared itself not run: ${gateFlowRan.length} of ` +
+              `${GATE_FLOW_IDS.length} ids ran, missing ${gateFlowMissing.slice(0, 8).join(", ")}`
         ]
           .filter(Boolean)
           .join(" ;; ")
@@ -818,9 +952,16 @@ async function main() {
     web_base: WEB,
     api_base: API,
     export_gate_exercised: gateChecked,
+    export_gate_refusals: gateRefusals,
+    seeded_validation_tasks: seeded.count,
     mutates_target_stack: mutated.value,
-    screenshots: SHOT_DIR || null,
-    expected_check_count: EXPECTED_CHECK_IDS.length + 1,
+    screenshots: SHOTS.note,
+    // Recorded, not gating: a third-party console error (the design system's Google
+    // Fonts @import, blocked offline or by a CSP) is not a defect in this application,
+    // but the run must still disclose it rather than swallow it.
+    third_party_console_errors: thirdPartyErrors,
+    unconditional_check_count: EXPECTED_CHECK_IDS.length,
+    gate_flow_check_ids: GATE_FLOW_IDS.length,
     unexpected_check_ids: unexpected,
     checked: results.length,
     passed: results.filter((entry) => entry.status === "pass").length,
@@ -829,9 +970,9 @@ async function main() {
   };
   const text = JSON.stringify(summary, null, 2);
   console.log(text);
-  if (SHOT_DIR) {
-    await mkdir(SHOT_DIR, { recursive: true });
-    await writeFile(path.join(SHOT_DIR, "ui_redesign_e2e.json"), text, "utf8");
+  if (SHOTS.dir) {
+    await mkdir(SHOTS.dir, { recursive: true });
+    await writeFile(path.join(SHOTS.dir, "ui_redesign_e2e.json"), text, "utf8");
   }
   process.exit(failed === 0 ? 0 : 1);
 }

@@ -53,7 +53,14 @@ export function Topbar() {
   // data. This entry has no fallback dataset, so the chip must not imply one — the
   // shell banner beside it says the same thing.
   const apiLabel =
-    apiStatus === "connected" ? "API connected" : apiStatus === "checking" ? "Checking API" : "API unreachable";
+    apiStatus === "connected"
+      ? "API connected"
+      : apiStatus === "checking"
+        ? "Checking API"
+        : apiStatus === "refused"
+          ? // The API answered; it declined us. Not the same fact as unreachable.
+            "API refused session"
+          : "API unreachable";
   const apiDotFill =
     apiStatus === "connected"
       ? "var(--color-accent)"

@@ -19,6 +19,8 @@ import {
   Tag
 } from "../components/primitives";
 import {
+  apiUnreadReason,
+  errorText,
   exportGateMessage,
   gateIsClosed,
   newestReport,
@@ -94,9 +96,14 @@ function GateBanner({ gate, onRetry }: { gate: GateState; onRetry: () => void })
     return (
       <div role="status" style={frame(true)}>
         <strong style={heading(true)}>Export gate clear</strong>
+        {/* "no OPEN tasks", not "no unresolved tasks": the gate's predicate counts
+            status `open` only, so a task parked as a conflict still needs a reviewer
+            while leaving the export unlocked. Claiming "unresolved" here contradicted
+            the queue, which lists conflicts as live cards. */}
         <span style={{ fontSize: 13 }}>
-          The backend reports no unresolved validation tasks for this report's workspace — official
-          exports are unlocked.
+          The backend reports no open validation tasks for this report's workspace — official exports
+          are unlocked. The gate counts open tasks only: a task parked as a conflict still needs a
+          reviewer but does not hold the export.
         </span>
       </div>
     );
@@ -113,10 +120,13 @@ function GateBanner({ gate, onRetry }: { gate: GateState; onRetry: () => void })
     return (
       <div role="status" style={frame(false)}>
         <strong style={heading(false)}>Export gate not visible</strong>
+        {/* No promise of a count: the 409 body is the bare string "Report has
+            unresolved validation tasks". The number lives in the audit metadata and
+            in report_json, not in the refusal. */}
         <span style={{ fontSize: 13 }}>
           This session may not read the validation gate, so it is not shown here. That is not a
-          statement that the queue is empty — the backend enforces the gate on every export and will
-          refuse with the open-task count if any remain.
+          statement that the queue is empty — the backend enforces the gate on every export and
+          refuses the export while any task remains open.
         </span>
       </div>
     );
@@ -186,7 +196,11 @@ export function Exports() {
   const [issued, setIssued] = useState<Issued[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [minting, setMinting] = useState<string | null>(null);
-  const [statuses, setStatuses] = useState<Record<string, { tone: "ok" | "bad"; text: string }>>({});
+  // `full` carries the complete SHA-256 for the status line's title, so a truncated
+  // digest is never the only value the DOM holds.
+  const [statuses, setStatuses] = useState<
+    Record<string, { tone: "ok" | "bad"; text: string; full?: string }>
+  >({});
 
   // Issued rows and per-format status belong to one workspace. Carrying them across
   // a switch would attribute another workspace's exports to this one.
@@ -251,7 +265,10 @@ export function Exports() {
         ...current,
         [format]: {
           tone: "ok",
-          text: `${format.toUpperCase()} ready · ${sizeLabel(result.byte_size)} · SHA ${shortSha(result.sha256)}`
+          // The ellipsis marks the truncation: 12 of 64 hex characters presented as
+          // "SHA <value>" reads as a whole digest and silently fails a comparison.
+          text: `${format.toUpperCase()} ready · ${sizeLabel(result.byte_size)} · SHA ${shortSha(result.sha256)}…`,
+          full: result.sha256
         }
       }));
       // The backend sets the report to "exported"; re-read so the panel does not
@@ -279,10 +296,7 @@ export function Exports() {
             ? exportGateMessage(live.openTasks)
             : "Export refused: the backend reports unresolved validation tasks for this report. Re-reading the gate — open Validation to resolve them.";
       } else {
-        text =
-          caught instanceof Error && caught.message
-            ? `Export refused. ${caught.message}`
-            : "Export refused. The workspace API did not answer.";
+        text = `Export refused. ${errorText(caught)}`;
       }
       setStatuses((current) => ({ ...current, [format]: { tone: "bad", text } }));
     } finally {
@@ -313,8 +327,10 @@ export function Exports() {
         `A short-lived reference for the ${item.format.toUpperCase()} export was issued and audit-logged. It expires at ${signed.expires_at}.`
       );
     } catch (caught) {
-      const message = caught instanceof Error ? caught.message : "The request did not complete.";
-      showToast("No URL issued", `A signed reference was not issued. ${message}`);
+      // Same guard as the success path: after a workspace switch this row is gone,
+      // and the toast would attribute the failure to the workspace now on screen.
+      if (forWorkspace !== workspaceIdRef.current) return;
+      showToast("No URL issued", `A signed reference was not issued. ${errorText(caught)}`);
     } finally {
       setMinting((current) => (current === item.id ? null : current));
     }
@@ -372,11 +388,11 @@ export function Exports() {
 
       {reports.state === "ready" && !target ? (
         <EmptyState
-          title="No report to export"
+          title={apiStatus === "connected" && workspaceId ? "No report to export" : "Report list not read"}
           body={
-            apiStatus === "connected"
+            apiUnreadReason(apiStatus) === null && workspaceId
               ? "This workspace has no Monday report yet. Create one first — exports are always issued against a report."
-              : "The workspace API is unreachable, so the report list could not be read."
+              : `${apiUnreadReason(apiStatus) ?? "No workspace is resolved"}, so the report list could not be read. This is not a confirmation that the workspace has no report.`
           }
           action={
             <Link className="btn btn-primary" to="/app/reports">
@@ -436,6 +452,7 @@ export function Exports() {
                   {status ? (
                     <span
                       role="status"
+                      title={status.full}
                       style={{
                         fontSize: 11.5,
                         lineHeight: 1.45,
@@ -481,7 +498,10 @@ export function Exports() {
                 </GridCell>
                 <GridCell style={{ fontSize: 13.5 }}>{sizeLabel(item.byte_size)}</GridCell>
                 <GridCell style={{ fontFamily: "var(--font-heading)", color: "var(--color-accent-700)", fontSize: 13 }}>
-                  {shortSha(item.sha256)}…
+                  {/* Abbreviated for the column; the full 64-character digest is in
+                      `title`, the same treatment the report id gets — a checksum the
+                      page advertises has to be readable somewhere. */}
+                  <span title={item.sha256}>{shortSha(item.sha256)}…</span>
                 </GridCell>
                 <GridCell>
                   <span className="text-muted" style={{ fontSize: 13 }}>

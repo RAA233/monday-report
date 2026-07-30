@@ -1,4 +1,4 @@
-import { Outlet } from "react-router-dom";
+import { Link, Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { useWorkspace } from "../lib/workspace";
@@ -14,7 +14,11 @@ import { useWorkspace } from "../lib/workspace";
  */
 export function AppShell() {
   const { apiStatus, retry, toast, dismissToast, pauseToast, resumeToast } = useWorkspace();
-  const offline = apiStatus === "offline";
+  // A refusal gets its own banner. Saying "unreachable" for a 401/403/503 sends the
+  // operator to debug a service that answered, and the retry offered below cannot
+  // help — the credential or the role has to change.
+  const refused = apiStatus === "refused";
+  const offline = apiStatus === "offline" || refused;
 
   return (
     <div
@@ -53,18 +57,25 @@ export function AppShell() {
                 fontSize: 12.5
               }}
             >
-              API unreachable
+              {refused ? "API refused this session" : "API unreachable"}
             </strong>
-            The workspace API is unreachable, so no workspace data can be read and nothing can be
-            recorded. Empty lists below mean "not read", not "none exist".
-            <button
-              type="button"
-              className="btn btn-ghost"
-              style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}
-              onClick={retry}
-            >
-              Retry connection
-            </button>
+            {refused
+              ? "The workspace API answered and refused this session's credential, so no workspace data can be read and nothing can be recorded. The service is running — the API key or the role has to change. Empty lists below mean \"not read\", not \"none exist\"."
+              : "The workspace API is unreachable, so no workspace data can be read and nothing can be recorded. Empty lists below mean \"not read\", not \"none exist\"."}
+            {refused ? (
+              <Link className="btn btn-ghost" to="/app/signin" style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}>
+                Check the session
+              </Link>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}
+                onClick={retry}
+              >
+                Retry connection
+              </button>
+            )}
           </div>
         ) : null}
 

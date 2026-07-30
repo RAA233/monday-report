@@ -1,4 +1,5 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { WorkspaceProvider } from "./lib/workspace";
 import { AppShell } from "./shell/AppShell";
 import { Landing } from "./pages/Landing";
 import { SignIn } from "./pages/SignIn";
@@ -30,7 +31,19 @@ import { useRouteAnnounce } from "./lib/useRouteAnnounce";
  * Deep-route refresh works because `vite.redesign.config.ts` rewrites non-asset
  * GETs to `/redesign.html` rather than letting Vite fall back to the v1 root
  * document.
+ *
+ * `WorkspaceProvider` wraps the /app subtree ONLY. Mounted above the whole router it
+ * ran its authenticated probe on the public landing page, so visiting `/` sent five
+ * keyed reads to the tenant API for a page that displays none of them.
  */
+function WorkspaceRoutes() {
+  return (
+    <WorkspaceProvider>
+      <Outlet />
+    </WorkspaceProvider>
+  );
+}
+
 export function AppRoutes() {
   // Route changes set the document title and move focus to the new view's h1.
   useRouteAnnounce();
@@ -38,28 +51,31 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<Landing />} />
-      <Route path="/app/signin" element={<SignIn />} />
 
-      <Route path="/app" element={<AppShell />}>
-        <Route index element={<Ask />} />
-        <Route path="reports" element={<Reports />} />
-        <Route path="reports/:reportId/draft" element={<Studio />} />
-        <Route path="studio" element={<Studio />} />
-        <Route path="validation" element={<Validation />} />
-        <Route path="exports" element={<Exports />} />
+      <Route element={<WorkspaceRoutes />}>
+        <Route path="/app/signin" element={<SignIn />} />
 
-        {/* Chat is not a separate destination — Ask is the chat-first home. */}
-        <Route path="chat" element={<Navigate to="/app" replace />} />
+        <Route path="/app" element={<AppShell />}>
+          <Route index element={<Ask />} />
+          <Route path="reports" element={<Reports />} />
+          <Route path="reports/:reportId/draft" element={<Studio />} />
+          <Route path="studio" element={<Studio />} />
+          <Route path="validation" element={<Validation />} />
+          <Route path="exports" element={<Exports />} />
 
-        {/* Reserved for the next increment; each renders a labelled pending state. */}
-        <Route path="well" element={<PendingStage />} />
-        <Route path="upload" element={<PendingStage />} />
-        <Route path="benchmarking" element={<PendingStage />} />
-        <Route path="failures" element={<PendingStage />} />
-        <Route path="audit" element={<PendingStage />} />
-        <Route path="settings" element={<PendingStage />} />
+          {/* Chat is not a separate destination — Ask is the chat-first home. */}
+          <Route path="chat" element={<Navigate to="/app" replace />} />
 
-        <Route path="*" element={<NotFound />} />
+          {/* Reserved for the next increment; each renders a labelled pending state. */}
+          <Route path="well" element={<PendingStage />} />
+          <Route path="upload" element={<PendingStage />} />
+          <Route path="benchmarking" element={<PendingStage />} />
+          <Route path="failures" element={<PendingStage />} />
+          <Route path="audit" element={<PendingStage />} />
+          <Route path="settings" element={<PendingStage />} />
+
+          <Route path="*" element={<NotFound />} />
+        </Route>
       </Route>
 
       {/* Anything outside /app returns to the public landing page. */}

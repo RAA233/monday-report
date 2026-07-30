@@ -32,11 +32,36 @@ import {
  * validation count that gates exports.
  *
  * Connectivity mirrors the committed v1 behaviour in `src/App.tsx`: a probe on
- * mount, `checking` → `connected` | `offline`, and an explicit retry. When the
- * API is unreachable the app says so and disables actions rather than pretending
- * to have data.
+ * mount, `checking` → `connected` | `refused` | `offline`, and an explicit retry.
+ * When the API is unreachable the app says so and disables actions rather than
+ * pretending to have data.
  */
-export type ApiStatus = "checking" | "connected" | "offline";
+/**
+ * `refused` is deliberately distinct from `offline`. A 401/403/503 means the API
+ * ANSWERED and declined us — the service is reachable, the credential or the role
+ * is the problem, and a retry with the same key cannot succeed. Reporting that as
+ * "unreachable" sends an operator to debug a running backend.
+ */
+export type ApiStatus = "checking" | "connected" | "refused" | "offline";
+
+/**
+ * Why a surface holds no data when the API is not connected — one sentence stem,
+ * in one place, so a new surface cannot regress into asserting "unreachable" while
+ * the probe is still in flight or after a refusal. `null` when connected: the
+ * caller then has a real answer to describe.
+ */
+export function apiUnreadReason(apiStatus: ApiStatus): string | null {
+  switch (apiStatus) {
+    case "connected":
+      return null;
+    case "checking":
+      return "The workspace API has not answered yet";
+    case "refused":
+      return "The workspace API refused this session's credential";
+    default:
+      return "The workspace API is unreachable";
+  }
+}
 
 /** Async state for one data surface, so every list can render the same four states. */
 export type Loadable<T> =
@@ -76,7 +101,10 @@ export interface WorkspaceContextValue {
    *
    * Reconstructed here from three READ-ONLY endpoints that carry the needed scope:
    * `/validation-tasks`, `/failures` (failure -> workspace) and
-   * `/workspaces/{id}/benchmarking` (anomaly -> workspace).
+   * `/workspaces/{id}/benchmarking` (anomaly -> workspace). The `/validation-tasks`
+   * payload is the snapshot this provider already holds (`validationTasks`), never a
+   * second read — a refused GET appends a `permission_denied` audit event, so asking
+   * twice would double them for one user intent.
    *
    * Deliberately NOT read from `GET /workspaces/{id}/report-draft`. That endpoint
    * publishes the backend's own number, but it calls
@@ -187,22 +215,42 @@ export function gateLabel(gate: GateState): string {
  * Order by created_at, then period_end, and use position only to break an exact
  * tie — so "the current report" means the same thing on both backends.
  */
-export function newestReport<T extends { created_at: string; period_end: string }>(
+export function newestReport<T extends { id: string; created_at: string; period_end: string }>(
   reports: readonly T[]
 ): T | null {
   if (reports.length === 0) return null;
-  return reports.reduce((best, candidate) => {
-    if (candidate.created_at !== best.created_at) {
-      return candidate.created_at > best.created_at ? candidate : best;
-    }
-    if (candidate.period_end !== best.period_end) {
-      return candidate.period_end > best.period_end ? candidate : best;
-    }
-    return candidate;
-  });
+  return reports.reduce((best, candidate) => (compareReports(candidate, best) > 0 ? candidate : best));
 }
 
-function errorText(error: unknown): string {
+function compareReports(
+  a: { id: string; created_at: string; period_end: string },
+  b: { id: string; created_at: string; period_end: string }
+): number {
+  const byCreated = compareTimestamp(a.created_at, b.created_at);
+  if (byCreated !== 0) return byCreated;
+  const byPeriod = compareTimestamp(a.period_end, b.period_end);
+  if (byPeriod !== 0) return byPeriod;
+  // Final tie-break on the id, which is stable across backends. Array position is
+  // NOT usable here: it is dict-insertion order on the local JSON store and
+  // physical row order on Postgres.
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+function compareTimestamp(a: string, b: string): number {
+  // Never compare ISO instants as strings: pydantic omits a zero microsecond field,
+  // and "…56Z" > "…56.000001Z" byte-wise ('Z' > '.'), which sorts the EARLIER
+  // instant last. Parse first; fall back to the raw strings only if unparseable.
+  const left = Date.parse(a);
+  const right = Date.parse(b);
+  if (!Number.isNaN(left) && !Number.isNaN(right)) {
+    return left === right ? 0 : left < right ? -1 : 1;
+  }
+  return a === b ? 0 : a < b ? -1 : 1;
+}
+
+/** Short, sanitized form of a thrown request error. Exported so every user-facing
+ *  string goes through one sanitizer instead of interpolating `API 409: …` raw. */
+export function errorText(error: unknown): string {
   // Surfaced to users, so keep it short and never leak a raw stack or a URL.
   if (error instanceof Error && error.message) {
     return error.message.replace(/^API\s/, "Request failed: ");
@@ -297,7 +345,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const reloadGate = useCallback(() => setGateTick((n) => n + 1), []);
+  // Re-reading the gate re-reads everything it is computed from. The queue snapshot
+  // is one of its inputs, so bumping only the tick would recompute the same verdict
+  // from the same stale task list.
+  const reloadGate = useCallback(() => {
+    void loadValidationTasks();
+    setGateTick((n) => n + 1);
+  }, [loadValidationTasks]);
 
   useEffect(() => {
     let cancelled = false;
@@ -313,8 +367,27 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         setWorkspaces(nextWorkspaces);
         setActiveId((current) => current ?? nextWorkspaces[0]?.id ?? null);
         setApiStatus("connected");
-      } catch {
+      } catch (error) {
         if (cancelled) return;
+        // Classify the refusal instead of calling every failure unreachability.
+        // `src/lib/api.ts` throws `API <status>: <detail>`, so the status is here:
+        // 401/403 = credential or role, 503 = a backend that is up but not
+        // configured for client data. All three answered; none is "unreachable",
+        // and the retry offered for `offline` cannot fix any of them.
+        const message = error instanceof Error ? error.message : "";
+        const refusal = /^API (401|403|503)\b/.exec(message);
+        if (refusal) {
+          setApiStatus("refused");
+          setValidationTasks(
+            refusal[1] === "503"
+              ? {
+                  state: "error",
+                  message: "The workspace API is not configured to serve client data yet."
+                }
+              : { state: "unauthorized" }
+          );
+          return;
+        }
         setApiStatus("offline");
         setValidationTasks({
           state: "error",
@@ -381,16 +454,42 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // Tokened so a slow read for a previous workspace cannot publish over a newer one.
   const gateToken = useRef(0);
   const activeWorkspaceId = activeWorkspace?.id ?? null;
+  // The queue snapshot this provider already holds, read through a ref: the gate's
+  // task list must NOT be fetched a second time. Every refused GET
+  // /validation-tasks appends a `permission_denied` event to the hash-chained audit
+  // log, so a session without view_validation_queue was writing two of them per
+  // mount for one user intent.
+  const queueRef = useRef(validationTasks);
+  queueRef.current = validationTasks;
   useEffect(() => {
     const token = ++gateToken.current;
     if (apiStatus !== "connected" || !activeWorkspaceId) {
       setGate({ state: "unavailable" });
       return;
     }
+    const queue = queueRef.current;
+    // Not read yet — stay in `loading`. The terminal transition bumps
+    // `queueVersion`, which re-runs this effect with a real snapshot.
+    if (queue.state === "loading") {
+      setGate({ state: "loading" });
+      return;
+    }
+    // The queue's own outcome IS the gate's outcome for these two: a session that
+    // may not read the queue has produced no evidence about the gate, and a failed
+    // read is not evidence either. Neither needs another request to establish.
+    if (queue.state === "unauthorized") {
+      setGate({ state: "unauthorized" });
+      return;
+    }
+    if (queue.state === "error") {
+      setGate({ state: "error", message: queue.message });
+      return;
+    }
+    const tasks = queue.data;
     setGate({ state: "loading" });
     void (async () => {
       try {
-        const [tasks, failures] = await Promise.all([getValidationTasks(), getFailures()]);
+        const failures = await getFailures();
         // Anomaly-targeted tasks also hold the gate, and only this workspace-scoped
         // read maps an anomaly to its workspace. Without it there is no defensible
         // count: counting every tenant anomaly task would inflate the number printed
