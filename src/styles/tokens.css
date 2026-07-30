@@ -1,4 +1,6 @@
-/* Industry — design-system tokens and component classes. This file is the source of truth for the system's look; retune it here and see readme.md. */
+/* Industry — design-system tokens and component classes. This file is the source of
+   truth for the system's look; retune it here. `src/styles/redesign.css` documents
+   how the application sheet extends it. */
 
 /* Ported COMPLETE and deliberately so. A review noted that Stage 1 references only
    part of this sheet (.card*, .dialog*, .table, .radio, .elev-sm, .tag-accent-2,
@@ -8,12 +10,16 @@
    pruning now would only force a re-port and let the sheet drift from the handoff.
    The unreferenced rules add ~2 kB gzipped and affect nothing at runtime. */
 
-/* Webfonts are a PROGRESSIVE ENHANCEMENT here, not a dependency. Monday Report is
-   documented as running fully offline, so this @import must never gate rendering:
-   `display=swap` paints the fallback immediately, and the stacks below name real
-   condensed/humanist fallbacks so an offline build keeps a deliberate voice rather
-   than dropping to a generic sans. If the third-party request is unacceptable in a
-   given deployment, delete this line — nothing else depends on it. */
+/* The handoff prescribes these two webfonts and this @import ships them. Stated
+   plainly, because the earlier note here overstated the safety of it:
+   - it IS a real third-party request to fonts.googleapis.com, and it is the only
+     outbound non-API request this frontend makes;
+   - `display=swap` governs the FACE once the sheet arrives; it does nothing when the
+     sheet never arrives, and the @import itself is render-blocking for CSS;
+   - what actually keeps an offline build legible is the fallback stacks below, which
+     name real condensed/humanist faces rather than a generic sans.
+   Nothing else depends on this line: deleting it leaves the fallback stacks in place
+   and removes the request. Self-hosting the two families is the standing follow-up. */
 @import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;600&display=swap');
 
 :root {
@@ -229,7 +235,10 @@ textarea.input { min-height: 90px; resize: vertical; }
   display: inline-flex; align-items: center; gap: 6px;
   padding: 7px 12px; font-size: 13px; cursor: pointer;
 }
-.seg-opt + .seg-opt { border-left: 1px solid var(--color-neutral-600); }
+/* Logical, not `border-left`: `.seg` is an inline-flex row, so under dir="rtl" a
+   physical left border puts every divider one option out of place and doubles the
+   container's own border on the outer edge. */
+.seg-opt + .seg-opt { border-inline-start: 1px solid var(--color-neutral-600); }
 /* accent-700, matching .btn-primary: the checked option's light label was 3.71:1
    on bare accent (contrast retune). */
 .seg-opt:has(input:checked) { background: var(--color-accent-700); color: var(--color-bg); }

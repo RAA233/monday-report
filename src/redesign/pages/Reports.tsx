@@ -138,7 +138,7 @@ export function Reports() {
       <PageHeader
         kicker={activeWorkspace?.name ?? "No workspace"}
         title="Monday reports"
-        lede="Weekly reports move draft → review → approved → exported. Official export stays blocked while validation tasks are open."
+        lede="A report opens as a draft; a refused export moves it to review, and a completed export marks it exported. Official export stays blocked while validation tasks are open."
         actions={newReportButton}
       />
 
@@ -218,9 +218,14 @@ export function Reports() {
             </GridTable>
           </Frame>
 
+          {/* Only the transitions that exist: create -> draft, a gate-refused export -> review,
+              a completed export -> exported. `approved` is a schema value with no route that
+              writes it, so advertising an approval step would describe a workflow the backend
+              does not have. */}
           <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
-            Status chain: draft → review → approved → exported. Every transition and export is appended
-            to the audit chain.
+            Recorded status: a report opens as a draft, a refused export moves it to review, and a
+            completed export marks it exported. There is no approval step in this increment. Every
+            report creation and export is appended to the audit chain.
           </p>
 
           {gateIsClosed(gate) && gate.state === "ready" ? (

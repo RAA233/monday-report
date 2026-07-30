@@ -1,6 +1,7 @@
 /* Redesign application styles.
  *
- * Extends tokens.css (the handoff design-system sheet, ported verbatim) with the
+ * Extends tokens.css (the handoff design-system sheet, ported with the contrast,
+ * border and disabled-state corrections documented inline in that file) with the
  * app-level rules the prototypes declare in their own <style> block: the skeleton
  * pulse, the shell breakpoints, and a small number of shared object classes so
  * pages do not repeat the same inline styling.
@@ -225,13 +226,35 @@ html {
   color: var(--color-bg);
 }
 
-/* Text/accent hover tints used by nav items, dock cells and snapshot cells. */
+/* Text/accent hover tints used by nav items, dock cells and snapshot cells.
+   The resting fill is declared HERE, not inline: an inline `background` always beats
+   an author stylesheet rule, so every call site that set one made these :hover rules
+   inert. The call sites now set no background at all. */
+.mr-hover-text,
+.mr-hover-accent {
+  background: transparent;
+}
+
+/* The dock and snapshot cells sit on the page fill rather than being transparent. */
+.mr-cell-bg {
+  background: var(--color-bg);
+}
+
 .mr-hover-text:hover {
   background: color-mix(in srgb, var(--color-text) 6%, transparent);
 }
 
 .mr-hover-accent:hover {
   background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+/* The current nav item keeps its accent wash, and still tints on hover. */
+[data-navbtn][aria-current="page"] {
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+[data-navbtn][aria-current="page"]:hover {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
 }
 
 /* These cells are bare <button>s (command dock, starters, follow-ups), so `.btn`'s

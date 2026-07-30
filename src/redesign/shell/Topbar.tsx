@@ -8,9 +8,10 @@ import { routeLabel } from "./navigation";
  * Topbar: workspace selector, the current route, and the trust chips.
  *
  * The API chip is a live `role="status"` so a connectivity change is announced;
- * the audit chip reports the real chain state from `GET /audit/integrity` and
+ * the audit chip reports the real chain state from `GET /audit-logs/integrity` and
  * links into the audit view. Both describe what the backend actually returned —
- * neither invents a "sealed" claim when the read failed.
+ * neither invents a "sealed" claim when the read failed, and neither calls a
+ * permission refusal an outage.
  */
 export function Topbar() {
   const navigate = useNavigate();
@@ -52,15 +53,19 @@ export function Topbar() {
   // NOT "Local fallback": that is v1's label, and v1 really does degrade to local
   // data. This entry has no fallback dataset, so the chip must not imply one — the
   // shell banner beside it says the same thing.
+  // Four distinct facts, four labels. "Unreachable" is reserved for a request that
+  // did not complete: the API answering with a refusal or an unconfigured-service
+  // 503 is not an outage, and saying so sends the operator to the wrong place.
   const apiLabel =
     apiStatus === "connected"
       ? "API connected"
       : apiStatus === "checking"
         ? "Checking API"
         : apiStatus === "refused"
-          ? // The API answered; it declined us. Not the same fact as unreachable.
-            "API refused session"
-          : "API unreachable";
+          ? "API refused session"
+          : apiStatus === "misconfigured"
+            ? "API not configured"
+            : "API unreachable";
   const apiDotFill =
     apiStatus === "connected"
       ? "var(--color-accent)"
@@ -87,17 +92,26 @@ export function Topbar() {
     .map((part) => part[0]?.toUpperCase() ?? "")
     .join("") || "MR";
 
-  // The chip states the integrity view the backend returned, never more.
-  const auditChipLabel = auditIntegrity
-    ? `${auditIntegrity.status} · ${auditIntegrity.total_events} events`
-    : "unavailable";
+  // The chip states the integrity view the backend returned, never more — and names
+  // WHY it has none: a session without view_audit_history was refused, which is not
+  // the same as the read failing.
+  const auditChipLabel =
+    auditIntegrity.state === "ready"
+      ? `${auditIntegrity.data.status} · ${auditIntegrity.data.total_events} events`
+      : auditIntegrity.state === "loading"
+        ? "checking"
+        : auditIntegrity.state === "unauthorized"
+          ? "not visible to this session"
+          : "unavailable";
 
   const chipBase = {
     display: "inline-flex" as const,
     alignItems: "center" as const,
     gap: 7,
     fontSize: 12.5,
-    border: "1px solid var(--color-divider)",
+    // neutral-600 (3.82:1), not --color-divider (1.38:1): two of these chips are
+    // buttons, and this hairline is the only boundary that identifies them.
+    border: "1px solid var(--color-neutral-600)",
     padding: "5px 10px"
   };
 
@@ -132,7 +146,11 @@ export function Topbar() {
           }}
         >
           {workspaces.length === 0 ? (
-            <option value="">No workspace available</option>
+            // "None available" is a claim about a read that happened. Before the probe
+            // resolves, or after it fails, the list is simply unread.
+            <option value="">
+              {apiStatus === "connected" ? "No workspace available" : "Workspaces not read"}
+            </option>
           ) : (
             workspaces.map((workspace) => (
               <option key={workspace.id} value={workspace.id}>
@@ -178,8 +196,12 @@ export function Topbar() {
         type="button"
         className="mr-hover-text"
         onClick={() => navigate("/app/audit")}
-        aria-label={`Audit chain ${auditChipLabel}`}
-        style={{ ...chipBase, background: "transparent", color: "inherit", cursor: "pointer", fontFamily: "var(--font-body)" }}
+        // The accessible name must CONTAIN the visible label (WCAG 2.5.3), so it is
+        // built by suffixing the exact visible string rather than paraphrasing it.
+        aria-label={`Audit · ${auditChipLabel} — open the audit chain`}
+        // No inline `background`: an inline value beats the stylesheet, which made
+        // `.mr-hover-text:hover` inert. The class owns the resting fill and the tint.
+        style={{ ...chipBase, color: "inherit", cursor: "pointer", fontFamily: "var(--font-body)" }}
       >
         <ShieldCheck size={13} strokeWidth={1.5} aria-hidden="true" />
         Audit · {auditChipLabel}
@@ -199,8 +221,8 @@ export function Topbar() {
             display: "inline-flex",
             alignItems: "center",
             gap: 8,
-            border: "1px solid var(--color-divider)",
-            background: "transparent",
+            // neutral-600, and no inline background: see chipBase above.
+            border: "1px solid var(--color-neutral-600)",
             color: "inherit",
             padding: "4px 10px 4px 4px",
             cursor: "pointer",

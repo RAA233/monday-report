@@ -101,9 +101,10 @@ function GateBanner({ gate, onRetry }: { gate: GateState; onRetry: () => void })
             while leaving the export unlocked. Claiming "unresolved" here contradicted
             the queue, which lists conflicts as live cards. */}
         <span style={{ fontSize: 13 }}>
-          The backend reports no open validation tasks for this report's workspace — official exports
-          are unlocked. The gate counts open tasks only: a task parked as a conflict still needs a
-          reviewer but does not hold the export.
+          No open validation task for this workspace was found in the queue, failure and anomaly reads
+          this view made — applying the backend's own gate predicate, which counts open tasks only, so a
+          task parked as a conflict still needs a reviewer but does not hold the export. The backend
+          enforces the gate again on export.
         </span>
       </div>
     );
@@ -242,7 +243,10 @@ export function Exports() {
   // backend still enforces the gate and answers 409, which is surfaced verbatim —
   // because a session that may export but may not read the queue must not be
   // stranded, and the banner says plainly that the gate is not being shown.
-  const gateBlocksExport = gateIsClosed(gate);
+  // `gateIsClosed` is true only for a gate the backend reported CLOSED, so it is
+  // false while the read is still in flight - and the buttons must not be live in a
+  // window where the banner beside them says "Checking the export gate".
+  const gateBlocksExport = gateIsClosed(gate) || gate.state === "loading";
   // Read inside async handlers: the captured render-time `gate` is stale by the
   // time an awaited request rejects.
   const gateRef = useRef(gate);
@@ -520,7 +524,8 @@ export function Exports() {
                         target="_blank"
                         rel="noreferrer"
                         style={{ minHeight: 0, whiteSpace: "normal", textAlign: "start" }}
-                        aria-label={`Open the signed reference for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}, expires ${item.expiresAt}`}
+                        // Prefixed with the exact visible string (WCAG 2.5.3).
+                        aria-label={`Open signed reference (expires ${item.expiresAt}) — for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}`}
                       >
                         Open signed reference (expires {item.expiresAt})
                       </a>
@@ -530,8 +535,10 @@ export function Exports() {
                       className="btn btn-ghost"
                       onClick={() => void mintUrl(item)}
                       disabled={readOnly || !canFetchEvidence || minting !== null}
-                      // Rows repeat this label, so the name states which export.
-                      aria-label={`${item.signedUrl ? "Issue a fresh signed URL" : "Get a signed URL"} for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}`}
+                      // Rows repeat this label, so the name states which export - built by
+                      // suffixing the EXACT visible string, which WCAG 2.5.3 requires the
+                      // accessible name to contain.
+                      aria-label={`${item.signedUrl ? "Issue a fresh URL" : "Get signed URL"} — for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}`}
                     >
                       {minting === item.id
                         ? "Issuing…"

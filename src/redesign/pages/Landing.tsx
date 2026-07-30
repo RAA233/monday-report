@@ -35,13 +35,13 @@ const CAPABILITIES = [
   {
     title: "Structured Monday reporting",
     body:
-      "Weekly Monday reports and daily morning reports on a reviewed schema — five variants, period tracking, and a draft → review → approved → exported status chain.",
+      "Weekly Monday reports and daily morning reports on a reviewed schema — five variants, period tracking, and a recorded status: a report opens as a draft, a refused export moves it to review, and a completed export marks it exported.",
     tags: ["MR-SCHEMA-1", "5 variants"]
   },
   {
     title: "Source-cited drafting",
     body:
-      "The Studio drafts sections from parsed workspace evidence. Every drafted value carries file, page, and confidence; reference values are labeled and source values are never overwritten.",
+      "The Studio drafts sections from parsed workspace evidence. Casing, survey and hydraulics rows each carry page, confidence, and a source-vs-reference label; the drafted header and narrative fields carry the draft's own citation list rather than per-field provenance. Reference values are labelled and recorded source values are never overwritten.",
     tags: ["Citations", "Confidence"]
   },
   {
@@ -53,7 +53,7 @@ const CAPABILITIES = [
   {
     title: "Validation workflow",
     body:
-      "High-severity, low-confidence, and conflicting extractions queue for human review. Decisions carry verified-reviewer attribution into the record.",
+      "High-severity, low-confidence, and conflicting extractions queue for human review. Decisions carry server-derived reviewer attribution into the record; verified-reviewer attribution requires a session authenticated with a per-user credential.",
     tags: ["Human-in-the-loop", "Reviewer attribution"]
   },
   {
@@ -82,7 +82,7 @@ const WORKFLOW = [
     num: "02",
     title: "Extract and cite",
     body:
-      "The pipeline parses, classifies, and extracts failures, NPT, tools, and report fields — every value pinned to its source file, page, and confidence.",
+      "The pipeline parses, classifies, and extracts failures, NPT, tools, and report fields. Every extracted record is pinned to its source file, page, and confidence; the drafted narrative carries the draft's citation list, not a per-field source.",
     surface: "Pipeline"
   },
   {
@@ -645,8 +645,10 @@ export function Landing() {
                   color: BODY_TEXT
                 }}
               >
-                The full application runs on demo data: draft a DDR, record a benchmark measurement,
-                clear the validation queue, and watch the audit chain seal every step.
+                This increment runs on demo data: draft a DDR from parsed evidence, clear the
+                validation queue, and issue a checksummed, gated export. Benchmarking, upload, the
+                failure explorer and the audit-chain view arrive in the next increment and say so on
+                their own pages.
               </p>
             </div>
             <Link className="btn btn-primary" to="/app" style={{ textDecoration: "none" }}>

@@ -470,8 +470,13 @@ export function Studio() {
           <strong style={{ fontFamily: "var(--font-heading)" }}>{activeVariant.label}</strong>{" "}
           <span className="text-muted">— {activeVariant.scope}</span>
         </span>
+        {/* On the error path the `role="alert"` card below owns the message. Repeating
+            it in this `role="status"` line printed the same sentence twice and had two
+            live regions announce it twice. */}
         <span style={{ marginInlineStart: "auto" }}>
-          <StatusLine tone={state === "error" ? "alert" : "neutral"}>{message}</StatusLine>
+          <StatusLine tone={state === "error" ? "alert" : "neutral"}>
+            {state === "error" ? "The draft was not built — see the message below." : message}
+          </StatusLine>
         </span>
       </div>
 
@@ -566,7 +571,10 @@ export function Studio() {
           )}
         </Frame>
 
-        <Frame as="aside" aria-label="Report preview" style={{ padding: 0, overflow: "hidden" }}>
+        {/* No `overflow: hidden` here: `Frame` is the blueprint wrapper and draws its
+            four registration marks at -6px, so clipping the box cut them in half. The
+            wide tables inside scroll in their own `.mr-scroll-x` containers. */}
+        <Frame as="aside" aria-label="Report preview" style={{ padding: 0 }}>
           <div
             style={{
               display: "flex",
@@ -792,7 +800,16 @@ export function Studio() {
                     Open full well schematics →
                   </Link>
                 </div>
-                <div className="mr-scroll-x" style={{ marginTop: 6 }}>
+                <div
+                  className="mr-scroll-x"
+                  style={{ marginTop: 6 }}
+                  // Focusable: the Evidence column sits past the right edge at narrow
+                  // widths and every cell inside is a non-focusable span, so without
+                  // this a keyboard-only user cannot scroll to it.
+                  tabIndex={0}
+                  role="region"
+                  aria-label="Casing strings, scrollable"
+                >
                   <div role="table" aria-label="Casing strings" style={{ minWidth: 380 }}>
                     <div role="row" className="mr-table-head" style={{ gridTemplateColumns: CASING_TEMPLATE }}>
                       <span role="columnheader">String</span>
@@ -832,7 +849,13 @@ export function Studio() {
                 <strong style={{ display: "block", fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}>
                   Survey — source vs calculated
                 </strong>
-                <div className="mr-scroll-x" style={{ marginTop: 6 }}>
+                <div
+                  className="mr-scroll-x"
+                  style={{ marginTop: 6 }}
+                  tabIndex={0}
+                  role="region"
+                  aria-label="Survey stations, scrollable"
+                >
                   <div role="table" aria-label="Survey stations" style={{ minWidth: 460 }}>
                     <div role="row" className="mr-table-head" style={{ gridTemplateColumns: SURVEY_TEMPLATE }}>
                       <span role="columnheader">MD</span>
@@ -892,7 +915,13 @@ export function Studio() {
                 <strong style={{ display: "block", fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}>
                   Hydraulics observations
                 </strong>
-                <div className="mr-scroll-x" style={{ marginTop: 6 }}>
+                <div
+                  className="mr-scroll-x"
+                  style={{ marginTop: 6 }}
+                  tabIndex={0}
+                  role="region"
+                  aria-label="Hydraulics observations, scrollable"
+                >
                   <div role="table" aria-label="Hydraulics observations" style={{ minWidth: 420 }}>
                     <div role="row" className="mr-table-head" style={{ gridTemplateColumns: HYDRAULICS_TEMPLATE }}>
                       <span role="columnheader">Measurement</span>

@@ -8,9 +8,23 @@ import { navItemForPath } from "../shell/navigation";
  * The route exists so the navigation reflects the real product shape, but this
  * page must never read as a finished workflow. It names the view, states plainly
  * that the redesigned surface is not built, and points at the destinations that
- * are. The equivalent workflow still exists in the v1 interface, so it says so
- * instead of implying the capability is missing from the product.
+ * are.
  */
+
+/**
+ * Reserved views whose workflow DOES exist in the v1 interface, so telling the
+ * operator to go there is true. Settings is deliberately absent: v1 has no settings
+ * view and the backend exposes no settings route, so claiming the capability is
+ * "still reachable" would send someone looking for a surface that has never existed.
+ */
+const REACHABLE_IN_V1 = new Set([
+  "Well schematics",
+  "Upload",
+  "Benchmarking",
+  "Failures",
+  "Audit chain"
+]);
+
 export function PendingStage() {
   const { pathname } = useLocation();
   const item = navItemForPath(pathname);
@@ -35,8 +49,10 @@ export function PendingStage() {
           {name.toLowerCase()} as unsupported by this interface today.
         </p>
         <p className="text-muted" style={{ fontSize: 13, lineHeight: 1.6, margin: 0 }}>
-          The underlying capability is unchanged in the backend and still reachable through the
-          existing interface. The redesigned surface arrives in a later increment.
+          {REACHABLE_IN_V1.has(name)
+            ? "The underlying capability is unchanged in the backend and still reachable through the existing interface."
+            : "Neither this interface nor the existing one has a surface for it today, and no backend route exposes it — nothing is hidden behind this page."}{" "}
+          The redesigned surface arrives in a later increment.
         </p>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <Link className="btn btn-primary" to="/app">

@@ -37,12 +37,18 @@ import {
  * pretending to have data.
  */
 /**
- * `refused` is deliberately distinct from `offline`. A 401/403/503 means the API
- * ANSWERED and declined us — the service is reachable, the credential or the role
- * is the problem, and a retry with the same key cannot succeed. Reporting that as
- * "unreachable" sends an operator to debug a running backend.
+ * `refused` and `misconfigured` are both distinct from `offline`, and from each
+ * other. All three mean something other than "unreachable":
+ *
+ *   refused       — 401/403. The API answered; the credential or the role is the
+ *                   problem, and a retry with the same key cannot succeed.
+ *   misconfigured — 503. The service is up but has no client API key or no active
+ *                   audit key, so it refuses BEFORE authentication runs at all.
+ *                   Blaming the operator's credential for this sends them to rotate
+ *                   a key that was never the cause.
+ *   offline       — the request did not complete.
  */
-export type ApiStatus = "checking" | "connected" | "refused" | "offline";
+export type ApiStatus = "checking" | "connected" | "refused" | "misconfigured" | "offline";
 
 /**
  * Why a surface holds no data when the API is not connected — one sentence stem,
@@ -58,6 +64,8 @@ export function apiUnreadReason(apiStatus: ApiStatus): string | null {
       return "The workspace API has not answered yet";
     case "refused":
       return "The workspace API refused this session's credential";
+    case "misconfigured":
+      return "The workspace API is not configured to serve client data yet";
     default:
       return "The workspace API is unreachable";
   }
@@ -121,8 +129,14 @@ export interface WorkspaceContextValue {
   reloadGate: () => void;
   validationTasks: Loadable<ApiValidationTask[]>;
   reloadValidationTasks: () => void;
-  auditIntegrity: ApiAuditIntegrityStatus | null;
-  localAi: ApiLocalAiStatus | null;
+  /**
+   * Both are permission-gated status reads, so "not read" has three causes that must
+   * not collapse into one word: still loading, refused for want of the permission
+   * (`view_audit_history` / `view_runtime_status`), or a read that failed. Only the
+   * last is an outage.
+   */
+  auditIntegrity: Loadable<ApiAuditIntegrityStatus>;
+  localAi: Loadable<ApiLocalAiStatus>;
   /** True when nothing can mutate at all (API unreachable / still probing). */
   readOnly: boolean;
   /**
@@ -268,8 +282,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   });
   const [gate, setGate] = useState<GateState>({ state: "unavailable" });
   const [gateTick, setGateTick] = useState(0);
-  const [auditIntegrity, setAuditIntegrity] = useState<ApiAuditIntegrityStatus | null>(null);
-  const [localAi, setLocalAi] = useState<ApiLocalAiStatus | null>(null);
+  const [auditIntegrity, setAuditIntegrity] = useState<Loadable<ApiAuditIntegrityStatus>>({
+    state: "loading"
+  });
+  const [localAi, setLocalAi] = useState<Loadable<ApiLocalAiStatus>>({ state: "loading" });
   const [toast, setToast] = useState<{ kind: string; text: string } | null>(null);
   const [probe, setProbe] = useState(0);
   const toastTimer = useRef<number | undefined>(undefined);
@@ -358,11 +374,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setApiStatus("checking");
 
     void (async () => {
+      let probedSession: ApiSession;
       try {
         // The session probe decides connectivity: it is the cheapest authenticated
         // read and it is what tells us the tenant we are scoped to.
         const [nextSession, nextWorkspaces] = await Promise.all([getSession(), getWorkspaces()]);
         if (cancelled) return;
+        probedSession = nextSession;
         setSession(nextSession);
         setWorkspaces(nextWorkspaces);
         setActiveId((current) => current ?? nextWorkspaces[0]?.id ?? null);
@@ -371,15 +389,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         // Classify the refusal instead of calling every failure unreachability.
         // `src/lib/api.ts` throws `API <status>: <detail>`, so the status is here:
-        // 401/403 = credential or role, 503 = a backend that is up but not
-        // configured for client data. All three answered; none is "unreachable",
-        // and the retry offered for `offline` cannot fix any of them.
+        // 401/403 = credential or role, 503 = a backend that is up but has no client
+        // API key or no active audit key. All three answered; none is "unreachable",
+        // the retry offered for `offline` cannot fix any of them, and a 503 must not
+        // be attributed to the operator's credential.
         const message = error instanceof Error ? error.message : "";
         const refusal = /^API (401|403|503)\b/.exec(message);
+        // The two status surfaces must leave `loading` on this path too, or a chip
+        // would sit on "Checking…" forever after a failed probe.
+        const unreadStatus: Loadable<never> = refusal
+          ? refusal[1] === "503"
+            ? { state: "error", message: "The workspace API is not configured to serve client data yet." }
+            : { state: "unauthorized" }
+          : { state: "error", message: "The workspace API is unreachable." };
+        setAuditIntegrity(unreadStatus);
+        setLocalAi(unreadStatus);
         if (refusal) {
-          setApiStatus("refused");
+          const misconfigured = refusal[1] === "503";
+          setApiStatus(misconfigured ? "misconfigured" : "refused");
           setValidationTasks(
-            refusal[1] === "503"
+            misconfigured
               ? {
                   state: "error",
                   message: "The workspace API is not configured to serve client data yet."
@@ -399,18 +428,34 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       // Secondary reads are individually tolerant: one failing surface must not
       // take down the shell. Success paths also honour `cancelled` so a stale
       // probe cannot overwrite a newer one's result.
+      //
+      // Both are permission-gated (`view_audit_history`, `view_runtime_status`), and
+      // ENGINEER holds neither. Asking anyway produced a refused GET — one more
+      // `permission_denied` entry in the hash-chained log per mount — and the chip
+      // then reported the refusal as "unavailable", i.e. an outage. Skip the request
+      // when the session we just probed says it may not read it, and record which of
+      // the two it was.
       void loadValidationTasks();
-      try {
-        const integrity = await getAuditIntegrity();
-        if (!cancelled) setAuditIntegrity(integrity);
-      } catch {
-        if (!cancelled) setAuditIntegrity(null);
+      const permits = (permission: string) => probedSession.permissions?.[permission] === true;
+      if (!permits("view_audit_history")) {
+        if (!cancelled) setAuditIntegrity({ state: "unauthorized" });
+      } else {
+        try {
+          const integrity = await getAuditIntegrity();
+          if (!cancelled) setAuditIntegrity({ state: "ready", data: integrity });
+        } catch (integrityError) {
+          if (!cancelled) setAuditIntegrity({ state: "error", message: errorText(integrityError) });
+        }
       }
-      try {
-        const ai = await getLocalAiStatus();
-        if (!cancelled) setLocalAi(ai);
-      } catch {
-        if (!cancelled) setLocalAi(null);
+      if (!permits("view_runtime_status")) {
+        if (!cancelled) setLocalAi({ state: "unauthorized" });
+      } else {
+        try {
+          const ai = await getLocalAiStatus();
+          if (!cancelled) setLocalAi({ state: "ready", data: ai });
+        } catch (aiError) {
+          if (!cancelled) setLocalAi({ state: "error", message: errorText(aiError) });
+        }
       }
     })();
 

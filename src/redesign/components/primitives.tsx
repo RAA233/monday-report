@@ -206,7 +206,10 @@ export function GridTable({
   children: ReactNode;
 }) {
   return (
-    <div className="mr-scroll-x">
+    // Focusable scroll container: a keyboard-only user cannot reach the columns that
+    // sit past the right edge otherwise, and the cells themselves are non-focusable
+    // spans. Named and given a role so the focus stop is not a mystery.
+    <div className="mr-scroll-x" tabIndex={0} role="region" aria-label={`${label}, scrollable`}>
       <div role="table" aria-label={label} style={{ minWidth }}>
         <div role="row" className="mr-table-head" style={{ gridTemplateColumns: template }}>
           {columns.map((column, index) => (

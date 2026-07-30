@@ -43,7 +43,13 @@ export function Validation() {
   const canResolve = can("resolve_validation");
   const decisionsBlocked = readOnly || !canResolve;
 
-  const loadFailures = useCallback(async () => getFailures(), []);
+  // Not read until the session resolves. Keyed on `apiStatus`, this used to fire once
+  // against the unresolved "checking" state and again after the probe landed - two
+  // reads, and on a refused route two audited refusals, for one navigation.
+  const loadFailures = useCallback(
+    async () => (apiStatus === "connected" ? getFailures() : []),
+    [apiStatus]
+  );
   const { value: failures, reload: reloadFailures } = useLoadable(loadFailures, [apiStatus]);
 
   const failureById = useMemo(() => {
@@ -282,7 +288,7 @@ export function Validation() {
                       rows={2}
                       value={notes[task.id] ?? ""}
                       placeholder="Required to reject; recorded with the decision either way."
-                      disabled={decisionsBlocked || busyId === task.id}
+                      disabled={decisionsBlocked || busyId !== null}
                       onChange={(event) =>
                         setNotes((current) => ({ ...current, [task.id]: event.target.value }))
                       }
@@ -291,13 +297,17 @@ export function Validation() {
                 </div>
 
                 <div style={{ display: "grid", gap: 8, alignContent: "start" }}>
-                  {/* Every card repeats these labels, so each name states its target. */}
+                  {/* Every card repeats these labels, so each name states its target.
+                      Disabled across the WHOLE queue while any decision is in flight:
+                      `decide()` refuses on `busyId` regardless of which card was
+                      clicked, so leaving a sibling enabled made its click a silent
+                      no-op — no toast, no status, no label change. */}
                   <button
                     type="button"
                     className="btn btn-primary"
                     aria-label={`Validate: ${cardTitle}`}
                     onClick={() => void decide(task, "validated")}
-                    disabled={decisionsBlocked || busyId === task.id}
+                    disabled={decisionsBlocked || busyId !== null}
                   >
                     {busyId === task.id ? "Recording…" : "Validate"}
                   </button>
@@ -306,7 +316,7 @@ export function Validation() {
                     className="btn btn-secondary"
                     aria-label={`Reject: ${cardTitle}`}
                     onClick={() => void decide(task, "rejected")}
-                    disabled={decisionsBlocked || busyId === task.id}
+                    disabled={decisionsBlocked || busyId !== null}
                   >
                     Reject
                   </button>

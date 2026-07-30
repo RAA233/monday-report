@@ -44,6 +44,7 @@ import { chromium } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const WEB = (process.env.MONDAY_REPORT_WEB_BASE ?? "http://127.0.0.1:5174").replace(/\/$/, "");
 const API = (process.env.MONDAY_REPORT_API_BASE ?? "http://127.0.0.1:8000").replace(/\/$/, "");
@@ -238,7 +239,10 @@ async function assertNoHorizontalScroll(page, label) {
     }
     return { scrollWidth: de.scrollWidth, clientWidth: de.clientWidth, offenders, rendered };
   });
-  const painted = overflow.rendered.elements >= 10 && overflow.rendered.text >= 40;
+  // `headings` is part of the gate, not a collected-and-discarded signal: every route
+  // in this loop renders exactly one h1, which route-renders already asserts.
+  const painted =
+    overflow.rendered.elements >= 10 && overflow.rendered.text >= 40 && overflow.rendered.headings >= 1;
   const noOverflow = overflow.scrollWidth <= overflow.clientWidth + 1;
   check(
     `no-horizontal-scroll:${label}`,
@@ -254,14 +258,21 @@ async function assertNoHorizontalScroll(page, label) {
 /**
  * Screenshots and the JSON summary are working artifacts and must never land in the
  * tree. The docstring promised that; nothing enforced it. Resolving the directory and
- * refusing anything inside the repository does — and `containment` is reported in the
- * summary so a run cannot hide that it wrote somewhere unexpected.
+ * refusing anything inside the repository does — and the outcome is reported in the
+ * summary's `screenshots` field so a run cannot hide that it wrote somewhere
+ * unexpected.
  */
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+// fileURLToPath, not a hand-rolled pathname fix-up: `import.meta.url` is
+// percent-ENCODED, so a repository path containing a space resolved to
+// "…/Monday%20Report" and every real subdirectory then looked OUTSIDE it. And
+// path.relative rather than a string prefix, because Windows paths are
+// case-insensitive while `startsWith` is not.
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 function resolveShotDir() {
   if (!SHOT_DIR) return { dir: "", note: "not set: no screenshot or summary file is written" };
   const dir = path.resolve(SHOT_DIR);
-  const inside = dir === REPO_ROOT || dir.startsWith(REPO_ROOT + path.sep);
+  const rel = path.relative(REPO_ROOT, dir);
+  const inside = rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
   return inside
     ? { dir: "", note: `REFUSED ${dir}: inside the repository at ${REPO_ROOT}` }
     : { dir, note: `writing to ${dir} (outside ${REPO_ROOT})` };
@@ -551,12 +562,13 @@ async function main() {
 
       const exportButton = page.locator("button", { hasText: /^Export PDF$/ }).first();
       const buttonPresent = (await exportButton.count()) > 0;
+      const gatedDisabled = buttonPresent ? await exportButton.isDisabled() : false;
       check(
         "export-disabled-while-gated",
-        buttonPresent && (await exportButton.isDisabled()),
+        buttonPresent && gatedDisabled,
         buttonPresent
-          ? "Export PDF is rendered and disabled while gated"
-          : "FAILED: no Export PDF button was rendered, so the gated state could not be asserted"
+          ? `Export PDF rendered, disabled=${gatedDisabled}`
+          : "no Export PDF button was rendered, so the gated state could not be asserted"
       );
 
       // Resolve through the UI so the unlock is the product's own behaviour, and
@@ -572,11 +584,14 @@ async function main() {
       // The card of a landed decision leaves the DOM only after the queue reload
       // resolves, so a second iteration could otherwise re-click the same card while
       // a genuinely open task stayed untouched.
+      // Counts the aria-label, which is stable: the visible text flips to
+      // "Recording…" while the PATCH is in flight, so counting /^Validate$/ would
+      // report the card as gone before it had actually left the queue.
       const waitForCardCount = async (want) => {
         const deadline = Date.now() + 15000;
         let seen = -1;
         while (Date.now() < deadline) {
-          seen = await page.locator("button", { hasText: /^Validate$/ }).count();
+          seen = await page.locator('button[aria-label^="Validate: "]').count();
           if (seen === want) return { ok: true, seen };
           await page.waitForTimeout(200);
         }
@@ -682,24 +697,36 @@ async function main() {
   {
     // `.catch(() => null)`, NOT `=> []`: substituting an array made both counts 0, so
     // an UNREADABLE audit log passed this check while proving nothing.
-    const countDraftEvents = async () => {
-      const page_ = await apiJson("/audit-logs?limit=200").catch(() => null);
-      if (!Array.isArray(page_)) return null;
-      return page_.filter((entry) => entry.action === "report_draft.generate").length;
+    //
+    // And ANCHORED rather than counted: GET /audit-logs caps at the newest 200 tenant
+    // entries, newest first, so on a busy stack two equal counts prove nothing — the
+    // draft event could have entered while an older one fell off the end. The entries
+    // newer than a fixed anchor are examined instead, and the check fails closed when
+    // the anchor is no longer in the page.
+    const readAuditPage = async () => {
+      const entries = await apiJson("/audit-logs?limit=200").catch(() => null);
+      return Array.isArray(entries) ? entries : null;
     };
-    const draftEventsBefore = await countDraftEvents();
+    const before = await readAuditPage();
+    const anchorId = before && before.length > 0 ? before[0].id : null;
     await page.goto(`${WEB}/app/studio`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
-    const draftEventsAfter = await countDraftEvents();
-    const readable = draftEventsBefore !== null && draftEventsAfter !== null;
+    const after = await readAuditPage();
+    const anchorIndex = after && anchorId ? after.findIndex((entry) => entry.id === anchorId) : -1;
+    const newer = after && anchorIndex >= 0 ? after.slice(0, anchorIndex) : null;
+    const drafted = newer ? newer.filter((entry) => entry.action === "report_draft.generate") : null;
     check(
       "studio-does-not-draft-on-mount",
-      readable && draftEventsAfter === draftEventsBefore,
-      !readable
-        ? `could not read the audit log, so nothing was verified (before=${draftEventsBefore}, after=${draftEventsAfter})`
-        : draftEventsAfter === draftEventsBefore
-          ? `no report_draft.generate audit event was appended by navigation (${draftEventsBefore} before and after)`
-          : `navigation appended ${draftEventsAfter - draftEventsBefore} report_draft.generate audit event(s)`
+      drafted !== null && drafted.length === 0,
+      before === null || after === null
+        ? "could not read the audit log, so nothing was verified"
+        : anchorId === null
+          ? "the audit log was empty before navigating, so there was no anchor to compare against"
+          : anchorIndex < 0
+            ? `the anchor entry ${anchorId} is no longer in the newest 200, so the window cannot be compared`
+            : drafted.length === 0
+              ? `${newer.length} audit event(s) were appended by navigation, none of them report_draft.generate`
+              : `navigation appended ${drafted.length} report_draft.generate audit event(s)`
     );
     const studioBody = await page.locator("body").innerText();
     const explicitDrafting = /runs only when you ask for it/i.test(studioBody);

@@ -10,13 +10,15 @@ import { formatSourceCitation } from "../../lib/citationFormat";
 import { Cells, ErrorState, Frame, PageHeader, Tag } from "../components/primitives";
 import {
   apiUnreadReason,
+  errorText,
   exportGateMessage,
   gateIsClear,
   gateIsClosed,
   gateLabel,
   newestReport,
   useWorkspace,
-  type GateState
+  type GateState,
+  type Loadable
 } from "../lib/workspace";
 
 /**
@@ -101,8 +103,13 @@ export function Ask() {
   const [busy, setBusy] = useState(false);
   const [turns, setTurns] = useState<Turn[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [latestReport, setLatestReport] = useState<string | null>(null);
-  const [rate, setRate] = useState<{ current: number | null; benchmark: number | null } | null>(null);
+  // Loadable, not `| null`: null collapsed "not read yet", "refused", "failed" and
+  // "read, and there is none" into one cell value, so the rail asserted "None yet"
+  // for reads that never happened.
+  const [latestReport, setLatestReport] = useState<Loadable<string | null>>({ state: "loading" });
+  const [rate, setRate] = useState<Loadable<{ current: number | null; benchmark: number | null }>>({
+    state: "loading"
+  });
   const seq = useRef(0);
 
   const workspaceId = activeWorkspace?.id ?? null;
@@ -111,34 +118,52 @@ export function Ask() {
   workspaceIdRef.current = workspaceId;
 
   // Snapshot reads. Each is independently tolerant: a cell that cannot be read
-  // says so rather than showing a zero that looks like a measurement.
+  // says so rather than showing a zero that looks like a measurement. A 403 is kept
+  // apart from a failure (these two routes need view_reports / view_benchmarks), and
+  // "no workspace resolved" is a third distinct case — not an empty result.
   useEffect(() => {
-    if (!workspaceId) return;
+    if (!workspaceId) {
+      const reason = apiUnreadReason(apiStatus) ?? "No workspace is resolved";
+      setLatestReport({ state: "error", message: `${reason}.` });
+      setRate({ state: "error", message: `${reason}.` });
+      return;
+    }
     let cancelled = false;
+    const classify = (caught: unknown): Loadable<never> => {
+      const message = caught instanceof Error ? caught.message : "";
+      return /\b403\b/.test(message)
+        ? { state: "unauthorized" }
+        : { state: "error", message: errorText(caught) };
+    };
+    setLatestReport({ state: "loading" });
+    setRate({ state: "loading" });
     void getMondayReports(workspaceId)
       .then((reports) => {
         if (cancelled) return;
         const newest = newestReport(reports);
-        setLatestReport(newest ? `${newest.period_end} · ${newest.status}` : null);
+        setLatestReport({ state: "ready", data: newest ? `${newest.period_end} · ${newest.status}` : null });
       })
-      .catch(() => {
-        if (!cancelled) setLatestReport(null);
+      .catch((caught: unknown) => {
+        if (!cancelled) setLatestReport(classify(caught));
       });
     void getWorkspaceBenchmarking(workspaceId)
       .then((status) => {
         if (cancelled) return;
         setRate({
-          current: status.current_ft_per_day ?? null,
-          benchmark: status.gordon_average_benchmark ?? null
+          state: "ready",
+          data: {
+            current: status.current_ft_per_day ?? null,
+            benchmark: status.gordon_average_benchmark ?? null
+          }
         });
       })
-      .catch(() => {
-        if (!cancelled) setRate(null);
+      .catch((caught: unknown) => {
+        if (!cancelled) setRate(classify(caught));
       });
     return () => {
       cancelled = true;
     };
-  }, [workspaceId]);
+  }, [workspaceId, apiStatus]);
 
   // The transcript belongs to one workspace. Answers cite that workspace's
   // evidence, so they must not survive a switch.
@@ -175,12 +200,31 @@ export function Ask() {
         .catch((caught: unknown) => {
           if (askedFor !== workspaceIdRef.current) return;
           const message = caught instanceof Error ? caught.message : "";
-          // A 403 is a permission refusal, not an unreachable API — the chat route
-          // is gated on generate_reports. Saying "did not answer" would be wrong.
-          const text = /403/.test(message)
-            ? "This session is not permitted to ask: the chat route requires the generate_reports permission. Nothing was drafted, extracted, or recorded."
-            : "The workspace API did not answer, so this question was not processed. Nothing was drafted, extracted, or recorded." +
-              (message ? ` (${message})` : "");
+          // Classify the way the provider's probe does. "Did not answer" is reserved
+          // for a request that produced no status at all: a 403 is a permission
+          // refusal, a 423 is the client-data readiness gate, and a 503 is a backend
+          // that is up but not configured for client data. The tail goes through
+          // errorText so a raw `API <status>: <detail>` never reaches the transcript.
+          //
+          // The previous version tested a regex that commit fa63ea3 had written with
+          // two literal backspace bytes instead of the escape `\b`, so it matched
+          // nothing and even a real 403 rendered as "did not answer".
+          const status = /^API (\d{3})\b/.exec(message)?.[1];
+          const nothingHappened = " Nothing was drafted, extracted, or recorded.";
+          const text =
+            status === "403"
+              ? "This session is not permitted to ask: the chat route requires the generate_reports permission." +
+                nothingHappened
+              : status === "423"
+                ? "The backend is holding client-data mutations until its readiness checks pass, so this question was not processed." +
+                  nothingHappened
+                : status === "503"
+                  ? "The workspace API is not configured to serve client data yet, so this question was not processed." +
+                    nothingHappened
+                  : status
+                    ? `The workspace API refused this question: ${errorText(caught)}.` + nothingHappened
+                    : "The workspace API did not answer, so this question was not processed." +
+                      nothingHappened;
           setTurns((current) => [...current, { id: `a-${id}`, role: "assistant", text }]);
         })
         .finally(() => {
@@ -268,16 +312,18 @@ export function Ask() {
             <button
               type="button"
               key={command.label}
-              className="mr-hover-accent"
+              className="mr-hover-accent mr-cell-bg"
               // The visible label is split across two elements, so the name is
               // stated explicitly rather than left to content concatenation.
               aria-label={`${command.label} — ${command.detail}`}
               onClick={() => submit(command.prompt)}
               disabled={askDisabled}
+              // No inline `background`: an inline value always beats the stylesheet,
+              // which made the .mr-hover-accent tint inert. `.mr-cell-bg` carries the
+              // resting fill instead.
               style={{
                 display: "grid",
                 gap: 2,
-                background: "var(--color-bg)",
                 border: "none",
                 borderInlineEnd: "1px solid var(--color-divider)",
                 borderBlockEnd: "1px solid var(--color-divider)",
@@ -314,9 +360,11 @@ export function Ask() {
               className="mr-hover-accent"
               onClick={() => submit(starter)}
               disabled={askDisabled}
+              // neutral-600 (3.82:1), not --color-divider (1.38:1): this border is the
+              // only thing that identifies the chip as a control. No inline
+              // background, so the hover tint applies.
               style={{
-                border: "1px solid var(--color-divider)",
-                background: "transparent",
+                border: "1px solid var(--color-neutral-600)",
                 color: "var(--color-neutral-800)",
                 padding: "6px 11px",
                 fontSize: 12,
@@ -407,24 +455,45 @@ export function Ask() {
             emphasis={!gateIsClear(gate)}
             to="/app/validation"
           />
+          {/* Each cell distinguishes an unread read from a read that came back
+              empty. "Not recorded" and "None yet" are claims about the workspace and
+              are reserved for `ready`. */}
           <SnapshotCell
             label="Drilling rate"
             value={
-              rate?.current != null
-                ? `${Math.round(rate.current).toLocaleString()} ft/day`
-                : "Not recorded"
+              rate.state !== "ready"
+                ? unreadCellValue(rate)
+                : rate.data.current != null
+                  ? `${Math.round(rate.data.current).toLocaleString()} ft/day`
+                  : "Not recorded"
             }
             detail={
-              rate?.current != null && rate.benchmark != null
-                ? `vs ${Math.round(rate.benchmark).toLocaleString()}`
-                : undefined
+              rate.state === "ready" && rate.data.current != null && rate.data.benchmark != null
+                ? `vs ${Math.round(rate.data.benchmark).toLocaleString()}`
+                : rate.state === "unauthorized"
+                  ? "requires view_benchmarks"
+                  : undefined
             }
             to="/app/benchmarking"
           />
-          <SnapshotCell label="Latest report" value={latestReport ?? "None yet"} to="/app/reports" />
+          <SnapshotCell
+            label="Latest report"
+            value={
+              latestReport.state !== "ready"
+                ? unreadCellValue(latestReport)
+                : (latestReport.data ?? "None yet")
+            }
+            detail={latestReport.state === "unauthorized" ? "requires view_reports" : undefined}
+            to="/app/reports"
+          />
           <SnapshotCell
             label="Audit chain"
-            value={auditIntegrity ? `${auditIntegrity.status} · ${auditIntegrity.total_events}` : "Unavailable"}
+            value={
+              auditIntegrity.state === "ready"
+                ? `${auditIntegrity.data.status} · ${auditIntegrity.data.total_events}`
+                : unreadCellValue(auditIntegrity)
+            }
+            detail={auditIntegrity.state === "unauthorized" ? "requires view_audit_history" : undefined}
             to="/app/audit"
           />
         </div>
@@ -469,11 +538,15 @@ export function Ask() {
             Local AI
           </strong>
           <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.55, margin: "6px 0 0" }}>
-            {localAi
-              ? `${localAi.runtime} · ${localAi.model ?? "no model reported"} — ${
-                  localAi.reachable ? "reachable" : "not reachable"
-                }, hosted fallback ${localAi.hosted_fallback_enabled ? "enabled" : "disabled"}. ${localAi.detail}`
-              : "Local-AI status could not be read. Answers still come from the workspace's deterministic analysis path."}
+            {localAi.state === "ready"
+              ? `${localAi.data.runtime} · ${localAi.data.model ?? "no model reported"} — ${
+                  localAi.data.reachable ? "reachable" : "not reachable"
+                }, hosted fallback ${localAi.data.hosted_fallback_enabled ? "enabled" : "disabled"}. ${localAi.data.detail}`
+              : localAi.state === "loading"
+                ? "Reading the local-AI status. Answers come from the workspace's deterministic analysis path either way."
+                : localAi.state === "unauthorized"
+                  ? "This session may not read runtime status (view_runtime_status), so it is not shown. Answers come from the workspace's deterministic analysis path either way."
+                  : "Local-AI status could not be read. Answers still come from the workspace's deterministic analysis path."}
           </p>
         </div>
       </aside>
@@ -543,6 +616,16 @@ function SnapshotCell({
   );
 }
 
+/** What a snapshot cell shows when its read did not produce a value. Never a figure,
+ *  and never a claim about the workspace. */
+function unreadCellValue(state: Loadable<unknown>): string {
+  return state.state === "loading"
+    ? "Checking…"
+    : state.state === "unauthorized"
+      ? "Not visible"
+      : "Not read";
+}
+
 /**
  * `export_actions` is the backend's own token list. Only `monday_report_<fmt>` for
  * the five committed formats names something the Exports view can issue; other
@@ -578,6 +661,9 @@ function ChatTurn({
 
   return (
     <article
+      // The avatar text is decorative and hidden, and the remaining cues (alignment,
+      // fill) are visual only, so the turn itself has to carry the attribution.
+      aria-label={isUser ? "Your question" : "Monday Report answer"}
       style={{
         display: "grid",
         gridTemplateColumns: "30px minmax(0,1fr)",
@@ -793,9 +879,9 @@ function ChatTurn({
                     className="mr-hover-accent"
                     disabled={disabled}
                     onClick={() => onSubmit(followup)}
+                    // neutral-600 and no inline background: as the starter chips above.
                     style={{
-                      border: "1px solid var(--color-divider)",
-                      background: "transparent",
+                      border: "1px solid var(--color-neutral-600)",
                       color: "var(--color-neutral-800)",
                       padding: "6px 11px",
                       fontSize: 12,
@@ -835,7 +921,9 @@ function ChatTurn({
                           key={token}
                           className="btn btn-secondary"
                           to="/app/exports"
-                          aria-label={`Open Exports to issue the ${format.toUpperCase()} export`}
+                          // Prefixed with the exact visible string (WCAG 2.5.3 Label
+                          // in Name), not paraphrased around it.
+                          aria-label={`Export ${format.toUpperCase()} — opens the Exports view to issue it`}
                         >
                           Export {format.toUpperCase()}
                         </Link>

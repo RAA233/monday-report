@@ -104,9 +104,10 @@ export function Sidebar() {
                     padding: "4px 8px",
                     border: "none",
                     borderInlineStart: `2px solid ${current ? "var(--color-accent)" : "transparent"}`,
-                    background: current
-                      ? "color-mix(in srgb, var(--color-accent) 10%, transparent)"
-                      : "transparent",
+                    // No inline `background`: it always beats the stylesheet, which
+                    // made `.mr-hover-text:hover` inert on every nav item. The
+                    // resting and current fills live in redesign.css, keyed on
+                    // `aria-current`, so the hover tint can actually apply.
                     color: current ? "var(--color-accent-800)" : "var(--color-text)",
                     fontFamily: "var(--font-body)",
                     fontSize: 13.5,
