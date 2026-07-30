@@ -12,14 +12,22 @@ import {
   Skeleton,
   Tag
 } from "../components/primitives";
-import { exportGateMessage, useLoadable, useWorkspace } from "../lib/workspace";
+import {
+  exportGateMessage,
+  gateIsClear,
+  gateIsClosed,
+  gateLabel,
+  useLoadable,
+  useWorkspace
+} from "../lib/workspace";
 
 /**
  * Monday reports.
  *
- * The gate column is the same open-validation count the Exports view enforces and
- * the sidebar badge shows — one source of truth, so a report can never look clear
- * here and be refused there.
+ * The gate column shows the BACKEND's gate for this workspace (the same figure the
+ * export route enforces), so a report cannot look clear here and be refused there.
+ * It is deliberately NOT the sidebar badge, which counts the tenant-wide review
+ * queue: those are different populations and the columns are labelled accordingly.
  */
 const TEMPLATE = "130px 1.2fr auto auto 0.7fr 0.7fr auto";
 
@@ -46,8 +54,7 @@ function shortId(value: string): string {
 
 export function Reports() {
   const navigate = useNavigate();
-  const { activeWorkspace, openValidationTasks, validationGateKnown, readOnly, can, showToast, apiStatus } =
-    useWorkspace();
+  const { activeWorkspace, gate, readOnly, can, showToast, apiStatus } = useWorkspace();
   const workspaceId = activeWorkspace?.id ?? null;
   const [creating, setCreating] = useState(false);
   // POST /monday-reports is gated on generate_reports by the backend.
@@ -60,12 +67,10 @@ export function Reports() {
 
   const { value, reload } = useLoadable(load, [workspaceId]);
 
-  // Three states: an unread queue is unknown, not clear.
-  const gateLabel = !validationGateKnown
-    ? "Unknown"
-    : openValidationTasks === 0
-      ? "Clear"
-      : `${openValidationTasks} open`;
+  // The gate label comes from the backend's own gate report, never a client
+  // re-derivation: only "ready" can say clear or give a count.
+  const gateText = gateLabel(gate);
+  const gateIsGood = gateIsClear(gate);
 
   async function createReport() {
     if (!workspaceId || readOnly || !canCreate || creating) return;
@@ -167,8 +172,8 @@ export function Reports() {
                     <Tag tone={STATUS_TONE[report.status]}>{report.status}</Tag>
                   </GridCell>
                   <GridCell>
-                    <Tag tone={!validationGateKnown || openValidationTasks > 0 ? "critical" : "outline"}>
-                      {gateLabel}
+                    <Tag tone={gateIsGood ? "outline" : "critical"} style={{ whiteSpace: "nowrap" }}>
+                      {gateText}
                     </Tag>
                   </GridCell>
                   <GridCell>
@@ -202,9 +207,9 @@ export function Reports() {
             to the audit chain.
           </p>
 
-          {openValidationTasks > 0 ? (
+          {gateIsClosed(gate) && gate.state === "ready" ? (
             <p role="status" style={{ fontSize: 12.5, margin: 0, color: "var(--color-accent-800)" }}>
-              {exportGateMessage(openValidationTasks)}
+              {exportGateMessage(gate.openTasks)}
             </p>
           ) : null}
         </>

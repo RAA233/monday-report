@@ -18,7 +18,7 @@ import {
   Tag,
   type CellSpec
 } from "../components/primitives";
-import { exportGateMessage, useWorkspace } from "../lib/workspace";
+import { exportGateMessage, gateIsClear, gateIsClosed, gateLabel, useWorkspace } from "../lib/workspace";
 
 /**
  * Report Studio.
@@ -29,9 +29,15 @@ import { exportGateMessage, useWorkspace } from "../lib/workspace";
  *
  * The editor holds local edits only. This is deliberate and disclosed on screen:
  * the API records changes as field corrections against a target, and inventing a
- * "save draft" call that does not exist would be worse than saying so. Values that
- * arrived from evidence are marked, and a local edit never rewrites the recorded
- * source value.
+ * "save draft" call that does not exist would be worse than saying so. A local edit
+ * never rewrites the recorded source value.
+ *
+ * Per-FIELD provenance marking is not implemented: `ApiReportDraft` returns the
+ * header/narrative fields as bare strings with no per-field source, so the editor
+ * cannot mark them without inventing provenance. Provenance IS shown where the
+ * payload carries it — the casing, survey and hydraulics rows tag `source` vs
+ * `reference` and their conflict/review flags, and the readiness board reports the
+ * source of each evidence class.
  */
 interface FormState {
   reportDate: string;
@@ -46,7 +52,8 @@ interface FormState {
   /**
    * As-drilled dogleg severity. Operator-entered and session-local: `ApiReportDraft`
    * carries no `dls` field, so this is never populated from evidence and never
-   * presented as sourced.
+   * presented as sourced. Preserved across a re-draft of the SAME workspace, and
+   * cleared with the rest of the form when the workspace changes.
    */
   dls: string;
   mudWeight: string;
@@ -136,8 +143,7 @@ const COMPLETENESS_FIELDS: Array<keyof FormState> = [
 export function Studio() {
   const { reportId } = useParams();
   const navigate = useNavigate();
-  const { activeWorkspace, openValidationTasks, validationGateKnown, readOnly, can, apiStatus } =
-    useWorkspace();
+  const { activeWorkspace, gate, readOnly, can, apiStatus } = useWorkspace();
   const workspaceId = activeWorkspace?.id ?? null;
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
@@ -190,25 +196,32 @@ export function Studio() {
     }
   }, [workspaceId]);
 
-  // Entering the Studio through a report loads that workspace's draft immediately;
-  // the fields are otherwise empty rather than pre-filled with plausible values.
-  useEffect(() => {
-    if (workspaceId && apiStatus === "connected") void sourceDraft();
-  }, [workspaceId, apiStatus, sourceDraft]);
-
-  // Clear the previous workspace's draft the moment the workspace changes, so no
-  // stale evidence is on screen while the new one loads.
+  // ONE effect for the workspace-scoped view: clear the previous workspace's draft
+  // AND its form, then load. Two separate effects meant the clear ran after the
+  // loader had already set "loading", cancelling the skeleton; and clearing only
+  // `draft` left the previous workspace's well, rig and operator text on screen
+  // under the new workspace's name.
   useEffect(() => {
     setDraft(null);
-    setState("idle");
-  }, [workspaceId]);
+    setForm(EMPTY_FORM);
+    setEditedKeys(new Set());
+    if (workspaceId && apiStatus === "connected") {
+      void sourceDraft();
+    } else {
+      setState("idle");
+      setMessage("Source draft pulls parsed workspace evidence into this editable report.");
+    }
+  }, [workspaceId, apiStatus, sourceDraft]);
 
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
     setEditedKeys((current) => new Set(current).add(key));
   }
 
-  const gateBlocked = openValidationTasks > 0;
+  // The gate is the backend's own report for this workspace, never re-derived.
+  const gateBlocked = gateIsClosed(gate);
+  const gateKnown = gate.state === "ready";
+  const gateText = gateLabel(gate);
 
   /**
    * Issue readiness board — the handoff's six cells (Format, Source, Draft,
@@ -221,7 +234,7 @@ export function Studio() {
     const completeness = Math.round((filled / COMPLETENESS_FIELDS.length) * 100);
     const narrativeReady =
       form.presentOps.trim().length > 0 && form.nextOps.trim().length > 0 && form.safety.trim().length > 0;
-    const gateKnownAndClear = validationGateKnown && !gateBlocked;
+    const gateKnownAndClear = gateIsClear(gate);
     const issueReady = narrativeReady && completeness === 100 && gateKnownAndClear;
 
     return [
@@ -255,12 +268,12 @@ export function Studio() {
       },
       {
         label: "Validation",
-        value: !validationGateKnown ? "Unknown" : gateBlocked ? `${openValidationTasks} open` : "Clear",
-        detail: !validationGateKnown
-          ? "The validation queue could not be read"
+        value: gateText,
+        detail: !gateKnown
+          ? "The backend gate could not be read — not a claim that it is clear"
           : gateBlocked
             ? "Export blocked until resolved"
-            : "No open tasks",
+            : "No open tasks for this workspace",
         ok: gateKnownAndClear
       },
       {
@@ -274,7 +287,7 @@ export function Studio() {
         ok: issueReady
       }
     ];
-  }, [activeVariant, draft, form, gateBlocked, openValidationTasks, validationGateKnown]);
+  }, [activeVariant, draft, form, gate, gateBlocked, gateKnown, gateText]);
 
   /** Second row: what the loaded evidence actually contains. */
   const evidenceCells: CellSpec[] = useMemo(() => {
@@ -316,8 +329,12 @@ export function Studio() {
 
   return (
     <>
+      {/* The draft is WORKSPACE-scoped: GET /workspaces/{id}/report-draft. Naming a
+          report id here implied the Studio was showing that report's stored
+          content, which it never reads. The report id (when the route carries one)
+          is disclosed below as the issue target instead. */}
       <PageHeader
-        kicker={`Report Studio${reportId ? ` · ${reportId}` : ""} · ${reportVariantSchemaVersion}`}
+        kicker={`Report Studio · ${activeWorkspace?.name ?? "no workspace"} · ${reportVariantSchemaVersion}`}
         title={`${activeVariant.label} draft`}
         actions={
           <>
@@ -338,6 +355,14 @@ export function Studio() {
           </>
         }
       />
+
+      {reportId ? (
+        <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
+          Issue target: report <code title={reportId}>{reportId}</code>. This draft is built from the
+          workspace's parsed evidence, not from that report's stored content — the report is where an
+          export is issued.
+        </p>
+      ) : null}
 
       <div
         style={{
@@ -603,17 +628,17 @@ export function Studio() {
                 Issue gate
               </strong>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
-                <Tag tone={gateBlocked ? "critical" : "accent"}>
-                  Validation · {gateBlocked ? `${openValidationTasks} open` : "clear"}
+                <Tag tone={gateIsClear(gate) ? "accent" : "critical"}>
+                  Validation · {gateKnown ? (gateBlocked ? `${gate.openTasks} open` : "clear") : gateText.toLowerCase()}
                 </Tag>
-                <Tag tone={gateBlocked ? "neutral" : "accent"}>
-                  Export · {gateBlocked ? "gated" : "available"}
+                <Tag tone={gateIsClear(gate) ? "accent" : "neutral"}>
+                  Export · {gateIsClear(gate) ? "available" : gateBlocked ? "gated" : "gate not read"}
                 </Tag>
                 <Tag tone="outline">{reportVariantSchemaVersion}</Tag>
               </div>
               {gateBlocked ? (
                 <p role="status" style={{ fontSize: 12, margin: "8px 0 0", color: "var(--color-accent-800)" }}>
-                  {exportGateMessage(openValidationTasks)}{" "}
+                  {exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)}{" "}
                   <button
                     type="button"
                     className="btn btn-ghost"

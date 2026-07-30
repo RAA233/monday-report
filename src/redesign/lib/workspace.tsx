@@ -10,9 +10,11 @@ import {
 } from "react";
 import {
   getAuditIntegrity,
+  getFailures,
   getLocalAiStatus,
   getSession,
   getValidationTasks,
+  getWorkspaceBenchmarking,
   getWorkspaces,
   type ApiAuditIntegrityStatus,
   type ApiLocalAiStatus,
@@ -49,14 +51,40 @@ export interface WorkspaceContextValue {
   workspaces: ApiWorkspace[];
   activeWorkspace: ApiWorkspace | null;
   selectWorkspace: (id: string) => void;
-  /** Validation tasks in an open state — the export gate's authoritative count. */
-  openValidationTasks: number;
   /**
-   * True only when the validation queue actually loaded. While this is false the
-   * gate state is UNKNOWN — a zero count from a failed or in-flight read must
-   * never be presented as "gate clear".
+   * Count of unresolved tasks in the tenant's validation QUEUE — what the
+   * Validation view lists and the sidebar badge counts. This is NOT the export
+   * gate: see `gate` below.
    */
-  validationGateKnown: boolean;
+  openQueueTasks: number;
+  /**
+   * The export gate, computed with the BACKEND's exact predicate.
+   *
+   * `POST /monday-reports/{id}/exports/{fmt}` enforces
+   * `_open_validation_tasks_for_workspace`, which counts a validation task only
+   * when: status is `open` (NOT `conflict`), the target type is `failure` or
+   * `anomaly_event`, and that target belongs to the report's workspace. A naive
+   * count over `GET /validation-tasks` satisfies none of those three conditions —
+   * it is tenant-wide, all target types, and counts `conflict` — so it would put a
+   * figure in the committed gate copy that the backend does not enforce.
+   *
+   * Reconstructed here from three READ-ONLY endpoints that carry the needed scope:
+   * `/validation-tasks`, `/failures` (failure -> workspace) and
+   * `/workspaces/{id}/benchmarking` (anomaly -> workspace).
+   *
+   * Deliberately NOT read from `GET /workspaces/{id}/report-draft`. That endpoint
+   * publishes the backend's own number, but it calls
+   * `store.audit("report_draft.generate")` — reading it on page load would append an
+   * audit event claiming a draft was generated when the user merely opened a page,
+   * inflating a hash-chained trust surface, and would put a write in the path of
+   * every navigation.
+   *
+   * `unauthorized` is distinct from `error`: a session that may not read the queue
+   * has produced no evidence about the gate, and must not strand a user who IS
+   * permitted to export — the backend remains the authority in that case.
+   */
+  gate: GateState;
+  reloadGate: () => void;
   validationTasks: Loadable<ApiValidationTask[]>;
   reloadValidationTasks: () => void;
   auditIntegrity: ApiAuditIntegrityStatus | null;
@@ -79,23 +107,70 @@ export interface WorkspaceContextValue {
   resumeToast: () => void;
 }
 
+/**
+ * The export gate, as reported by the backend.
+ *
+ *   loading      — the read is in flight; assert nothing
+ *   ready        — `openTasks` is the backend's own count for this workspace
+ *   unauthorized — this session may not read the gate (403). Not evidence about
+ *                  the gate; the backend still enforces it on export.
+ *   error        — the read failed. Also not evidence.
+ *   unavailable  — no workspace selected / API offline
+ */
+export type GateState =
+  | { state: "loading" }
+  | { state: "ready"; openTasks: number; clear: boolean }
+  | { state: "unauthorized" }
+  | { state: "error"; message: string }
+  | { state: "unavailable" };
+
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 
 /**
- * Validation-task statuses that still hold the export gate closed.
+ * Validation-task statuses that still need a reviewer decision.
  *
  * `ApiValidationTask.status` is the committed union open|validated|rejected|conflict.
- * A conflict is unresolved by definition, so both it and `open` keep the gate shut.
+ * Used for the QUEUE count (what a reviewer still has to look at) — a `conflict`
+ * needs human attention even though the backend's export gate counts only `open`.
  */
-const OPEN_TASK_STATUSES: ReadonlyArray<ApiValidationTask["status"]> = ["open", "conflict"];
+const UNRESOLVED_TASK_STATUSES: ReadonlyArray<ApiValidationTask["status"]> = ["open", "conflict"];
 
 export function isOpenValidationTask(task: ApiValidationTask): boolean {
-  return OPEN_TASK_STATUSES.includes(task.status);
+  return UNRESOLVED_TASK_STATUSES.includes(task.status);
 }
 
-/** The committed gate copy. `count` must be the real calculated open-task count. */
+/**
+ * The committed gate copy. `count` must be the BACKEND's own gate count
+ * (`GateState.openTasks`), never a client re-derivation.
+ */
 export function exportGateMessage(count: number): string {
   return `Resolve ${count} validation task(s) before exporting an official Monday Report.`;
+}
+
+/** True only when the backend reported the gate AND reported it clear. */
+export function gateIsClear(gate: GateState): boolean {
+  return gate.state === "ready" && gate.clear;
+}
+
+/** True only when the backend reported the gate AND reported it closed. */
+export function gateIsClosed(gate: GateState): boolean {
+  return gate.state === "ready" && !gate.clear;
+}
+
+/** Short label for a gate chip/cell. Never says "clear" unless the backend did. */
+export function gateLabel(gate: GateState): string {
+  switch (gate.state) {
+    case "ready":
+      return gate.clear ? "Clear" : `${gate.openTasks} open`;
+    case "loading":
+      return "Checking…";
+    case "unauthorized":
+      return "Not visible";
+    case "error":
+      return "Unknown";
+    default:
+      return "Unavailable";
+  }
 }
 
 /**
@@ -137,6 +212,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [validationTasks, setValidationTasks] = useState<Loadable<ApiValidationTask[]>>({
     state: "loading"
   });
+  const [gate, setGate] = useState<GateState>({ state: "unavailable" });
+  const [gateTick, setGateTick] = useState(0);
   const [auditIntegrity, setAuditIntegrity] = useState<ApiAuditIntegrityStatus | null>(null);
   const [localAi, setLocalAi] = useState<ApiLocalAiStatus | null>(null);
   const [toast, setToast] = useState<{ kind: string; text: string } | null>(null);
@@ -155,6 +232,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const showToast = useCallback(
     (kind: string, text: string) => {
+      // Reset the hold: a pause left set by a previous toast (e.g. dismissed from
+      // the keyboard, so no mouseleave ever fired) would make this one permanent.
+      toastPaused.current = false;
       setToast({ kind, text });
       armToastTimer();
     },
@@ -162,6 +242,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   );
 
   const dismissToast = useCallback(() => {
+    toastPaused.current = false;
     window.clearTimeout(toastTimer.current);
     setToast(null);
   }, []);
@@ -179,15 +260,24 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // The auto-dismiss timer must not outlive the provider.
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
+  // A monotonic token: only the newest queue read may publish its result, so a
+  // slow earlier read cannot overwrite a newer one.
+  const queueToken = useRef(0);
+
   const loadValidationTasks = useCallback(async () => {
+    const token = ++queueToken.current;
     setValidationTasks({ state: "loading" });
     try {
       const tasks = await getValidationTasks();
+      if (token !== queueToken.current) return;
       setValidationTasks({ state: "ready", data: tasks });
     } catch (error) {
+      if (token !== queueToken.current) return;
       setValidationTasks({ state: "error", message: errorText(error) });
     }
   }, []);
+
+  const reloadGate = useCallback(() => setGateTick((n) => n + 1), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -257,17 +347,72 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [apiStatus, session]
   );
 
-  const openValidationTasks = useMemo(() => {
+  const openQueueTasks = useMemo(() => {
     if (validationTasks.state !== "ready") return 0;
     return validationTasks.data.filter(isOpenValidationTask).length;
   }, [validationTasks]);
-
-  const validationGateKnown = validationTasks.state === "ready";
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeId) ?? workspaces[0] ?? null,
     [workspaces, activeId]
   );
+
+  // Reconstruct the gate with the backend's own predicate, from READ-ONLY reads.
+  // Tokened so a slow read for a previous workspace cannot publish over a newer one.
+  const gateToken = useRef(0);
+  const activeWorkspaceId = activeWorkspace?.id ?? null;
+  useEffect(() => {
+    const token = ++gateToken.current;
+    if (apiStatus !== "connected" || !activeWorkspaceId) {
+      setGate({ state: "unavailable" });
+      return;
+    }
+    setGate({ state: "loading" });
+    void (async () => {
+      try {
+        const [tasks, failures] = await Promise.all([getValidationTasks(), getFailures()]);
+        // Anomaly-targeted tasks also hold the gate. This read is workspace-scoped
+        // and read-only; if it is unavailable, anomaly-targeted tasks are COUNTED
+        // (fail closed) rather than silently dropped from the gate.
+        let anomalyIds: Set<string> | null = null;
+        try {
+          const benchmarking = await getWorkspaceBenchmarking(activeWorkspaceId);
+          anomalyIds = new Set(
+            [...benchmarking.active_anomalies, ...benchmarking.historical_anomalies].map(
+              (anomaly) => anomaly.id
+            )
+          );
+        } catch {
+          anomalyIds = null;
+        }
+        if (token !== gateToken.current) return;
+
+        const workspaceFailureIds = new Set(
+          failures
+            .filter((failure) => failure.workspace_id === activeWorkspaceId)
+            .map((failure) => failure.id)
+        );
+        const holding = tasks.filter((task) => {
+          if (task.status !== "open") return false; // the backend counts `open` only
+          if (task.target_type === "failure") return workspaceFailureIds.has(task.target_id);
+          if (task.target_type === "anomaly_event") {
+            return anomalyIds === null ? true : anomalyIds.has(task.target_id);
+          }
+          return false; // every other target type is outside the gate
+        });
+        setGate({ state: "ready", openTasks: holding.length, clear: holding.length === 0 });
+      } catch (error) {
+        if (token !== gateToken.current) return;
+        const message = error instanceof Error ? error.message : "";
+        // A 403 is evidence about this session's permissions, not about the gate.
+        if (/\b403\b/.test(message)) {
+          setGate({ state: "unauthorized" });
+          return;
+        }
+        setGate({ state: "error", message: errorText(error) });
+      }
+    })();
+  }, [apiStatus, activeWorkspaceId, gateTick, validationTasks]);
 
   const value = useMemo<WorkspaceContextValue>(
     () => ({
@@ -277,8 +422,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       workspaces,
       activeWorkspace,
       selectWorkspace: setActiveId,
-      openValidationTasks,
-      validationGateKnown,
+      openQueueTasks,
+      gate,
+      reloadGate,
       validationTasks,
       reloadValidationTasks: () => void loadValidationTasks(),
       auditIntegrity,
@@ -298,8 +444,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       session,
       workspaces,
       activeWorkspace,
-      openValidationTasks,
-      validationGateKnown,
+      openQueueTasks,
+      gate,
+      reloadGate,
       validationTasks,
       loadValidationTasks,
       auditIntegrity,

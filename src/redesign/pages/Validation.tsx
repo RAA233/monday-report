@@ -22,7 +22,7 @@ export function Validation() {
   const {
     validationTasks,
     reloadValidationTasks,
-    openValidationTasks,
+    openQueueTasks,
     readOnly,
     can,
     showToast,
@@ -90,8 +90,8 @@ export function Validation() {
         title="Validation queue"
         lede="High-severity, low-confidence, and conflicting extractions wait here. Decisions carry verified-reviewer attribution and unlock the export gate."
         actions={
-          <Tag tone={openValidationTasks > 0 ? "critical" : "outline"} style={{ fontSize: 13, padding: "6px 12px" }}>
-            {openValidationTasks} open
+          <Tag tone={openQueueTasks > 0 ? "critical" : "outline"} style={{ fontSize: 13, padding: "6px 12px" }}>
+            {openQueueTasks} open
           </Tag>
         }
       />

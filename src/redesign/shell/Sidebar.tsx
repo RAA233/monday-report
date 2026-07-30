@@ -1,4 +1,4 @@
-import { NavLink, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { BrandMark, Tag } from "../components/primitives";
 import { NAV_GROUPS, isCurrent } from "./navigation";
 import { useWorkspace } from "../lib/workspace";
@@ -12,7 +12,9 @@ import { useWorkspace } from "../lib/workspace";
  */
 export function Sidebar() {
   const { pathname } = useLocation();
-  const { openValidationTasks, activeWorkspace, apiStatus, session } = useWorkspace();
+  // The badge counts the tenant validation QUEUE, which is what the Validation view
+  // lists. The export gate is a different, workspace-scoped number (see `gate`).
+  const { openQueueTasks, activeWorkspace, apiStatus, session } = useWorkspace();
   const tenantName = session?.tenant.name ?? null;
 
   return (
@@ -69,15 +71,14 @@ export function Sidebar() {
               const current = isCurrent(item, pathname);
               const Icon = item.icon;
               const badge =
-                item.showsValidationCount && openValidationTasks > 0
-                  ? String(openValidationTasks)
+                item.showsValidationCount && openQueueTasks > 0
+                  ? String(openQueueTasks)
                   : null;
               return (
-                <NavLink
+                <Link
                   data-navbtn=""
                   key={item.path}
                   to={item.path}
-                  end={item.path === "/app"}
                   aria-current={current ? "page" : undefined}
                   // The count is a bare visual number, so it is folded into the
                   // accessible name rather than left to be read as loose text.
@@ -118,7 +119,7 @@ export function Sidebar() {
                       {badge}
                     </span>
                   ) : null}
-                </NavLink>
+                </Link>
               );
             })}
           </div>

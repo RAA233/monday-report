@@ -8,7 +8,7 @@ import {
 } from "../../lib/api";
 import { formatSourceCitation } from "../../lib/citationFormat";
 import { Cells, ErrorState, Frame, PageHeader, Tag } from "../components/primitives";
-import { newestReport, useWorkspace } from "../lib/workspace";
+import { gateIsClear, gateLabel, newestReport, useWorkspace } from "../lib/workspace";
 
 /**
  * Ask — the chat-first home.
@@ -86,8 +86,7 @@ const STEP_TONE: Record<string, string> = {
 
 export function Ask() {
   const navigate = useNavigate();
-  const { activeWorkspace, apiStatus, session, openValidationTasks, localAi, auditIntegrity, readOnly } =
-    useWorkspace();
+  const { activeWorkspace, apiStatus, session, gate, localAi, auditIntegrity, can } = useWorkspace();
 
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -167,16 +166,13 @@ export function Ask() {
         .catch((caught: unknown) => {
           if (askedFor !== workspaceIdRef.current) return;
           const message = caught instanceof Error ? caught.message : "";
-          setTurns((current) => [
-            ...current,
-            {
-              id: `a-${id}`,
-              role: "assistant",
-              text:
-                "The workspace API did not answer, so this question was not processed. Nothing was drafted, extracted, or recorded." +
-                (message ? ` (${message})` : "")
-            }
-          ]);
+          // A 403 is a permission refusal, not an unreachable API — the chat route
+          // is gated on generate_reports. Saying "did not answer" would be wrong.
+          const text = /403/.test(message)
+            ? "This session is not permitted to ask: the chat route requires the generate_reports permission. Nothing was drafted, extracted, or recorded."
+            : "The workspace API did not answer, so this question was not processed. Nothing was drafted, extracted, or recorded." +
+              (message ? ` (${message})` : "");
+          setTurns((current) => [...current, { id: `a-${id}`, role: "assistant", text }]);
         })
         .finally(() => {
           if (askedFor === workspaceIdRef.current) setBusy(false);
@@ -185,7 +181,12 @@ export function Ask() {
     [busy, workspaceId]
   );
 
-  const gateLabel = openValidationTasks === 0 ? "Clear" : `${openValidationTasks} open`;
+
+  // The chat route is gated on generate_reports by the backend.
+  const askDisabled = busy || apiStatus !== "connected" || !can("generate_reports");
+
+  // The gate label is the backend's own report; Ask never re-derives it.
+  const gateText = gateLabel(gate);
 
   // Short, factual announcement derived from the newest assistant turn.
   const announcement = useMemo(() => {
@@ -232,13 +233,13 @@ export function Ask() {
             placeholder="Ask about failures, NPT, tools, drilling rate, or source evidence…"
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            disabled={busy || apiStatus !== "connected"}
+            disabled={askDisabled}
           />
           <button
             type="submit"
             className="btn btn-primary"
             style={{ minHeight: 46, paddingInline: 18 }}
-            disabled={busy || apiStatus !== "connected"}
+            disabled={askDisabled}
           >
             Ask
           </button>
@@ -263,7 +264,7 @@ export function Ask() {
               // stated explicitly rather than left to content concatenation.
               aria-label={`${command.label} — ${command.detail}`}
               onClick={() => submit(command.prompt)}
-              disabled={busy || apiStatus !== "connected"}
+              disabled={askDisabled}
               style={{
                 display: "grid",
                 gap: 2,
@@ -301,7 +302,7 @@ export function Ask() {
               key={starter}
               className="mr-hover-accent"
               onClick={() => submit(starter)}
-              disabled={busy || apiStatus !== "connected"}
+              disabled={askDisabled}
               style={{
                 border: "1px solid var(--color-divider)",
                 background: "transparent",
@@ -317,6 +318,16 @@ export function Ask() {
           ))}
         </div>
 
+        {apiStatus === "connected" && !can("generate_reports") ? (
+          <p
+            role="status"
+            style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
+          >
+            This session lacks <strong>generate_reports</strong>, which the chat route requires, so
+            asking is disabled here.
+          </p>
+        ) : null}
+
         {error ? <ErrorState title="Nothing was asked" message={error} /> : null}
 
         {/* One concise announcement per answer instead of making the whole
@@ -326,8 +337,10 @@ export function Ask() {
           {announcement}
         </span>
 
-        {/* role="log" is the right container role for appended conversation. */}
-        <div style={{ display: "grid", alignContent: "start", gap: 14 }} role="log" aria-label="Conversation">
+        {/* A plain labelled region, NOT role="log": log carries an implicit
+            aria-live=polite, so combining it with the status line above announced
+            every answer twice — once as a summary and once as the whole subtree. */}
+        <div style={{ display: "grid", alignContent: "start", gap: 14 }} role="group" aria-label="Conversation">
           {turns.length === 0 && !busy ? (
             <Frame style={{ padding: 16 }}>
               <p style={{ fontSize: 13.5, lineHeight: 1.55, margin: 0 }}>
@@ -345,7 +358,7 @@ export function Ask() {
               turn={turn}
               onNavigate={navigate}
               onSubmit={submit}
-              disabled={busy || apiStatus !== "connected"}
+              disabled={askDisabled}
             />
           ))}
         </div>
@@ -371,8 +384,9 @@ export function Ask() {
         >
           <SnapshotCell
             label="Validation gate"
-            value={gateLabel}
-            emphasis={openValidationTasks > 0}
+            value={gateText}
+            detail={gate.state === "ready" ? undefined : "not a queue-empty claim"}
+            emphasis={!gateIsClear(gate)}
             to="/app/validation"
           />
           <SnapshotCell

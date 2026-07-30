@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   createReportExportSignedUrl,
@@ -18,7 +18,13 @@ import {
   Skeleton,
   Tag
 } from "../components/primitives";
-import { exportGateMessage, newestReport, useLoadable, useWorkspace } from "../lib/workspace";
+import {
+  exportGateMessage,
+  newestReport,
+  useLoadable,
+  useWorkspace,
+  type GateState
+} from "../lib/workspace";
 
 /**
  * Exports.
@@ -45,6 +51,96 @@ const TEMPLATE = "130px 70px 90px 150px 110px 1fr";
 interface Issued extends ApiReportExport {
   signedUrl?: string;
   expiresAt?: string;
+}
+
+/**
+ * The gate banner. Five states, and only one of them says "clear".
+ *
+ * `unauthorized` and `error` are explicitly NOT gate verdicts: they say the gate
+ * was not read and that the backend still enforces it. Neither is presented as an
+ * empty queue.
+ */
+function GateBanner({ gate, onRetry }: { gate: GateState; onRetry: () => void }) {
+  const frame = (accent: boolean) => ({
+    display: "flex" as const,
+    gap: 12,
+    alignItems: "baseline" as const,
+    flexWrap: "wrap" as const,
+    border: `1px solid ${accent ? "var(--color-accent)" : "var(--color-text)"}`,
+    padding: "12px 16px"
+  });
+  const heading = (accent: boolean) => ({
+    fontFamily: "var(--font-heading)",
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.05em",
+    fontSize: 13,
+    ...(accent ? { color: "var(--color-accent-700)" } : {})
+  });
+
+  if (gate.state === "ready" && !gate.clear) {
+    return (
+      <div role="status" style={frame(false)}>
+        <strong style={heading(false)}>Export gate closed</strong>
+        <span style={{ fontSize: 13 }}>{exportGateMessage(gate.openTasks)}</span>
+        <Link className="btn btn-ghost" to="/app/validation" style={{ minHeight: 0, padding: "0 4px" }}>
+          Open the queue →
+        </Link>
+      </div>
+    );
+  }
+  if (gate.state === "ready") {
+    return (
+      <div role="status" style={frame(true)}>
+        <strong style={heading(true)}>Export gate clear</strong>
+        <span style={{ fontSize: 13 }}>
+          The backend reports no unresolved validation tasks for this report's workspace — official
+          exports are unlocked.
+        </span>
+      </div>
+    );
+  }
+  if (gate.state === "loading") {
+    return (
+      <div role="status" style={frame(false)}>
+        <strong style={heading(false)}>Checking the export gate</strong>
+        <span style={{ fontSize: 13 }}>Reading the gate from the backend…</span>
+      </div>
+    );
+  }
+  if (gate.state === "unauthorized") {
+    return (
+      <div role="status" style={frame(false)}>
+        <strong style={heading(false)}>Export gate not visible</strong>
+        <span style={{ fontSize: 13 }}>
+          This session may not read the validation gate, so it is not shown here. That is not a
+          statement that the queue is empty — the backend enforces the gate on every export and will
+          refuse with the open-task count if any remain.
+        </span>
+      </div>
+    );
+  }
+  if (gate.state === "error") {
+    return (
+      <div role="status" style={frame(false)}>
+        <strong style={heading(false)}>Export gate unknown</strong>
+        <span style={{ fontSize: 13 }}>
+          The gate could not be read, so it cannot be shown. This is not a statement that the queue is
+          empty — the backend still enforces it on every export.
+        </span>
+        <button type="button" className="btn btn-ghost" style={{ minHeight: 0, padding: "0 4px" }} onClick={onRetry}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div role="status" style={frame(false)}>
+      <strong style={heading(false)}>Export gate unavailable</strong>
+      <span style={{ fontSize: 13 }}>
+        No workspace is resolved, so there is no gate to evaluate and nothing to export.
+      </span>
+    </div>
+  );
 }
 
 function shortSha(sha: string): string {
@@ -78,17 +174,11 @@ function isGateRefusal(error: unknown): boolean {
 }
 
 export function Exports() {
-  const {
-    activeWorkspace,
-    openValidationTasks,
-    validationGateKnown,
-    reloadValidationTasks,
-    readOnly,
-    can,
-    showToast,
-    apiStatus
-  } = useWorkspace();
+  const { activeWorkspace, gate, reloadGate, reloadValidationTasks, readOnly, can, showToast, apiStatus } =
+    useWorkspace();
   const workspaceId = activeWorkspace?.id ?? null;
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
 
   const [issued, setIssued] = useState<Issued[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -115,21 +205,33 @@ export function Exports() {
   // Ordered explicitly; array position is not a documented ordering.
   const target = reports.state === "ready" ? newestReport(reports.data) : null;
 
-  // Three states, not two. An unread queue is UNKNOWN — never "clear".
-  const gateState: "closed" | "clear" | "unknown" = !validationGateKnown
-    ? "unknown"
-    : openValidationTasks > 0
-      ? "closed"
-      : "clear";
-  const canExport = can("issue_client_reports") || can("export_evidence");
-  const exportsBlocked = gateState !== "clear" || !canExport;
+  // The two routes require DIFFERENT permissions; the backend checks them
+  // separately, so the UI must not collapse them into one capability.
+  //   POST /monday-reports/{id}/exports/{fmt}  -> issue_client_reports
+  //   POST /report-exports/{id}/signed-url     -> export_evidence
+  const canIssueExport = can("issue_client_reports");
+  const canFetchEvidence = can("export_evidence");
+
+  // Only the backend's own "clear" enables the buttons. When the gate could not be
+  // READ (unauthorized/error) the buttons stay enabled for a permitted user — the
+  // backend still enforces the gate and answers 409, which is surfaced verbatim —
+  // because a session that may export but may not read the queue must not be
+  // stranded, and the banner says plainly that the gate is not being shown.
+  const gateReadable = gate.state === "ready";
+  const gateBlocksExport = gate.state === "ready" && !gate.clear;
+  const exportsBlocked = readOnly || !canIssueExport || gateBlocksExport;
 
   async function runExport(format: ApiReportExport["format"]) {
     if (!target || exportsBlocked || busy) return;
+    // Captured so a resolution arriving after a workspace switch cannot attribute
+    // this export, its toast, or its status text to the new workspace.
+    const forWorkspace = workspaceId;
+    const forReport = target.id;
     setBusy(format);
     setStatuses((current) => ({ ...current, [format]: { tone: "ok", text: `Creating ${format.toUpperCase()} export…` } }));
     try {
-      const result = await exportMondayReport(target.id, format);
+      const result = await exportMondayReport(forReport, format);
+      if (forWorkspace !== workspaceIdRef.current) return;
       setIssued((current) => [...current.filter((item) => item.id !== result.id), result]);
       setStatuses((current) => ({
         ...current,
@@ -138,21 +240,26 @@ export function Exports() {
           text: `${format.toUpperCase()} ready · ${sizeLabel(result.byte_size)} · SHA ${shortSha(result.sha256)}`
         }
       }));
+      // The backend sets the report to "exported"; re-read so the panel does not
+      // keep showing the pre-export status.
+      reload();
       showToast(
         "Export ready",
-        `${target.id} ${format.toUpperCase()} export written, checksummed, and appended to the audit chain. Fetch it with an expiring signed URL.`
+        `${shortId(forReport)} ${format.toUpperCase()} export written, checksummed, and appended to the audit chain. Fetch it with an expiring signed URL.`
       );
     } catch (caught) {
+      if (forWorkspace !== workspaceIdRef.current) return;
       let text: string;
       if (isGateRefusal(caught)) {
-        // The backend refused on the gate while this client believed it was clear,
-        // so our count is stale. Re-read rather than interpolating a stale number
-        // (which produced "Resolve 0 validation task(s)…").
+        // The backend refused on the gate. Re-read the gate and the queue rather
+        // than interpolating a number we may not have (which once produced
+        // "Resolve 0 validation task(s)…").
+        reloadGate();
         reloadValidationTasks();
         text =
-          openValidationTasks > 0
-            ? exportGateMessage(openValidationTasks)
-            : "Export refused: the backend reports unresolved validation tasks. Re-reading the validation queue — open Validation to resolve them.";
+          gate.state === "ready" && gate.openTasks > 0
+            ? exportGateMessage(gate.openTasks)
+            : "Export refused: the backend reports unresolved validation tasks for this report. Re-reading the gate — open Validation to resolve them.";
       } else {
         text =
           caught instanceof Error && caught.message
@@ -161,14 +268,14 @@ export function Exports() {
       }
       setStatuses((current) => ({ ...current, [format]: { tone: "bad", text } }));
     } finally {
-      setBusy(null);
+      if (forWorkspace === workspaceIdRef.current) setBusy(null);
     }
   }
 
   async function mintUrl(item: Issued) {
     // Guard the in-flight request: a second click would mint a second token and
     // append a second audit event for one user intent.
-    if (readOnly || minting) return;
+    if (readOnly || !canFetchEvidence || minting) return;
     setMinting(item.id);
     try {
       const signed = await createReportExportSignedUrl(item.id);
@@ -197,104 +304,25 @@ export function Exports() {
         lede="Official exports are validation-gated, checksummed, audit-logged, and fetched only through expiring signed URLs."
       />
 
-      {gateState === "closed" ? (
-        <div
-          role="status"
-          style={{
-            display: "flex",
-            gap: 12,
-            alignItems: "baseline",
-            flexWrap: "wrap",
-            border: "1px solid var(--color-text)",
-            padding: "12px 16px"
-          }}
-        >
-          <strong
-            style={{
-              fontFamily: "var(--font-heading)",
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
-              fontSize: 13
-            }}
-          >
-            Export gate closed
-          </strong>
-          <span style={{ fontSize: 13 }}>{exportGateMessage(openValidationTasks)}</span>
-          <Link className="btn btn-ghost" to="/app/validation" style={{ minHeight: 0, padding: "0 4px" }}>
-            Open the queue →
-          </Link>
-        </div>
-      ) : gateState === "unknown" ? (
-        <div
-          role="status"
-          style={{
-            display: "flex",
-            gap: 12,
-            alignItems: "baseline",
-            flexWrap: "wrap",
-            border: "1px solid var(--color-text)",
-            padding: "12px 16px"
-          }}
-        >
-          <strong
-            style={{
-              fontFamily: "var(--font-heading)",
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
-              fontSize: 13
-            }}
-          >
-            Export gate unknown
-          </strong>
-          <span style={{ fontSize: 13 }}>
-            The validation queue could not be read, so the gate cannot be evaluated. Exports stay
-            disabled — this is not a statement that the queue is empty.
-          </span>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            style={{ minHeight: 0, padding: "0 4px" }}
-            onClick={reloadValidationTasks}
-          >
-            Retry
-          </button>
-        </div>
-      ) : (
-        <div
-          role="status"
-          style={{
-            display: "flex",
-            gap: 12,
-            alignItems: "baseline",
-            flexWrap: "wrap",
-            border: "1px solid var(--color-accent)",
-            padding: "12px 16px"
-          }}
-        >
-          <strong
-            style={{
-              fontFamily: "var(--font-heading)",
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
-              fontSize: 13,
-              color: "var(--color-accent-700)"
-            }}
-          >
-            Export gate clear
-          </strong>
-          <span style={{ fontSize: 13 }}>
-            No validation tasks are open — official exports of the current report are unlocked.
-          </span>
-        </div>
-      )}
+      <GateBanner gate={gate} onRetry={reloadGate} />
 
-      {gateState === "clear" && !canExport ? (
+      {!readOnly && !canIssueExport ? (
         <p
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          The gate is clear, but this session has neither <strong>issue_client_reports</strong> nor{" "}
-          <strong>export_evidence</strong>, so exports stay disabled.
+          This session lacks <strong>issue_client_reports</strong>, so official exports stay disabled.
+          The backend refuses the export route without it.
+        </p>
+      ) : null}
+
+      {!readOnly && canIssueExport && !canFetchEvidence ? (
+        <p
+          role="status"
+          style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
+        >
+          This session can create exports but lacks <strong>export_evidence</strong>, so signed
+          references cannot be issued from here.
         </p>
       ) : null}
 
@@ -424,29 +452,37 @@ export function Exports() {
                   </span>
                 </GridCell>
                 <GridCell>
-                  {item.signedUrl ? (
-                    <a
-                      className="btn btn-ghost"
-                      href={item.signedUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ minHeight: 0 }}
-                      aria-label={`Open the signed reference for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}, expires ${item.expiresAt}`}
-                    >
-                      Open signed reference (expires {item.expiresAt})
-                    </a>
-                  ) : (
+                  {/* A minted reference EXPIRES, so the mint action must remain
+                      available afterwards — otherwise the row's only affordance
+                      becomes a link that has already died. */}
+                  <span style={{ display: "grid", gap: 4, justifyItems: "start" }}>
+                    {item.signedUrl ? (
+                      <a
+                        className="btn btn-ghost"
+                        href={item.signedUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ minHeight: 0, whiteSpace: "normal", textAlign: "start" }}
+                        aria-label={`Open the signed reference for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}, expires ${item.expiresAt}`}
+                      >
+                        Open signed reference (expires {item.expiresAt})
+                      </a>
+                    ) : null}
                     <button
                       type="button"
                       className="btn btn-ghost"
                       onClick={() => void mintUrl(item)}
-                      disabled={readOnly || minting !== null}
+                      disabled={readOnly || !canFetchEvidence || minting !== null}
                       // Rows repeat this label, so the name states which export.
-                      aria-label={`Get a signed URL for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}`}
+                      aria-label={`${item.signedUrl ? "Issue a fresh signed URL" : "Get a signed URL"} for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}`}
                     >
-                      {minting === item.id ? "Issuing…" : "Get signed URL"}
+                      {minting === item.id
+                        ? "Issuing…"
+                        : item.signedUrl
+                          ? "Issue a fresh URL"
+                          : "Get signed URL"}
                     </button>
-                  )}
+                  </span>
                 </GridCell>
               </GridRow>
             ))}
