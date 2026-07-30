@@ -28,17 +28,50 @@ export function Topbar() {
 
   const [profileOpen, setProfileOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement | null>(null);
+  const profileTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const profilePanelRef = useRef<HTMLDivElement | null>(null);
 
-  // Close on outside click and on Escape, and return focus to the trigger.
+  /**
+   * Disclosure behaviour: close on outside click, close on Escape and return focus to
+   * the trigger, and while it is open keep Tab inside the panel.
+   *
+   * The trap matters because the panel is the last thing in the topbar: without it Tab
+   * left the open panel and walked into the page behind it, so a keyboard user could be
+   * operating the page while an overlay they could not see was still open.
+   */
   useEffect(() => {
     if (!profileOpen) return;
+    const focusable = () =>
+      [...(profilePanelRef.current?.querySelectorAll<HTMLElement>("button, a[href]") ?? [])].filter(
+        (node) => !node.hasAttribute("disabled")
+      );
+    // Move focus in, so the panel's content is where the keyboard already is.
+    focusable()[0]?.focus();
+    const close = (restoreFocus: boolean) => {
+      setProfileOpen(false);
+      if (restoreFocus) profileTriggerRef.current?.focus();
+    };
     const onPointerDown = (event: PointerEvent) => {
-      if (!profileRef.current?.contains(event.target as Node)) setProfileOpen(false);
+      if (!profileRef.current?.contains(event.target as Node)) close(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setProfileOpen(false);
-        profileRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+        event.preventDefault();
+        close(true);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const nodes = focusable();
+      if (nodes.length === 0) return;
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !profilePanelRef.current?.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
       }
     };
     document.addEventListener("pointerdown", onPointerDown);
@@ -123,6 +156,10 @@ export function Topbar() {
         alignItems: "center",
         gap: 14,
         minHeight: 52,
+        // Containing block for the profile disclosure. Anchored to the CHIP, the panel
+        // rendered off the inline-start edge once the topbar wrapped and the chip
+        // started the line; anchored to the header it is always inside the viewport.
+        position: "relative",
         padding: "8px clamp(14px,3vw,28px)",
         borderBlockEnd: "1px solid var(--color-divider)"
       }}
@@ -207,11 +244,12 @@ export function Topbar() {
         Audit · {auditChipLabel}
       </button>
 
-      <div style={{ position: "relative" }} ref={profileRef}>
+      <div ref={profileRef}>
         <button
           data-chip=""
           type="button"
           className="mr-hover-text"
+          ref={profileTriggerRef}
           onClick={() => setProfileOpen((open) => !open)}
           // A plain disclosure, not role="menu": two actions plus identity text
           // are not menu content, and Tab is the right navigation model here.
@@ -253,11 +291,16 @@ export function Topbar() {
           <div
             id="mr-profile-disclosure"
             className="elev-md"
+            ref={profilePanelRef}
             style={{
               position: "absolute",
-              insetInlineEnd: 0,
-              top: "calc(100% + 6px)",
-              width: 264,
+              // Logical properties throughout, and clamped to the header's content box,
+              // so the panel stays inside the viewport at every width and flips with
+              // dir="rtl" without a second rule.
+              insetInlineEnd: "clamp(14px,3vw,28px)",
+              insetBlockStart: "calc(100% - 6px)",
+              inlineSize: "min(264px, calc(100vw - 2 * clamp(14px,3vw,28px)))",
+              maxInlineSize: "calc(100vw - 2 * clamp(14px,3vw,28px))",
               background: "var(--color-bg)",
               border: "1px solid var(--color-divider)",
               padding: 14,
@@ -292,7 +335,7 @@ export function Topbar() {
                   navigate("/app/settings");
                 }}
               >
-                Settings &amp; session
+                Settings &amp; session (next increment)
               </button>
               <button
                 type="button"

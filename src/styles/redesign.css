@@ -99,7 +99,14 @@ html {
     display: flex !important;
     gap: 4px !important;
     overflow-x: auto;
-    padding-bottom: 4px;
+    /* 4px on EVERY edge, not only the bottom. `overflow-x: auto` makes overflow-y
+       compute to auto, so this is a scroll container and it clips its descendants'
+       INK overflow to its padding box - and an outline is ink overflow, which never
+       joins the scrollable area, so a clipped ring cannot be scrolled to. The
+       :focus-visible ring is 2px wide at 2px offset, i.e. 4px outside the border
+       box, so the padding must be >= 4px per edge. The indicator itself is
+       untouched: still 2px solid --color-accent at full strength. */
+    padding: 4px;
   }
   [data-navgroup] {
     display: flex !important;

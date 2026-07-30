@@ -96,7 +96,7 @@ const WORKFLOW = [
     num: "04",
     title: "Validate",
     body:
-      "Ambiguous or high-severity extractions route to reviewers. The issue gate counts what is still open — and holds the report until it is clear.",
+      "Three sources raise a review task: a high-severity extracted failure, a file that needed OCR, and a Critical benchmark anomaly. The issue gate counts the open failure and anomaly tasks — and holds the report until those are clear.",
     surface: "Validation"
   },
   {
@@ -340,8 +340,13 @@ export function Landing() {
                       Drilling ahead 12.25 in section at 8,620 ft MD; hole cleaning and directional
                       response monitored.
                     </p>
-                    <span className="tag tag-accent" style={{ marginTop: 6 }}>
-                      DDR p. 2 · 93% confidence
+                    {/* Draft-LEVEL, not per-field: `ApiReportDraft` returns the narrative
+                        as a bare string with no page or confidence of its own, which the
+                        capability card above and the Studio both state. Row-level page and
+                        confidence appear on the casing/survey/hydraulics rows, which do
+                        carry them. */}
+                    <span className="tag tag-neutral" style={{ marginTop: 6 }}>
+                      Drafted narrative · cited at draft level
                     </span>
                   </div>
 
@@ -647,9 +652,9 @@ export function Landing() {
                 }}
               >
                 This increment runs on demo data: draft a DDR from parsed evidence, clear the
-                validation queue, and issue a checksummed, gated export. Benchmarking, upload, the
-                failure explorer and the audit-chain view arrive in the next increment and say so on
-                their own pages.
+                validation queue, and issue a checksummed, gated export. Well schematics, upload,
+                benchmarking, the failure explorer, the audit-chain view and settings arrive in the
+                next increment and say so on their own pages.
               </p>
             </div>
             <Link className="btn btn-primary" to="/app" style={{ textDecoration: "none" }}>

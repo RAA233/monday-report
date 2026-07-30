@@ -229,7 +229,12 @@ export function Exports() {
       ? (reports.data.find((report) => report.id === requestedReportId) ?? null)
       : null;
   const target = reports.state === "ready" ? (requested ?? newestReport(reports.data)) : null;
-  const requestedButMissing = Boolean(requestedReportId) && reports.state === "ready" && !requested;
+  // `loadReports()` returns [] WITHOUT calling the API when no workspace is resolved,
+  // so a `ready` empty list is not evidence that the named report is absent. Without
+  // this guard the page asserted "not in this workspace's report list" directly above
+  // its own "Report list not read" empty state.
+  const requestedButMissing =
+    Boolean(requestedReportId) && reports.state === "ready" && workspaceId !== null && !requested;
 
   // The two routes require DIFFERENT permissions; the backend checks them
   // separately, so the UI must not collapse them into one capability.

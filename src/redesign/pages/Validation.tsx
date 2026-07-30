@@ -14,11 +14,13 @@ import {
 /**
  * Validation queue.
  *
- * Decisions go through `PATCH /validation-tasks/{id}` — the same call the v1
- * interface makes — so a decision here really does resolve the task, really does
- * carry server-derived reviewer attribution, and really does move the export gate.
- * After a successful decision the shared open-task count reloads, which is what
- * unlocks Exports.
+ * Decisions go through `PATCH /validation-tasks/{id}` — so a decision here really
+ * does resolve the task and really does carry server-derived reviewer attribution.
+ * It moves the EXPORT GATE only for the task types the gate counts:
+ * `_open_validation_tasks_for_workspace` counts open tasks whose target is a
+ * `failure` or an `anomaly_event` in that workspace, so an OCR `file` task is queue
+ * work that no export waits on. After a successful decision the shared open-task
+ * count reloads, which is what unlocks Exports for the counted types.
  *
  * Where a task points at an extracted failure the failure's own evidence is shown
  * beside it. When the task targets something else, the card says what the target is
@@ -110,7 +112,7 @@ export function Validation() {
       <PageHeader
         kicker="Human-in-the-loop"
         title="Validation queue"
-        lede="A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each raise a task here. Decisions are recorded with server-derived reviewer attribution — verified-reviewer only when the session authenticates a per-user credential — and resolving one moves the export gate."
+        lede="A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each raise a task here. Decisions are recorded with server-derived reviewer attribution — verified-reviewer only when the session authenticates a per-user credential. The export gate counts only the failure- and anomaly-targeted tasks, so resolving one of those moves it; an OCR file task is queue work that export does not wait on."
         actions={
           <Tag
             tone={openQueueTasks === null ? "neutral" : openQueueTasks > 0 ? "critical" : "outline"}
@@ -162,7 +164,13 @@ export function Validation() {
         <ErrorState
           title="Validation queue failed to load"
           message={`${validationTasks.message} The queue is unavailable, so it cannot be shown — this is not a statement that it is empty.`}
-          onRetry={reloadValidationTasks}
+          // A queue-only retry cannot reconcile `apiStatus`: `loadValidationTasks` has no
+          // connectivity guard, so a successful read would render live task cards under
+          // the shell banner that says nothing can be read. While degraded the shell
+          // carries the correct affordance for each state ("Retry connection" for
+          // offline, "Check the session" for a refusal or a 503), so no second and
+          // dishonest retry is offered here.
+          onRetry={apiStatus === "connected" ? reloadValidationTasks : undefined}
         />
       ) : null}
 

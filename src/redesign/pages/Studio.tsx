@@ -203,14 +203,28 @@ export function Studio() {
       // inside a state updater: React runs the updater during the following render,
       // so `kept.length` read here was always 0 and the disclosure never printed.
       const previous = formRef.current;
-      const kept = [...editedKeysRef.current].filter((key) => previous[key].trim().length > 0);
+      // EVERY key the operator touched is restored from `previous`, including one they
+      // deliberately CLEARED. Filtering on `.trim().length > 0` treated a clear as "no
+      // edit", so the draft's value was written straight back over it while the panel
+      // below still counted the field as changed locally - the operator was told an
+      // edit was held that had just been reverted.
+      //
+      // Three states are kept distinct: a key absent from `editedKeys` is NOT LOADED and
+      // takes the backend value; a key present with text is an operator VALUE; a key
+      // present with "" is EMPTY BY CHOICE. No truthiness fallback anywhere.
+      const edited = [...editedKeysRef.current];
       const drafted = formFromDraft(next, previous);
-      for (const key of kept) drafted[key] = previous[key];
+      for (const key of edited) drafted[key] = previous[key];
+      const clearedCount = edited.filter((key) => previous[key].trim().length === 0).length;
+      const keptCount = edited.length - clearedCount;
       setForm(drafted);
       setState("ready");
       setMessage(
         `Source-backed draft ready from ${next.source_document_count} document(s), ${next.source_chunk_count} chunk(s), and ${next.citation_count} citation(s).` +
-          (kept.length > 0 ? ` ${kept.length} locally edited field(s) were kept.` : "")
+          (keptCount > 0 ? ` ${keptCount} locally edited field(s) were kept.` : "") +
+          (clearedCount > 0
+            ? ` ${clearedCount} field(s) you cleared were left empty rather than re-drafted.`
+            : "")
       );
     } catch (caught) {
       if (askedFor !== workspaceIdRef.current) return;
@@ -427,8 +441,10 @@ export function Studio() {
             >
               Exports
             </Link>
+            {/* Labelled as pending: this destination renders the not-implemented
+                page, and the landing copy now names it among the six. */}
             <Link className="btn btn-secondary" to="/app/well">
-              Well schematics
+              Well schematics (next increment)
             </Link>
           </>
         }
@@ -518,40 +534,41 @@ export function Studio() {
               gap: 10
             }}
           >
-            <Field id="st-date" label="Date" type="date" value={form.reportDate} onChange={(v) => update("reportDate", v)} disabled={readOnly} />
-            <Field id="st-no" label="Report no." value={form.reportNo} onChange={(v) => update("reportNo", v)} disabled={readOnly} />
-            <Field id="st-well" label="Well" value={form.well} onChange={(v) => update("well", v)} disabled={readOnly} />
-            <Field id="st-rig" label="Rig" value={form.rig} onChange={(v) => update("rig", v)} disabled={readOnly} />
-            <Field id="st-op" label="Operator" value={form.operator} onChange={(v) => update("operator", v)} disabled={readOnly} />
-            <Field id="st-phase" label="Phase" value={form.phase} onChange={(v) => update("phase", v)} disabled={readOnly} />
-            <Field id="st-hole" label="Hole size" value={form.holeSize} onChange={(v) => update("holeSize", v)} disabled={readOnly} />
-            <Field id="st-md" label="MD ft" value={form.mdFt} onChange={(v) => update("mdFt", v)} disabled={readOnly} inputMode="decimal" />
-            <Field id="st-tvd" label="TVD ft" value={form.tvdFt} onChange={(v) => update("tvdFt", v)} disabled={readOnly} inputMode="decimal" />
+            <Field id="st-date" label="Date" type="date" value={form.reportDate} onChange={(v) => update("reportDate", v)} />
+            <Field id="st-no" label="Report no." value={form.reportNo} onChange={(v) => update("reportNo", v)} />
+            <Field id="st-well" label="Well" value={form.well} onChange={(v) => update("well", v)} />
+            <Field id="st-rig" label="Rig" value={form.rig} onChange={(v) => update("rig", v)} />
+            <Field id="st-op" label="Operator" value={form.operator} onChange={(v) => update("operator", v)} />
+            <Field id="st-phase" label="Phase" value={form.phase} onChange={(v) => update("phase", v)} />
+            <Field id="st-hole" label="Hole size" value={form.holeSize} onChange={(v) => update("holeSize", v)} />
+            <Field id="st-md" label="MD ft" value={form.mdFt} onChange={(v) => update("mdFt", v)} inputMode="decimal" />
+            <Field id="st-tvd" label="TVD ft" value={form.tvdFt} onChange={(v) => update("tvdFt", v)} inputMode="decimal" />
             <Field
               id="st-dls"
               label="As-drilled DLS"
               value={form.dls}
               onChange={(v) => update("dls", v)}
-              disabled={readOnly}
+             
               placeholder="1.3 deg/100 ft"
               hint="Operator-entered — the draft payload carries no DLS value."
             />
-            <Field id="st-mud" label="Mud weight" value={form.mudWeight} onChange={(v) => update("mudWeight", v)} disabled={readOnly} />
+            <Field id="st-mud" label="Mud weight" value={form.mudWeight} onChange={(v) => update("mudWeight", v)} />
           </div>
 
-          <TextField id="st-present" label="Present operations" rows={3} value={form.presentOps} onChange={(v) => update("presentOps", v)} disabled={readOnly} />
-          <TextField id="st-next" label="Next 24 hr plan" rows={3} value={form.nextOps} onChange={(v) => update("nextOps", v)} disabled={readOnly} />
-          <TextField id="st-safety" label="Safety and well-control notes" rows={2} value={form.safety} onChange={(v) => update("safety", v)} disabled={readOnly} />
-          <TextField id="st-risks" label="Risks and AI watchlist" rows={2} value={form.risks} onChange={(v) => update("risks", v)} disabled={readOnly} />
+          <TextField id="st-present" label="Present operations" rows={3} value={form.presentOps} onChange={(v) => update("presentOps", v)} />
+          <TextField id="st-next" label="Next 24 hr plan" rows={3} value={form.nextOps} onChange={(v) => update("nextOps", v)} />
+          <TextField id="st-safety" label="Safety and well-control notes" rows={2} value={form.safety} onChange={(v) => update("safety", v)} />
+          <TextField id="st-risks" label="Risks and AI watchlist" rows={2} value={form.risks} onChange={(v) => update("risks", v)} />
 
           {readOnly ? (
             <p
               className="text-muted"
               style={{ fontSize: 12, margin: 0, border: "1px solid var(--color-divider)", padding: "8px 10px" }}
             >
-              {apiStatus === "checking"
-                ? "Checking the workspace API — editing is disabled until the session resolves."
-                : `Read-only: ${apiUnreadReason(apiStatus) ?? "no workspace session is resolved"}, so no edit can be recorded.`}
+              {`${apiUnreadReason(apiStatus) ?? "No workspace session is resolved"}, so a
+              source-backed draft cannot be rebuilt right now. These fields stay editable:
+              they are local to this browser session in every state, and nothing typed
+              here is recorded against the report either way.`}
             </p>
           ) : (
             <p
@@ -800,7 +817,7 @@ export function Studio() {
                     to="/app/well"
                     style={{ minHeight: 0, padding: "0 4px", fontSize: 11.5, whiteSpace: "normal", textAlign: "start" }}
                   >
-                    Open full well schematics →
+                    Well schematics — next increment →
                   </Link>
                 </div>
                 <div
@@ -1048,7 +1065,8 @@ function Field({
   label: string;
   value: string;
   onChange: (value: string) => void;
-  disabled: boolean;
+  /** Optional: the editor is local-only and no longer keys this on connectivity. */
+  disabled?: boolean;
   type?: string;
   inputMode?: "decimal" | "text";
   placeholder?: string;
@@ -1091,7 +1109,8 @@ function TextField({
   rows: number;
   value: string;
   onChange: (value: string) => void;
-  disabled: boolean;
+  /** Optional: see Field. */
+  disabled?: boolean;
 }) {
   return (
     <div className="field">
