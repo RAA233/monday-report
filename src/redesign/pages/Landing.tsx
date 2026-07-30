@@ -26,7 +26,7 @@ const PREVIEW_META = [
 
 const STATS = [
   { value: "5", label: "Report variants — DDR, BHA, mud, survey, directional" },
-  { value: "6", label: "Pipeline stages, scan to index, each one audited" },
+  { value: "6", label: "Pipeline stages, scan to index — upload, parse, extraction and validation each audited" },
   { value: "5", label: "Export formats, checksummed and validation-gated" },
   { value: "1:1", label: "Extracted records to source citations — drafted narrative is labelled, never passed off as evidence" }
 ];
@@ -35,13 +35,13 @@ const CAPABILITIES = [
   {
     title: "Structured Monday reporting",
     body:
-      "Weekly Monday reports and daily morning reports on a reviewed schema — five variants, period tracking, and a recorded status: a report opens as a draft, a refused export moves it to review, and a completed export marks it exported.",
+      "Weekly Monday reports and daily morning reports on a reviewed schema — five variants, period tracking, and a recorded status: a report opens as a draft, or directly as review when the workspace already has open validation tasks; a refused export also moves one to review, and a completed export marks it exported.",
     tags: ["MR-SCHEMA-1", "5 variants"]
   },
   {
     title: "Source-cited drafting",
     body:
-      "The Studio drafts sections from parsed workspace evidence. Casing, survey and hydraulics rows each carry page, confidence, and a source-vs-reference label; the drafted header and narrative fields carry the draft's own citation list rather than per-field provenance. Reference values are labelled and recorded source values are never overwritten.",
+      "The Studio drafts sections from parsed workspace evidence. Casing rows carry their locator, confidence and a source-vs-reference label; survey stations carry locator, confidence and a conflict flag; hydraulics observations carry their source text and a review flag. The drafted header and narrative fields carry the draft's own citation list rather than per-field provenance, and a recorded source value is never overwritten.",
     tags: ["Citations", "Confidence"]
   },
   {
@@ -82,7 +82,7 @@ const WORKFLOW = [
     num: "02",
     title: "Extract and cite",
     body:
-      "The pipeline parses, classifies, and extracts failures, NPT, tools, and report fields. Every extracted record is pinned to its source file, page, and confidence; the drafted narrative carries the draft's citation list, not a per-field source.",
+      "The pipeline parses, classifies, and extracts failures, NPT, tools, and report fields. Every extracted record is pinned to its source file, its in-file locator (a page for PDFs and scans, a row for CSVs, a sheet, a section or a chunk otherwise) and a confidence; the drafted narrative carries the draft's citation list, not a per-field source.",
     surface: "Pipeline"
   },
   {
@@ -103,7 +103,7 @@ const WORKFLOW = [
     num: "05",
     title: "Export with the audit chain",
     body:
-      "Approved reports export in five formats, checksummed, signed-URL served, and written into the hash-chained audit log.",
+      "Reports export in five formats once the validation gate is clear — checksummed, signed-URL served, and written into the hash-chained audit log.",
     surface: "Exports"
   }
 ];
@@ -206,8 +206,9 @@ export function Landing() {
             </h1>
             <p style={{ fontSize: 16, lineHeight: 1.55, maxWidth: "56ch", margin: "28px 0 0" }}>
               Monday Report drafts morning and Monday drilling reports for rig teams and operator HQ —
-              from the paperwork the rig already produces. A local-first AI extracts and cites the
-              evidence, people validate it, and official exports stay gated behind the audit chain.
+              from the paperwork the rig already produces. A local-first, deterministic engine
+              extracts and cites the evidence, people validate it, and official exports stay gated
+              behind the audit chain.
             </p>
             <div style={{ display: "flex", gap: "var(--space-3)", flexWrap: "wrap", marginTop: 28 }}>
               <Link className="btn btn-primary" to="/app" style={{ textDecoration: "none" }}>
@@ -696,7 +697,8 @@ export function Landing() {
             </Link>
           </div>
           <span>
-            Tenant-scoped drilling-report drafting with a local-first AI. This preview runs on demo
+            Tenant-scoped drilling-report drafting on a local-first, deterministic engine. This
+            preview runs on demo
             data only — no client data is stored, and official exports remain gated behind validation
             and the audit chain.
           </span>

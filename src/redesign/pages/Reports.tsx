@@ -31,7 +31,10 @@ import {
  * It is deliberately NOT the sidebar badge, which counts the tenant-wide review
  * queue: those are different populations and the columns are labelled accordingly.
  */
-const TEMPLATE = "130px 1.2fr auto auto 0.7fr 0.7fr auto";
+// Definite widths, not `auto`: `.mr-table-head` and `.mr-table-row` are separate
+// grid containers, so an `auto` track sizes to that ROW's content and the header
+// stopped lining up with the cells beneath it.
+const TEMPLATE = "130px 1.2fr 96px 112px 0.7fr 0.7fr 84px";
 
 const STATUS_TONE: Record<ApiMondayReport["status"], "accent" | "neutral" | "outline"> = {
   draft: "outline",
@@ -138,7 +141,7 @@ export function Reports() {
       <PageHeader
         kicker={activeWorkspace?.name ?? "No workspace"}
         title="Monday reports"
-        lede="A report opens as a draft; a refused export moves it to review, and a completed export marks it exported. Official export stays blocked while validation tasks are open."
+        lede="A report opens as a draft, or directly as review when the workspace already has open validation tasks; a refused export also moves it to review, and a completed export marks it exported. Official export stays blocked while validation tasks are open."
         actions={newReportButton}
       />
 
@@ -218,12 +221,15 @@ export function Reports() {
             </GridTable>
           </Frame>
 
-          {/* Only the transitions that exist: create -> draft, a gate-refused export -> review,
-              a completed export -> exported. `approved` is a schema value with no route that
-              writes it, so advertising an approval step would describe a workflow the backend
+          {/* Only the transitions that exist. Creation is itself conditional: the backend
+              opens a report as `review` when the workspace already has open validation
+              tasks, and as `draft` otherwise. A gate-refused export also sets `review`; a
+              completed export sets `exported`. `approved` is a schema value that no route
+              writes, so advertising an approval step would describe a workflow the backend
               does not have. */}
           <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
-            Recorded status: a report opens as a draft, a refused export moves it to review, and a
+            Recorded status: a report opens as a draft, or directly as review when the workspace
+            already has open validation tasks. A refused export also moves one to review, and a
             completed export marks it exported. There is no approval step in this increment. Every
             report creation and export is appended to the audit chain.
           </p>

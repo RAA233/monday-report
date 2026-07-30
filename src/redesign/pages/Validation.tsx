@@ -46,10 +46,18 @@ export function Validation() {
   // Not read until the session resolves. Keyed on `apiStatus`, this used to fire once
   // against the unresolved "checking" state and again after the probe landed - two
   // reads, and on a refused route two audited refusals, for one navigation.
-  const loadFailures = useCallback(
-    async () => (apiStatus === "connected" ? getFailures() : []),
-    [apiStatus]
-  );
+  //
+  // It REJECTS rather than resolving to []: an empty array would reach `ready` and let
+  // a card state that the target failure is absent from the list, which a read that
+  // never happened does not establish.
+  const loadFailures = useCallback(async () => {
+    if (apiStatus !== "connected") {
+      throw new Error(
+        `${apiUnreadReason(apiStatus) ?? "The workspace is not resolved"}, so failure evidence was not read.`
+      );
+    }
+    return getFailures();
+  }, [apiStatus]);
   const { value: failures, reload: reloadFailures } = useLoadable(loadFailures, [apiStatus]);
 
   const failureById = useMemo(() => {
@@ -305,7 +313,11 @@ export function Validation() {
                   <button
                     type="button"
                     className="btn btn-primary"
-                    aria-label={`Validate: ${cardTitle}`}
+                    // WCAG 2.5.3: the name must contain the VISIBLE text, which becomes
+                    // "Recording…" while this decision is in flight.
+                    aria-label={
+                      busyId === task.id ? `Recording… Validate: ${cardTitle}` : `Validate: ${cardTitle}`
+                    }
                     onClick={() => void decide(task, "validated")}
                     disabled={decisionsBlocked || busyId !== null}
                   >

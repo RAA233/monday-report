@@ -286,11 +286,12 @@ export function Exports() {
       if (forWorkspace !== workspaceIdRef.current) return;
       let text: string;
       if (isGateRefusal(caught)) {
-        // The backend refused on the gate. Re-read the gate and the queue rather
-        // than interpolating a number we may not have (which once produced
-        // "Resolve 0 validation task(s)…").
+        // The backend refused on the gate. Re-read the gate rather than interpolating
+        // a number we may not have (which once produced "Resolve 0 validation
+        // task(s)…"). `reloadGate` re-reads the queue snapshot itself, so calling
+        // `reloadValidationTasks` as well issued a second GET - and on a session that
+        // may not read the queue, a second audited refusal.
         reloadGate();
-        reloadValidationTasks();
         // The refusal itself mutates the report (status -> "review" plus a
         // validation block), so the panel's status line is stale until re-read.
         reload();
@@ -538,7 +539,13 @@ export function Exports() {
                       // Rows repeat this label, so the name states which export - built by
                       // suffixing the EXACT visible string, which WCAG 2.5.3 requires the
                       // accessible name to contain.
-                      aria-label={`${item.signedUrl ? "Issue a fresh URL" : "Get signed URL"} — for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}`}
+                      aria-label={`${
+                        minting === item.id
+                          ? "Issuing…"
+                          : item.signedUrl
+                            ? "Issue a fresh URL"
+                            : "Get signed URL"
+                      } — for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}`}
                     >
                       {minting === item.id
                         ? "Issuing…"

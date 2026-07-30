@@ -15,8 +15,11 @@
  *   - the export gate shows the exact committed copy while a task is open, and
  *     resolving the task unlocks it
  *   - no page scrolls horizontally at 390 / 768 / 1440 / 1728
- *   - dir="rtl" flips the shell without a second stylesheet
- *   - the mobile breakpoint gives 44px navigation targets
+ *   - dir="rtl" flips the shell (sidebar on the right, logical divider) and does not
+ *     introduce a horizontal scroll; it does NOT assert anything about how many
+ *     stylesheets are involved
+ *   - the mobile breakpoint collapses to one column, hides the nav chrome, and keeps
+ *     every navigation target at least 44px tall
  *   - zero blocking console errors and zero failed same-origin requests
  *
  * Usage:
@@ -248,7 +251,7 @@ async function assertNoHorizontalScroll(page, label) {
     `no-horizontal-scroll:${label}`,
     painted && noOverflow,
     !painted
-      ? `nothing rendered to measure (${overflow.rendered.elements} elements, ${overflow.rendered.text} chars) — the check would have passed vacuously`
+      ? `nothing rendered to measure (${overflow.rendered.elements} elements, ${overflow.rendered.text} chars, ${overflow.rendered.headings} h1) — the check would have passed vacuously`
       : noOverflow
         ? `${overflow.clientWidth}px viewport, ${overflow.rendered.elements} elements painted, no page-level overflow`
         : `scrollWidth ${overflow.scrollWidth} > clientWidth ${overflow.clientWidth}; first offenders: ${overflow.offenders.join(", ") || "none in-flow"}`
@@ -296,9 +299,11 @@ async function main() {
   context.on("console", (message) => {
     if (message.type() !== "error") return;
     const url = message.location().url ?? "";
-    // Third-party failures (the design system's Google Fonts @import, blocked
-    // offline or by a CSP) are not defects in this application. They are recorded
-    // separately so the run still discloses them.
+    // A third-party console error is not a defect in this application, so it is
+    // recorded separately rather than gating the run — and the summary prints the list
+    // so a run cannot hide one. This frontend now makes NO third-party request at all
+    // (the design system's webfont @import was removed), so the expected value is an
+    // empty array; anything in it means something new reached off-origin.
     if (isThirdParty(url)) {
       thirdPartyErrors.push(`${url}: ${message.text()}`);
       return;
@@ -447,7 +452,9 @@ async function main() {
   check(
     "unknown-route-in-shell",
     shellPresent && /this route does not exist/i.test(notFoundText),
-    `not-found rendered inside the shell: ${shellPresent}`
+    `exactly one [data-shell]: ${shellPresent}; body states the route does not exist: ${/this route does not exist/i.test(
+      notFoundText
+    )}`
   );
 
   // ── reserved Stage 2 routes must not claim completeness ───────────────────
@@ -767,7 +774,9 @@ async function main() {
     const sidebar = document.querySelector("[data-sidebar]");
     const groups = document.querySelector("[data-navgroups]");
     const buttons = [...document.querySelectorAll("[data-navbtn]")];
-    const label = document.querySelector("[data-navlabel]");
+    // ALL the group labels: querySelector returned the first, so two of the three
+    // were never measured while the check id claimed the whole nav chrome.
+    const labels = [...document.querySelectorAll("[data-navlabel]")];
     const tenant = document.querySelector("[data-tenantcard]");
     return {
       columns: getComputedStyle(shell).gridTemplateColumns,
@@ -775,7 +784,8 @@ async function main() {
       navOverflowX: getComputedStyle(groups).overflowX,
       minHeight: Math.min(...buttons.map((b) => Math.round(b.getBoundingClientRect().height))),
       count: buttons.length,
-      labelHidden: label ? getComputedStyle(label).display === "none" : false,
+      labelCount: labels.length,
+      labelsHidden: labels.filter((node) => getComputedStyle(node).display === "none").length,
       tenantHidden: tenant ? getComputedStyle(tenant).display === "none" : false
     };
   });
@@ -797,8 +807,8 @@ async function main() {
   );
   check(
     "mobile-nav-chrome-hidden",
-    mobile.labelHidden && mobile.tenantHidden,
-    `group label display:none = ${mobile.labelHidden}; tenant card display:none = ${mobile.tenantHidden}`
+    mobile.labelCount === 3 && mobile.labelsHidden === mobile.labelCount && mobile.tenantHidden,
+    `${mobile.labelsHidden} of ${mobile.labelCount} group labels are display:none (expected 3 of 3); tenant card display:none = ${mobile.tenantHidden}`
   );
   await shoot(page, "reports-mobile-nav");
 

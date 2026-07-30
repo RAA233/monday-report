@@ -31,9 +31,12 @@ import {
  * shell and pages share — session, workspaces, connectivity, and the open
  * validation count that gates exports.
  *
- * Connectivity mirrors the committed v1 behaviour in `src/App.tsx`: a probe on
- * mount, `checking` → `connected` | `refused` | `offline`, and an explicit retry.
- * When the API is unreachable the app says so and disables actions rather than
+ * Connectivity is this entry's own model, in the same SPIRIT as the committed v1
+ * behaviour in `src/App.tsx` (probe on mount, degrade honestly, offer a retry) but not
+ * the same states: v1 carries a two-value online/offline flag and falls back to local
+ * data, while this entry has no fallback dataset and distinguishes four outcomes —
+ * `checking` → `connected` | `refused` | `misconfigured` | `offline`. When the API
+ * cannot be used the app says which of those it is and disables actions rather than
  * pretending to have data.
  */
 /**
@@ -156,10 +159,13 @@ export interface WorkspaceContextValue {
 }
 
 /**
- * The export gate, as reported by the backend.
+ * The export gate: the backend's own PREDICATE, applied by this client to read-only
+ * data the backend returned. It is not a figure the backend published - see the
+ * `gate` field's own note - except on the Studio's draft path, where
+ * `ApiReportDraft.open_validation_tasks` IS the backend's own count.
  *
  *   loading      — the read is in flight; assert nothing
- *   ready        — `openTasks` is the backend's own count for this workspace
+ *   ready        — `openTasks` is the count that predicate yields for this workspace
  *   unauthorized — this session may not read the gate (403). Not evidence about
  *                  the gate; the backend still enforces it on export.
  *   error        — the read failed. Also not evidence.
@@ -188,8 +194,10 @@ export function isOpenValidationTask(task: ApiValidationTask): boolean {
 }
 
 /**
- * The committed gate copy. `count` must be the BACKEND's own gate count
- * (`GateState.openTasks`), never a client re-derivation.
+ * The committed gate copy. `count` must come from `GateState.openTasks` - the
+ * backend's predicate applied to backend data, or the draft's own published count -
+ * never from an ad-hoc count of `/validation-tasks`, which is tenant-wide, includes
+ * every target type, and counts `conflict`.
  */
 export function exportGateMessage(count: number): string {
   return `Resolve ${count} validation task(s) before exporting an official Monday Report.`;
@@ -397,10 +405,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         const refusal = /^API (401|403|503)\b/.exec(message);
         // The two status surfaces must leave `loading` on this path too, or a chip
         // would sit on "Checking…" forever after a failed probe.
+        // `unauthorized` means "this session may not read THIS surface", and the
+        // consumers name the specific permission when they render it. A 401 (no valid
+        // credential at all) and a 503 (unconfigured backend) are not that, so they
+        // stay `error` with their own sentence; only a 403 earns `unauthorized`.
         const unreadStatus: Loadable<never> = refusal
-          ? refusal[1] === "503"
-            ? { state: "error", message: "The workspace API is not configured to serve client data yet." }
-            : { state: "unauthorized" }
+          ? refusal[1] === "403"
+            ? { state: "unauthorized" }
+            : {
+                state: "error",
+                message:
+                  refusal[1] === "503"
+                    ? "The workspace API is not configured to serve client data yet."
+                    : "The workspace API refused this session's credential."
+              }
           : { state: "error", message: "The workspace API is unreachable." };
         setAuditIntegrity(unreadStatus);
         setLocalAi(unreadStatus);

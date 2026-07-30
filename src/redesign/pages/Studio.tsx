@@ -91,9 +91,12 @@ const EMPTY_FORM: FormState = {
 };
 
 /** Column templates for the preview sheet's evidence tables. */
-const CASING_TEMPLATE = "1.3fr 0.7fr 0.7fr 0.7fr auto";
-const SURVEY_TEMPLATE = "0.8fr 0.6fr 0.6fr 0.9fr 0.9fr auto";
-const HYDRAULICS_TEMPLATE = "1fr 0.8fr 1.4fr auto";
+// The trailing evidence column is a definite width, not `auto`: each row is its own
+// grid container, so an `auto` track sizes to that row's own tag and the header drifts
+// out of alignment with the cells.
+const CASING_TEMPLATE = "1.3fr 0.7fr 0.7fr 0.7fr 104px";
+const SURVEY_TEMPLATE = "0.8fr 0.6fr 0.6fr 0.9fr 0.9fr 128px";
+const HYDRAULICS_TEMPLATE = "1fr 0.8fr 1.4fr 96px";
 
 /** Feet with a thousands separator, or an em dash when absent. */
 function ft(value: number | null | undefined): string {

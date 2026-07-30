@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { BrandMark, SegControl, Tag } from "../components/primitives";
 import { getSession } from "../../lib/api";
-import { useWorkspace } from "../lib/workspace";
+import { errorText, useWorkspace } from "../lib/workspace";
 
 /**
  * Sign-in surface.
@@ -54,10 +54,19 @@ export function SignIn() {
       retry();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "";
+      // Classify on the status the client actually threw. "Did not answer" is reserved
+      // for a request that produced no status: a 503 means the backend answered and is
+      // missing its client API key or audit key, so telling the operator to confirm the
+      // backend is running points at the wrong thing entirely.
+      const status = /^API (\d{3})\b/.exec(message)?.[1];
       setError(
-        message.includes("401") || message.includes("403")
+        status === "401" || status === "403"
           ? "The configured credential was refused. Check the API key this build was compiled with."
-          : "The workspace API did not answer. Confirm the backend is running and reachable from this origin."
+          : status === "503"
+            ? "The workspace API answered, but it is not configured to serve client data yet — it reports a missing client API key or audit key. That is a backend configuration change, not a credential problem."
+            : status
+              ? `The workspace API refused the session check: ${errorText(caught)}`
+              : "The workspace API did not answer. Confirm the backend is running and reachable from this origin."
       );
       setResolved(null);
     } finally {

@@ -35,12 +35,17 @@ import {
  * new one's heading.
  */
 
-/** Where a returned tool action leads. `kind` is the API's own enum. */
+/**
+ * Where a returned tool action leads. `kind` is the API's own enum.
+ *
+ * Only kinds whose destination EXISTS in this increment are routed. `schematic` and
+ * `audit` would land on a labelled not-implemented page, which answers nothing, so
+ * they fall through to asking the action's own prompt instead - the same treatment an
+ * unknown kind gets.
+ */
 const TOOL_ACTION_ROUTE: Record<string, string> = {
   plan: "/app/studio",
   draft: "/app/studio",
-  schematic: "/app/well",
-  audit: "/app/audit",
   export: "/app/exports",
   source: "/app/validation"
 };
@@ -85,6 +90,9 @@ interface Turn {
   role: "user" | "assistant";
   text: string;
   answer?: ApiChatResponse;
+  /** Set on an assistant turn that carries a refusal instead of an answer, so the
+   *  live region can announce the SAME classification the transcript shows. */
+  failed?: boolean;
 }
 
 const STEP_TONE: Record<string, string> = {
@@ -123,9 +131,16 @@ export function Ask() {
   // "no workspace resolved" is a third distinct case — not an empty result.
   useEffect(() => {
     if (!workspaceId) {
-      const reason = apiUnreadReason(apiStatus) ?? "No workspace is resolved";
-      setLatestReport({ state: "error", message: `${reason}.` });
-      setRate({ state: "error", message: `${reason}.` });
+      // Two different causes. While the probe is in flight (or the API is not usable)
+      // the read has not been attempted yet, which is `loading` - printing "Not read"
+      // there asserts a finished attempt. Only a connected session with no workspace
+      // is a real dead end.
+      const reason = apiUnreadReason(apiStatus);
+      const pending: Loadable<never> = reason
+        ? { state: "loading" }
+        : { state: "error", message: "No workspace is resolved, so there was nothing to read." };
+      setLatestReport(pending);
+      setRate(pending);
       return;
     }
     let cancelled = false;
@@ -210,22 +225,27 @@ export function Ask() {
           // two literal backspace bytes instead of the escape `\b`, so it matched
           // nothing and even a real 403 rendered as "did not answer".
           const status = /^API (\d{3})\b/.exec(message)?.[1];
-          const nothingHappened = " Nothing was drafted, extracted, or recorded.";
+          // Scoped to what the client can actually know. The earlier blanket "nothing
+          // was recorded" was false for a refusal: a 403 appends `permission_denied`
+          // and a 423 appends `client_data.operation_blocked` to the audit chain.
+          const nothingDrafted = " No report, draft or extraction was produced.";
+          const refusalRecorded = nothingDrafted + " The refusal itself is recorded in the audit chain.";
           const text =
             status === "403"
               ? "This session is not permitted to ask: the chat route requires the generate_reports permission." +
-                nothingHappened
+                refusalRecorded
               : status === "423"
                 ? "The backend is holding client-data mutations until its readiness checks pass, so this question was not processed." +
-                  nothingHappened
+                  refusalRecorded
                 : status === "503"
                   ? "The workspace API is not configured to serve client data yet, so this question was not processed." +
-                    nothingHappened
+                    nothingDrafted
                   : status
-                    ? `The workspace API refused this question: ${errorText(caught)}.` + nothingHappened
+                    ? `The workspace API refused this question: ${errorText(caught)}.` + nothingDrafted
                     : "The workspace API did not answer, so this question was not processed." +
-                      nothingHappened;
-          setTurns((current) => [...current, { id: `a-${id}`, role: "assistant", text }]);
+                      nothingDrafted +
+                      " Whether the request reached the backend is unknown.";
+          setTurns((current) => [...current, { id: `a-${id}`, role: "assistant", text, failed: true }]);
         })
         .finally(() => {
           if (askedFor === workspaceIdRef.current) setBusy(false);
@@ -246,7 +266,11 @@ export function Ask() {
     if (busy) return "Working on the answer.";
     const last = turns[turns.length - 1];
     if (!last || last.role !== "assistant") return "";
-    if (!last.answer) return "The question was not processed: the workspace API did not answer.";
+    // Announce the SAME thing the transcript shows. Keying on `!last.answer` made the
+    // live region say "the workspace API did not answer" for a 403, a 423 and a 503 —
+    // the three cases the visible text classifies correctly.
+    if (last.failed) return `The question was not processed. ${last.text}`;
+    if (!last.answer) return "The question was not processed.";
     const citations = last.answer.citations.length;
     return `Answer received with ${citations} citation${citations === 1 ? "" : "s"}.`;
   }, [busy, turns]);
@@ -570,14 +594,15 @@ function SnapshotCell({
   return (
     <Link
       to={to}
-      className="mr-hover-accent"
+      className="mr-hover-accent mr-cell-bg"
       aria-label={`${label}: ${value}${detail ? ` ${detail}` : ""}`}
+      // No inline `background` here either: this was the one call site the previous
+      // pass missed, so these four cells still had no hover state at all.
       style={{
         display: "flex",
         justifyContent: "space-between",
         alignItems: "baseline",
         gap: 10,
-        background: "var(--color-bg)",
         borderInlineEnd: "1px solid var(--color-divider)",
         borderBlockEnd: "1px solid var(--color-divider)",
         padding: "11px 13px",
@@ -932,11 +957,17 @@ function ChatTurn({
                   </div>
                 ) : null}
                 <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
-                  {exportGated
-                    ? exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)
-                    : "Issued from the Exports view, where the validation gate is enforced, the SHA-256 is recorded, and the issuance is appended to the audit chain."}
+                  {/* Only claim an issuance path when a control for it is actually
+                      rendered. A benchmarking answer names only non-report artifacts, so
+                      the "Issued from the Exports view" sentence described a route that
+                      does not exist for anything on offer. */}
+                  {issuableExports.length > 0
+                    ? exportGated
+                      ? exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)
+                      : "Issued from the Exports view, where the validation gate is enforced, the SHA-256 is recorded, and the issuance is appended to the audit chain."
+                    : ""}
                   {otherExports.length > 0
-                    ? ` This answer also names ${otherExports.join(", ")}, which are not Monday-report exports and are not issued from that view.`
+                    ? `${issuableExports.length > 0 ? " This answer also names" : "This answer names"} ${otherExports.join(", ")}, which ${otherExports.length === 1 ? "is not a Monday-report export and is" : "are not Monday-report exports and are"} not issued from the Exports view.`
                     : ""}
                 </span>
               </div>

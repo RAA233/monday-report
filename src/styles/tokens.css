@@ -10,17 +10,17 @@
    pruning now would only force a re-port and let the sheet drift from the handoff.
    The unreferenced rules add ~2 kB gzipped and affect nothing at runtime. */
 
-/* The handoff prescribes these two webfonts and this @import ships them. Stated
-   plainly, because the earlier note here overstated the safety of it:
-   - it IS a real third-party request to fonts.googleapis.com, and it is the only
-     outbound non-API request this frontend makes;
-   - `display=swap` governs the FACE once the sheet arrives; it does nothing when the
-     sheet never arrives, and the @import itself is render-blocking for CSS;
-   - what actually keeps an offline build legible is the fallback stacks below, which
-     name real condensed/humanist faces rather than a generic sans.
-   Nothing else depends on this line: deleting it leaves the fallback stacks in place
-   and removes the request. Self-hosting the two families is the standing follow-up. */
-@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;700&family=Barlow+Condensed:wght@400;600&display=swap');
+/* NO WEBFONT REQUEST, deliberately.
+   The handoff's sheet @imports Barlow and Barlow Condensed from fonts.googleapis.com.
+   That is a real third-party request, and it was the only outbound non-API request
+   this frontend made -- while the landing page states that no request leaves the
+   tenant and the repository's own invariant is that the app runs fully offline. A
+   marketing claim cannot outrank a network call, so the @import is removed rather
+   than the claim softened.
+   The typographic intent is carried by the fallback stacks below, which name real
+   condensed and humanist faces in order instead of collapsing to a generic sans.
+   Self-hosting the two families as local @font-face assets is the follow-up that
+   would restore the exact faces without reintroducing the request. */
 
 :root {
   --color-bg: #f2f2f3;
@@ -295,7 +295,7 @@ textarea.input { min-height: 90px; resize: vertical; }
 }
 .nav-brand {
   font-family: var(--font-heading); font-weight: var(--font-heading-weight);
-  font-size: 18px; margin-right: auto;
+  font-size: 18px; margin-inline-end: auto;
 }
 .nav a { color: inherit; text-decoration: none; font-size: 14px; }
 .nav a:hover, .nav a[aria-current='page'] { color: var(--color-accent-700); }

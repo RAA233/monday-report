@@ -14,11 +14,12 @@ import { useWorkspace } from "../lib/workspace";
  */
 export function AppShell() {
   const { apiStatus, retry, toast, dismissToast, pauseToast, resumeToast } = useWorkspace();
-  // A refusal gets its own banner. Saying "unreachable" for a 401/403/503 sends the
-  // operator to debug a service that answered, and the retry offered below cannot
-  // help — the credential or the role has to change.
+  // Three degraded states, one banner, three different sentences. Adding
+  // `misconfigured` without adding it here left a 503 backend rendering a silently
+  // read-only app with no banner at all.
   const refused = apiStatus === "refused";
-  const offline = apiStatus === "offline" || refused;
+  const misconfigured = apiStatus === "misconfigured";
+  const degraded = apiStatus === "offline" || refused || misconfigured;
 
   return (
     <div
@@ -35,7 +36,7 @@ export function AppShell() {
       <div style={{ minWidth: 0, display: "flex", flexDirection: "column", minHeight: "100vh" }}>
         <Topbar />
 
-        {offline ? (
+        {degraded ? (
           <div
             role="alert"
             style={{
@@ -57,12 +58,21 @@ export function AppShell() {
                 fontSize: 12.5
               }}
             >
-              {refused ? "API refused this session" : "API unreachable"}
+              {refused
+                ? "API refused this session"
+                : misconfigured
+                  ? "API not configured for client data"
+                  : "API unreachable"}
             </strong>
             {refused
               ? "The workspace API answered and refused this session's credential, so no workspace data can be read and nothing can be recorded. The service is running — the API key or the role has to change. Empty lists below mean \"not read\", not \"none exist\"."
-              : "The workspace API is unreachable, so no workspace data can be read and nothing can be recorded. Empty lists below mean \"not read\", not \"none exist\"."}
-            {refused ? (
+              : misconfigured
+                ? "The workspace API answered, but it is not configured to serve client data yet — it reports a missing client API key or audit key. Nothing can be read or recorded until that is configured on the backend. Empty lists below mean \"not read\", not \"none exist\"."
+                : "The workspace API is unreachable, so no workspace data can be read and nothing can be recorded. Empty lists below mean \"not read\", not \"none exist\"."}
+            {refused || misconfigured ? (
+              // No retry: neither a credential refusal nor an unconfigured backend can be
+              // fixed by repeating the same request. The sign-in surface reports what the
+              // server actually said.
               <Link className="btn btn-ghost" to="/app/signin" style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}>
                 Check the session
               </Link>
