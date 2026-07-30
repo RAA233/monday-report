@@ -46,9 +46,12 @@ function shortId(value: string): string {
 
 export function Reports() {
   const navigate = useNavigate();
-  const { activeWorkspace, openValidationTasks, readOnly, showToast, apiStatus } = useWorkspace();
+  const { activeWorkspace, openValidationTasks, validationGateKnown, readOnly, can, showToast, apiStatus } =
+    useWorkspace();
   const workspaceId = activeWorkspace?.id ?? null;
   const [creating, setCreating] = useState(false);
+  // POST /monday-reports is gated on generate_reports by the backend.
+  const canCreate = can("generate_reports");
 
   const load = useCallback(async () => {
     if (!workspaceId) return [] as ApiMondayReport[];
@@ -57,18 +60,23 @@ export function Reports() {
 
   const { value, reload } = useLoadable(load, [workspaceId]);
 
-  const gateLabel = openValidationTasks === 0 ? "Clear" : `${openValidationTasks} open`;
+  // Three states: an unread queue is unknown, not clear.
+  const gateLabel = !validationGateKnown
+    ? "Unknown"
+    : openValidationTasks === 0
+      ? "Clear"
+      : `${openValidationTasks} open`;
 
   async function createReport() {
-    if (!workspaceId || readOnly || creating) return;
+    if (!workspaceId || readOnly || !canCreate || creating) return;
     setCreating(true);
     try {
-      // A Monday week: today back to the previous Monday is not derivable without
-      // guessing intent, so the period is the current ISO week containing today.
+      // The ISO week containing today, computed in UTC throughout so the derived
+      // period does not shift by a day for operators west of UTC.
       const now = new Date();
-      const day = (now.getUTCDay() + 6) % 7; // 0 = Monday
-      const monday = new Date(now);
-      monday.setUTCDate(now.getUTCDate() - day);
+      const monday = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - ((now.getUTCDay() + 6) % 7))
+      );
       const sunday = new Date(monday);
       sunday.setUTCDate(monday.getUTCDate() + 6);
       const report = await createMondayReport({
@@ -96,7 +104,12 @@ export function Reports() {
       type="button"
       className="btn btn-primary"
       onClick={() => void createReport()}
-      disabled={readOnly || creating || !workspaceId}
+      disabled={readOnly || !canCreate || creating || !workspaceId}
+      title={
+        !readOnly && !canCreate
+          ? "This session lacks the generate_reports permission."
+          : undefined
+      }
     >
       {creating ? "Creating…" : "New Monday report"}
     </button>
@@ -154,7 +167,9 @@ export function Reports() {
                     <Tag tone={STATUS_TONE[report.status]}>{report.status}</Tag>
                   </GridCell>
                   <GridCell>
-                    <Tag tone={openValidationTasks > 0 ? "critical" : "outline"}>{gateLabel}</Tag>
+                    <Tag tone={!validationGateKnown || openValidationTasks > 0 ? "critical" : "outline"}>
+                      {gateLabel}
+                    </Tag>
                   </GridCell>
                   <GridCell>
                     <span className="text-muted" style={{ fontSize: 13 }}>
@@ -167,9 +182,11 @@ export function Reports() {
                     </span>
                   </GridCell>
                   <GridCell style={{ textAlign: "end" }}>
+                    {/* Every row repeats "Open", so the name identifies the report. */}
                     <button
                       type="button"
                       className="btn btn-ghost"
+                      aria-label={`Open report ${shortId(report.id)} for ${isoDay(report.period_start)} to ${isoDay(report.period_end)}`}
                       onClick={() => navigate(`/app/reports/${encodeURIComponent(report.id)}/draft`)}
                     >
                       Open

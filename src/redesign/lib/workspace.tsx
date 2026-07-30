@@ -51,22 +51,35 @@ export interface WorkspaceContextValue {
   selectWorkspace: (id: string) => void;
   /** Validation tasks in an open state — the export gate's authoritative count. */
   openValidationTasks: number;
+  /**
+   * True only when the validation queue actually loaded. While this is false the
+   * gate state is UNKNOWN — a zero count from a failed or in-flight read must
+   * never be presented as "gate clear".
+   */
+  validationGateKnown: boolean;
   validationTasks: Loadable<ApiValidationTask[]>;
   reloadValidationTasks: () => void;
   auditIntegrity: ApiAuditIntegrityStatus | null;
   localAi: ApiLocalAiStatus | null;
-  /** True when the session's roles cannot mutate (viewer-only or API offline). */
+  /** True when nothing can mutate at all (API unreachable / still probing). */
   readOnly: boolean;
+  /**
+   * Server-derived capability check against the session's permission map
+   * (`permission_map` over the identity's roles — the same model the backend
+   * enforces per route). Default-deny: unknown permission, missing map, or a
+   * role without the grant all return false.
+   */
+  can: (permission: string) => boolean;
   roles: string[];
   toast: { kind: string; text: string } | null;
   showToast: (kind: string, text: string) => void;
   dismissToast: () => void;
+  /** Hold the toast open (hover/focus) so it is not dismissed mid-read. */
+  pauseToast: () => void;
+  resumeToast: () => void;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
-
-/** Roles permitted to act. Anything else is treated as read-only. */
-const WRITER_ROLES = ["admin", "engineer", "validator"];
 
 /**
  * Validation-task statuses that still hold the export gate closed.
@@ -83,6 +96,29 @@ export function isOpenValidationTask(task: ApiValidationTask): boolean {
 /** The committed gate copy. `count` must be the real calculated open-task count. */
 export function exportGateMessage(count: number): string {
   return `Resolve ${count} validation task(s) before exporting an official Monday Report.`;
+}
+
+/**
+ * Newest report by an explicit ordering key.
+ *
+ * `GET /monday-reports` applies no sort, so array position is backend-dependent
+ * (dict insertion order on the local JSON store, physical row order on Postgres).
+ * Order by created_at, then period_end, and use position only to break an exact
+ * tie — so "the current report" means the same thing on both backends.
+ */
+export function newestReport<T extends { created_at: string; period_end: string }>(
+  reports: readonly T[]
+): T | null {
+  if (reports.length === 0) return null;
+  return reports.reduce((best, candidate) => {
+    if (candidate.created_at !== best.created_at) {
+      return candidate.created_at > best.created_at ? candidate : best;
+    }
+    if (candidate.period_end !== best.period_end) {
+      return candidate.period_end > best.period_end ? candidate : best;
+    }
+    return candidate;
+  });
 }
 
 function errorText(error: unknown): string {
@@ -107,13 +143,41 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [probe, setProbe] = useState(0);
   const toastTimer = useRef<number | undefined>(undefined);
 
-  const showToast = useCallback((kind: string, text: string) => {
-    setToast({ kind, text });
+  const toastPaused = useRef(false);
+
+  const armToastTimer = useCallback(() => {
     window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), 5200);
+    toastTimer.current = window.setTimeout(() => {
+      if (toastPaused.current) return; // held open by hover/focus; resume re-arms
+      setToast(null);
+    }, 5200);
   }, []);
 
-  const dismissToast = useCallback(() => setToast(null), []);
+  const showToast = useCallback(
+    (kind: string, text: string) => {
+      setToast({ kind, text });
+      armToastTimer();
+    },
+    [armToastTimer]
+  );
+
+  const dismissToast = useCallback(() => {
+    window.clearTimeout(toastTimer.current);
+    setToast(null);
+  }, []);
+
+  const pauseToast = useCallback(() => {
+    toastPaused.current = true;
+    window.clearTimeout(toastTimer.current);
+  }, []);
+
+  const resumeToast = useCallback(() => {
+    toastPaused.current = false;
+    armToastTimer();
+  }, [armToastTimer]);
+
+  // The auto-dismiss timer must not outlive the provider.
+  useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
   const loadValidationTasks = useCallback(async () => {
     setValidationTasks({ state: "loading" });
@@ -150,15 +214,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       }
 
       // Secondary reads are individually tolerant: one failing surface must not
-      // take down the shell.
+      // take down the shell. Success paths also honour `cancelled` so a stale
+      // probe cannot overwrite a newer one's result.
       void loadValidationTasks();
       try {
-        setAuditIntegrity(await getAuditIntegrity());
+        const integrity = await getAuditIntegrity();
+        if (!cancelled) setAuditIntegrity(integrity);
       } catch {
         if (!cancelled) setAuditIntegrity(null);
       }
       try {
-        setLocalAi(await getLocalAiStatus());
+        const ai = await getLocalAiStatus();
+        if (!cancelled) setLocalAi(ai);
       } catch {
         if (!cancelled) setLocalAi(null);
       }
@@ -172,22 +239,30 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const retry = useCallback(() => setProbe((n) => n + 1), []);
 
   const roles = useMemo(() => {
-    // Roles are server-derived. Absent under the shared-key demo bootstrap, which
-    // is why an empty list is not treated as "no permission" below.
-    const raw = session?.authenticated_identity?.roles ?? [];
+    const raw = session?.authenticated_identity?.roles ?? session?.user.roles ?? [];
     return raw.map(String);
   }, [session]);
 
-  const readOnly = useMemo(() => {
-    if (apiStatus !== "connected") return true;
-    if (roles.length === 0) return false; // demo bootstrap grants the full local role set
-    return !roles.some((role) => WRITER_ROLES.includes(role));
-  }, [apiStatus, roles]);
+  // Offline / probing = nothing can mutate. Per-action capability is `can()`.
+  const readOnly = apiStatus !== "connected";
+
+  const can = useCallback(
+    (permission: string): boolean => {
+      if (apiStatus !== "connected") return false;
+      // The session's permission map is the backend's own `permission_map` over
+      // the identity's roles — the model each route enforces. Default-deny when
+      // the map or the key is absent, exactly like the server.
+      return session?.permissions?.[permission] === true;
+    },
+    [apiStatus, session]
+  );
 
   const openValidationTasks = useMemo(() => {
     if (validationTasks.state !== "ready") return 0;
     return validationTasks.data.filter(isOpenValidationTask).length;
   }, [validationTasks]);
+
+  const validationGateKnown = validationTasks.state === "ready";
 
   const activeWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === activeId) ?? workspaces[0] ?? null,
@@ -203,15 +278,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       activeWorkspace,
       selectWorkspace: setActiveId,
       openValidationTasks,
+      validationGateKnown,
       validationTasks,
       reloadValidationTasks: () => void loadValidationTasks(),
       auditIntegrity,
       localAi,
       readOnly,
+      can,
       roles,
       toast,
       showToast,
-      dismissToast
+      dismissToast,
+      pauseToast,
+      resumeToast
     }),
     [
       apiStatus,
@@ -220,15 +299,19 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       workspaces,
       activeWorkspace,
       openValidationTasks,
+      validationGateKnown,
       validationTasks,
       loadValidationTasks,
       auditIntegrity,
       localAi,
       readOnly,
+      can,
       roles,
       toast,
       showToast,
-      dismissToast
+      dismissToast,
+      pauseToast,
+      resumeToast
     ]
   );
 

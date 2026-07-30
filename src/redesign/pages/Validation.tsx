@@ -19,14 +19,26 @@ import { isOpenValidationTask, useLoadable, useWorkspace } from "../lib/workspac
  * instead of borrowing an unrelated record's citation.
  */
 export function Validation() {
-  const { validationTasks, reloadValidationTasks, openValidationTasks, readOnly, showToast, apiStatus, roles } =
-    useWorkspace();
+  const {
+    validationTasks,
+    reloadValidationTasks,
+    openValidationTasks,
+    readOnly,
+    can,
+    showToast,
+    apiStatus,
+    roles
+  } = useWorkspace();
 
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<string, string>>({});
 
+  // The backend gates PATCH /validation-tasks on resolve_validation.
+  const canResolve = can("resolve_validation");
+  const decisionsBlocked = readOnly || !canResolve;
+
   const loadFailures = useCallback(async () => getFailures(), []);
-  const { value: failures } = useLoadable(loadFailures, [apiStatus]);
+  const { value: failures, reload: reloadFailures } = useLoadable(loadFailures, [apiStatus]);
 
   const failureById = useMemo(() => {
     const map = new Map<string, ApiFailureRecord>();
@@ -42,7 +54,7 @@ export function Validation() {
   );
 
   async function decide(task: ApiValidationTask, status: "validated" | "rejected") {
-    if (readOnly || busyId) return;
+    if (decisionsBlocked || busyId) return;
     const note = notes[task.id]?.trim();
     if (status === "rejected" && !note) {
       showToast("Reason required", "Rejecting a task needs a written resolution note for the record.");
@@ -84,19 +96,20 @@ export function Validation() {
         }
       />
 
-      {readOnly ? (
+      {decisionsBlocked ? (
         <p
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          {apiStatus === "connected" ? (
-            <>
-              This session has no validation permission — the queue is read-only. Decisions require the{" "}
-              <strong>validator</strong> or <strong>admin</strong> role
-              {roles.length > 0 ? <> (this session holds: {roles.join(", ")})</> : null}.
-            </>
-          ) : (
+          {apiStatus !== "connected" ? (
             <>The workspace API is unreachable, so no decision can be recorded and the queue is read-only.</>
+          ) : (
+            <>
+              This session lacks the <strong>resolve_validation</strong> permission, so the queue is
+              read-only
+              {roles.length > 0 ? <> (roles: {roles.join(", ")})</> : null}. The backend refuses the
+              decision route without it.
+            </>
           )}
         </p>
       ) : null}
@@ -134,6 +147,7 @@ export function Validation() {
             const critical = task.priority === "critical";
             const conflict = task.status === "conflict";
             const citation = failure?.citations[0];
+            const cardTitle = failure ? failure.event_type : task.target_type.replace(/_/g, " ");
 
             return (
               <Frame
@@ -151,7 +165,7 @@ export function Validation() {
                   <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
                     <Tag tone={critical ? "critical" : "outline"}>{task.priority}</Tag>
                     <h2 style={{ fontSize: 19, letterSpacing: "0.02em", textTransform: "uppercase", margin: 0 }}>
-                      {failure ? failure.event_type : task.target_type.replace(/_/g, " ")}
+                      {cardTitle}
                     </h2>
                     {conflict ? <Tag tone="neutral">conflict — sources disagree</Tag> : null}
                   </div>
@@ -204,6 +218,26 @@ export function Validation() {
                         </p>
                       )}
                     </>
+                  ) : task.target_type === "failure" && failures.state !== "ready" ? (
+                    // Absence of a record and a failed read are different facts.
+                    <p style={{ fontSize: 13, lineHeight: 1.55, margin: "10px 0 0" }}>
+                      This task targets failure <code>{task.target_id}</code>, but the failure list{" "}
+                      {failures.state === "loading" ? "is still loading" : "could not be read"}, so its
+                      evidence is unavailable — this is not a statement that no record exists.
+                      {failures.state === "error" ? (
+                        <>
+                          {" "}
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            style={{ minHeight: 0, padding: "0 4px", fontSize: 12 }}
+                            onClick={reloadFailures}
+                          >
+                            Retry
+                          </button>
+                        </>
+                      ) : null}
+                    </p>
                   ) : (
                     <p style={{ fontSize: 13, lineHeight: 1.55, margin: "10px 0 0" }}>
                       This task targets {task.target_type.replace(/_/g, " ")}{" "}
@@ -220,7 +254,7 @@ export function Validation() {
                       rows={2}
                       value={notes[task.id] ?? ""}
                       placeholder="Required to reject; recorded with the decision either way."
-                      disabled={readOnly || busyId === task.id}
+                      disabled={decisionsBlocked || busyId === task.id}
                       onChange={(event) =>
                         setNotes((current) => ({ ...current, [task.id]: event.target.value }))
                       }
@@ -229,19 +263,22 @@ export function Validation() {
                 </div>
 
                 <div style={{ display: "grid", gap: 8, alignContent: "start" }}>
+                  {/* Every card repeats these labels, so each name states its target. */}
                   <button
                     type="button"
                     className="btn btn-primary"
+                    aria-label={`Validate: ${cardTitle}`}
                     onClick={() => void decide(task, "validated")}
-                    disabled={readOnly || busyId === task.id}
+                    disabled={decisionsBlocked || busyId === task.id}
                   >
                     {busyId === task.id ? "Recording…" : "Validate"}
                   </button>
                   <button
                     type="button"
                     className="btn btn-secondary"
+                    aria-label={`Reject: ${cardTitle}`}
                     onClick={() => void decide(task, "rejected")}
-                    disabled={readOnly || busyId === task.id}
+                    disabled={decisionsBlocked || busyId === task.id}
                   >
                     Reject
                   </button>

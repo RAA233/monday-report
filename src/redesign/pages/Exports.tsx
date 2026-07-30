@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   createReportExportSignedUrl,
@@ -18,7 +18,7 @@ import {
   Skeleton,
   Tag
 } from "../components/primitives";
-import { exportGateMessage, useLoadable, useWorkspace } from "../lib/workspace";
+import { exportGateMessage, newestReport, useLoadable, useWorkspace } from "../lib/workspace";
 
 /**
  * Exports.
@@ -62,17 +62,47 @@ function sizeLabel(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/**
+ * A 409 alone does not mean the validation gate. The export route answers 409 with
+ * "Report has unresolved validation tasks" for the gate, but also with
+ * "Signing secret is required in client data mode" for an unrelated cause — so the
+ * detail, not the status, decides. Anything else is shown verbatim rather than
+ * mislabelled as a gate refusal.
+ */
 function isGateRefusal(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("409");
+  return (
+    error instanceof Error &&
+    error.message.includes("409") &&
+    /unresolved validation task/i.test(error.message)
+  );
 }
 
 export function Exports() {
-  const { activeWorkspace, openValidationTasks, readOnly, showToast, apiStatus } = useWorkspace();
+  const {
+    activeWorkspace,
+    openValidationTasks,
+    validationGateKnown,
+    reloadValidationTasks,
+    readOnly,
+    can,
+    showToast,
+    apiStatus
+  } = useWorkspace();
   const workspaceId = activeWorkspace?.id ?? null;
 
   const [issued, setIssued] = useState<Issued[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  const [minting, setMinting] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<string, { tone: "ok" | "bad"; text: string }>>({});
+
+  // Issued rows and per-format status belong to one workspace. Carrying them across
+  // a switch would attribute another workspace's exports to this one.
+  useEffect(() => {
+    setIssued([]);
+    setStatuses({});
+    setBusy(null);
+    setMinting(null);
+  }, [workspaceId]);
 
   const loadReports = useCallback(async () => {
     if (!workspaceId) return [] as ApiMondayReport[];
@@ -82,13 +112,20 @@ export function Exports() {
   const { value: reports, reload } = useLoadable(loadReports, [workspaceId]);
 
   // Export the newest report in the workspace — the one the Studio drafts against.
-  const target =
-    reports.state === "ready" && reports.data.length > 0 ? reports.data[reports.data.length - 1] : null;
+  // Ordered explicitly; array position is not a documented ordering.
+  const target = reports.state === "ready" ? newestReport(reports.data) : null;
 
-  const gateClosed = openValidationTasks > 0;
+  // Three states, not two. An unread queue is UNKNOWN — never "clear".
+  const gateState: "closed" | "clear" | "unknown" = !validationGateKnown
+    ? "unknown"
+    : openValidationTasks > 0
+      ? "closed"
+      : "clear";
+  const canExport = can("issue_client_reports") || can("export_evidence");
+  const exportsBlocked = gateState !== "clear" || !canExport;
 
   async function runExport(format: ApiReportExport["format"]) {
-    if (!target || readOnly || busy) return;
+    if (!target || exportsBlocked || busy) return;
     setBusy(format);
     setStatuses((current) => ({ ...current, [format]: { tone: "ok", text: `Creating ${format.toUpperCase()} export…` } }));
     try {
@@ -106,11 +143,22 @@ export function Exports() {
         `${target.id} ${format.toUpperCase()} export written, checksummed, and appended to the audit chain. Fetch it with an expiring signed URL.`
       );
     } catch (caught) {
-      const text = isGateRefusal(caught)
-        ? exportGateMessage(openValidationTasks)
-        : caught instanceof Error && caught.message
-          ? `Export refused. ${caught.message}`
-          : "Export refused. The workspace API did not answer.";
+      let text: string;
+      if (isGateRefusal(caught)) {
+        // The backend refused on the gate while this client believed it was clear,
+        // so our count is stale. Re-read rather than interpolating a stale number
+        // (which produced "Resolve 0 validation task(s)…").
+        reloadValidationTasks();
+        text =
+          openValidationTasks > 0
+            ? exportGateMessage(openValidationTasks)
+            : "Export refused: the backend reports unresolved validation tasks. Re-reading the validation queue — open Validation to resolve them.";
+      } else {
+        text =
+          caught instanceof Error && caught.message
+            ? `Export refused. ${caught.message}`
+            : "Export refused. The workspace API did not answer.";
+      }
       setStatuses((current) => ({ ...current, [format]: { tone: "bad", text } }));
     } finally {
       setBusy(null);
@@ -118,7 +166,10 @@ export function Exports() {
   }
 
   async function mintUrl(item: Issued) {
-    if (readOnly) return;
+    // Guard the in-flight request: a second click would mint a second token and
+    // append a second audit event for one user intent.
+    if (readOnly || minting) return;
+    setMinting(item.id);
     try {
       const signed = await createReportExportSignedUrl(item.id);
       setIssued((current) =>
@@ -133,6 +184,8 @@ export function Exports() {
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "The request did not complete.";
       showToast("No URL issued", `A signed reference was not issued. ${message}`);
+    } finally {
+      setMinting(null);
     }
   }
 
@@ -144,7 +197,7 @@ export function Exports() {
         lede="Official exports are validation-gated, checksummed, audit-logged, and fetched only through expiring signed URLs."
       />
 
-      {gateClosed ? (
+      {gateState === "closed" ? (
         <div
           role="status"
           style={{
@@ -170,6 +223,41 @@ export function Exports() {
           <Link className="btn btn-ghost" to="/app/validation" style={{ minHeight: 0, padding: "0 4px" }}>
             Open the queue →
           </Link>
+        </div>
+      ) : gateState === "unknown" ? (
+        <div
+          role="status"
+          style={{
+            display: "flex",
+            gap: 12,
+            alignItems: "baseline",
+            flexWrap: "wrap",
+            border: "1px solid var(--color-text)",
+            padding: "12px 16px"
+          }}
+        >
+          <strong
+            style={{
+              fontFamily: "var(--font-heading)",
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+              fontSize: 13
+            }}
+          >
+            Export gate unknown
+          </strong>
+          <span style={{ fontSize: 13 }}>
+            The validation queue could not be read, so the gate cannot be evaluated. Exports stay
+            disabled — this is not a statement that the queue is empty.
+          </span>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            style={{ minHeight: 0, padding: "0 4px" }}
+            onClick={reloadValidationTasks}
+          >
+            Retry
+          </button>
         </div>
       ) : (
         <div
@@ -199,6 +287,16 @@ export function Exports() {
           </span>
         </div>
       )}
+
+      {gateState === "clear" && !canExport ? (
+        <p
+          role="status"
+          style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
+        >
+          The gate is clear, but this session has neither <strong>issue_client_reports</strong> nor{" "}
+          <strong>export_evidence</strong>, so exports stay disabled.
+        </p>
+      ) : null}
 
       {reports.state === "loading" ? <Skeleton rows={2} label="Loading reports" /> : null}
 
@@ -266,7 +364,7 @@ export function Exports() {
                     type="button"
                     className="btn btn-secondary"
                     onClick={() => void runExport(entry.format)}
-                    disabled={readOnly || gateClosed || busy !== null}
+                    disabled={exportsBlocked || busy !== null}
                   >
                     {busy === entry.format ? "Exporting…" : `Export ${entry.label}`}
                   </button>
@@ -333,6 +431,7 @@ export function Exports() {
                       target="_blank"
                       rel="noreferrer"
                       style={{ minHeight: 0 }}
+                      aria-label={`Open the signed reference for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}, expires ${item.expiresAt}`}
                     >
                       Open signed reference (expires {item.expiresAt})
                     </a>
@@ -341,9 +440,11 @@ export function Exports() {
                       type="button"
                       className="btn btn-ghost"
                       onClick={() => void mintUrl(item)}
-                      disabled={readOnly}
+                      disabled={readOnly || minting !== null}
+                      // Rows repeat this label, so the name states which export.
+                      aria-label={`Get a signed URL for the ${item.format.toUpperCase()} export of report ${shortId(item.report_id)}`}
                     >
-                      Get signed URL
+                      {minting === item.id ? "Issuing…" : "Get signed URL"}
                     </button>
                   )}
                 </GridCell>

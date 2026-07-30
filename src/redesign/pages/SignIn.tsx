@@ -196,7 +196,12 @@ export function SignIn() {
                   fontSize: 12.5
                 }}
               >
-                Credential accepted
+                {/* A 200 means an identity resolved, which is NOT the same as the
+                    presented credential having authenticated: in demo mode an
+                    unrecognised or disabled credential falls back to the demo
+                    bootstrap identity. Only claim acceptance when the server says
+                    the actor was actually authenticated. */}
+                {resolved.actorSource === "authenticated" ? "Credential accepted" : "Identity resolved"}
               </strong>
               <span>
                 {resolved.name} · {resolved.email}
@@ -218,6 +223,12 @@ export function SignIn() {
                   The server reported no roles for this credential.
                 </span>
               )}
+              {resolved.actorSource !== "authenticated" ? (
+                <span style={{ fontSize: 12, lineHeight: 1.45, color: "var(--color-accent-800)" }}>
+                  This identity came from the local fallback, not from the credential presented — the
+                  request would have resolved the same way without it.
+                </span>
+              ) : null}
             </div>
           ) : null}
 
@@ -245,9 +256,14 @@ export function SignIn() {
             Open the workspace without checking
           </Link>
 
+          {/* Both halves of the prototype's closing line were wrong for this
+              build. Disabled accounts are refused only in client mode (demo mode
+              falls back to the bootstrap identity), and GET /auth/session is a
+              read that appends no audit event — only rejections are recorded. */}
           <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.5, margin: "14px 0 0" }}>
-            Disabled accounts are refused at the credential check. All sign-ins append to the tenant's
-            hash-chained audit log.
+            In client mode a disabled account or a revoked credential is refused with 401 and the
+            refusal is written to the tenant's hash-chained audit log. A successful check is a read and
+            is not itself audited.
           </p>
         </div>
 

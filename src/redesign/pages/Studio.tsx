@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { getReportDraft, type ApiReportDraft } from "../../lib/api";
 import {
@@ -43,6 +43,12 @@ interface FormState {
   holeSize: string;
   mdFt: string;
   tvdFt: string;
+  /**
+   * As-drilled dogleg severity. Operator-entered and session-local: `ApiReportDraft`
+   * carries no `dls` field, so this is never populated from evidence and never
+   * presented as sourced.
+   */
+  dls: string;
   mudWeight: string;
   presentOps: string;
   nextOps: string;
@@ -60,6 +66,7 @@ const EMPTY_FORM: FormState = {
   holeSize: "",
   mdFt: "",
   tvdFt: "",
+  dls: "",
   mudWeight: "",
   presentOps: "",
   nextOps: "",
@@ -67,7 +74,27 @@ const EMPTY_FORM: FormState = {
   risks: ""
 };
 
-function formFromDraft(draft: ApiReportDraft): FormState {
+/** Column templates for the preview sheet's evidence tables. */
+const CASING_TEMPLATE = "1.3fr 0.7fr 0.7fr 0.7fr auto";
+const SURVEY_TEMPLATE = "0.8fr 0.6fr 0.6fr 0.9fr 0.9fr auto";
+const HYDRAULICS_TEMPLATE = "1fr 0.8fr 1.4fr auto";
+
+/** Feet with a thousands separator, or an em dash when absent. */
+function ft(value: number | null | undefined): string {
+  return value == null ? "—" : Math.round(value).toLocaleString();
+}
+
+/** Degrees to one decimal, or an em dash when absent. */
+function deg(value: number | null | undefined): string {
+  return value == null ? "—" : `${value.toFixed(1)}°`;
+}
+
+/** " · 86%" for a present confidence, empty otherwise — never a fabricated number. */
+function conf(value: number | null | undefined): string {
+  return value == null ? "" : ` · ${Math.round(value * 100)}%`;
+}
+
+function formFromDraft(draft: ApiReportDraft, previous: FormState): FormState {
   return {
     reportDate: draft.report_date,
     reportNo: draft.report_no,
@@ -78,6 +105,8 @@ function formFromDraft(draft: ApiReportDraft): FormState {
     holeSize: draft.hole_size,
     mdFt: draft.md_ft,
     tvdFt: draft.tvd_ft,
+    // Not in the payload — preserve whatever the operator typed.
+    dls: previous.dls,
     mudWeight: draft.mud_weight,
     presentOps: draft.present_ops,
     nextOps: draft.next_ops,
@@ -86,11 +115,33 @@ function formFromDraft(draft: ApiReportDraft): FormState {
   };
 }
 
+/** Percentage of the issue-critical fields that currently carry text. */
+const COMPLETENESS_FIELDS: Array<keyof FormState> = [
+  "reportDate",
+  "reportNo",
+  "well",
+  "rig",
+  "operator",
+  "phase",
+  "holeSize",
+  "mdFt",
+  "tvdFt",
+  "mudWeight",
+  "presentOps",
+  "nextOps",
+  "safety",
+  "risks"
+];
+
 export function Studio() {
   const { reportId } = useParams();
   const navigate = useNavigate();
-  const { activeWorkspace, openValidationTasks, readOnly, apiStatus } = useWorkspace();
+  const { activeWorkspace, openValidationTasks, validationGateKnown, readOnly, can, apiStatus } =
+    useWorkspace();
   const workspaceId = activeWorkspace?.id ?? null;
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
+  const canEdit = can("generate_reports") || can("record_field_corrections");
 
   const [variant, setVariant] = useState<FormatVariantId>("ddr");
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -112,18 +163,24 @@ export function Studio() {
       setMessage("No workspace is selected, so there is no evidence to draft from.");
       return;
     }
+    const askedFor = workspaceId;
     setState("loading");
     setMessage("Building a source-backed draft from parsed documents, citations, and validation tasks…");
     try {
-      const next = await getReportDraft(workspaceId);
+      const next = await getReportDraft(askedFor);
+      // A draft is workspace-scoped evidence. If the operator switched workspaces
+      // while this was in flight, dropping it is the only correct outcome —
+      // otherwise workspace A's well, citations and readiness render under B.
+      if (askedFor !== workspaceIdRef.current) return;
       setDraft(next);
-      setForm(formFromDraft(next));
+      setForm((previous) => formFromDraft(next, previous));
       setEditedKeys(new Set());
       setState("ready");
       setMessage(
         `Source-backed draft ready from ${next.source_document_count} document(s), ${next.source_chunk_count} chunk(s), and ${next.citation_count} citation(s).`
       );
     } catch (caught) {
+      if (askedFor !== workspaceIdRef.current) return;
       setState("error");
       setMessage(
         caught instanceof Error && caught.message
@@ -139,52 +196,96 @@ export function Studio() {
     if (workspaceId && apiStatus === "connected") void sourceDraft();
   }, [workspaceId, apiStatus, sourceDraft]);
 
+  // Clear the previous workspace's draft the moment the workspace changes, so no
+  // stale evidence is on screen while the new one loads.
+  useEffect(() => {
+    setDraft(null);
+    setState("idle");
+  }, [workspaceId]);
+
   function update<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
     setEditedKeys((current) => new Set(current).add(key));
   }
 
+  const gateBlocked = openValidationTasks > 0;
+
+  /**
+   * Issue readiness board — the handoff's six cells (Format, Source, Draft,
+   * Completeness, Validation, Issue), computed live from the form AND the queue.
+   * `form` is a dependency on purpose: the board is named for issue readiness, so
+   * emptying a required section must change it on the next keystroke.
+   */
   const readiness: CellSpec[] = useMemo(() => {
-    if (!draft) {
-      return [
-        { label: "Evidence", value: "Not loaded", detail: "Build a source-backed draft", ok: false },
-        { label: "Citations", value: "—", detail: "Attached once the draft is built", ok: false },
-        {
-          label: "Validation gate",
-          value: openValidationTasks === 0 ? "Clear" : `${openValidationTasks} open`,
-          detail: openValidationTasks === 0 ? "No open tasks" : "Export blocked",
-          ok: openValidationTasks === 0
-        },
-        { label: "Schematic", value: "—", detail: "Requires casing evidence", ok: false },
-        { label: "Survey", value: "—", detail: "Requires survey stations", ok: false },
-        { label: "Hydraulics", value: "—", detail: "Requires hydraulics observations", ok: false }
-      ];
-    }
+    const filled = COMPLETENESS_FIELDS.filter((key) => form[key].trim().length > 0).length;
+    const completeness = Math.round((filled / COMPLETENESS_FIELDS.length) * 100);
+    const narrativeReady =
+      form.presentOps.trim().length > 0 && form.nextOps.trim().length > 0 && form.safety.trim().length > 0;
+    const gateKnownAndClear = validationGateKnown && !gateBlocked;
+    const issueReady = narrativeReady && completeness === 100 && gateKnownAndClear;
+
     return [
       {
-        label: "Evidence",
-        value: `${draft.source_document_count} docs`,
-        detail: `${draft.source_chunk_count} chunks parsed`,
-        ok: draft.source_document_count > 0
+        label: "Format",
+        value: activeVariant.shortLabel,
+        detail: `${activeVariant.label} · ${reportVariantSchemaVersion}`,
+        ok: true
       },
       {
-        label: "Citations",
-        value: String(draft.citation_count),
-        detail: `${draft.failure_count} failure record(s)`,
-        ok: draft.citation_count > 0
+        label: "Source",
+        value: draft ? `${draft.source_document_count} docs` : "Not loaded",
+        detail: draft
+          ? `${draft.source_chunk_count} chunk(s) · ${draft.citation_count} citation(s)`
+          : "Build a source-backed draft",
+        ok: Boolean(draft && draft.source_document_count > 0)
       },
       {
-        label: "Validation gate",
-        value: draft.validation_gate === "clear" ? "Clear" : "Review required",
-        detail: `${draft.open_validation_tasks} open task(s)`,
-        ok: draft.validation_gate === "clear"
+        label: "Draft",
+        value: narrativeReady ? "Ready" : "Gaps",
+        detail: narrativeReady
+          ? "Operations, plan and safety all carry text"
+          : "Present operations, next 24 hr and safety are required",
+        ok: narrativeReady
       },
       {
-        label: "Schematic",
-        value: draft.schematic_source === "source" ? "From source" : "Reference",
+        label: "Completeness",
+        value: `${completeness}%`,
+        detail: `${filled} of ${COMPLETENESS_FIELDS.length} report fields`,
+        ok: completeness === 100
+      },
+      {
+        label: "Validation",
+        value: !validationGateKnown ? "Unknown" : gateBlocked ? `${openValidationTasks} open` : "Clear",
+        detail: !validationGateKnown
+          ? "The validation queue could not be read"
+          : gateBlocked
+            ? "Export blocked until resolved"
+            : "No open tasks",
+        ok: gateKnownAndClear
+      },
+      {
+        label: "Issue",
+        value: issueReady ? "Ready" : "Gated",
+        detail: issueReady
+          ? "Draft text complete and the gate is clear"
+          : !gateKnownAndClear
+            ? "Held by the validation gate"
+            : "Held by incomplete draft fields",
+        ok: issueReady
+      }
+    ];
+  }, [activeVariant, draft, form, gateBlocked, openValidationTasks, validationGateKnown]);
+
+  /** Second row: what the loaded evidence actually contains. */
+  const evidenceCells: CellSpec[] = useMemo(() => {
+    if (!draft) return [];
+    return [
+      {
+        label: "Casing",
+        value: draft.schematic_source === "source" ? `${draft.casing_strings?.length ?? 0} strings` : "Reference",
         detail:
           draft.schematic_source === "source"
-            ? `${draft.casing_strings?.length ?? 0} casing string(s)`
+            ? "From source evidence"
             : "Labelled reference values, not evidence",
         ok: draft.schematic_source === "source"
       },
@@ -200,16 +301,18 @@ export function Studio() {
       {
         label: "Hydraulics",
         value:
-          draft.hydraulics_source === "source"
-            ? `${draft.hydraulics_observations?.length ?? 0} obs`
-            : "None",
+          draft.hydraulics_source === "source" ? `${draft.hydraulics_observations?.length ?? 0} obs` : "None",
         detail: draft.hydraulics_source === "source" ? "Extracted from source" : "No observations found",
         ok: draft.hydraulics_source === "source"
+      },
+      {
+        label: "Failures",
+        value: String(draft.failure_count),
+        detail: `${draft.open_validation_tasks} open validation task(s) on this draft`,
+        ok: draft.failure_count === 0 || draft.open_validation_tasks === 0
       }
     ];
-  }, [draft, openValidationTasks]);
-
-  const gateBlocked = openValidationTasks > 0;
+  }, [draft]);
 
   return (
     <>
@@ -251,7 +354,7 @@ export function Studio() {
             fontSize: 10.5,
             letterSpacing: "0.1em",
             textTransform: "uppercase",
-            color: "var(--color-neutral-600)"
+            color: "var(--color-neutral-700)"
           }}
         >
           Format
@@ -259,7 +362,6 @@ export function Studio() {
         <SegControl<FormatVariantId>
           name="mr-variant"
           label="Report format variants"
-          role="tablist"
           value={variant}
           onChange={setVariant}
           options={reportFormatVariants.map((item) => ({ id: item.id, label: item.shortLabel }))}
@@ -274,6 +376,8 @@ export function Studio() {
       </div>
 
       <Cells items={readiness} label="Issue readiness board" />
+
+      {evidenceCells.length > 0 ? <Cells items={evidenceCells} label="Loaded evidence" /> : null}
 
       {state === "loading" && !draft ? <Skeleton rows={4} label="Building the draft" /> : null}
 
@@ -315,6 +419,15 @@ export function Studio() {
             <Field id="st-hole" label="Hole size" value={form.holeSize} onChange={(v) => update("holeSize", v)} disabled={readOnly} />
             <Field id="st-md" label="MD ft" value={form.mdFt} onChange={(v) => update("mdFt", v)} disabled={readOnly} inputMode="decimal" />
             <Field id="st-tvd" label="TVD ft" value={form.tvdFt} onChange={(v) => update("tvdFt", v)} disabled={readOnly} inputMode="decimal" />
+            <Field
+              id="st-dls"
+              label="As-drilled DLS"
+              value={form.dls}
+              onChange={(v) => update("dls", v)}
+              disabled={readOnly}
+              placeholder="1.3 deg/100 ft"
+              hint="Operator-entered — the draft payload carries no DLS value."
+            />
             <Field id="st-mud" label="Mud weight" value={form.mudWeight} onChange={(v) => update("mudWeight", v)} disabled={readOnly} />
           </div>
 
@@ -328,9 +441,7 @@ export function Studio() {
               className="text-muted"
               style={{ fontSize: 12, margin: 0, border: "1px solid var(--color-divider)", padding: "8px 10px" }}
             >
-              {apiStatus === "connected"
-                ? "Read-only session: this role has no report-edit permission. Ask a workspace admin for engineer access."
-                : "Read-only: the workspace API is unreachable, so no edit can be recorded."}
+              Read-only: the workspace API is unreachable, so no edit can be recorded.
             </p>
           ) : (
             <p
@@ -341,6 +452,14 @@ export function Studio() {
               Recording a change against the report requires a field correction with a written reason,
               which carries reviewer attribution into the audit chain — the recorded source value is
               never overwritten.
+              {!canEdit ? (
+                <>
+                  {" "}
+                  This session holds neither <strong>generate_reports</strong> nor{" "}
+                  <strong>record_field_corrections</strong>, so a correction could not be recorded even
+                  with a reason.
+                </>
+              ) : null}
             </p>
           )}
         </Frame>
@@ -415,7 +534,11 @@ export function Studio() {
             <span>{form.phase || activeVariant.phase}</span>
           </div>
 
-          <div style={{ display: "grid", gap: 16, padding: "16px 18px" }}>
+          {/* minmax(0,1fr): an implicit grid column is sized to its widest child's
+              max-content, so the evidence tables (min-width 380-460px) pushed this
+              column past the card, where overflow:hidden then CLIPPED the content
+              instead of letting the tables scroll inside themselves. */}
+          <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 16, padding: "16px 18px" }}>
             <Cells
               min={110}
               label="Report header values"
@@ -425,6 +548,7 @@ export function Studio() {
                 { label: "Hole", value: form.holeSize || "—" },
                 { label: "MD", value: form.mdFt || "—" },
                 { label: "TVD", value: form.tvdFt || "—" },
+                { label: "DLS", value: form.dls || "—" },
                 { label: "Mud", value: form.mudWeight || "—" }
               ]}
             />
@@ -502,8 +626,165 @@ export function Studio() {
               ) : null}
             </div>
 
+            {/* Casing list. The handoff's preview sheet carries the casing program;
+                the mini deviated-schematic SVG ports with the Stage 2 generators. */}
+            {draft && draft.casing_strings && draft.casing_strings.length > 0 ? (
+              <div style={{ border: "1px solid var(--color-divider)", padding: "9px 10px" }}>
+                {/* Wraps at narrow widths: as one non-wrapping row the link
+                    overflowed the card at 390px. */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "baseline",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    flexWrap: "wrap"
+                  }}
+                >
+                  <strong
+                    style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}
+                  >
+                    Casing program
+                  </strong>
+                  <Link
+                    className="btn btn-ghost"
+                    to="/app/well"
+                    style={{ minHeight: 0, padding: "0 4px", fontSize: 11.5, whiteSpace: "normal", textAlign: "start" }}
+                  >
+                    Open full well schematics →
+                  </Link>
+                </div>
+                <div className="mr-scroll-x" style={{ marginTop: 6 }}>
+                  <div role="table" aria-label="Casing strings" style={{ minWidth: 380 }}>
+                    <div role="row" className="mr-table-head" style={{ gridTemplateColumns: CASING_TEMPLATE }}>
+                      <span role="columnheader">String</span>
+                      <span role="columnheader">OD</span>
+                      <span role="columnheader">Top</span>
+                      <span role="columnheader">Shoe</span>
+                      <span role="columnheader">Evidence</span>
+                    </div>
+                    {draft.casing_strings.map((string, index) => (
+                      <div
+                        role="row"
+                        className="mr-table-row"
+                        key={`${string.name}-${index}`}
+                        style={{ gridTemplateColumns: CASING_TEMPLATE, fontSize: 11.5 }}
+                      >
+                        <span role="cell">{string.name}</span>
+                        <span role="cell">{string.od ?? "—"}</span>
+                        <span role="cell">{ft(string.top_ft)}</span>
+                        <span role="cell">{ft(string.shoe_ft)}</span>
+                        <span role="cell">
+                          <Tag tone={string.source === "source" ? "accent" : "outline"}>
+                            {string.source === "source"
+                              ? `p. ${string.page ?? "—"}${conf(string.confidence)}`
+                              : "reference"}
+                          </Tag>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            {/* Survey source-vs-calculated table with conflict tags. */}
+            {draft && draft.survey_stations && draft.survey_stations.length > 0 ? (
+              <div style={{ border: "1px solid var(--color-divider)", padding: "9px 10px" }}>
+                <strong style={{ display: "block", fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                  Survey — source vs calculated
+                </strong>
+                <div className="mr-scroll-x" style={{ marginTop: 6 }}>
+                  <div role="table" aria-label="Survey stations" style={{ minWidth: 460 }}>
+                    <div role="row" className="mr-table-head" style={{ gridTemplateColumns: SURVEY_TEMPLATE }}>
+                      <span role="columnheader">MD</span>
+                      <span role="columnheader">Inc</span>
+                      <span role="columnheader">Azi</span>
+                      <span role="columnheader">TVD source</span>
+                      <span role="columnheader">TVD calc</span>
+                      <span role="columnheader">Evidence</span>
+                    </div>
+                    {draft.survey_stations.map((station, index) => {
+                      const calculated = draft.trajectory?.stations.find(
+                        (candidate) => candidate.measured_depth_ft === station.measured_depth_ft
+                      );
+                      return (
+                        <div
+                          role="row"
+                          className="mr-table-row"
+                          key={`${station.station_id ?? station.measured_depth_ft}-${index}`}
+                          style={{ gridTemplateColumns: SURVEY_TEMPLATE, fontSize: 11.5 }}
+                        >
+                          <span role="cell">{ft(station.measured_depth_ft)}</span>
+                          <span role="cell">{deg(station.inclination_deg)}</span>
+                          <span role="cell">{deg(station.azimuth_deg)}</span>
+                          <span role="cell">{ft(station.true_vertical_depth_ft)}</span>
+                          <span role="cell">{calculated ? ft(calculated.tvd_ft) : "—"}</span>
+                          <span role="cell">
+                            {station.conflict ? (
+                              <Tag tone="critical">conflict — review</Tag>
+                            ) : (
+                              <Tag tone="accent">{`p. ${station.page ?? "—"}${conf(station.confidence)}`}</Tag>
+                            )}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                {draft.trajectory_source === "calculated" ? (
+                  <p className="text-muted" style={{ fontSize: 11, margin: "6px 0 0" }}>
+                    Calculated · minimum curvature · review required · not certified.
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
+            {/* Hydraulics observations with their review flags. */}
+            {draft && draft.hydraulics_observations && draft.hydraulics_observations.length > 0 ? (
+              <div style={{ border: "1px solid var(--color-divider)", padding: "9px 10px" }}>
+                <strong style={{ display: "block", fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                  Hydraulics observations
+                </strong>
+                <div className="mr-scroll-x" style={{ marginTop: 6 }}>
+                  <div role="table" aria-label="Hydraulics observations" style={{ minWidth: 420 }}>
+                    <div role="row" className="mr-table-head" style={{ gridTemplateColumns: HYDRAULICS_TEMPLATE }}>
+                      <span role="columnheader">Measurement</span>
+                      <span role="columnheader">Value</span>
+                      <span role="columnheader">Source text</span>
+                      <span role="columnheader">Status</span>
+                    </div>
+                    {draft.hydraulics_observations.map((observation, index) => (
+                      <div
+                        role="row"
+                        className="mr-table-row"
+                        key={`${observation.measurement}-${index}`}
+                        style={{ gridTemplateColumns: HYDRAULICS_TEMPLATE, fontSize: 11.5 }}
+                      >
+                        <span role="cell">{observation.measurement.replace(/_/g, " ")}</span>
+                        <span role="cell">
+                          {observation.value ?? "—"}
+                          {observation.unit ? ` ${observation.unit}` : ""}
+                        </span>
+                        <span role="cell" style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+                          {observation.source_value_text}
+                        </span>
+                        <span role="cell">
+                          {observation.conflict || observation.review_flag ? (
+                            <Tag tone="critical">{observation.conflict ? "conflict" : "review"}</Tag>
+                          ) : (
+                            <Tag tone="outline">{observation.observation_status}</Tag>
+                          )}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
             {draft && draft.citations.length > 0 ? (
-              <div style={{ display: "grid", gap: 6 }} aria-label="Draft citations">
+              <div style={{ display: "grid", gap: 6 }} role="group" aria-label="Draft citations">
                 <strong
                   style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase" }}
                 >
@@ -581,7 +862,9 @@ function Field({
   onChange,
   disabled,
   type = "text",
-  inputMode
+  inputMode,
+  placeholder,
+  hint
 }: {
   id: string;
   label: string;
@@ -590,7 +873,10 @@ function Field({
   disabled: boolean;
   type?: string;
   inputMode?: "decimal" | "text";
+  placeholder?: string;
+  hint?: string;
 }) {
+  const hintId = hint ? `${id}-hint` : undefined;
   return (
     <div className="field">
       <label htmlFor={id}>{label}</label>
@@ -599,10 +885,17 @@ function Field({
         className="input"
         type={type}
         inputMode={inputMode}
+        placeholder={placeholder}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         disabled={disabled}
+        aria-describedby={hintId}
       />
+      {hint ? (
+        <span id={hintId} className="text-muted" style={{ fontSize: 11, lineHeight: 1.4 }}>
+          {hint}
+        </span>
+      ) : null}
     </div>
   );
 }

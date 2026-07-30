@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   askChat,
@@ -8,17 +8,31 @@ import {
 } from "../../lib/api";
 import { formatSourceCitation } from "../../lib/citationFormat";
 import { Cells, ErrorState, Frame, PageHeader, Tag } from "../components/primitives";
-import { useWorkspace } from "../lib/workspace";
+import { newestReport, useWorkspace } from "../lib/workspace";
 
 /**
  * Ask — the chat-first home.
  *
  * Every enriched block below is a real field of `ApiChatResponse`: `workflow_steps`
  * is the runway, `insight_cards` the cell grid, `risk_register` the risk list,
- * `citations` the source list, `tool_actions` the follow-on commands. Nothing here
- * is synthesised client-side, so an answer can never display a citation or a
- * confidence the backend did not return.
+ * `citations` the source list, `tool_actions` the follow-on buttons, and
+ * `followups` the suggestion chips. Nothing here is synthesised client-side, so an
+ * answer can never display a citation or a confidence the backend did not return.
+ *
+ * The transcript is scoped to one workspace: switching workspaces clears it, and a
+ * late answer for the previous workspace is dropped rather than appended under the
+ * new one's heading.
  */
+
+/** Where a returned tool action leads. `kind` is the API's own enum. */
+const TOOL_ACTION_ROUTE: Record<string, string> = {
+  plan: "/app/studio",
+  draft: "/app/studio",
+  schematic: "/app/well",
+  audit: "/app/audit",
+  export: "/app/exports",
+  source: "/app/validation"
+};
 
 const COMMANDS = [
   {
@@ -84,6 +98,9 @@ export function Ask() {
   const seq = useRef(0);
 
   const workspaceId = activeWorkspace?.id ?? null;
+  // Read inside async resolutions to detect a workspace switch mid-request.
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
 
   // Snapshot reads. Each is independently tolerant: a cell that cannot be read
   // says so rather than showing a zero that looks like a measurement.
@@ -93,7 +110,7 @@ export function Ask() {
     void getMondayReports(workspaceId)
       .then((reports) => {
         if (cancelled) return;
-        const newest = reports[reports.length - 1];
+        const newest = newestReport(reports);
         setLatestReport(newest ? `${newest.period_end} · ${newest.status}` : null);
       })
       .catch(() => {
@@ -115,6 +132,14 @@ export function Ask() {
     };
   }, [workspaceId]);
 
+  // The transcript belongs to one workspace. Answers cite that workspace's
+  // evidence, so they must not survive a switch.
+  useEffect(() => {
+    setTurns([]);
+    setError(null);
+    setBusy(false);
+  }, [workspaceId]);
+
   const submit = useCallback(
     (text: string) => {
       const trimmed = text.trim();
@@ -125,19 +150,22 @@ export function Ask() {
       }
       seq.current += 1;
       const id = `t${seq.current}`;
+      const askedFor = workspaceId; // captured: a late answer must not cross workspaces
       setError(null);
       setInput("");
       setBusy(true);
       setTurns((current) => [...current, { id: `u-${id}`, role: "user", text: trimmed }]);
 
-      void askChat(workspaceId, trimmed)
+      void askChat(askedFor, trimmed)
         .then((answer) => {
+          if (askedFor !== workspaceIdRef.current) return;
           setTurns((current) => [
             ...current,
             { id: `a-${id}`, role: "assistant", text: answer.answer, answer }
           ]);
         })
         .catch((caught: unknown) => {
+          if (askedFor !== workspaceIdRef.current) return;
           const message = caught instanceof Error ? caught.message : "";
           setTurns((current) => [
             ...current,
@@ -150,12 +178,24 @@ export function Ask() {
             }
           ]);
         })
-        .finally(() => setBusy(false));
+        .finally(() => {
+          if (askedFor === workspaceIdRef.current) setBusy(false);
+        });
     },
     [busy, workspaceId]
   );
 
   const gateLabel = openValidationTasks === 0 ? "Clear" : `${openValidationTasks} open`;
+
+  // Short, factual announcement derived from the newest assistant turn.
+  const announcement = useMemo(() => {
+    if (busy) return "Working on the answer.";
+    const last = turns[turns.length - 1];
+    if (!last || last.role !== "assistant") return "";
+    if (!last.answer) return "The question was not processed: the workspace API did not answer.";
+    const citations = last.answer.citations.length;
+    return `Answer received with ${citations} citation${citations === 1 ? "" : "s"}.`;
+  }, [busy, turns]);
 
   return (
     <section
@@ -211,6 +251,7 @@ export function Ask() {
             borderBlockStart: "1px solid var(--color-divider)",
             borderInlineStart: "1px solid var(--color-divider)"
           }}
+          role="group"
           aria-label="AI command dock"
         >
           {COMMANDS.map((command) => (
@@ -253,7 +294,7 @@ export function Ask() {
           ))}
         </div>
 
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }} aria-label="Starter prompts">
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }} role="group" aria-label="Starter prompts">
           {STARTERS.map((starter) => (
             <button
               type="button"
@@ -278,7 +319,15 @@ export function Ask() {
 
         {error ? <ErrorState title="Nothing was asked" message={error} /> : null}
 
-        <div style={{ display: "grid", alignContent: "start", gap: 14 }} aria-live="polite">
+        {/* One concise announcement per answer instead of making the whole
+            transcript a live region (which re-read the user's own message and
+            every enriched block, and nested a second live region inside itself). */}
+        <span className="mr-visually-hidden" role="status" aria-live="polite">
+          {announcement}
+        </span>
+
+        {/* role="log" is the right container role for appended conversation. */}
+        <div style={{ display: "grid", alignContent: "start", gap: 14 }} role="log" aria-label="Conversation">
           {turns.length === 0 && !busy ? (
             <Frame style={{ padding: 16 }}>
               <p style={{ fontSize: 13.5, lineHeight: 1.55, margin: 0 }}>
@@ -291,29 +340,33 @@ export function Ask() {
           ) : null}
 
           {turns.map((turn) => (
-            <ChatTurn key={turn.id} turn={turn} onNavigate={navigate} readOnly={readOnly} />
+            <ChatTurn
+              key={turn.id}
+              turn={turn}
+              onNavigate={navigate}
+              onSubmit={submit}
+              disabled={busy || apiStatus !== "connected"}
+            />
           ))}
-
-          {busy ? (
-            <p
-              data-skeleton=""
-              className="text-muted"
-              style={{ fontSize: 12.5, margin: 0 }}
-              role="status"
-            >
-              Reasoning over workspace evidence…
-            </p>
-          ) : null}
         </div>
+
+        {/* Outside the log container: its own status, not a logged entry. */}
+        {busy ? (
+          <p data-skeleton="" className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
+            Reasoning over workspace evidence…
+          </p>
+        ) : null}
       </div>
 
-      <aside style={{ display: "grid", gap: 16, minWidth: 0 }}>
+      {/* Named: a page with two complementary landmarks needs them distinguishable. */}
+      <aside aria-label="Workspace snapshot and local AI status" style={{ display: "grid", gap: 16, minWidth: 0 }}>
         <div
           style={{
             display: "grid",
             borderBlockStart: "1px solid var(--color-divider)",
             borderInlineStart: "1px solid var(--color-divider)"
           }}
+          role="group"
           aria-label="Workspace snapshot"
         >
           <SnapshotCell
@@ -326,10 +379,13 @@ export function Ask() {
             label="Drilling rate"
             value={
               rate?.current != null
-                ? `${Math.round(rate.current).toLocaleString()}${
-                    rate.benchmark != null ? ` / ${Math.round(rate.benchmark).toLocaleString()}` : ""
-                  }`
+                ? `${Math.round(rate.current).toLocaleString()} ft/day`
                 : "Not recorded"
+            }
+            detail={
+              rate?.current != null && rate.benchmark != null
+                ? `vs ${Math.round(rate.benchmark).toLocaleString()}`
+                : undefined
             }
             to="/app/benchmarking"
           />
@@ -339,6 +395,33 @@ export function Ask() {
             value={auditIntegrity ? `${auditIntegrity.status} · ${auditIntegrity.total_events}` : "Unavailable"}
             to="/app/audit"
           />
+        </div>
+
+        {/* The handoff's rail also carries a well-schematic thumbnail. Its
+            casing/plan/profile SVG generators port with the Stage 2 Well view, so
+            rather than draw an unsourced picture the card states what is missing
+            and links to the destination. */}
+        <div style={{ border: "1px solid var(--color-divider)", padding: "12px 14px" }}>
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+            <strong
+              style={{
+                fontFamily: "var(--font-heading)",
+                fontSize: 13,
+                letterSpacing: "0.04em",
+                textTransform: "uppercase"
+              }}
+            >
+              Well schematics
+            </strong>
+            <Link className="btn btn-ghost" to="/app/well" style={{ minHeight: 0, padding: "0 4px", fontSize: 12 }}>
+              Open →
+            </Link>
+          </div>
+          <p className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5, margin: "6px 0 0" }}>
+            Casing, trajectory plan view, and vertical profile are drawn on the Well view, which is not
+            part of this increment. No thumbnail is shown here rather than an illustration that is not
+            this workspace's evidence.
+          </p>
         </div>
 
         <div style={{ border: "1px solid var(--color-divider)", padding: "12px 14px" }}>
@@ -369,11 +452,13 @@ export function Ask() {
 function SnapshotCell({
   label,
   value,
+  detail,
   to,
   emphasis = false
 }: {
   label: string;
   value: string;
+  detail?: string;
   to: string;
   emphasis?: boolean;
 }) {
@@ -381,7 +466,7 @@ function SnapshotCell({
     <Link
       to={to}
       className="mr-hover-accent"
-      aria-label={`${label}: ${value}`}
+      aria-label={`${label}: ${value}${detail ? ` ${detail}` : ""}`}
       style={{
         display: "flex",
         justifyContent: "space-between",
@@ -402,20 +487,26 @@ function SnapshotCell({
           fontSize: 10.5,
           letterSpacing: "0.1em",
           textTransform: "uppercase",
-          color: "var(--color-neutral-600)"
+          color: "var(--color-neutral-700)"
         }}
       >
         {label}
       </span>
-      <strong
-        style={{
-          fontFamily: "var(--font-heading)",
-          fontSize: 17,
-          color: emphasis ? "var(--color-accent-800)" : "inherit"
-        }}
-      >
-        {value}
-      </strong>
+      <span style={{ textAlign: "end" }}>
+        <strong
+          style={{
+            display: "block",
+            fontFamily: "var(--font-heading)",
+            fontSize: 17,
+            color: emphasis ? "var(--color-accent-800)" : "inherit"
+          }}
+        >
+          {value}
+        </strong>
+        {detail ? (
+          <span style={{ display: "block", fontSize: 11, color: "var(--color-neutral-700)" }}>{detail}</span>
+        ) : null}
+      </span>
     </Link>
   );
 }
@@ -423,11 +514,13 @@ function SnapshotCell({
 function ChatTurn({
   turn,
   onNavigate,
-  readOnly
+  onSubmit,
+  disabled
 }: {
   turn: Turn;
   onNavigate: (path: string) => void;
-  readOnly: boolean;
+  onSubmit: (prompt: string) => void;
+  disabled: boolean;
 }) {
   const isUser = turn.role === "user";
   const answer = turn.answer;
@@ -478,6 +571,7 @@ function ChatTurn({
                   borderBlockStart: "1px solid var(--color-divider)",
                   borderInlineStart: "1px solid var(--color-divider)"
                 }}
+                role="group"
                 aria-label="Workflow runway"
               >
                 {answer.workflow_steps.map((step) => (
@@ -569,7 +663,7 @@ function ChatTurn({
             ) : null}
 
             {answer.citations.length > 0 ? (
-              <div style={{ display: "grid", gap: 6 }} aria-label="Source citations">
+              <div style={{ display: "grid", gap: 6 }} role="group" aria-label="Source citations">
                 {answer.citations.map((citation) => (
                   <span
                     key={citation.id}
@@ -604,30 +698,63 @@ function ChatTurn({
               </ul>
             ) : null}
 
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => onNavigate("/app/validation")}
-              >
-                Open validation
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => onNavigate("/app/studio")}
-              >
-                Open the draft
-              </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => onNavigate("/app/exports")}
-                disabled={readOnly}
-              >
-                Go to exports →
-              </button>
-            </div>
+            {/* The answer's own tool_actions decide the follow-on buttons — the
+                backend's command-aware routing, not a fixed client list. */}
+            {answer.tool_actions.length > 0 ? (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                {answer.tool_actions.map((action) => {
+                  const route = TOOL_ACTION_ROUTE[action.kind];
+                  return (
+                    <button
+                      type="button"
+                      key={`${action.kind}-${action.label}`}
+                      className="btn btn-secondary"
+                      title={action.detail}
+                      aria-label={`${action.label} — ${action.detail}`}
+                      disabled={disabled && !route}
+                      onClick={() => (route ? onNavigate(route) : onSubmit(action.prompt))}
+                    >
+                      {action.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                <button type="button" className="btn btn-secondary" onClick={() => onNavigate("/app/validation")}>
+                  Open validation
+                </button>
+                <button type="button" className="btn btn-secondary" onClick={() => onNavigate("/app/studio")}>
+                  Open the draft
+                </button>
+              </div>
+            )}
+
+            {answer.followups.length > 0 ? (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }} role="group" aria-label="Suggested follow-up questions">
+                {answer.followups.map((followup) => (
+                  <button
+                    type="button"
+                    key={followup}
+                    className="mr-hover-accent"
+                    disabled={disabled}
+                    onClick={() => onSubmit(followup)}
+                    style={{
+                      border: "1px solid var(--color-divider)",
+                      background: "transparent",
+                      color: "var(--color-neutral-800)",
+                      padding: "6px 11px",
+                      fontSize: 12,
+                      cursor: "pointer",
+                      fontFamily: "var(--font-body)",
+                      textAlign: "start"
+                    }}
+                  >
+                    {followup}
+                  </button>
+                ))}
+              </div>
+            ) : null}
 
             {answer.export_actions.length > 0 ? (
               <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
