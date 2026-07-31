@@ -429,6 +429,9 @@ def evaluate_context(run_input: Mapping[str, Any], observations: Mapping[str, An
         "pg_runtime_identity": observations.get("pg_runtime_identity"),
         "migration_runtime_roles_distinct": observations.get("migration_runtime_roles_distinct"),
         "local_persistence": observations.get("local_persistence"),
+        "pg_persistence": observations.get("pg_persistence"),
+        "workflow": observations.get("workflow"),
+        "isolation": observations.get("isolation"),
         "overall_readiness": "ready" if client_data_ready else "not_ready",
         "client_data_ready": bool(client_data_ready),
         "release_candidate_ready": bool(ga_ready),
@@ -489,6 +492,15 @@ def collect_observations(run_input: Mapping[str, Any]) -> dict[str, Any]:
     return _observe_postgres(run_input)
 
 
+def _seed_txn(store: Any):
+    """The backend-appropriate snapshot transaction for the read-back seed: PostgresStateStore
+    requires ``snapshot_transaction()`` (an unprotected write fails closed); LocalStateStore uses
+    ``local_snapshot_transaction()``."""
+    if type(store).__name__ == "PostgresStateStore":
+        return store.snapshot_transaction()
+    return store.local_snapshot_transaction()
+
+
 def _client_verified_reviewer(store: Any):
     """Establish a request-scoped VERIFIED reviewer for a client-mode terminal validation outcome:
     a real active non-bootstrap user + active credential bound to the tenant, set as the current
@@ -507,55 +519,155 @@ def _client_verified_reviewer(store: Any):
     return token, reset_current_identity
 
 
-def _local_persistence_readback(store: Any, mode: str) -> dict[str, Any]:
-    """Prove, from the PERSISTED snapshot (never a response body), that the accepted LocalStateStore
-    atomicity holds in this isolated context: a validation decision and a blocked-export transition
-    each persist together with their audit event exactly once, the snapshot revision advances, no
-    stale refresh regresses committed state, and the audit chain stays valid.
+def _isolation_preflight(run_input: Mapping[str, Any], *, target_kind: str, target_identity: str,
+                         expected_prefix: str | None = None,
+                         forbidden_substrings: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Prove, BEFORE any mutating operation, that this context targets its OWN isolated resource and
+    never reuses another context's state/database or a shared/demo/live target. Compares the
+    certified (expected) target against the target actually in use and fails closed
+    (ExecutionUnavailable) on any mismatch or forbidden shared reference. Returns an isolation facts
+    dict on success."""
+    cid = run_input["context_id"]
+    problems: list[str] = []
+    ti = str(target_identity)
+    if cid not in RC.CANONICAL_CONTEXT_ORDER:
+        problems.append(f"unknown context id {cid!r}")
+    for bad in forbidden_substrings:
+        if bad and bad in ti:
+            problems.append(f"target references forbidden shared/live resource {bad!r}")
+    if expected_prefix is not None and not ti.startswith(str(expected_prefix)):
+        problems.append("actual target is not under this context's isolated root "
+                        "(certified vs actual target mismatch)")
+    if problems:
+        raise ExecutionUnavailable(f"isolation preflight failed for {cid} [{target_kind}]: {problems}")
+    return {
+        "context_id": cid,
+        "target_kind": target_kind,
+        "certified_matches_actual": True,
+        "shared_or_live_target_rejected": True,
+        "isolated": True,
+    }
 
-    Reads assertions from the on-disk state file. Returns a facts dict; the caller fails closed if any
-    invariant is violated."""
-    import json as _json
-    from pathlib import Path as _Path
+
+def _observe_supported_workflow(store: Any, mode: str, ws_id, report_id, open_task_id) -> dict[str, Any]:
+    """Observe the supported workflow through committed store methods, reusing the read-back's seed:
+    tenant-scoped report list, report draft retrieval, benchmarking status, the export gate CLOSED
+    while an unresolved validation task remains, the gate UNLOCKING once it is resolved, real export
+    issuance, and a signed download reference on the resulting export. All facts are DETERMINISTIC
+    booleans. Returns a workflow facts dict with a ``workflow_verified`` boolean."""
+    from backend.app.schemas import ValidationTaskUpdate
+
+    # The store's committed projection already reflects the read-back's persisted mutations; no
+    # out-of-band refresh (it would desync the PostgresStateStore optimistic-CAS revision).
+    report_list_ok = report_id in store.monday_reports and len(store.monday_reports) >= 1
+    report_draft_ok = bool(getattr(store.monday_reports.get(report_id), "report_json", None) is not None)
+    try:
+        store.benchmarking_status(ws_id)
+        benchmarking_ok = True
+    except Exception:  # noqa: BLE001 - a benchmarking failure is a workflow failure, recorded not raised
+        benchmarking_ok = False
+
+    # export gate CLOSED: the official-export gate predicate is report_open_validation_tasks(); while
+    # the remaining validation task is unresolved it must report an open task that blocks the export.
+    export_gate_closed_ok = bool(store.report_open_validation_tasks(report_id))
+
+    # resolve the remaining task (verified reviewer in client mode), then the gate must UNLOCK
+    reviewer_token = reviewer_reset = None
+    if mode == "client":
+        reviewer_token, reviewer_reset = _client_verified_reviewer(store)
+    try:
+        store.update_validation_task(open_task_id, ValidationTaskUpdate(status="validated"))
+    finally:
+        if reviewer_reset is not None and reviewer_token is not None:
+            reviewer_reset(reviewer_token)
+
+    # report_open_validation_tasks refreshes internally; no out-of-band refresh (it would desync the
+    # PostgresStateStore optimistic-CAS revision and make export_monday_report raise SnapshotConflict).
+    gate_open = not store.report_open_validation_tasks(report_id)
+    export_unlock_ok = False
+    signed_reference_ok = False
+    try:
+        export = store.export_monday_report(report_id, "json")
+        export_unlock_ok = gate_open  # the gate opened AND the export issued
+        signed_reference_ok = bool(
+            getattr(export, "storage_uri", None) or getattr(export, "signed_url", None)
+            or getattr(export, "download_reference", None) or getattr(export, "download_url", None))
+    except Exception:  # noqa: BLE001 - recorded as a workflow failure
+        pass
+
+    chain_ok = store.audit_integrity_status().status == "sealed"
+    facts = {
+        "tenant_scoped_report_list": bool(report_list_ok),
+        "report_draft_retrieved": bool(report_draft_ok),
+        "benchmarking_observed": bool(benchmarking_ok),
+        "export_gate_closed_on_unresolved_validation": bool(export_gate_closed_ok),
+        "validation_unlocks_export_gate": bool(export_unlock_ok),
+        "export_issued": bool(export_unlock_ok),
+        "signed_reference_issued": bool(signed_reference_ok),
+        "audit_chain_valid_after_workflow": bool(chain_ok),
+    }
+    facts["workflow_verified"] = bool(
+        report_list_ok and report_draft_ok and benchmarking_ok and export_gate_closed_ok
+        and export_unlock_ok and signed_reference_ok and chain_ok)
+    return facts
+
+
+def _persistence_readback_core(store: Any, mode: str, snapshot, *, has_revision: bool,
+                               observe_workflow: bool = False) -> dict[str, Any]:
+    """Shared persisted-state read-back for BOTH the local-JSON store and the restricted
+    PostgresStateStore. Seeds an isolated workspace/failure/tasks/report, exercises the blocked-export
+    transition and a validation decision, and asserts -- from ``snapshot()`` (a re-read of the
+    persisted state, NEVER a response body) -- that each persisted together with its audit event
+    exactly once, the audit chain stays sealed, and there is no business/audit contradiction. The
+    revision-advance invariant is asserted only where the backend exposes a snapshot revision (local).
+
+    ``snapshot()`` returns ``{"monday_reports":[{id,status}], "validation_tasks":[{id,status}],
+    "audit_logs":[{action,resource_id}], "snapshot_revision": int?}``.
+    Returns a facts dict with a ``persistence_verified`` boolean; the caller fails closed on False."""
     from backend.app.schemas import (FailureRecord, MondayReport, ValidationTask,
                                       ValidationTaskUpdate, Workspace)
 
     tenant_id = store.tenant.id
 
-    def _disk() -> dict:
-        return _json.loads(_Path(store.state_path).read_text(encoding="utf-8"))
-
     def _events(snap: dict, action: str, rid) -> int:
         return sum(1 for e in snap.get("audit_logs", [])
                    if e.get("action") == action and str(e.get("resource_id")) == str(rid))
 
-    def _rev(snap: dict) -> int:
-        return int(snap.get("snapshot_revision", 0))
+    def _rev(snap: dict):
+        return int(snap.get("snapshot_revision", 0)) if has_revision else None
 
+    # Sync the store's optimistic-CAS baseline ONCE before the first write: the preceding readiness
+    # evaluation reads/refreshes the store, which can leave a stale expected revision. A single leading
+    # refresh is harmless on the local backend; no refresh follows a write.
+    store.refresh()
     ws = Workspace(tenant_id=tenant_id, name="rc-readback", asset="a", campaign="c")
-    store.workspaces[ws.id] = ws
     f1 = FailureRecord(tenant_id=tenant_id, workspace_id=ws.id, event_type="npt", severity="High",
                        summary="MWD signal loss", confidence=0.9)
     f2 = FailureRecord(tenant_id=tenant_id, workspace_id=ws.id, event_type="npt", severity="High",
                        summary="stuck pipe", confidence=0.9)
-    store.failures[f1.id] = f1
-    store.failures[f2.id] = f2
     t1 = ValidationTask(tenant_id=tenant_id, target_type="failure", target_id=f1.id,
                         reason="High-severity extracted failure requires review.", status="open")
     t2 = ValidationTask(tenant_id=tenant_id, target_type="failure", target_id=f2.id,
                         reason="High-severity extracted failure requires review.", status="open")
-    store.validation_tasks[t1.id] = t1
-    store.validation_tasks[t2.id] = t2
     report = MondayReport(tenant_id=tenant_id, workspace_id=ws.id, period_start="2026-07-06",
                           period_end="2026-07-12", report_json={"summary": "seed"}, status="draft")
-    store.monday_reports[report.id] = report
-    store.save()
-    rev0 = _rev(_disk())
+    # The seed must run inside the backend's snapshot transaction: PostgresStateStore.save() fails
+    # closed on an unprotected write ("PostgreSQL mutations must run inside snapshot_transaction()"),
+    # which is exactly the client-data-safety guard. The transaction commits (persists) on exit.
+    with _seed_txn(store):
+        store.workspaces[ws.id] = ws
+        store.failures[f1.id] = f1
+        store.failures[f2.id] = f2
+        store.validation_tasks[t1.id] = t1
+        store.validation_tasks[t2.id] = t2
+        store.monday_reports[report.id] = report
+        store.save()  # inside the txn: marks it dirty (local) / performs the protected write (PG)
+    rev0 = _rev(snapshot())
 
     # -- blocked-export path: status transition + export_blocked audit persist together, once --
     open_tasks = store.report_open_validation_tasks(report.id)
     store.mark_report_export_blocked(report.id, "json", False, [t.id for t in open_tasks])
-    snap_b = _disk()
+    snap_b = snapshot()
     persisted_report = next(r for r in snap_b["monday_reports"] if r["id"] == str(report.id))
     rev_after_block = _rev(snap_b)
 
@@ -569,7 +681,7 @@ def _local_persistence_readback(store: Any, mode: str) -> dict[str, Any]:
     finally:
         if reviewer_reset is not None and reviewer_token is not None:
             reviewer_reset(reviewer_token)
-    snap_v = _disk()
+    snap_v = snapshot()
     persisted_task = next(t for t in snap_v["validation_tasks"] if t["id"] == str(t1.id))
     rev_after_val = _rev(snap_v)
 
@@ -580,29 +692,43 @@ def _local_persistence_readback(store: Any, mode: str) -> dict[str, Any]:
     chain_status = store.audit_integrity_status().status
     contradiction = ((export_event_count and not export_status_persisted)
                      or (validation_event_count and not validation_status_persisted))
+    revision_advanced = (rev_after_block > rev0 and rev_after_val > rev_after_block
+                         if has_revision else None)
 
     facts = {
         "validation_decision_persisted": bool(validation_status_persisted),
         "validation_audit_event_count": int(validation_event_count),
         "blocked_export_status_persisted": bool(export_status_persisted),
         "blocked_export_audit_event_count": int(export_event_count),
-        # Only the DETERMINISTIC boolean is retained. The absolute revision integers are intentionally
-        # NOT reported: the readiness probe writes a run-varying number of snapshots, so exposing raw
-        # revisions here would make them part of the canonical result body and break the accepted
-        # audit:readiness-contexts reproducibility invariants (identical canonical hash across runs).
-        "snapshot_revision_advanced": rev_after_block > rev0 and rev_after_val > rev_after_block,
         "audit_chain_status": str(chain_status),
         "audit_chain_valid": str(chain_status) == "sealed",
         "business_audit_contradiction": bool(contradiction),
     }
-    facts["local_persistence_verified"] = bool(
-        facts["validation_decision_persisted"]
-        and facts["validation_audit_event_count"] == 1
-        and facts["blocked_export_status_persisted"]
-        and facts["blocked_export_audit_event_count"] == 1
-        and facts["snapshot_revision_advanced"]
-        and facts["audit_chain_valid"]
-        and not facts["business_audit_contradiction"])
+    if has_revision:
+        # Only the DETERMINISTIC boolean is retained (raw revision integers would break the accepted
+        # audit:readiness-contexts reproducibility invariants -- identical canonical hash across runs).
+        facts["snapshot_revision_advanced"] = bool(revision_advanced)
+    facts["persistence_verified"] = bool(
+        validation_status_persisted and validation_event_count == 1
+        and export_status_persisted and export_event_count == 1
+        and facts["audit_chain_valid"] and not contradiction
+        and (revision_advanced if has_revision else True))
+    if observe_workflow:
+        # reuse the seed: t1 is validated, t2 is still open -> exercise the export gate + unlock
+        facts["workflow"] = _observe_supported_workflow(store, mode, ws.id, report.id, t2.id)
+    return facts
+
+
+def _local_persistence_readback(store: Any, mode: str) -> dict[str, Any]:
+    """Local-JSON persisted-state read-back: assertions read from the ON-DISK state file."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    def snapshot() -> dict:
+        return _json.loads(_Path(store.state_path).read_text(encoding="utf-8"))
+
+    facts = _persistence_readback_core(store, mode, snapshot, has_revision=True, observe_workflow=True)
+    facts["local_persistence_verified"] = facts.pop("persistence_verified")
     return facts
 
 
@@ -613,12 +739,19 @@ def _observe_local(run_input: Mapping[str, Any]) -> dict[str, Any]:
     mode = run_input["client_data_mode"]
     previous = {k: os.environ.get(k) for k in
                 ("MONDAY_REPORT_CLIENT_DATA_MODE", "MONDAY_REPORT_REPOSITORY_BACKEND",
-                 "MONDAY_REPORT_DATA_DIR", "MONDAY_REPORT_AUDIT_HMAC_KEY")}
+                 "MONDAY_REPORT_STATE_PATH", "MONDAY_REPORT_STORAGE_ROOT",
+                 "MONDAY_REPORT_EXPORT_ROOT", "MONDAY_REPORT_AUDIT_HMAC_KEY")}
     tmp = tempfile.mkdtemp(prefix="rc-ctx-local-")
     try:
         os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client" if mode == "client" else "demo"
         os.environ["MONDAY_REPORT_REPOSITORY_BACKEND"] = "local_json"
-        os.environ["MONDAY_REPORT_DATA_DIR"] = tmp
+        # Bind the store to THIS context's isolated temp root via the variables the store actually
+        # reads (MONDAY_REPORT_STATE_PATH / STORAGE_ROOT / EXPORT_ROOT). The prior MONDAY_REPORT_DATA_DIR
+        # was ignored by the store, so the observer silently used the shared .local_data default -- the
+        # isolation preflight below now rejects exactly that.
+        os.environ["MONDAY_REPORT_STATE_PATH"] = str(Path(tmp) / "state.json")
+        os.environ["MONDAY_REPORT_STORAGE_ROOT"] = str(Path(tmp) / "storage")
+        os.environ["MONDAY_REPORT_EXPORT_ROOT"] = str(Path(tmp) / "exports")
         # A configured audit-integrity key is required for the persisted-state read-back to be
         # coherent: the store keys its bootstrap events, and a post-refresh append must use the SAME
         # key or it is refused ("unkeyed behind a keyed suffix"). Provide a disposable isolated key
@@ -630,13 +763,21 @@ def _observe_local(run_input: Mapping[str, Any]) -> dict[str, Any]:
         from backend.app.store import LocalStateStore
 
         store = LocalStateStore()
+        # ISOLATION PREFLIGHT (before any mutation): prove this context targets its OWN isolated
+        # state, never shared/demo/.local_data. Fail closed on any mismatch.
+        isolation = _isolation_preflight(
+            run_input, target_kind="local_json_state_file", target_identity=str(store.state_path),
+            expected_prefix=tmp, forbidden_substrings=(".local_data", ":8000", ":5173"))
         readiness = READINESS.evaluate_client_data_readiness(store)
         # Prove the accepted atomicity from the persisted snapshot in THIS isolated context.
         persistence = _local_persistence_readback(store, mode)
+        workflow = persistence.pop("workflow", None)
         if not persistence["local_persistence_verified"]:
             raise ExecutionUnavailable(
                 "local persisted-state read-back failed; the isolated LocalStateStore did not "
                 f"persist a decision + its audit event atomically: {persistence}")
+        if not (workflow and workflow.get("workflow_verified")):
+            raise ExecutionUnavailable(f"local workflow observation failed: {workflow}")
         return {
             "source": "executed",
             "context_id": run_input["context_id"],
@@ -646,6 +787,8 @@ def _observe_local(run_input: Mapping[str, Any]) -> dict[str, Any]:
             "counters": {c: 0 for c in REQUIRED_ZERO_COUNTERS},
             "evidence_artifacts_consumed": [],
             "local_persistence": persistence,
+            "workflow": workflow,
+            "isolation": isolation,
         }
     finally:
         for key, value in previous.items():
@@ -770,6 +913,26 @@ def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping
                 "create_store did not return a PostgresStateStore on the restricted runtime "
                 f"(got {type(store).__name__}); refusing to observe a substituted backend")
         readiness = READINESS.evaluate_client_data_readiness(store)
+        # ISOLATION PREFLIGHT (non-mutating): the runner-owned disposable database on loopback, never a
+        # shared DB or the live app ports. Fail closed on a shared/live target.
+        isolation = _isolation_preflight(
+            run_input, target_kind="restricted_postgres_database",
+            target_identity=f"host=127.0.0.1 port={ctx['port']} db={ctx['db']}",
+            forbidden_substrings=(":8000", ":5173", ".local_data"))
+        if "127.0.0.1" not in rt:
+            raise ExecutionUnavailable("PostgreSQL isolation preflight: runtime DSN is not the "
+                                       "runner-owned loopback database")
+        # NOTE: the PostgreSQL PERSISTED read-back and full workflow are NOT yet implemented. The
+        # normalized PostgresStateStore does not accept the direct-dict + save() seed the local
+        # read-back uses (reports/failures/validation-tasks are normalized tables, not the JSONB
+        # snapshot), and there is no standalone validation-task create method to seed the blocked-
+        # export gate transaction-safely. Implementing it (create_monday_report + a normalized
+        # validation-task seed) is deferred; the PG observer therefore still evaluates readiness +
+        # restricted-role identity + isolation only, and is NOT read-back/workflow eligible.
+        pg_persistence = {"pg_persistence_verified": False,
+                          "status": "not_implemented_normalized_seed_required"}
+        workflow = {"workflow_verified": False,
+                    "status": "not_implemented_normalized_seed_required"}
     finally:
         for key, value in saved.items():
             if value is None:
@@ -789,6 +952,9 @@ def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping
         # DB-observed: the protected tables are owned by a principal distinct from the runtime login
         # (not a comparison of run-scoped role NAMES, which would always differ by construction).
         "migration_runtime_roles_distinct": bool(identity.get("migration_owner_distinct_from_runtime")),
+        "pg_persistence": pg_persistence,
+        "workflow": workflow,
+        "isolation": isolation,
     }
 
 

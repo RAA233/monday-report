@@ -53,6 +53,26 @@ def positive(cid: str) -> None:
         "no business/audit contradiction")
     rec(f"{cid}:verified", p.get("local_persistence_verified") is True,
         "the persisted-state read-back is verified overall")
+    # isolation preflight
+    iso = obs.get("isolation") or {}
+    rec(f"{cid}:isolated", iso.get("isolated") is True
+        and iso.get("certified_matches_actual") is True,
+        "the isolation preflight passed (own isolated state, no shared/live/.local_data target)")
+    # supported workflow
+    w = obs.get("workflow") or {}
+    rec(f"{cid}:workflow-report-list-draft",
+        w.get("tenant_scoped_report_list") is True and w.get("report_draft_retrieved") is True,
+        "tenant-scoped report list and report draft observed")
+    rec(f"{cid}:workflow-benchmarking", w.get("benchmarking_observed") is True,
+        "benchmarking status observed")
+    rec(f"{cid}:workflow-export-gate",
+        w.get("export_gate_closed_on_unresolved_validation") is True
+        and w.get("validation_unlocks_export_gate") is True,
+        "the export gate closes on unresolved validation and unlocks once resolved")
+    rec(f"{cid}:workflow-signed-reference", w.get("signed_reference_issued") is True,
+        "export issuance produced a signed download reference")
+    rec(f"{cid}:workflow-verified", w.get("workflow_verified") is True,
+        "the supported workflow is verified overall")
 
 
 def fail_closed() -> None:
