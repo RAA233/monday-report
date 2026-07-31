@@ -428,6 +428,7 @@ def evaluate_context(run_input: Mapping[str, Any], observations: Mapping[str, An
         "overall_GA_status": "GA_BLOCKED",
         "pg_runtime_identity": observations.get("pg_runtime_identity"),
         "migration_runtime_roles_distinct": observations.get("migration_runtime_roles_distinct"),
+        "local_persistence": observations.get("local_persistence"),
         "overall_readiness": "ready" if client_data_ready else "not_ready",
         "client_data_ready": bool(client_data_ready),
         "release_candidate_ready": bool(ga_ready),
@@ -488,6 +489,122 @@ def collect_observations(run_input: Mapping[str, Any]) -> dict[str, Any]:
     return _observe_postgres(run_input)
 
 
+def _client_verified_reviewer(store: Any):
+    """Establish a request-scoped VERIFIED reviewer for a client-mode terminal validation outcome:
+    a real active non-bootstrap user + active credential bound to the tenant, set as the current
+    identity. Returns (token, reset_fn); the caller resets it. In demo mode returns (None, None)."""
+    from backend.app.identity import set_current_identity, reset_current_identity
+    from backend.app.schemas import AuthenticatedIdentity, Role
+
+    user = store.create_user("rc-reviewer@readiness.test", "RC Reviewer", [Role.ADMIN])
+    cred, _token = store.create_credential(user.id)
+    identity = AuthenticatedIdentity(
+        user_id=user.id, tenant_id=store.tenant.id, email=user.email, display_name=user.full_name,
+        roles=list(user.roles), account_status="active", authentication_source="api_token",
+        credential_id=cred.credential_id, credential_fingerprint=cred.token_fingerprint,
+        actor_source="authenticated")
+    token = set_current_identity(identity)
+    return token, reset_current_identity
+
+
+def _local_persistence_readback(store: Any, mode: str) -> dict[str, Any]:
+    """Prove, from the PERSISTED snapshot (never a response body), that the accepted LocalStateStore
+    atomicity holds in this isolated context: a validation decision and a blocked-export transition
+    each persist together with their audit event exactly once, the snapshot revision advances, no
+    stale refresh regresses committed state, and the audit chain stays valid.
+
+    Reads assertions from the on-disk state file. Returns a facts dict; the caller fails closed if any
+    invariant is violated."""
+    import json as _json
+    from pathlib import Path as _Path
+    from backend.app.schemas import (FailureRecord, MondayReport, ValidationTask,
+                                      ValidationTaskUpdate, Workspace)
+
+    tenant_id = store.tenant.id
+
+    def _disk() -> dict:
+        return _json.loads(_Path(store.state_path).read_text(encoding="utf-8"))
+
+    def _events(snap: dict, action: str, rid) -> int:
+        return sum(1 for e in snap.get("audit_logs", [])
+                   if e.get("action") == action and str(e.get("resource_id")) == str(rid))
+
+    def _rev(snap: dict) -> int:
+        return int(snap.get("snapshot_revision", 0))
+
+    ws = Workspace(tenant_id=tenant_id, name="rc-readback", asset="a", campaign="c")
+    store.workspaces[ws.id] = ws
+    f1 = FailureRecord(tenant_id=tenant_id, workspace_id=ws.id, event_type="npt", severity="High",
+                       summary="MWD signal loss", confidence=0.9)
+    f2 = FailureRecord(tenant_id=tenant_id, workspace_id=ws.id, event_type="npt", severity="High",
+                       summary="stuck pipe", confidence=0.9)
+    store.failures[f1.id] = f1
+    store.failures[f2.id] = f2
+    t1 = ValidationTask(tenant_id=tenant_id, target_type="failure", target_id=f1.id,
+                        reason="High-severity extracted failure requires review.", status="open")
+    t2 = ValidationTask(tenant_id=tenant_id, target_type="failure", target_id=f2.id,
+                        reason="High-severity extracted failure requires review.", status="open")
+    store.validation_tasks[t1.id] = t1
+    store.validation_tasks[t2.id] = t2
+    report = MondayReport(tenant_id=tenant_id, workspace_id=ws.id, period_start="2026-07-06",
+                          period_end="2026-07-12", report_json={"summary": "seed"}, status="draft")
+    store.monday_reports[report.id] = report
+    store.save()
+    rev0 = _rev(_disk())
+
+    # -- blocked-export path: status transition + export_blocked audit persist together, once --
+    open_tasks = store.report_open_validation_tasks(report.id)
+    store.mark_report_export_blocked(report.id, "json", False, [t.id for t in open_tasks])
+    snap_b = _disk()
+    persisted_report = next(r for r in snap_b["monday_reports"] if r["id"] == str(report.id))
+    rev_after_block = _rev(snap_b)
+
+    # -- validation decision: status + validation_task.update audit persist together, once --
+    # A client-mode terminal outcome requires a VERIFIED reviewer; establish one, scoped to this call.
+    reviewer_token = reviewer_reset = None
+    if mode == "client":
+        reviewer_token, reviewer_reset = _client_verified_reviewer(store)
+    try:
+        store.update_validation_task(t1.id, ValidationTaskUpdate(status="validated"))
+    finally:
+        if reviewer_reset is not None and reviewer_token is not None:
+            reviewer_reset(reviewer_token)
+    snap_v = _disk()
+    persisted_task = next(t for t in snap_v["validation_tasks"] if t["id"] == str(t1.id))
+    rev_after_val = _rev(snap_v)
+
+    export_status_persisted = persisted_report["status"] == "review"
+    export_event_count = _events(snap_v, "monday_report.export_blocked", report.id)
+    validation_status_persisted = persisted_task["status"] == "validated"
+    validation_event_count = _events(snap_v, "validation_task.update", t1.id)
+    chain_status = store.audit_integrity_status().status
+    contradiction = ((export_event_count and not export_status_persisted)
+                     or (validation_event_count and not validation_status_persisted))
+
+    facts = {
+        "validation_decision_persisted": bool(validation_status_persisted),
+        "validation_audit_event_count": int(validation_event_count),
+        "blocked_export_status_persisted": bool(export_status_persisted),
+        "blocked_export_audit_event_count": int(export_event_count),
+        "snapshot_revision_start": rev0,
+        "snapshot_revision_after_blocked_export": rev_after_block,
+        "snapshot_revision_after_validation": rev_after_val,
+        "snapshot_revision_advanced": rev_after_block > rev0 and rev_after_val > rev_after_block,
+        "audit_chain_status": str(chain_status),
+        "audit_chain_valid": str(chain_status) == "sealed",
+        "business_audit_contradiction": bool(contradiction),
+    }
+    facts["local_persistence_verified"] = bool(
+        facts["validation_decision_persisted"]
+        and facts["validation_audit_event_count"] == 1
+        and facts["blocked_export_status_persisted"]
+        and facts["blocked_export_audit_event_count"] == 1
+        and facts["snapshot_revision_advanced"]
+        and facts["audit_chain_valid"]
+        and not facts["business_audit_contradiction"])
+    return facts
+
+
 def _observe_local(run_input: Mapping[str, Any]) -> dict[str, Any]:
     """Observe a local-JSON context in an ISOLATED temp root. Never touches live ``.local_data``."""
     from backend.app import readiness as READINESS
@@ -495,16 +612,30 @@ def _observe_local(run_input: Mapping[str, Any]) -> dict[str, Any]:
     mode = run_input["client_data_mode"]
     previous = {k: os.environ.get(k) for k in
                 ("MONDAY_REPORT_CLIENT_DATA_MODE", "MONDAY_REPORT_REPOSITORY_BACKEND",
-                 "MONDAY_REPORT_DATA_DIR")}
+                 "MONDAY_REPORT_DATA_DIR", "MONDAY_REPORT_AUDIT_HMAC_KEY")}
     tmp = tempfile.mkdtemp(prefix="rc-ctx-local-")
     try:
         os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "client" if mode == "client" else "demo"
         os.environ["MONDAY_REPORT_REPOSITORY_BACKEND"] = "local_json"
         os.environ["MONDAY_REPORT_DATA_DIR"] = tmp
+        # A configured audit-integrity key is required for the persisted-state read-back to be
+        # coherent: the store keys its bootstrap events, and a post-refresh append must use the SAME
+        # key or it is refused ("unkeyed behind a keyed suffix"). Provide a disposable isolated key
+        # BEFORE the store is constructed, for both modes, so bootstrap and the read-back stay
+        # consistent. It is scoped to this context's temp root and restored in the finally -- never a
+        # shared or client key. (Client mode additionally requires it before any mutation.)
+        os.environ["MONDAY_REPORT_AUDIT_HMAC_KEY"] = (
+            "readiness-context-local-observer-disposable-audit-hmac-key-000000000000")
         from backend.app.store import LocalStateStore
 
         store = LocalStateStore()
         readiness = READINESS.evaluate_client_data_readiness(store)
+        # Prove the accepted atomicity from the persisted snapshot in THIS isolated context.
+        persistence = _local_persistence_readback(store, mode)
+        if not persistence["local_persistence_verified"]:
+            raise ExecutionUnavailable(
+                "local persisted-state read-back failed; the isolated LocalStateStore did not "
+                f"persist a decision + its audit event atomically: {persistence}")
         return {
             "source": "executed",
             "context_id": run_input["context_id"],
@@ -513,6 +644,7 @@ def _observe_local(run_input: Mapping[str, Any]) -> dict[str, Any]:
             "forge_report": None,
             "counters": {c: 0 for c in REQUIRED_ZERO_COUNTERS},
             "evidence_artifacts_consumed": [],
+            "local_persistence": persistence,
         }
     finally:
         for key, value in previous.items():
