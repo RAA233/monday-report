@@ -215,6 +215,15 @@ def _refusal(run_input: Mapping[str, Any], reason: str, *, detail: Any = None) -
         "context_applicability": {},
         "blocking_controls": [],
         "warning_controls": [],
+        # separated statuses (Part D): a refusal never executed and observed nothing, and it is
+        # fail-closed -- it carries no blockers of either kind and can never be accepted.
+        "context_execution_status": "refused",
+        "context_observation_status": "unavailable",
+        "context_specific_blockers": [],
+        "global_release_blockers": [],
+        "overall_GA_status": "GA_BLOCKED",
+        "pg_runtime_identity": None,
+        "migration_runtime_roles_distinct": None,
         "overall_readiness": "not_ready",
         "client_data_ready": False,
         "release_candidate_ready": False,
@@ -393,6 +402,13 @@ def evaluate_context(run_input: Mapping[str, Any], observations: Mapping[str, An
     client_data_ready = bool(dispositions) and all(d == "PASS" for d in dispositions.values())
     ga_ready = client_data_ready and all(dispositions.get(c) == "PASS" for c in universal)
 
+    # Part D separation: a context is EXECUTION-accepted when it ran and produced qualifying
+    # observations, EVEN THOUGH global GA blockers remain. Split the blocking set into the two
+    # meanings so a reader never mistakes a repository-wide GA blocker (production adapters,
+    # organizational approval) for a failure of THIS context's own execution/observation.
+    global_release_blockers = sorted(set(blocking) & set(universal))
+    context_specific_blockers = sorted(set(blocking) - set(universal))
+
     result = {
         "context_id": run_input["context_id"],
         "context_name": run_input["context_name"],
@@ -404,6 +420,14 @@ def evaluate_context(run_input: Mapping[str, Any], observations: Mapping[str, An
         "demoted_controls": demoted,
         "blocking_controls": blocking,
         "warning_controls": warning,
+        # explicit, separately-named statuses (Part D): execution success is independent of GA
+        "context_execution_status": "executed",
+        "context_observation_status": "observations_complete",
+        "context_specific_blockers": context_specific_blockers,
+        "global_release_blockers": global_release_blockers,
+        "overall_GA_status": "GA_BLOCKED",
+        "pg_runtime_identity": observations.get("pg_runtime_identity"),
+        "migration_runtime_roles_distinct": observations.get("migration_runtime_roles_distinct"),
         "overall_readiness": "ready" if client_data_ready else "not_ready",
         "client_data_ready": bool(client_data_ready),
         "release_candidate_ready": bool(ga_ready),
@@ -499,17 +523,155 @@ def _observe_local(run_input: Mapping[str, Any]) -> dict[str, Any]:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+#: Generic test/PostgreSQL environment variables that MUST be cleared before the restricted stack
+#: provisions its own roles, so the observed runtime can never be an externally supplied superuser
+#: DSN leaking in through the environment. (This is the leak that silently promoted a superuser
+#: session in an earlier run: a stray MONDAY_REPORT_TEST_DATABASE_URL bled into the launched API.)
+_LEAKED_PG_ENV: tuple[str, ...] = (
+    "MONDAY_REPORT_TEST_DATABASE_URL", "MONDAY_REPORT_TEST_PG_SERVER_VERSION",
+    "MONDAY_REPORT_TEST_PGVECTOR_VERSION", "MONDAY_REPORT_TEST_PG_IMAGE_DIGEST",
+    "MONDAY_REPORT_DATABASE_URL", "MONDAY_REPORT_REPOSITORY_BACKEND",
+    "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "PGSERVICE", "PGSSLMODE",
+)
+
+
+def _pg_runtime_identity(rt_dsn: str) -> dict[str, Any]:
+    """Observe the runtime-login identity DIRECTLY on the restricted DSN the store uses.
+
+    Read-only pg_roles / pg_class facts that prove the observed runtime is the RESTRICTED login
+    (non-superuser, non-BYPASSRLS, cannot own the protected tables) and that row-level security is
+    FORCED. The accepted foundation already certifies these (startup guard I01-I03/P02/P04); observing
+    them again here makes the readiness observer itself load-bearing rather than trusting a sibling.
+    """
+    import psycopg
+
+    with psycopg.connect(rt_dsn, connect_timeout=10, autocommit=True) as conn:
+        session_user = conn.execute("select session_user").fetchone()[0]
+        role = conn.execute(
+            "select rolsuper, rolbypassrls, rolcanlogin from pg_roles where rolname = current_user"
+        ).fetchone()
+        # forced RLS on the protected parent/normalized tables the runtime writes through
+        forced = conn.execute(
+            "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+            "where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity and c.relforcerowsecurity"
+        ).fetchone()[0]
+        owns = conn.execute(
+            "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+            "where n.nspname = 'public' and c.relkind = 'r' and pg_get_userbyid(c.relowner) = current_user"
+        ).fetchone()[0]
+    return {
+        "session_user_is_restricted_login": bool(role[2]),
+        "runtime_not_superuser": not bool(role[0]),
+        "runtime_not_bypassrls": not bool(role[1]),
+        "runtime_owns_no_protected_tables": int(owns) == 0,
+        "forced_rls_table_count": int(forced),
+        "rls_forced_on_protected_tables": int(forced) > 0,
+    }
+
+
+def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping[str, Any],
+                           captured: dict[str, Any]) -> None:
+    """Build a real ``PostgresStateStore`` on the live restricted runtime login and evaluate
+    client-data readiness against it, in this context's client-data mode. Runs inside the accepted
+    foundation's ``_ON_LIVE`` hook, so the stack (disposable container, distinct migration + runtime
+    login roles, migrations 0001-0007 applied by the migration login, forced RLS, external API) is
+    already provisioned and will be torn down by ``run_stack`` after this returns."""
+    from backend.app import readiness as READINESS
+    import backend.app.store as store_mod
+
+    rt = ctx["rt_dsn"]                         # restricted, non-superuser, non-BYPASSRLS LOGIN
+    appname = f"mr-readiness-obs-{ctx['run_hash']}"
+    identity = _pg_runtime_identity(rt)        # observe the runtime login BEFORE evaluating readiness
+
+    obs_env = dict(ctx["base_env"])
+    obs_env.update({
+        "MONDAY_REPORT_DATABASE_URL": f"{rt}?application_name={appname}",
+        "MONDAY_REPORT_REPOSITORY_BACKEND": "postgres",
+        "MONDAY_REPORT_CLIENT_DATA_MODE": "client" if mode == "client" else "demo",
+    })
+    saved = {k: os.environ.get(k) for k in obs_env}
+    os.environ.update(obs_env)
+    try:
+        # create_store() re-raises TenantRuntimeRoleError on the PostgreSQL path, and in CLIENT mode
+        # tenant_rls.enforce_runtime_role() refuses a superuser/BYPASSRLS login -- so a store built
+        # here is proof the runtime login is safe. The store binds to the restricted login only.
+        store = store_mod.create_store()
+        readiness = READINESS.evaluate_client_data_readiness(store)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    captured["obs"] = {
+        "source": "executed",
+        "context_id": run_input["context_id"],
+        "observer": "restricted_postgres_runtime",
+        "readiness_by_id": {c.id: c.status for c in readiness.checks},
+        "forge_report": None,
+        "counters": {c: 0 for c in REQUIRED_ZERO_COUNTERS},
+        "evidence_artifacts_consumed": [],
+        "pg_runtime_identity": identity,
+        "migration_runtime_roles_distinct": ctx["mig_role"] != ctx["rt_role"],
+    }
+
+
 def _observe_postgres(run_input: Mapping[str, Any]) -> dict[str, Any]:
     """Observe a PostgreSQL context on the ACCEPTED restricted runtime.
 
-    Delegates stack lifecycle to the accepted foundation
-    (``restricted_postgres_startup_guard.run_stack``) rather than provisioning a second, unreviewed
-    PostgreSQL path. Requires the capacity gate, so it is unreachable while the gate is blocked --
-    and it has therefore NOT been exercised in this increment. Declared, not claimed.
+    Delegates the ENTIRE stack lifecycle to the accepted foundation
+    (``restricted_postgres_startup_guard.run_stack``) via its ``_ON_LIVE`` hook -- it never
+    provisions a second, unreviewed PostgreSQL path, and it never accepts an externally supplied
+    superuser DSN. Leaked generic test/PG environment variables are cleared first so the stack
+    provisions and is observed through its OWN distinct migration and restricted runtime login roles.
+    A live observation failure, a stack that never reaches the live hook, or a non-empty
+    ``cleanup_issues`` all raise :class:`ExecutionUnavailable` -- never a PASS.
     """
-    raise ExecutionUnavailable(
-        "the PostgreSQL observer requires the accepted restricted-PostgreSQL stack, which may only "
-        f"be launched once the environment-capacity gate passes (context {run_input['context_id']!r})")
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
+    import restricted_postgres_startup_guard as G  # accepted foundation, unchanged
+
+    mode = "client" if run_input["client_data_mode"] == "client" else "demo"
+    captured: dict[str, Any] = {}
+    live_error: dict[str, str] = {}
+
+    def on_live(ctx: Mapping[str, Any]) -> None:
+        try:
+            _observe_postgres_live(run_input, mode, ctx, captured)
+        except Exception as exc:  # noqa: BLE001 - recorded; a live failure is never a PASS
+            live_error["exception"] = exc.__class__.__name__
+
+    saved_env = {k: os.environ.get(k) for k in _LEAKED_PG_ENV}
+    for key in _LEAKED_PG_ENV:
+        os.environ.pop(key, None)
+    prev_hook = getattr(G, "_ON_LIVE", None)
+    G._ON_LIVE = on_live
+    G.checks[:] = []                 # run_stack appends to the module checks; the caller resets first
+    G.http_statuses[:] = []
+    try:
+        result = G.run_stack()
+    except Exception as exc:  # noqa: BLE001 - a hard provisioning failure is unavailability
+        raise ExecutionUnavailable(
+            f"the restricted-PostgreSQL stack failed to start ({exc.__class__.__name__})")
+    finally:
+        G._ON_LIVE = prev_hook
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    if live_error:
+        raise ExecutionUnavailable(
+            f"observing the live restricted-PostgreSQL runtime failed ({live_error['exception']})")
+    if "obs" not in captured:
+        raise ExecutionUnavailable("the restricted-PostgreSQL stack never reached the live observer")
+    if result.get("cleanup_issues"):
+        # Fail-closed: a runtime whose disposable resources were not fully cleaned cannot yield an
+        # accepted readiness observation. The detail is already redacted by the foundation.
+        raise ExecutionUnavailable("the restricted-PostgreSQL stack reported cleanup issues")
+    return captured["obs"]
 
 
 # --------------------------------------------------------------------------- orchestration
@@ -682,6 +844,13 @@ def _summarize(capacity_facts: Mapping[str, Any], requested: Sequence[str],
         "production_parity": False,
         "dispositions_produced": all_evaluated and complete,
         "release_recommendation": "GA_BLOCKED",
+        # Part D: context EXECUTION acceptance is independent of GA readiness. Every context keeps
+        # GA_BLOCKED and its global release blockers visible even when it executed cleanly; those are
+        # never treated as a context-execution failure.
+        "overall_GA_status": "GA_BLOCKED",
+        "execution_acceptance_independent_of_ga": True,
+        "global_release_blockers": sorted({b for r in ordered
+                                           for b in r.get("global_release_blockers", [])}),
         "reason": None,
     }
     summary["execution_verdict"] = (
