@@ -504,7 +504,6 @@ def run_stack() -> dict:
         # TCP SQL session is stable, absorbing short-lived connection instability inside THIS fresh stack
         # (bounded deadline), so it need not cost an outer fresh-stack retry. A non-transient or
         # deadline-exhausted failure fails closed here.
-        _fault("before_stable_sql")
         sql_readiness_history.extend(
             _STABLE_SQL_PROBE(boot_dsn) if _STABLE_SQL_PROBE is not None
             else wait_for_stable_sql_connection(boot_dsn))
