@@ -586,9 +586,10 @@ def _local_persistence_readback(store: Any, mode: str) -> dict[str, Any]:
         "validation_audit_event_count": int(validation_event_count),
         "blocked_export_status_persisted": bool(export_status_persisted),
         "blocked_export_audit_event_count": int(export_event_count),
-        "snapshot_revision_start": rev0,
-        "snapshot_revision_after_blocked_export": rev_after_block,
-        "snapshot_revision_after_validation": rev_after_val,
+        # Only the DETERMINISTIC boolean is retained. The absolute revision integers are intentionally
+        # NOT reported: the readiness probe writes a run-varying number of snapshots, so exposing raw
+        # revisions here would make them part of the canonical result body and break the accepted
+        # audit:readiness-contexts reproducibility invariants (identical canonical hash across runs).
         "snapshot_revision_advanced": rev_after_block > rev0 and rev_after_val > rev_after_block,
         "audit_chain_status": str(chain_status),
         "audit_chain_valid": str(chain_status) == "sealed",
