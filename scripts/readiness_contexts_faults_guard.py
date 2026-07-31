@@ -87,13 +87,14 @@ EXPECTED_CHECK_IDS = [
     "FS01 runner-imports-canonical-inventory", "FS02 runner-launches-nothing",
     "FS03 capacity-gate-precedes-observation", "FS04 battery-drives-real-harness",
     "FS05 no-simulated-dispositions", "FS06 accepted-hash-pinned-literally",
+    "FS07 pg-observer-delegates-to-foundation", "FS08 execution-ga-separation-present",
     "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
 
 #: Pinned battery size. Without these, deleting a mutation TOGETHER WITH its expected-list entry
 #: leaves the completeness gate satisfied and the battery silently shrinks (the reviewer's V2 probe:
 #: 46 passed / 38 mutations, still certifying).
-EXPECTED_TOTAL_CHECKS = 58
+EXPECTED_TOTAL_CHECKS = 60
 EXPECTED_MUTATION_COUNT = 48
 
 
@@ -784,6 +785,56 @@ def run() -> int:
         "currently equals the contract's computed hash, so a contract mutation cannot certify itself",
         level="structural source check",
         extra={"pinned": R.ACCEPTED_INVENTORY_HASH[:16] + "..."})
+
+    # FS07: the PostgreSQL observer must be REAL -- it delegates the stack lifecycle to the accepted
+    # foundation (calls run_stack) and is NOT a bare `raise ExecutionUnavailable` stub. Reverting it
+    # to the declared-not-implemented stub (the original defect) makes this fail.
+    pg_obs_def = next((n for n in ast.walk(runner_ast)
+                       if isinstance(n, ast.FunctionDef) and n.name == "_observe_postgres"), None)
+    delegates = False
+    is_bare_stub = False
+    if pg_obs_def is not None:
+        calls_run_stack = any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "run_stack"
+            for n in ast.walk(pg_obs_def))
+        raises = [n for n in ast.walk(pg_obs_def) if isinstance(n, ast.Raise)]
+        # a bare stub is a body whose ONLY meaningful statement raises ExecutionUnavailable and never
+        # reaches the foundation
+        non_doc = [s for s in pg_obs_def.body
+                   if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
+        is_bare_stub = (not calls_run_stack and len(non_doc) == 1
+                        and isinstance(non_doc[0], ast.Raise))
+        delegates = calls_run_stack and not is_bare_stub and bool(raises)
+    rec("FS07 pg-observer-delegates-to-foundation", delegates,
+        "the PostgreSQL observer delegates the stack lifecycle to the accepted foundation "
+        "(restricted_postgres_startup_guard.run_stack) and still fails closed with a raise -- it is "
+        "not the declared-not-implemented ExecutionUnavailable stub",
+        level="structural source check", extra={"is_bare_stub": is_bare_stub})
+
+    # FS08: an executed context result reports execution status, observation status and the global
+    # release blockers SEPARATELY from context-specific blockers, and keeps overall_GA_status visible.
+    # Removing the separation (hiding global GA blockers, or conflating them with a context failure)
+    # makes this fail.
+    sep = evaluated("client-postgres")
+    universal = set(R.universal_ga_blockers())
+    sep_ok = (
+        sep.get("context_execution_status") == "executed"
+        and sep.get("context_observation_status") == "observations_complete"
+        and sep.get("overall_GA_status") == "GA_BLOCKED"
+        and isinstance(sep.get("global_release_blockers"), list)
+        and isinstance(sep.get("context_specific_blockers"), list)
+        # the two blocker sets partition the blocking set and never overlap
+        and set(sep["global_release_blockers"]) == (set(sep["blocking_controls"]) & universal)
+        and set(sep["context_specific_blockers"]) == (set(sep["blocking_controls"]) - universal)
+        and not (set(sep["global_release_blockers"]) & set(sep["context_specific_blockers"])))
+    rec("FS08 execution-ga-separation-present", sep_ok,
+        "an executed context reports execution/observation status and partitions its blockers into "
+        "global-release vs context-specific, so a repository-wide GA blocker is never hidden nor "
+        "mistaken for a context-execution failure",
+        level="structural source check",
+        extra={"global": sep.get("global_release_blockers"),
+               "context_specific_count": len(sep.get("context_specific_blockers") or [])})
 
     run_contexts_def = next((n for n in runner_ast.body
                              if isinstance(n, ast.FunctionDef) and n.name == "run_contexts"), None)

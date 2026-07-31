@@ -105,6 +105,7 @@
     "audit:ga-gap-assessment": "python scripts/ga_gap_assessment_guard.py",
     "audit:ga-gap-assessment-faults": "python scripts/ga_gap_assessment_faults_guard.py",
     "audit:readiness-contexts-faults": "python scripts/readiness_contexts_faults_guard.py",
+    "audit:readiness-context-pg-observer": "python scripts/readiness_context_pg_observer_guard.py",
     "audit:postgres-malware-route": "python scripts/postgres_malware_route_guard.py",
     "audit:storage-paths": "python scripts/storage_path_guard.py",
     "audit:archive-safety": "python scripts/archive_safety_guard.py",
