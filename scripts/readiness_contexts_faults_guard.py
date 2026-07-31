@@ -88,13 +88,14 @@ EXPECTED_CHECK_IDS = [
     "FS03 capacity-gate-precedes-observation", "FS04 battery-drives-real-harness",
     "FS05 no-simulated-dispositions", "FS06 accepted-hash-pinned-literally",
     "FS07 pg-observer-delegates-to-foundation", "FS08 execution-ga-separation-present",
+    "FS09 pg-observer-enforces-readback-workflow", "FS10 pg-readback-uses-supported-seed",
     "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
 
 #: Pinned battery size. Without these, deleting a mutation TOGETHER WITH its expected-list entry
 #: leaves the completeness gate satisfied and the battery silently shrinks (the reviewer's V2 probe:
 #: 46 passed / 38 mutations, still certifying).
-EXPECTED_TOTAL_CHECKS = 60
+EXPECTED_TOTAL_CHECKS = 62
 EXPECTED_MUTATION_COUNT = 48
 
 
@@ -835,6 +836,50 @@ def run() -> int:
         level="structural source check",
         extra={"global": sep.get("global_release_blockers"),
                "context_specific_count": len(sep.get("context_specific_blockers") or [])})
+
+    # FS09: the PostgreSQL observer ENFORCES the persisted read-back + workflow -- it calls
+    # _pg_workflow_readback and raises ExecutionUnavailable unless BOTH pg_persistence_verified AND
+    # workflow_verified. Reverting to not-implemented markers, or dropping either enforcement, fails.
+    pg_live = next((n for n in ast.walk(runner_ast)
+                    if isinstance(n, ast.FunctionDef) and n.name == "_observe_postgres_live"), None)
+    calls_readback = pg_live is not None and any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "_pg_workflow_readback" for n in ast.walk(pg_live))
+    pg_live_src = ast.get_source_segment(runner_src, pg_live) if pg_live is not None else ""
+    enforces_both = ("pg_persistence_verified" in (pg_live_src or "")
+                     and "workflow_verified" in (pg_live_src or "")
+                     and (pg_live_src or "").count("raise ExecutionUnavailable") >= 2)
+    rec("FS09 pg-observer-enforces-readback-workflow", bool(calls_readback and enforces_both),
+        "the PostgreSQL observer calls _pg_workflow_readback and fails closed unless both the "
+        "persisted read-back and the workflow verify -- not the not-implemented markers",
+        level="structural source check",
+        extra={"calls_readback": calls_readback, "enforces_both": enforces_both})
+
+    # FS10: the PG read-back seeds via SUPPORTED wrapped mutations and reads back through an
+    # INDEPENDENT store -- never direct-dict assignment to normalized collections, ad-hoc SQL, or a
+    # superuser. The validation task comes from the real critical-benchmark workflow.
+    pg_rb = next((n for n in ast.walk(runner_ast)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_pg_workflow_readback"), None)
+    rb_src = ast.get_source_segment(runner_src, pg_rb) if pg_rb is not None else ""
+    calls = {n.func.attr for n in ast.walk(pg_rb) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)} if pg_rb is not None else set()
+    supported_seed = {"create_workspace", "record_benchmark_measurement", "create_monday_report",
+                      "mark_report_export_blocked", "update_validation_task",
+                      "export_monday_report"} <= calls
+    independent_reader = "create_store" in (rb_src or "") and "read_back_source" in (rb_src or "")
+    no_raw_sql = not any(k in (rb_src or "") for k in (".execute(", "psycopg.connect", "BYPASSRLS",
+                                                       "superuser"))
+    no_direct_normalized = (".monday_reports[" not in (rb_src or "")
+                            and ".validation_tasks[" not in (rb_src or ""))
+    rec("FS10 pg-readback-uses-supported-seed",
+        bool(pg_rb is not None and supported_seed and independent_reader and no_raw_sql
+             and no_direct_normalized),
+        "the PG read-back seeds only via supported wrapped mutations (the validation task via the "
+        "critical-benchmark workflow), reads back through an independent store, and uses no ad-hoc "
+        "SQL / superuser / direct normalized-collection assignment",
+        level="structural source check",
+        extra={"supported_seed": supported_seed, "independent_reader": independent_reader,
+               "no_raw_sql": no_raw_sql, "no_direct_normalized": no_direct_normalized})
 
     run_contexts_def = next((n for n in runner_ast.body
                              if isinstance(n, ast.FunctionDef) and n.name == "run_contexts"), None)
