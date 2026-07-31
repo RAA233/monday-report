@@ -805,11 +805,16 @@ def run() -> int:
                    if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
         is_bare_stub = (not calls_run_stack and len(non_doc) == 1
                         and isinstance(non_doc[0], ast.Raise))
-        delegates = calls_run_stack and not is_bare_stub and bool(raises)
+        # A non-raise RETURN path must exist: a stub that calls run_stack() and then unconditionally
+        # raises (never returning an observation) would otherwise satisfy the check while refusing
+        # every real execution. Requiring a Return closes that false-negative.
+        has_return = any(isinstance(n, ast.Return) for n in ast.walk(pg_obs_def))
+        delegates = calls_run_stack and not is_bare_stub and bool(raises) and has_return
     rec("FS07 pg-observer-delegates-to-foundation", delegates,
         "the PostgreSQL observer delegates the stack lifecycle to the accepted foundation "
-        "(restricted_postgres_startup_guard.run_stack) and still fails closed with a raise -- it is "
-        "not the declared-not-implemented ExecutionUnavailable stub",
+        "(restricted_postgres_startup_guard.run_stack), still fails closed with a raise, AND has a "
+        "non-raise return path -- it is neither the declared-not-implemented ExecutionUnavailable "
+        "stub nor a run_stack()-then-always-raise stub",
         level="structural source check", extra={"is_bare_stub": is_bare_stub})
 
     # FS08: an executed context result reports execution status, observation status and the global

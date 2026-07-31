@@ -546,26 +546,43 @@ def _pg_runtime_identity(rt_dsn: str) -> dict[str, Any]:
     import psycopg
 
     with psycopg.connect(rt_dsn, connect_timeout=10, autocommit=True) as conn:
-        session_user = conn.execute("select session_user").fetchone()[0]
         role = conn.execute(
             "select rolsuper, rolbypassrls, rolcanlogin from pg_roles where rolname = current_user"
         ).fetchone()
-        # forced RLS on the protected parent/normalized tables the runtime writes through
-        forced = conn.execute(
-            "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
-            "where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity and c.relforcerowsecurity"
-        ).fetchone()[0]
+        # Across the public tables that have RLS ENABLED (the protected relations): how many FORCE it,
+        # and how many enable-but-do-not-force it (must be zero for "RLS is forced on them").
+        forced, enabled_not_forced = conn.execute(
+            "select "
+            " count(*) filter (where c.relrowsecurity and c.relforcerowsecurity), "
+            " count(*) filter (where c.relrowsecurity and not c.relforcerowsecurity) "
+            "from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+            "where n.nspname = 'public' and c.relkind = 'r'"
+        ).fetchone()
         owns = conn.execute(
             "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace "
             "where n.nspname = 'public' and c.relkind = 'r' and pg_get_userbyid(c.relowner) = current_user"
         ).fetchone()[0]
+        # DB-observed principal separation: the RLS-protected tables are owned by a role OTHER than
+        # the runtime login. Derived from the live catalog, not from run-scoped role NAMES (which are
+        # constructed with distinct prefixes and would make any name comparison a tautology).
+        owned_by_other = conn.execute(
+            "select count(distinct pg_get_userbyid(c.relowner)) "
+            "from pg_class c join pg_namespace n on n.oid = c.relnamespace "
+            "where n.nspname = 'public' and c.relkind = 'r' and c.relrowsecurity "
+            "and pg_get_userbyid(c.relowner) <> current_user"
+        ).fetchone()[0]
     return {
+        # current_user == session_user here (no SET ROLE); rolcanlogin proves it is a LOGIN role
         "session_user_is_restricted_login": bool(role[2]),
         "runtime_not_superuser": not bool(role[0]),
         "runtime_not_bypassrls": not bool(role[1]),
         "runtime_owns_no_protected_tables": int(owns) == 0,
         "forced_rls_table_count": int(forced),
-        "rls_forced_on_protected_tables": int(forced) > 0,
+        "rls_enabled_not_forced_count": int(enabled_not_forced),
+        # forced on the protected tables means: some table forces RLS AND none enable-without-forcing
+        "rls_forced_on_protected_tables": int(forced) > 0 and int(enabled_not_forced) == 0,
+        # observed at the DB: the protected tables are owned by a principal that is NOT the runtime
+        "migration_owner_distinct_from_runtime": int(owned_by_other) >= 1,
     }
 
 
@@ -596,6 +613,14 @@ def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping
         # tenant_rls.enforce_runtime_role() refuses a superuser/BYPASSRLS login -- so a store built
         # here is proof the runtime login is safe. The store binds to the restricted login only.
         store = store_mod.create_store()
+        # FAIL-CLOSED: create_store() swallows a generic PostgresStateStore construction error and
+        # silently returns a LocalStateStore fallback. Observing readiness against that fallback while
+        # labelling it a restricted-PostgreSQL observation would substitute the backend under test.
+        # Refuse unless the store really is the PostgreSQL store.
+        if type(store).__name__ != "PostgresStateStore":
+            raise ExecutionUnavailable(
+                "create_store did not return a PostgresStateStore on the restricted runtime "
+                f"(got {type(store).__name__}); refusing to observe a substituted backend")
         readiness = READINESS.evaluate_client_data_readiness(store)
     finally:
         for key, value in saved.items():
@@ -613,7 +638,9 @@ def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping
         "counters": {c: 0 for c in REQUIRED_ZERO_COUNTERS},
         "evidence_artifacts_consumed": [],
         "pg_runtime_identity": identity,
-        "migration_runtime_roles_distinct": ctx["mig_role"] != ctx["rt_role"],
+        # DB-observed: the protected tables are owned by a principal distinct from the runtime login
+        # (not a comparison of run-scoped role NAMES, which would always differ by construction).
+        "migration_runtime_roles_distinct": bool(identity.get("migration_owner_distinct_from_runtime")),
     }
 
 
