@@ -270,8 +270,31 @@ function compareTimestamp(a: string, b: string): number {
   return a === b ? 0 : a < b ? -1 : 1;
 }
 
+/** The HTTP status embedded in a thrown request error, or null when the request
+ *  never produced a response (network failure, abort, timeout, CORS). Reads the
+ *  ORIGINAL typed message the api client throws (`API <status>: …`), never the
+ *  sanitized `errorText()` output — sanitization is presentation-only and must not
+ *  drive classification, or a refused request reads as an incomplete one. */
+export function requestStatus(error: unknown): number | null {
+  if (error instanceof Error && error.message) {
+    const match = /^API (\d{3})\b/.exec(error.message);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+/** True when the backend produced a definite response — the request provably
+ *  reached the server and was refused, so its effect on server state is KNOWN
+ *  (nothing was applied). A null status is fail-closed: whether the mutation
+ *  landed is genuinely unknown and the caller must reconcile before retrying. */
+export function isBackendRefusal(error: unknown): boolean {
+  return requestStatus(error) !== null;
+}
+
 /** Short, sanitized form of a thrown request error. Exported so every user-facing
- *  string goes through one sanitizer instead of interpolating `API 409: …` raw. */
+ *  string goes through one sanitizer instead of interpolating `API 409: …` raw.
+ *  Classification must use `requestStatus`/`isBackendRefusal` on the raw error, not
+ *  this string, whose `^API ` rewrite deliberately erases the typed status. */
 export function errorText(error: unknown): string {
   // Surfaced to users, so keep it short and never leak a raw stack or a URL.
   if (error instanceof Error && error.message) {

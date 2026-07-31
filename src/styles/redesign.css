@@ -300,12 +300,30 @@ html {
  * them the inert appearance the attribute would have. `disabled` remains correct for
  * STANDING conditions, where nothing is focused when it is applied.
  */
-[aria-disabled="true"] {
+[aria-disabled="true"],
+[aria-disabled="true"]:hover,
+[aria-disabled="true"]:active,
+[aria-disabled="true"]:focus,
+[aria-disabled="true"]:focus-visible {
   /* NOT `opacity`. Group opacity fades the focus ring with the control, taking the
      indicator to ~1.9:1 - defeating the focus contract this rule exists to serve,
      since the whole point is that these controls STAY focusable. Dim the ink and the
-     fill instead, and leave the outline at full strength. */
-  color: var(--color-neutral-700);
-  background-color: var(--color-neutral-200);
+     fill instead, and leave the outline at full strength.
+
+     `!important` and the :hover/:active/:focus variants are load-bearing, not cosmetic:
+       - `.btn-primary:hover` (0,2,0) outranks a bare `[aria-disabled]` (0,1,0), so an
+         in-flight primary button repainted its fill back to accent-800 ON HOVER while
+         the ink stayed neutral-700 -> 1.51:1, a near-invisible label exactly when the
+         operator is pointing at it. Re-asserting the inert fill on every interaction
+         state keeps it at neutral-700-on-neutral-200 = 5.32:1.
+       - inline `style={{ color }}` / `style={{ background }}` (an inline declaration)
+         outranks any selector, so an inline-coloured control had NO visible inert
+         state. `!important` on an author rule beats inline non-important, restoring one
+         consistent inert appearance for every aria-disabled control.
+     The outline (focus ring) is untouched, so a focusable inert control still shows
+     focus. Activation is blocked in the handler (aria-disabled controls run an inert
+     handler), so this rule only owns the APPEARANCE. */
+  color: var(--color-neutral-700) !important;
+  background-color: var(--color-neutral-200) !important;
   cursor: not-allowed;
 }

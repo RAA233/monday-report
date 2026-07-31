@@ -101,7 +101,9 @@ function GateBanner({
     return (
       <div role="status" style={frame(false)}>
         <strong style={heading(false)}>Export gate closed</strong>
-        <span style={{ fontSize: 13 }}>{exportGateMessage(gate.openTasks)}</span>
+        {/* `id` is referenced by each export button's aria-describedby while the gate is
+            closed, so the reason travels with the (focusable, aria-disabled) control. */}
+        <span id="export-gate-reason" style={{ fontSize: 13 }}>{exportGateMessage(gate.openTasks)}</span>
         <Link className="btn btn-ghost" to="/app/validation" style={{ minHeight: 0, padding: "0 4px" }}>
           Open the queue →
         </Link>
@@ -340,13 +342,24 @@ export function Exports() {
   // time an awaited request rejects.
   const gateRef = useRef(gate);
   gateRef.current = gate;
-  // Split, because the two halves need different mechanisms. `gate.state === "loading"`
-  // is TRANSIENT and a refused export flips the gate into it - so folding it into the
-  // native attribute put `disabled` on the button the operator had just pressed and
-  // blurred them to <body>. Standing terms stay native; the transient one is carried
-  // by aria-disabled, with `exportsBlocked` still the single predicate the handlers use.
-  const exportsStandingBlocked = readOnly || !canIssueExport || gateIsClosed(gate);
-  const exportsBlocked = exportsStandingBlocked || gateBlocksExport;
+  // THREE distinct reasons an export cannot run, each modelled with the mechanism that
+  // matches what it MEANS to the operator:
+  //   (a) permission / prerequisite unavailable — a STANDING fact of this session
+  //       (no issue_client_reports, or the API is not connected). The action is
+  //       genuinely impossible, so the control takes native `disabled`.
+  //   (b) a request is IN FLIGHT (busy, or the gate re-read a refusal put into
+  //       `loading`) — transient; native `disabled` on the just-pressed button blurs
+  //       it to <body>, so this is carried by aria-disabled with an inert handler.
+  //   (c) the business gate is CLOSED by qualifying validation tasks — frequently it
+  //       closes BECAUSE the operator pressed Export (the refusal flips the report to
+  //       "review" and blocks the gate). Representing that as a native-`disabled`
+  //       button makes it vanish from the tab order as an unexplained dimmed control.
+  //       It stays focusable (aria-disabled) and is wired by aria-describedby to the
+  //       GateBanner's reason + "open the queue" next action.
+  const exportsPermissionBlocked = readOnly || !canIssueExport;
+  const exportGateClosed = gateIsClosed(gate);
+  const exportInFlight = busy !== null || gate.state === "loading";
+  const exportsBlocked = exportsPermissionBlocked || gateBlocksExport;
 
   async function runExport(format: ApiReportExport["format"]) {
     // aria-disabled keeps these focusable, so the handler is what actually makes them
@@ -557,8 +570,12 @@ export function Exports() {
                     type="button"
                     className="btn btn-secondary"
                     onClick={() => void runExport(entry.format)}
-                    disabled={exportsStandingBlocked}
-                        aria-disabled={busy !== null || gate.state === "loading" || undefined}
+                    disabled={exportsPermissionBlocked}
+                    aria-disabled={exportInFlight || exportGateClosed || undefined}
+                    // A closed business gate keeps the button focusable and points the
+                    // screen-reader user at the banner that says why and what to do next,
+                    // instead of a bare dimmed control with no reason in its name.
+                    aria-describedby={exportGateClosed ? "export-gate-reason" : undefined}
                   >
                     {busy === entry.format ? "Exporting…" : `Export ${entry.label}`}
                   </button>

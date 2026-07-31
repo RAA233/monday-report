@@ -14,6 +14,7 @@ import {
 import {
   apiUnreadReason,
   errorText,
+  isBackendRefusal,
   isOpenValidationTask,
   useLoadable,
   useWorkspace
@@ -133,7 +134,12 @@ export function Validation() {
     } catch (caught) {
       showToast(
         "Not recorded",
-        /^API \d{3}\b/.test(errorText(caught))
+        // Classify on the ORIGINAL typed error, not errorText()'s sanitized string —
+        // its `^API ` rewrite erases the status, so a definite backend refusal (403
+        // permission, 409 conflict, 423 locked, 5xx) used to collapse into the
+        // network-unknown branch. A backend refusal provably left the gate unchanged;
+        // a null status stays fail-closed (reconcile before retrying).
+        isBackendRefusal(caught)
           ? `The decision was not recorded, so the gate is unchanged. ${errorText(caught)}`
           : `The request did not complete, so whether it reached the backend is unknown — reload the queue before deciding again. ${errorText(caught)}`
       );

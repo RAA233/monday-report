@@ -4,10 +4,11 @@ import { Link } from "react-router-dom";
  * Public product page.
  *
  * A recreation of the handoff landing design. The copy is the approved final copy;
- * the only substantive change is the product-preview caption, which now says the
- * preview is an illustration using demo-workspace values. This page is not
- * connected to the API, so describing it as "drawn from the demo workspace" would
- * have asserted a provenance it does not have.
+ * the only substantive change is the product-preview caption. This page is not
+ * connected to the API and PREVIEW_META is hard-coded, so the caption labels the
+ * figures as representative SAMPLE values not read from any workspace. "Demo-workspace
+ * values" was still a provenance claim — it named a source these static numbers do not
+ * have — so it is not used for the illustration.
  *
  * No certification, compliance, or production-acceptance claim appears anywhere on
  * this page — the trust section states that explicitly.
@@ -441,11 +442,11 @@ export function Landing() {
               </div>
             </div>
             <figcaption style={{ marginTop: "var(--space-2)" }}>
-              A design illustration using demo-workspace values — a casing and directional
-              schematic with the 13 3/8 in and 9 5/8 in shoes, current depth MD 8,620 ft, and the
-              target box. The Studio's draft carries the casing program, survey stations and
-              hydraulics as tables; the drawn schematic arrives with the Well view. Not live data
-              and not a real survey computation.
+              A design illustration with representative sample figures — not read from any
+              workspace — showing a casing and directional schematic with the 13 3/8 in and 9 5/8 in
+              shoes, an illustrative current depth of MD 8,620 ft, and the target box. The Studio's
+              draft carries the casing program, survey stations and hydraulics as tables; the drawn
+              schematic arrives with the Well view. Not live data and not a real survey computation.
             </figcaption>
           </figure>
         </section>
