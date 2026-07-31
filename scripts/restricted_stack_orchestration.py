@@ -26,7 +26,10 @@ import time
 from typing import Any, Callable
 
 DEFAULT_MAX_ATTEMPTS = 3
-_BACKOFF_SECONDS = (2.0, 5.0)
+# Bounded backoff before attempts 2 and 3. A longer settle lets the Docker daemon finish tearing down
+# the prior disposable container before a fresh one is created, which shrinks the next container's
+# first-init race window and materially lowers the retry's own failure rate. Still strictly bounded.
+_BACKOFF_SECONDS = (6.0, 14.0)
 
 #: Transient connection/bootstrap classes that are retryable ONLY before the first business mutation.
 _TRANSIENT_MARKERS = (
