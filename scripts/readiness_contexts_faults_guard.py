@@ -795,9 +795,13 @@ def run() -> int:
     delegates = False
     top_level_raise = True
     if pg_obs_def is not None:
+        # Delegation to the accepted foundation may be DIRECT (run_stack) or via the shared retry seam
+        # (provision_restricted_stack, which itself runs the unchanged run_stack). Either counts.
         calls_run_stack = any(
-            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-            and n.func.attr == "run_stack"
+            isinstance(n, ast.Call)
+            and ((isinstance(n.func, ast.Attribute) and n.func.attr in ("run_stack",
+                                                                         "provision_restricted_stack"))
+                 or (isinstance(n.func, ast.Name) and n.func.id == "provision_restricted_stack"))
             for n in ast.walk(pg_obs_def))
         # An UNCONDITIONAL raise at the function-body top level marks a stub that never really
         # executes: both the bare `raise ExecutionUnavailable(...)` stub AND a

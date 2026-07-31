@@ -1085,7 +1085,7 @@ def _observe_postgres(run_input: Mapping[str, Any]) -> dict[str, Any]:
     """
     if str(ROOT / "scripts") not in sys.path:
         sys.path.insert(0, str(ROOT / "scripts"))
-    import restricted_postgres_startup_guard as G  # accepted foundation, unchanged
+    import restricted_stack_orchestration as O   # shared retry seam around the accepted foundation
 
     mode = "client" if run_input["client_data_mode"] == "client" else "demo"
     captured: dict[str, Any] = {}
@@ -1094,50 +1094,45 @@ def _observe_postgres(run_input: Mapping[str, Any]) -> dict[str, Any]:
     def on_live(ctx: Mapping[str, Any]) -> None:
         try:
             _observe_postgres_live(run_input, mode, ctx, captured)
-        except Exception as exc:  # noqa: BLE001 - recorded; a live failure is never a PASS
+        except Exception as exc:  # noqa: BLE001 - recorded; a live failure is never a PASS or a retry
             live_error["exception"] = exc.__class__.__name__
 
     saved_env = {k: os.environ.get(k) for k in _LEAKED_PG_ENV}
     for key in _LEAKED_PG_ENV:
         os.environ.pop(key, None)
-    prev_hook = getattr(G, "_ON_LIVE", None)
-    G._ON_LIVE = on_live
-    G.checks[:] = []                 # run_stack appends to the module checks; the caller resets first
-    G.http_statuses[:] = []
-    foundation_checks: list = []
     try:
-        result = G.run_stack()
-        foundation_checks = list(G.checks)   # snapshot the foundation's recorded checks for this run
-    except Exception as exc:  # noqa: BLE001 - a hard provisioning failure is unavailability
+        # Provision through the SHARED seam: it runs the ACCEPTED run_stack unchanged, enforces the
+        # foundation's own recorded checks + clean cleanup + a fired hook as its success criterion, and
+        # retries ONLY a clean transient server-readiness/bootstrap race (before any business mutation)
+        # with fresh isolated resources, bounded to 3 attempts. Semantic/observer/cleanup/unknown
+        # failures are never retried.
+        prov = O.provision_restricted_stack(on_live, max_attempts=3)
+    except O.ProvisioningFailed as exc:  # non-retryable, or the bounded budget was exhausted
+        last = exc.history[-1] if exc.history else {}
         raise ExecutionUnavailable(
-            f"the restricted-PostgreSQL stack failed to start ({exc.__class__.__name__})")
+            f"the restricted-PostgreSQL stack could not be provisioned after {len(exc.history)} "
+            f"attempt(s) (phase={last.get('phase')!r}, retryable={last.get('retry_eligible')})")
     finally:
-        G._ON_LIVE = prev_hook
         for key, value in saved_env.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
 
-    # ENFORCE the accepted foundation's own certification: run_stack RECORDS failed identity/RLS/
-    # ownership checks (record(..., False, ...)) without raising, and still fires _ON_LIVE. So a
-    # foundation regression could reach the live hook with a failed R/P/I check. Any non-skipped
-    # foundation check that did not pass makes this observation unavailable. Fail-closed.
-    failed_foundation = [c.get("id") for c in foundation_checks
-                         if not c.get("ok") and not c.get("skipped")]
-    if failed_foundation:
-        raise ExecutionUnavailable(
-            f"the restricted-PostgreSQL foundation recorded {len(failed_foundation)} failed check(s)")
-
+    # The seam only returns success when the foundation recorded NO failed checks, cleanup was clean,
+    # AND the business hook fired -- so those invariants are already enforced. A live-observation
+    # failure (the observer caught its own exception) is a business failure, never retried: refuse.
     if live_error:
         raise ExecutionUnavailable(
             f"observing the live restricted-PostgreSQL runtime failed ({live_error['exception']})")
     if "obs" not in captured:
         raise ExecutionUnavailable("the restricted-PostgreSQL stack never reached the live observer")
-    if result.get("cleanup_issues"):
-        # Fail-closed: a runtime whose disposable resources were not fully cleaned cannot yield an
-        # accepted readiness observation. The detail is already redacted by the foundation.
-        raise ExecutionUnavailable("the restricted-PostgreSQL stack reported cleanup issues")
+    # Retain the provisioning attempt history HONESTLY, but keep the non-deterministic attempt count
+    # OUT of the observation that feeds the canonical result hash (log it to stderr instead).
+    if len(prov.get("attempts", [])) > 1:
+        print(f"[provisioning] {run_input['context_id']}: succeeded on attempt "
+              f"{prov['succeeded_on_attempt']} after {len(prov['attempts']) - 1} transient "
+              "retry(ies)", file=sys.stderr)
     return captured["obs"]
 
 
