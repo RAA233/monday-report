@@ -549,6 +549,122 @@ def _isolation_preflight(run_input: Mapping[str, Any], *, target_kind: str, targ
     }
 
 
+def _pg_workflow_readback(store: Any, mode: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """PostgreSQL persisted workflow + read-back through the REAL normalized PostgresStateStore, using
+    ONLY supported wrapped mutations (no direct-dict seed, no ad-hoc SQL, no RLS bypass). The
+    validation task is created by the SUPPORTED application workflow -- a Critical benchmark breach via
+    record_benchmark_measurement spawns a critical ValidationTask (_register_validation_task threads
+    the normalized persist hook). Every critical mutation is read back from an INDEPENDENT fresh
+    PostgresStateStore (a separate RLS-scoped connection), never from a response body. Returns
+    (pg_persistence_facts, workflow_facts)."""
+    from datetime import date
+    import backend.app.store as store_mod
+    from backend.app.identity import set_current_identity, reset_current_identity
+    from backend.app.schemas import (AuthenticatedIdentity, BenchmarkMeasurementCreate,
+                                      MondayReportCreate, Role, ValidationTaskUpdate, WorkspaceCreate)
+
+    reader = store_mod.create_store()  # INDEPENDENT DB reader (fresh restricted-role connection)
+    if type(reader).__name__ != "PostgresStateStore":
+        raise ExecutionUnavailable("read-back store is not a PostgresStateStore")
+
+    def db_view() -> dict:
+        reader.refresh()
+        return {
+            "reports": {str(r.id): r.status for r in reader.monday_reports.values()},
+            "tasks": {str(t.id): t.status for t in reader.validation_tasks.values()},
+            "events": [(e.action, str(e.resource_id)) for e in reader.audit_logs],
+        }
+
+    def ecount(view: dict, action: str, rid) -> int:
+        return sum(1 for a, r in view["events"] if a == action and r == str(rid))
+
+    # Client mode: a verified reviewer authenticates the whole workflow (terminal validation requires
+    # it). Create the reviewer via the supported path, then bind the request identity.
+    rev_token = None
+    if mode == "client":
+        user = store.create_user("rc-pgwf-reviewer@readiness.test", "RC PGWF Reviewer", [Role.ADMIN])
+        cred, _tok = store.create_credential(user.id)
+        ident = AuthenticatedIdentity(
+            user_id=user.id, tenant_id=store.tenant.id, email=user.email,
+            display_name=user.full_name, roles=list(user.roles), account_status="active",
+            authentication_source="api_token", credential_id=cred.credential_id,
+            credential_fingerprint=cred.token_fingerprint, actor_source="authenticated")
+        rev_token = set_current_identity(ident)
+    try:
+        ws = store.create_workspace(WorkspaceCreate(name="rc-pgwf"))
+        # a Critical drilling-rate deviation (well below the ~448.8 critical threshold) -> critical task
+        store.record_benchmark_measurement(ws.id, BenchmarkMeasurementCreate(
+            metric="feet_drilled_per_day", value=300.0, unit="ft/day", data_source="rc-readiness"))
+        report = store.create_monday_report(MondayReportCreate(
+            workspace_id=ws.id, period_start=date(2026, 7, 6), period_end=date(2026, 7, 12)))
+        open_tasks = store.report_open_validation_tasks(report.id)
+        task = next((t for t in open_tasks if getattr(t, "priority", None) == "critical"),
+                    open_tasks[0] if open_tasks else None)
+        if task is None:
+            raise ExecutionUnavailable("the Critical benchmark breach did not create a validation task")
+        gate_closed = bool(open_tasks)
+
+        store.mark_report_export_blocked(report.id, "json", False, [t.id for t in open_tasks])
+        v1 = db_view()
+        export_status_persisted = v1["reports"].get(str(report.id)) == "review"
+        export_event_count = ecount(v1, "monday_report.export_blocked", report.id)
+
+        store.update_validation_task(task.id, ValidationTaskUpdate(status="validated"))
+        v2 = db_view()
+        validation_status_persisted = v2["tasks"].get(str(task.id)) == "validated"
+        validation_event_count = ecount(v2, "validation_task.update", task.id)
+
+        for rem in store.report_open_validation_tasks(report.id):
+            store.update_validation_task(rem.id, ValidationTaskUpdate(status="validated"))
+        gate_open = not store.report_open_validation_tasks(report.id)
+        export = store.export_monday_report(report.id, "json")
+        signed = bool(getattr(export, "storage_uri", None) or getattr(export, "signed_url", None)
+                      or getattr(export, "download_reference", None) or getattr(export, "download_url", None))
+        v3 = db_view()
+        report_list_ok = str(report.id) in v3["reports"]
+        report_draft_ok = getattr(reader.monday_reports.get(report.id), "report_json", None) is not None
+        try:
+            reader.benchmarking_status(ws.id)
+            benchmarking_ok = True
+        except Exception:  # noqa: BLE001
+            benchmarking_ok = False
+        chain_ok = reader.audit_integrity_status().status == "sealed"
+    finally:
+        if rev_token is not None:
+            reset_current_identity(rev_token)
+
+    contradiction = ((export_event_count and not export_status_persisted)
+                     or (validation_event_count and not validation_status_persisted))
+    pg = {
+        "validation_decision_persisted": bool(validation_status_persisted),
+        "validation_audit_event_count": int(validation_event_count),
+        "blocked_export_status_persisted": bool(export_status_persisted),
+        "blocked_export_audit_event_count": int(export_event_count),
+        "audit_chain_valid": bool(chain_ok),
+        "business_audit_contradiction": bool(contradiction),
+        "validation_task_created_by": "record_benchmark_measurement_critical_breach",
+        "read_back_source": "independent_fresh_postgres_store",
+    }
+    pg["pg_persistence_verified"] = bool(
+        validation_status_persisted and validation_event_count == 1
+        and export_status_persisted and export_event_count == 1
+        and chain_ok and not contradiction)
+    workflow = {
+        "tenant_scoped_report_list": bool(report_list_ok),
+        "report_draft_retrieved": bool(report_draft_ok),
+        "benchmarking_observed": bool(benchmarking_ok),
+        "export_gate_closed_on_unresolved_validation": bool(gate_closed),
+        "validation_unlocks_export_gate": bool(gate_open),
+        "export_issued": bool(export is not None),
+        "signed_reference_issued": bool(signed),
+        "audit_chain_valid_after_workflow": bool(chain_ok),
+    }
+    workflow["workflow_verified"] = bool(
+        report_list_ok and report_draft_ok and benchmarking_ok and gate_closed
+        and gate_open and signed and chain_ok)
+    return pg, workflow
+
+
 def _observe_supported_workflow(store: Any, mode: str, ws_id, report_id, open_task_id) -> dict[str, Any]:
     """Observe the supported workflow through committed store methods, reusing the read-back's seed:
     tenant-scoped report list, report draft retrieval, benchmarking status, the export gate CLOSED
@@ -922,17 +1038,15 @@ def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping
         if "127.0.0.1" not in rt:
             raise ExecutionUnavailable("PostgreSQL isolation preflight: runtime DSN is not the "
                                        "runner-owned loopback database")
-        # NOTE: the PostgreSQL PERSISTED read-back and full workflow are NOT yet implemented. The
-        # normalized PostgresStateStore does not accept the direct-dict + save() seed the local
-        # read-back uses (reports/failures/validation-tasks are normalized tables, not the JSONB
-        # snapshot), and there is no standalone validation-task create method to seed the blocked-
-        # export gate transaction-safely. Implementing it (create_monday_report + a normalized
-        # validation-task seed) is deferred; the PG observer therefore still evaluates readiness +
-        # restricted-role identity + isolation only, and is NOT read-back/workflow eligible.
-        pg_persistence = {"pg_persistence_verified": False,
-                          "status": "not_implemented_normalized_seed_required"}
-        workflow = {"workflow_verified": False,
-                    "status": "not_implemented_normalized_seed_required"}
+        # PERSISTED workflow + read-back through the REAL normalized PostgresStateStore, seeded via
+        # supported wrapped mutations (the validation task comes from a Critical benchmark breach) and
+        # read back from an INDEPENDENT fresh Postgres store. Fail closed on any unverified invariant.
+        pg_persistence, workflow = _pg_workflow_readback(store, mode)
+        if not pg_persistence["pg_persistence_verified"]:
+            raise ExecutionUnavailable(
+                f"PostgreSQL persisted-state read-back failed: {pg_persistence}")
+        if not workflow.get("workflow_verified"):
+            raise ExecutionUnavailable(f"PostgreSQL workflow observation failed: {workflow}")
     finally:
         for key, value in saved.items():
             if value is None:
