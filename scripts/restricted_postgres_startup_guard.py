@@ -208,6 +208,8 @@ _TRANSIENT_CONNECT_MARKERS = (
     "connection reset",
     "could not connect",
     "connection timed out",
+    "timeout expired",        # libpq application-level connect_timeout expiry during slow bring-up
+    "operation timed out",
     "eof detected",
 )
 #: Non-transient connection classes that must NEVER be retried by the probe.

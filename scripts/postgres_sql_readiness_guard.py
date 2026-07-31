@@ -60,6 +60,8 @@ class FakePsycopg:
             return c
         if kind == "transient":
             raise RuntimeError("connection failed: server closed the connection")
+        if kind == "timeout":
+            raise RuntimeError("connection to server at \"h\" failed: timeout expired")
         if kind == "auth":
             raise RuntimeError("password authentication failed for user")
         if kind == "perm":
@@ -140,6 +142,12 @@ def positive() -> None:
     rec("SR09 history-redacted",
         "postgresql://" not in blob and ":y@" not in blob and "127.0.0.1" not in blob,
         "the returned attempt history carries no DSN/credential/endpoint")
+
+    # a libpq connect_timeout expiry ("timeout expired") is transient and recovers
+    r = _with_fake(["timeout", "ok"], deadline_seconds=5.0, poll_seconds=0.01)
+    rec("SR11 connect-timeout-expiry-transient",
+        r["ok"] and [h["outcome"] for h in r["history"]] == ["transient", "connected"],
+        "a libpq connect_timeout expiry during slow bring-up is transient and recovers")
 
     # STRUCTURAL: the stability probe runs BEFORE any semantic bootstrap in run_stack
     src = io.open(GUARD, encoding="utf-8").read()
