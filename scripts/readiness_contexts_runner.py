@@ -578,6 +578,12 @@ def _pg_workflow_readback(store: Any, mode: str) -> tuple[dict[str, Any], dict[s
     def ecount(view: dict, action: str, rid) -> int:
         return sum(1 for a, r in view["events"] if a == action and r == str(rid))
 
+    # MUTATION BOUNDARY: the independent reader above was the last read-only step; everything below
+    # MUTATES (create_user / create_workspace / record_benchmark_measurement / ...). Mark the monotonic
+    # per-attempt flag NOW so a transient connection failure from here on is NEVER retried.
+    import restricted_stack_orchestration as O
+    O.mark_business_mutation_started()
+
     # Client mode: a verified reviewer authenticates the whole workflow (terminal validation requires
     # it). Create the reviewer via the supported path, then bind the request identity.
     rev_token = None
@@ -989,9 +995,11 @@ def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping
     already provisioned and will be torn down by ``run_stack`` after this returns."""
     from backend.app import readiness as READINESS
     import backend.app.store as store_mod
+    import restricted_stack_orchestration as O   # attempt-local lifecycle marks (pre-mutation phase)
 
     rt = ctx["rt_dsn"]                         # restricted, non-superuser, non-BYPASSRLS LOGIN
     appname = f"mr-readiness-obs-{ctx['run_hash']}"
+    O.mark("store_connection_started")         # the identity probe is the first pre-mutation connection
     identity = _pg_runtime_identity(rt)        # observe the runtime login BEFORE evaluating readiness
 
     # ENFORCE, do not merely observe: if the runtime is NOT the restricted login (superuser, or
@@ -1028,7 +1036,9 @@ def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping
             raise ExecutionUnavailable(
                 "create_store did not return a PostgresStateStore on the restricted runtime "
                 f"(got {type(store).__name__}); refusing to observe a substituted backend")
+        O.mark("store_connection_ready")
         readiness = READINESS.evaluate_client_data_readiness(store)
+        O.mark("readiness_observation_completed")
         # ISOLATION PREFLIGHT (non-mutating): the runner-owned disposable database on loopback, never a
         # shared DB or the live app ports. Fail closed on a shared/live target.
         isolation = _isolation_preflight(
@@ -1038,6 +1048,7 @@ def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping
         if "127.0.0.1" not in rt:
             raise ExecutionUnavailable("PostgreSQL isolation preflight: runtime DSN is not the "
                                        "runner-owned loopback database")
+        O.mark("isolation_preflight_completed")
         # PERSISTED workflow + read-back through the REAL normalized PostgresStateStore, seeded via
         # supported wrapped mutations (the validation task comes from a Critical benchmark breach) and
         # read back from an INDEPENDENT fresh Postgres store. Fail closed on any unverified invariant.
@@ -1089,29 +1100,29 @@ def _observe_postgres(run_input: Mapping[str, Any]) -> dict[str, Any]:
 
     mode = "client" if run_input["client_data_mode"] == "client" else "demo"
     captured: dict[str, Any] = {}
-    live_error: dict[str, str] = {}
 
     def on_live(ctx: Mapping[str, Any]) -> None:
-        try:
-            _observe_postgres_live(run_input, mode, ctx, captured)
-        except Exception as exc:  # noqa: BLE001 - recorded; a live failure is never a PASS or a retry
-            live_error["exception"] = exc.__class__.__name__
+        # Do NOT swallow the observer's exception: the seam surfaces it via the attempt state and
+        # decides retry eligibility from the per-attempt business_mutation_started flag.
+        _observe_postgres_live(run_input, mode, ctx, captured)
 
     saved_env = {k: os.environ.get(k) for k in _LEAKED_PG_ENV}
     for key in _LEAKED_PG_ENV:
         os.environ.pop(key, None)
     try:
-        # Provision through the SHARED seam: it runs the ACCEPTED run_stack unchanged, enforces the
-        # foundation's own recorded checks + clean cleanup + a fired hook as its success criterion, and
-        # retries ONLY a clean transient server-readiness/bootstrap race (before any business mutation)
-        # with fresh isolated resources, bounded to 3 attempts. Semantic/observer/cleanup/unknown
-        # failures are never retried.
+        # Provision through the SHARED seam: it runs the ACCEPTED run_stack unchanged, and retries
+        # ONLY a clean transient connection/bootstrap failure that occurs strictly BEFORE the first
+        # business mutation -- foundation bring-up OR the observer's own pre-mutation initialization
+        # (store construction, readiness evaluation, isolation preflight) -- with fresh isolated
+        # resources, bounded to 3 attempts. Any failure at or after the first business mutation, and
+        # every semantic/cleanup/unknown failure, is never retried.
         prov = O.provision_restricted_stack(on_live, max_attempts=3)
     except O.ProvisioningFailed as exc:  # non-retryable, or the bounded budget was exhausted
         last = exc.history[-1] if exc.history else {}
         raise ExecutionUnavailable(
             f"the restricted-PostgreSQL stack could not be provisioned after {len(exc.history)} "
-            f"attempt(s) (phase={last.get('phase')!r}, retryable={last.get('retry_eligible')})")
+            f"attempt(s) (phase={last.get('phase')!r}, retryable={last.get('retry_eligible')}, "
+            f"business_mutation_started={last.get('business_mutation_started')})")
     finally:
         for key, value in saved_env.items():
             if value is None:
@@ -1119,20 +1130,16 @@ def _observe_postgres(run_input: Mapping[str, Any]) -> dict[str, Any]:
             else:
                 os.environ[key] = value
 
-    # The seam only returns success when the foundation recorded NO failed checks, cleanup was clean,
-    # AND the business hook fired -- so those invariants are already enforced. A live-observation
-    # failure (the observer caught its own exception) is a business failure, never retried: refuse.
-    if live_error:
-        raise ExecutionUnavailable(
-            f"observing the live restricted-PostgreSQL runtime failed ({live_error['exception']})")
+    # The seam only returns success when run_stack recorded NO failed checks, cleanup was clean, the
+    # hook fired, AND the observer raised nothing -- so those invariants are already enforced.
     if "obs" not in captured:
         raise ExecutionUnavailable("the restricted-PostgreSQL stack never reached the live observer")
     # Retain the provisioning attempt history HONESTLY, but keep the non-deterministic attempt count
     # OUT of the observation that feeds the canonical result hash (log it to stderr instead).
     if len(prov.get("attempts", [])) > 1:
         print(f"[provisioning] {run_input['context_id']}: succeeded on attempt "
-              f"{prov['succeeded_on_attempt']} after {len(prov['attempts']) - 1} transient "
-              "retry(ies)", file=sys.stderr)
+              f"{prov['succeeded_on_attempt']} after {len(prov['attempts']) - 1} pre-mutation "
+              "transient retry(ies)", file=sys.stderr)
     return captured["obs"]
 
 
