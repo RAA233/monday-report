@@ -109,6 +109,7 @@
     "audit:readiness-context-local-observer": "python scripts/readiness_context_local_observer_guard.py",
     "audit:readiness-context-four-context": "python scripts/readiness_context_four_context_guard.py",
     "audit:restricted-stack-orchestration": "python scripts/restricted_stack_orchestration_guard.py",
+    "audit:postgres-sql-readiness": "python scripts/postgres_sql_readiness_guard.py",
     "diag:provisioning-reliability": "python scripts/provisioning_reliability_probe.py",
     "audit:postgres-malware-route": "python scripts/postgres_malware_route_guard.py",
     "audit:storage-paths": "python scripts/storage_path_guard.py",
