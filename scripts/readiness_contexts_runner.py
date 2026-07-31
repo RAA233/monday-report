@@ -578,9 +578,11 @@ def _pg_runtime_identity(rt_dsn: str) -> dict[str, Any]:
         "runtime_not_bypassrls": not bool(role[1]),
         "runtime_owns_no_protected_tables": int(owns) == 0,
         "forced_rls_table_count": int(forced),
+        # observed for transparency: public tables that ENABLE RLS without FORCING it. Not gated on
+        # zero -- a table outside the runtime's protected write set may legitimately enable-not-force,
+        # and the accepted foundation (startup guard P04) certifies the complete protected forced set.
         "rls_enabled_not_forced_count": int(enabled_not_forced),
-        # forced on the protected tables means: some table forces RLS AND none enable-without-forcing
-        "rls_forced_on_protected_tables": int(forced) > 0 and int(enabled_not_forced) == 0,
+        "rls_forced_on_protected_tables": int(forced) > 0,
         # observed at the DB: the protected tables are owned by a principal that is NOT the runtime
         "migration_owner_distinct_from_runtime": int(owned_by_other) >= 1,
     }
