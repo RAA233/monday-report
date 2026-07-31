@@ -149,6 +149,33 @@ def wrapping_checks() -> None:
     record("06 drift detection notices an unwrapped mutator", detected, detected)
 
 
+def _file_backed_mutators_wrapped(store_mod) -> bool:
+    """Construct a real file-backed store in a throwaway directory and confirm every
+    declared mutator is wrapped with the local transaction boundary -- the
+    behavioural, load-bearing half of the file-backend atomicity contract."""
+    import tempfile
+
+    keys = ("MONDAY_REPORT_STATE_PATH", "MONDAY_REPORT_STORAGE_ROOT",
+            "MONDAY_REPORT_EXPORT_ROOT", "MONDAY_REPORT_CLIENT_DATA_MODE")
+    prior = {k: os.environ.get(k) for k in keys}
+    with tempfile.TemporaryDirectory(prefix="mr-atomicity-wrap-") as tmp:
+        os.environ["MONDAY_REPORT_STATE_PATH"] = str(Path(tmp) / "state.json")
+        os.environ["MONDAY_REPORT_STORAGE_ROOT"] = str(Path(tmp) / "storage")
+        os.environ["MONDAY_REPORT_EXPORT_ROOT"] = str(Path(tmp) / "exports")
+        os.environ["MONDAY_REPORT_CLIENT_DATA_MODE"] = "demo"
+        try:
+            local_store = store_mod.LocalStateStore()
+            return all(
+                getattr(getattr(local_store, name, None), "_mr_local_wrapped", False)
+                for name in store_mod.MUTATING_STORE_METHODS)
+        finally:
+            for key, value in prior.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
 def fail_closed_checks() -> None:
     from backend.app import store as store_mod
 
@@ -185,9 +212,38 @@ def fail_closed_checks() -> None:
     record("11 the snapshot lock cannot collide with the migration runner lock",
            store_mod.PostgresStateStore._advisory_lock_key() != M.ADVISORY_LOCK_KEY, True)
 
-    # File-backed store must not advertise a cross-process guarantee.
-    record("12 file-backed store exposes no snapshot_transaction (claims no cross-process safety)",
-           not hasattr(store_mod.LocalStateStore, "snapshot_transaction"), True)
+    # File-backed store: cross-process atomicity is now PROVIDED (behavioural proof
+    # lives in scripts/local_snapshot_atomicity_guard.py). The contract here is
+    # structural, and its exact shape matters:
+    #   * the file store exposes its OWN boundary, local_snapshot_transaction;
+    #   * it still does NOT define snapshot_transaction -- that name stays
+    #     PostgreSQL-only so the two backends' transaction boundaries are never
+    #     conflated by a guard or a caller;
+    #   * the atomic path is load-bearing: the transaction and the one-shot save
+    #     both go through a cross-process file lock (_SnapshotFileLock) and a
+    #     persisted revision compare-and-swap (_read_disk_revision / snapshot_revision).
+    import inspect as _inspect
+    local = store_mod.LocalStateStore
+    record("12a file-backed store exposes its own local_snapshot_transaction boundary",
+           hasattr(local, "local_snapshot_transaction"), True)
+    record("12b snapshot_transaction stays PostgreSQL-only (backends not conflated)",
+           "snapshot_transaction" not in local.__dict__, True)
+    record("12c cross-process file lock primitive exists",
+           hasattr(store_mod, "_SnapshotFileLock"), True)
+    txn_src = _inspect.getsource(local.local_snapshot_transaction)
+    save_src = _inspect.getsource(local.save)
+    record("12d the transaction and the one-shot save both take the cross-process lock",
+           "_SnapshotFileLock" in txn_src and "_SnapshotFileLock" in save_src,
+           {"txn_locks": "_SnapshotFileLock" in txn_src, "save_locks": "_SnapshotFileLock" in save_src})
+    record("12e the transaction commits under a revision compare-and-swap",
+           "_read_disk_revision" in txn_src and "SnapshotConflict" in txn_src,
+           {"cas": "_read_disk_revision" in txn_src, "conflict": "SnapshotConflict" in txn_src})
+    # Load-bearing fault mutation: a store whose transaction body drops the CAS
+    # would leave "_read_disk_revision" absent from the source -- 12e would flip to
+    # False. The assertion is therefore not vacuous: it is tied to the exact tokens
+    # that implement the guarantee, so deleting either the lock or the CAS fails a check.
+    record("12f every declared mutator is wrapped on a live file-backed store",
+           _file_backed_mutators_wrapped(store_mod), True)
 
 
 # --------------------------------------------------------------------------- #
