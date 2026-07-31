@@ -147,6 +147,14 @@ def _classify(attempt: ProvisioningAttempt, checks: list[dict], result: dict,
                 and not str(c.get("detail", "")).lstrip().lower().startswith("aborted:"))
     semantic = any(_genuine_semantic(c) for c in checks
                    if not c.get("ok") and not c.get("skipped"))
+    # The foundation's Layer-1 probe may CLASSIFY a connection failure itself. An explicit
+    # "non-transient" classification (auth / permission / missing-object / unknown) is authoritative
+    # and must never be outer-retried, even if the message also mentions a driver class like
+    # "OperationalError".
+    if "non-transient" in low:
+        return {"phase": "non-transient-connection-or-auth",
+                "failure_class": _redact(text) or "non-transient", "retry_eligible": False,
+                "timeout_class": "none", "business_mutation_started": False}
     is_transient = any(m in low for m in _TRANSIENT_MARKERS)
     timeout = "readiness-timeout" if "container not ready" in low else "none"
     if is_transient and not semantic:
