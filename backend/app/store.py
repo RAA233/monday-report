@@ -173,6 +173,80 @@ STATE_READ_RETRIES = 5
 STATE_READ_RETRY_DELAY_SECONDS = 0.03
 STATE_REPLACE_RETRIES = 5
 STATE_REPLACE_RETRY_DELAY_SECONDS = 0.03
+# Bounded wait for the cross-process snapshot lock on the file backend. A blocked
+# writer fails as a controlled, retryable conflict rather than hanging a thread.
+SNAPSHOT_LOCK_ACQUIRE_TIMEOUT_SECONDS = 5.0
+SNAPSHOT_LOCK_POLL_SECONDS = 0.02
+
+if sys.platform.startswith("win"):
+    import msvcrt
+
+    def _lock_fh(fh) -> None:
+        # Non-blocking exclusive lock of one byte at offset 0. Raises OSError when
+        # another process holds it. Advisory region locking works on empty files.
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _unlock_fh(fh) -> None:
+        try:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+else:
+    import fcntl
+
+    def _lock_fh(fh) -> None:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock_fh(fh) -> None:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+
+
+class _SnapshotFileLock:
+    """Cross-process advisory lock on a SIDECAR lock file (never the snapshot file
+    itself, so ``os.replace`` of the snapshot is never obstructed by an open
+    handle). Bounded acquire; released in ``__exit__``. Windows: msvcrt; POSIX:
+    fcntl. No third-party dependency. The lock file path is never surfaced in an
+    error or evidence payload -- a timeout raises a pathless SnapshotConflict."""
+
+    def __init__(self, path, timeout_seconds, poll_seconds):
+        self._path = path
+        self._timeout = timeout_seconds
+        self._poll = poll_seconds
+        self._fh = None
+
+    def __enter__(self):
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + self._timeout
+        self._fh = open(self._path, "a+b")
+        while True:
+            try:
+                _lock_fh(self._fh)
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    try:
+                        self._fh.close()
+                    finally:
+                        self._fh = None
+                    raise SnapshotConflict("snapshot lock timeout", retryable=True)
+                time.sleep(self._poll)
+
+    def __exit__(self, *exc):
+        if self._fh is not None:
+            try:
+                _unlock_fh(self._fh)
+            finally:
+                try:
+                    self._fh.close()
+                except OSError:
+                    pass
+                self._fh = None
+        return False
 FEET_DRILLED_PER_DAY = "feet_drilled_per_day"
 
 # Reference (non-extracted) schematic geometry. These rows are shown only when no
@@ -296,6 +370,21 @@ class LocalStateStore:
         # attribute is assigned. On the base (file) backend there is no
         # transaction isolation, so every access routes here directly.
         self._published: dict[str, object] = {}
+        # Preserve a transaction context a subclass set before calling super()
+        # (PostgresStateStore). On the file backend there is none, so it is None
+        # and every new atomic behaviour below is gated on `_txn is None`.
+        self._txn = getattr(self, "_txn", None)
+        # File-backend snapshot atomicity. `_snapshot_lock` serializes in-process
+        # writers and read rebinds; `_loaded_revision`/`_collections_loaded` back
+        # the revision guard so a refresh does not rebind (and orphan held rows)
+        # when nothing changed on disk; `_in_local_txn` defers per-call saves to
+        # the single transaction commit. Postgres uses its own txn machinery and
+        # never touches these.
+        self._snapshot_lock = threading.RLock()
+        self._loaded_revision = 0
+        self._collections_loaded = False
+        self._in_local_txn = False
+        self._local_txn_dirty = False
         self.tenant = self._configured_tenant()
         self.user = self._configured_user(self.tenant.id)
         self.workspaces: dict[UUID, Workspace] = {}
@@ -356,6 +445,8 @@ class LocalStateStore:
             self.save()
         if not client_diagnostic_only and self._ensure_benchmarking_defaults():
             self.save()
+        if getattr(self, "_txn", None) is None:
+            self._install_local_mutation_boundary()
         # NOTE: the demo bootstrap identity is derived in memory (see
         # demo_bootstrap_identity); it is intentionally NOT persisted on import,
         # construction, start, reload, health, or route access. A user is
@@ -703,10 +794,31 @@ class LocalStateStore:
         )
 
     def refresh(self) -> None:
-        payload = self._read_state_payload()
-        if payload is None:
+        # Postgres owner path (reached via super().refresh() inside a transaction):
+        # load the locked payload unconditionally, exactly as before. The file
+        # backend never sets _txn, so it takes the guarded path below.
+        if getattr(self, "_txn", None) is not None:
+            payload = self._read_state_payload()
+            if payload is None:
+                return
+            self._load_from_payload(payload)
             return
+        # FILE BACKEND. Rebind only when the persisted revision actually advanced.
+        # A refresh that reloads unchanged state would rebind the collection dicts
+        # and orphan any row a caller is mid-mutation on -- the exact mechanism of
+        # the blocked-export and concurrent-PATCH write loss.
+        with self._snapshot_lock:
+            payload = self._read_state_payload()
+            if payload is None:
+                return
+            disk_revision = self._payload_revision(payload)
+            if self._collections_loaded and disk_revision == self._loaded_revision:
+                return
+            self._load_from_payload(payload)
+            self._loaded_revision = disk_revision
+            self._collections_loaded = True
 
+    def _load_from_payload(self, payload: dict) -> None:
         self.tenant = Tenant.model_validate(payload["tenant"])
         self.user = User.model_validate(payload["user"])
         self.workspaces = self._load_map(Workspace, payload.get("workspaces", []))
@@ -741,17 +853,170 @@ class LocalStateStore:
         self.audit_logs = [AuditLog.model_validate(item) for item in payload.get("audit_logs", [])]
 
     def save(self) -> None:
+        if getattr(self, "_txn", None) is not None:
+            # Postgres overrides save(); base save() is never reached on that
+            # backend. Defensive no-op so an accidental call cannot write a file.
+            return
+        if self._in_local_txn:
+            # Inside a local transaction: defer to the single commit-time write, so
+            # the whole mutation + audit append serializes exactly once.
+            self._local_txn_dirty = True
+            return
+        # One durable atomic write outside a transaction (init seeding; a route
+        # that mutated in memory then audited). Cross-process serialized by the
+        # sidecar file lock; compare-and-swap on the persisted revision so a write
+        # built on stale state cannot silently overwrite a newer committed one.
+        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
+        with _SnapshotFileLock(lock_path, SNAPSHOT_LOCK_ACQUIRE_TIMEOUT_SECONDS, SNAPSHOT_LOCK_POLL_SECONDS):
+            with self._snapshot_lock:
+                disk_revision = self._read_disk_revision()
+                if self._collections_loaded and disk_revision != self._loaded_revision:
+                    raise SnapshotConflict("stale revision", retryable=False)
+                self._atomic_write(disk_revision + 1)
+
+    @staticmethod
+    def _payload_revision(payload: dict) -> int:
+        try:
+            return int(payload.get("snapshot_revision", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _read_disk_revision(self) -> int:
+        """The persisted revision, or 0 for a missing/old snapshot. A snapshot that
+        exists but cannot be parsed forces a retryable conflict rather than a blind
+        overwrite that could destroy a concurrent writer's committed work."""
+        try:
+            raw = self.state_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:
+            raise SnapshotConflict("snapshot unreadable during commit", retryable=True) from exc
+        try:
+            return self._payload_revision(json.loads(raw))
+        except (json.JSONDecodeError, AttributeError):
+            return 0
+
+    @staticmethod
+    def _fsync_dir(directory: Path) -> None:
+        # POSIX: fsync the containing directory so the rename is durable. Windows
+        # has no directory-fd fsync; there the atomic replace (MoveFileEx) is the
+        # durability boundary. Best-effort, never fatal.
+        try:
+            fd = os.open(str(directory), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    def _atomic_write(self, new_revision: int) -> None:
+        """Serialize the current committed projection stamped with new_revision and
+        replace the snapshot file atomically: write temp -> fsync temp -> atomic
+        replace -> fsync dir. Never leaves partial JSON at the canonical path."""
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = self._state_payload()
+        payload["snapshot_revision"] = int(new_revision)
+        body = json.dumps(payload, indent=2).encode("utf-8")
         tmp_path = self.state_path.with_name(f"{self.state_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
         try:
-            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            with open(tmp_path, "wb") as handle:
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
             self._replace_state_file(tmp_path)
+            self._fsync_dir(self.state_path.parent)
+            self._loaded_revision = int(new_revision)
+            self._collections_loaded = True
         finally:
             try:
                 tmp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+
+    def _force_reload(self) -> None:
+        """Reload committed state from disk unconditionally (bypassing the revision
+        guard). Used at transaction start and on rollback."""
+        payload = self._read_state_payload()
+        if payload is None:
+            self._loaded_revision = 0
+            self._collections_loaded = True
+            return
+        self._load_from_payload(payload)
+        self._loaded_revision = self._payload_revision(payload)
+        self._collections_loaded = True
+
+    @contextmanager
+    def local_snapshot_transaction(self):
+        """One logical mutation as a single locked compare-and-swap unit on the file
+        backend, purpose-equivalent to PostgresStateStore.snapshot_transaction:
+
+            cross-process file lock -> in-process lock -> load latest committed
+            snapshot + revision -> caller mutates and appends audit in memory
+            (per-call save deferred) -> serialize once -> CAS on revision -> atomic
+            replace -> advance revision -> release.
+
+        Any failure discards the in-memory mutations by reloading committed state,
+        so neither the business change nor its audit event is published. A nested
+        mutator call from the owning context joins this transaction rather than
+        opening a second one, so a compound operation still commits exactly once.
+        """
+        if self._in_local_txn:
+            yield
+            return
+        lock_path = self.state_path.with_name(self.state_path.name + ".lock")
+        file_lock = _SnapshotFileLock(
+            lock_path, SNAPSHOT_LOCK_ACQUIRE_TIMEOUT_SECONDS, SNAPSHOT_LOCK_POLL_SECONDS)
+        file_lock.__enter__()
+        self._snapshot_lock.acquire()
+        self._in_local_txn = True
+        self._local_txn_dirty = False
+        try:
+            self._force_reload()
+            entry_revision = self._loaded_revision
+            yield
+            if self._local_txn_dirty:
+                disk_revision = self._read_disk_revision()
+                if disk_revision != entry_revision:
+                    raise SnapshotConflict("stale revision", retryable=False)
+                self._atomic_write(entry_revision + 1)
+        except BaseException:
+            self._in_local_txn = False
+            try:
+                self._force_reload()
+            except Exception:  # noqa: BLE001 -- a reload failure must not mask the cause
+                pass
+            raise
+        finally:
+            self._in_local_txn = False
+            self._local_txn_dirty = False
+            self._snapshot_lock.release()
+            file_lock.__exit__(None, None, None)
+
+    def _install_local_mutation_boundary(self) -> None:
+        """Wrap every durable mutation on the file backend so it runs inside one
+        local_snapshot_transaction -- correctness must not depend on a caller
+        remembering to open one, and a nested call joins the open transaction."""
+        for name in MUTATING_STORE_METHODS:
+            original = getattr(self, name, None)
+            if original is None or getattr(original, "_mr_local_wrapped", False):
+                continue
+            setattr(self, name, self._wrap_local_mutation(original))
+
+    def _wrap_local_mutation(self, method):
+        import functools
+
+        @functools.wraps(method)
+        def wrapper(*args, **kwargs):
+            if self._in_local_txn:
+                return method(*args, **kwargs)
+            with self.local_snapshot_transaction():
+                return method(*args, **kwargs)
+
+        wrapper._mr_local_wrapped = True  # type: ignore[attr-defined]
+        return wrapper
 
     def _state_payload(self) -> dict[str, object]:
         payload = {
