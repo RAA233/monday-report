@@ -111,19 +111,13 @@ def check_c2_blocked_export(results: list) -> None:
 
         _ws, _failure_id, _task_id, report_id = _seed(store)
 
-        # Exactly the main.py export_monday_report 409 sequence.
+        # The main.py export_monday_report 409 path -- now one wrapped store method so
+        # the review transition and the export_blocked audit event persist atomically.
         store.refresh()
-        report = store.monday_reports.get(report_id)
         open_tasks = store.report_open_validation_tasks(report_id)
         assert open_tasks, "seed error: the gate did not see an open task"
-        report.status = "review"
-        if isinstance(report.report_json, dict):
-            report.report_json["validation"] = {"open_tasks": len(open_tasks), "status": "requires_review"}
-        store.audit(
-            "monday_report.export_blocked",
-            "monday_report",
-            report_id,
-            {"open_validation_tasks": len(open_tasks)},
+        store.mark_report_export_blocked(
+            report_id, "json", False, [task.id for task in open_tasks]
         )
 
         snapshot = _disk(store)

@@ -196,11 +196,9 @@ def battery_blocked_export(results, rounds=25):
             store.save()
 
             store.refresh()
-            report = store.monday_reports.get(report_id)
             open_tasks = store.report_open_validation_tasks(report_id)
-            report.status = "review"
-            store.audit("monday_report.export_blocked", "monday_report", report_id,
-                        {"open_validation_tasks": len(open_tasks)})
+            store.mark_report_export_blocked(
+                report_id, "json", False, [t.id for t in open_tasks])
 
             snap = _disk(store)
             persisted = next(r for r in snap["monday_reports"] if r["id"] == str(report_id))
@@ -244,6 +242,96 @@ def battery_multiprocess(results, workers=25):
              persisted == workers and events == workers and not errors,
              f"{workers} processes; validated persisted={persisted}, events={events}, "
              f"final revision={revision}, worker errors={errors[:2]}")
+
+
+def battery_concurrent_writer_threads(results, rounds=60, writers=4):
+    """>=2 concurrent WRITER threads on ONE in-process store singleton. This is the
+    FastAPI threadpool model, and the interleaving the exact-head review found the
+    original single-writer battery could not detect: a process-global nesting flag let
+    a second thread run its mutation unsynchronised. Each thread validates a DISTINCT
+    task; every acknowledged mutation and its audit event must be present on disk."""
+    from backend.app.schemas import ValidationTaskUpdate
+    import threading
+    lost = 0
+    for _ in range(rounds):
+        with tempfile.TemporaryDirectory(prefix="mr-h-cwt-") as tmp:
+            _fresh_env(Path(tmp))
+            store = _new_store()
+            ws = _seed_workspace(store)
+            tids = [_seed_open_task(store, ws) for _ in range(writers)]
+            store.save()
+            barrier = threading.Barrier(writers)
+            errors = []
+
+            def writer(tid):
+                try:
+                    barrier.wait()
+                    store.update_validation_task(tid, ValidationTaskUpdate(status="validated"))
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(repr(exc))
+
+            threads = [threading.Thread(target=writer, args=(t,)) for t in tids]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join(timeout=30)
+            snap = _disk(store)
+            persisted = sum(1 for t in tids if _task_status(snap, t) == "validated")
+            events = sum(1 for t in tids if _event_present(snap, "validation_task.update", t))
+            if persisted != writers or events != writers or errors:
+                lost += 1
+    _rec(results, "battery-concurrent-writer-threads-zero-loss",
+         lost == 0, f"{rounds} rounds x {writers} concurrent writer THREADS on one singleton; rounds with loss/error={lost}")
+
+
+def battery_concurrent_txn_blocked_export(results, rounds=40):
+    """A blocked-export committed while another thread holds an open transaction must
+    NEVER silently lose its status+event: it either persists both (once it wins the
+    lock) or raises a loud SnapshotConflict. No 2xx/409 with lost persistence."""
+    import threading
+    silent_loss = 0
+    for _ in range(rounds):
+        with tempfile.TemporaryDirectory(prefix="mr-h-cte-") as tmp:
+            _fresh_env(Path(tmp))
+            store = _new_store()
+            ws = _seed_workspace(store)
+            report_id = _seed_report_with_gate(store, ws)
+            open_ids = [t.id for t in store.report_open_validation_tasks(report_id)]
+            store.save()
+            other_open = threading.Event()
+            release = threading.Event()
+
+            def holder():
+                try:
+                    with store.local_snapshot_transaction():
+                        other_open.set()
+                        release.wait(timeout=5)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            th = threading.Thread(target=holder)
+            th.start()
+            other_open.wait(timeout=5)
+            raised = None
+            try:
+                store.mark_report_export_blocked(report_id, "json", False, open_ids)
+            except Exception as exc:  # noqa: BLE001
+                raised = exc
+            release.set()
+            th.join(timeout=10)
+            snap = _disk(store)
+            status = next(r for r in snap["monday_reports"] if r["id"] == str(report_id))["status"]
+            event = _event_present(snap, "monday_report.export_blocked", report_id)
+            coupled = (status == "review") == event
+            # Acceptable: (persisted both) OR (raised a conflict AND persisted neither).
+            ok = coupled and (
+                (status == "review" and event and raised is None)
+                or (status != "review" and not event and raised is not None)
+            )
+            if not ok:
+                silent_loss += 1
+    _rec(results, "concurrent-txn-blocked-export-no-silent-loss",
+         silent_loss == 0, f"{rounds} rounds; blocked-export under a concurrent open txn: silent-loss/uncoupled rounds={silent_loss}")
 
 
 def check_multiprocess_needs_cross_process_lock(results):
@@ -537,6 +625,8 @@ def main() -> int:
     battery_concurrent_validation(results, rounds=60, pollers=6)
     battery_blocked_export(results, rounds=25)
     battery_multiprocess(results, workers=25)
+    battery_concurrent_writer_threads(results, rounds=60, writers=4)
+    battery_concurrent_txn_blocked_export(results, rounds=40)
     check_multiprocess_needs_cross_process_lock(results)
     # Part K fault injection (each with a no-fault negative control inside _fault_case)
     _fault_case(results, "before-audit-append", fault_before_audit, _no_partial_and_old)

@@ -385,6 +385,16 @@ class LocalStateStore:
         self._collections_loaded = False
         self._in_local_txn = False
         self._local_txn_dirty = False
+        # OWNERSHIP token for the local transaction, scoped to the execution CONTEXT
+        # (a ContextVar, exactly like PostgresStateStore._txn_owner) -- NOT a bare
+        # process-global bool. The mutating routes are sync `def` handlers dispatched
+        # on the anyio threadpool against this singleton, so two requests hit the store
+        # from different threads. A per-context owner token is what lets a concurrent
+        # non-owner fall through and BLOCK on the lock instead of falsely joining an
+        # open transaction and running its mutation (and audit) unsynchronised.
+        self._local_txn_owner: contextvars.ContextVar = contextvars.ContextVar(
+            "mr_local_txn_owner", default=None)
+        self._local_active_token = None
         self.tenant = self._configured_tenant()
         self.user = self._configured_user(self.tenant.id)
         self.workspaces: dict[UUID, Workspace] = {}
@@ -794,10 +804,13 @@ class LocalStateStore:
         )
 
     def refresh(self) -> None:
-        # Postgres owner path (reached via super().refresh() inside a transaction):
-        # load the locked payload unconditionally, exactly as before. The file
-        # backend never sets _txn, so it takes the guarded path below.
-        if getattr(self, "_txn", None) is not None:
+        # Any non-file-backend path -- the Postgres owner refresh reached via
+        # super().refresh() inside a transaction, AND a Postgres instance outside a
+        # transaction -- loads the payload unconditionally, exactly as before. The
+        # revision-guarded fast path below is taken ONLY by the file backend, so a
+        # PostgresStateStore can never enter it and rebind its committed projection
+        # from a file it does not use.
+        if getattr(self, "_txn", None) is not None or self.repository_backend != LOCAL_REPOSITORY_BACKEND:
             payload = self._read_state_payload()
             if payload is None:
                 return
@@ -857,9 +870,10 @@ class LocalStateStore:
             # Postgres overrides save(); base save() is never reached on that
             # backend. Defensive no-op so an accidental call cannot write a file.
             return
-        if self._in_local_txn:
-            # Inside a local transaction: defer to the single commit-time write, so
-            # the whole mutation + audit append serializes exactly once.
+        if self._owns_local_txn():
+            # Inside THIS context's local transaction: defer to the single commit-time
+            # write, so the whole mutation + audit append serializes exactly once. A
+            # concurrent non-owner falls through to a durable atomic write of its own.
             self._local_txn_dirty = True
             return
         # One durable atomic write outside a transaction (init seeding; a route
@@ -948,6 +962,13 @@ class LocalStateStore:
         self._loaded_revision = self._payload_revision(payload)
         self._collections_loaded = True
 
+    def _owns_local_txn(self) -> bool:
+        """True only when THIS execution context opened the active local transaction.
+        A different thread/task sharing the singleton reads its own (default None)
+        ContextVar value and is therefore never treated as already inside the txn."""
+        token = self._local_active_token
+        return token is not None and self._local_txn_owner.get() is token
+
     @contextmanager
     def local_snapshot_transaction(self):
         """One logical mutation as a single locked compare-and-swap unit on the file
@@ -963,7 +984,8 @@ class LocalStateStore:
         mutator call from the owning context joins this transaction rather than
         opening a second one, so a compound operation still commits exactly once.
         """
-        if self._in_local_txn:
+        if self._owns_local_txn():
+            # A nested mutator call from the OWNING context joins this transaction.
             yield
             return
         lock_path = self.state_path.with_name(self.state_path.name + ".lock")
@@ -971,6 +993,9 @@ class LocalStateStore:
             lock_path, SNAPSHOT_LOCK_ACQUIRE_TIMEOUT_SECONDS, SNAPSHOT_LOCK_POLL_SECONDS)
         file_lock.__enter__()
         self._snapshot_lock.acquire()
+        token = object()
+        owner_reset = self._local_txn_owner.set(token)
+        self._local_active_token = token
         self._in_local_txn = True
         self._local_txn_dirty = False
         try:
@@ -983,13 +1008,21 @@ class LocalStateStore:
                     raise SnapshotConflict("stale revision", retryable=False)
                 self._atomic_write(entry_revision + 1)
         except BaseException:
+            # Discard uncommitted in-memory mutations. Ownership is cleared first so a
+            # refresh/save triggered by the reload cannot re-enter as owner.
+            self._local_active_token = None
             self._in_local_txn = False
             try:
                 self._force_reload()
             except Exception:  # noqa: BLE001 -- a reload failure must not mask the cause
-                pass
+                # The committed state could not be reloaded: invalidate the revision
+                # guard so the NEXT refresh is forced to reload rather than no-op on
+                # stale in-memory collections.
+                self._collections_loaded = False
             raise
         finally:
+            self._local_txn_owner.reset(owner_reset)
+            self._local_active_token = None
             self._in_local_txn = False
             self._local_txn_dirty = False
             self._snapshot_lock.release()
@@ -1010,7 +1043,8 @@ class LocalStateStore:
 
         @functools.wraps(method)
         def wrapper(*args, **kwargs):
-            if self._in_local_txn:
+            if self._owns_local_txn():
+                # Nested call from the owning context: one lock, one commit.
                 return method(*args, **kwargs)
             with self.local_snapshot_transaction():
                 return method(*args, **kwargs)
@@ -2824,6 +2858,40 @@ class LocalStateStore:
             },
         )
         self._normalized_persist_report_create(report, event)
+        return report
+
+    def mark_report_export_blocked(
+        self,
+        report_id: UUID,
+        export_format: str,
+        override_requested: bool,
+        open_task_ids: list,
+    ) -> "MondayReport":
+        """Persist the review transition AND the export_blocked audit event as one
+        atomic unit. Wrapped into local_snapshot_transaction (below), so a 409 refusal
+        either commits both together or rolls both back on a conflict -- the status
+        change and its audit event can never diverge, and neither leaks into memory
+        without being persisted. Replaces an inline route mutation + raw audit that
+        ran outside any transaction."""
+        self.refresh()
+        report = self.monday_reports[report_id]
+        report.status = "review"
+        if isinstance(report.report_json, dict):
+            report.report_json["validation"] = {
+                "open_tasks": len(open_task_ids),
+                "status": "requires_review",
+            }
+        self.audit(
+            "monday_report.export_blocked",
+            "monday_report",
+            report_id,
+            {
+                "format": export_format,
+                "open_validation_tasks": len(open_task_ids),
+                "override_requested": override_requested,
+                "validation_task_ids": [str(task_id) for task_id in open_task_ids],
+            },
+        )
         return report
 
     def report_open_validation_tasks(self, report_id: UUID) -> list[ValidationTask]:
@@ -7018,6 +7086,21 @@ class LocalStateStore:
         build -> HMAC -> append -> save sequence is serialized by audit_lock so
         concurrent appends chain linearly.
         """
+        if (
+            save
+            and getattr(self, "_txn", None) is None
+            and getattr(self, "repository_backend", None) == LOCAL_REPOSITORY_BACKEND
+            and not self._owns_local_txn()
+        ):
+            # File backend, standalone durable audit: run under the snapshot
+            # transaction so the file lock is acquired BEFORE audit_lock (one global
+            # lock order: file -> snapshot -> audit, so there is no inversion against a
+            # wrapped mutator), the append is atomic, and a concurrent transaction's
+            # rollback-reload can never discard it. Inside the recursion this context
+            # owns the transaction, so the branch is skipped and the append+deferred
+            # save run normally, committed once at transaction end.
+            with self.local_snapshot_transaction():
+                return self.audit(action, resource_type, resource_id, metadata, save=save)
         with self.audit_lock:
             identity = self.current_identity()
             provider = audit_key_provider()
@@ -7365,6 +7448,7 @@ MUTATING_STORE_METHODS = (
     "set_user_status",
     "update_benchmark_value",
     "update_validation_task",
+    "mark_report_export_blocked",
 )
 
 # ``audit`` is discovered as a mutator because it persists, but it must NOT be

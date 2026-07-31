@@ -2112,22 +2112,14 @@ def export_monday_report(
     require_client_data_ready("monday_report.export", "monday_report", report_id)
     open_tasks = store.report_open_validation_tasks(report_id)
     if open_tasks and (not allow_unresolved_validation or client_data_mode() == "client"):
-        report.status = "review"
-        if isinstance(report.report_json, dict):
-            report.report_json["validation"] = {
-                "open_tasks": len(open_tasks),
-                "status": "requires_review",
-            }
-        store.audit(
-            "monday_report.export_blocked",
-            "monday_report",
+        # The review transition and the export_blocked audit event persist together
+        # or roll back together (one wrapped snapshot transaction) -- a 409 refusal
+        # never leaves one without the other, even under a concurrent writer.
+        store.mark_report_export_blocked(
             report_id,
-            {
-                "format": export_format,
-                "open_validation_tasks": len(open_tasks),
-                "override_requested": allow_unresolved_validation,
-                "validation_task_ids": [str(task.id) for task in open_tasks],
-            },
+            export_format,
+            allow_unresolved_validation,
+            [task.id for task in open_tasks],
         )
         raise HTTPException(status_code=409, detail="Report has unresolved validation tasks")
     if open_tasks and allow_unresolved_validation:
