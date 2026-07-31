@@ -792,30 +792,25 @@ def run() -> int:
     pg_obs_def = next((n for n in ast.walk(runner_ast)
                        if isinstance(n, ast.FunctionDef) and n.name == "_observe_postgres"), None)
     delegates = False
-    is_bare_stub = False
+    top_level_raise = True
     if pg_obs_def is not None:
         calls_run_stack = any(
             isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
             and n.func.attr == "run_stack"
             for n in ast.walk(pg_obs_def))
-        raises = [n for n in ast.walk(pg_obs_def) if isinstance(n, ast.Raise)]
-        # a bare stub is a body whose ONLY meaningful statement raises ExecutionUnavailable and never
-        # reaches the foundation
-        non_doc = [s for s in pg_obs_def.body
-                   if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))]
-        is_bare_stub = (not calls_run_stack and len(non_doc) == 1
-                        and isinstance(non_doc[0], ast.Raise))
-        # A non-raise RETURN path must exist: a stub that calls run_stack() and then unconditionally
-        # raises (never returning an observation) would otherwise satisfy the check while refusing
-        # every real execution. Requiring a Return closes that false-negative.
+        # An UNCONDITIONAL raise at the function-body top level marks a stub that never really
+        # executes: both the bare `raise ExecutionUnavailable(...)` stub AND a
+        # `run_stack(); raise; return {}` stub carry a top-level Raise, while the real observer raises
+        # ONLY inside `if`/`try` branches. Requiring no top-level raise plus a Return closes both.
+        top_level_raise = any(isinstance(s, ast.Raise) for s in pg_obs_def.body)
         has_return = any(isinstance(n, ast.Return) for n in ast.walk(pg_obs_def))
-        delegates = calls_run_stack and not is_bare_stub and bool(raises) and has_return
+        delegates = calls_run_stack and not top_level_raise and has_return
     rec("FS07 pg-observer-delegates-to-foundation", delegates,
         "the PostgreSQL observer delegates the stack lifecycle to the accepted foundation "
-        "(restricted_postgres_startup_guard.run_stack), still fails closed with a raise, AND has a "
-        "non-raise return path -- it is neither the declared-not-implemented ExecutionUnavailable "
-        "stub nor a run_stack()-then-always-raise stub",
-        level="structural source check", extra={"is_bare_stub": is_bare_stub})
+        "(restricted_postgres_startup_guard.run_stack), has a non-raise return path, and carries NO "
+        "unconditional top-level raise -- so it is neither the declared-not-implemented "
+        "ExecutionUnavailable stub nor a run_stack()-then-always-raise stub",
+        level="structural source check", extra={"unconditional_top_level_raise": top_level_raise})
 
     # FS08: an executed context result reports execution status, observation status and the global
     # release blockers SEPARATELY from context-specific blockers, and keeps overall_GA_status visible.

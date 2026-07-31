@@ -602,6 +602,19 @@ def _observe_postgres_live(run_input: Mapping[str, Any], mode: str, ctx: Mapping
     appname = f"mr-readiness-obs-{ctx['run_hash']}"
     identity = _pg_runtime_identity(rt)        # observe the runtime login BEFORE evaluating readiness
 
+    # ENFORCE, do not merely observe: if the runtime is NOT the restricted login (superuser, or
+    # BYPASSRLS, or owns protected tables, or RLS is not forced, or the migration owner is not
+    # distinct, or it is not a LOGIN role), refuse. Otherwise a future foundation regression that
+    # provisioned an unsafe runtime would still yield an "executed" observation. Fail-closed.
+    required_true = ("session_user_is_restricted_login", "runtime_not_superuser",
+                     "runtime_not_bypassrls", "runtime_owns_no_protected_tables",
+                     "rls_forced_on_protected_tables", "migration_owner_distinct_from_runtime")
+    unsafe = [k for k in required_true if not identity.get(k)]
+    if unsafe:
+        raise ExecutionUnavailable(
+            "the observed PostgreSQL runtime is not the restricted login the context requires "
+            f"(unsatisfied identity guarantees: {sorted(unsafe)})")
+
     obs_env = dict(ctx["base_env"])
     obs_env.update({
         "MONDAY_REPORT_DATABASE_URL": f"{rt}?application_name={appname}",
@@ -678,8 +691,10 @@ def _observe_postgres(run_input: Mapping[str, Any]) -> dict[str, Any]:
     G._ON_LIVE = on_live
     G.checks[:] = []                 # run_stack appends to the module checks; the caller resets first
     G.http_statuses[:] = []
+    foundation_checks: list = []
     try:
         result = G.run_stack()
+        foundation_checks = list(G.checks)   # snapshot the foundation's recorded checks for this run
     except Exception as exc:  # noqa: BLE001 - a hard provisioning failure is unavailability
         raise ExecutionUnavailable(
             f"the restricted-PostgreSQL stack failed to start ({exc.__class__.__name__})")
@@ -690,6 +705,16 @@ def _observe_postgres(run_input: Mapping[str, Any]) -> dict[str, Any]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+    # ENFORCE the accepted foundation's own certification: run_stack RECORDS failed identity/RLS/
+    # ownership checks (record(..., False, ...)) without raising, and still fires _ON_LIVE. So a
+    # foundation regression could reach the live hook with a failed R/P/I check. Any non-skipped
+    # foundation check that did not pass makes this observation unavailable. Fail-closed.
+    failed_foundation = [c.get("id") for c in foundation_checks
+                         if not c.get("ok") and not c.get("skipped")]
+    if failed_foundation:
+        raise ExecutionUnavailable(
+            f"the restricted-PostgreSQL foundation recorded {len(failed_foundation)} failed check(s)")
 
     if live_error:
         raise ExecutionUnavailable(
