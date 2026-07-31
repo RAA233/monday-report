@@ -50,8 +50,17 @@ class MockGuard:
         self.run_hashes.append(rh)
         self.checks[:] = []
         if kind == "transient":
+            # a real transient abort marks the failing connection AND cascades every UNREACHED check
+            # (incl. P03/P04/I0x) as "aborted: OperationalError ..." -- must still be retryable.
             self.checks.append({"id": "P01 database created by the runner", "ok": False,
                                 "skipped": False, "detail": CONN})
+            for cid in ("P03 migrations applied", "P04 RLS enabled and forced",
+                        "I01 api session_user"):
+                self.checks.append({"id": cid, "ok": False, "skipped": False, "detail": CONN})
+            return {"run_hash": rh, "cleanup_issues": [], "container_created": True}
+        if kind == "semantic-genuine":
+            self.checks.append({"id": "P04 RLS enabled and forced", "ok": False, "skipped": False,
+                                "detail": "row-level security is NOT forced on a protected table"})
             return {"run_hash": rh, "cleanup_issues": [], "container_created": True}
         if kind == "semantic-migration":
             self.checks.append({"id": "P03 migrations applied", "ok": False, "skipped": False,
@@ -159,6 +168,19 @@ def positive() -> None:
     rec("O07 semantic-never-retried",
         (not r["ok"]) and len(r["history"]) == 1 and not r["history"][0]["retry_eligible"],
         "a semantic migration failure is never retried")
+
+    # a transient abort that CASCADES aborted P03/P04/I0x checks is still classified transient (the
+    # aborted cascade must not be mistaken for a genuine semantic failure) -> retried
+    r = _drive(["transient", "ok"], hook=lambda ctx: None)
+    rec("O07b aborted-cascade-not-semantic-retried",
+        r["ok"] and r["out"]["attempts"][0]["phase"] == "pre-mutation-transient-connection",
+        "a transient abort cascading aborted P03/P04/I0x checks is retried, not treated as semantic")
+
+    # a GENUINE (non-aborted) RLS/semantic failure -> never retried
+    r = _drive(["semantic-genuine", "ok"], hook=lambda ctx: None)
+    rec("O07c genuine-semantic-never-retried",
+        (not r["ok"]) and r["history"][0]["phase"] == "migration-role-rls-identity",
+        "a genuine RLS/semantic check failure (real assertion, not an aborted cascade) is never retried")
 
     # cleanup failure -> never retried
     r = _drive(["cleanup-fail", "ok"], hook=lambda ctx: None)

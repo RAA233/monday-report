@@ -134,10 +134,16 @@ def _classify(attempt: ProvisioningAttempt, checks: list[dict], result: dict,
     if attempt.business_mutation_started:
         return {"phase": "business-or-post-mutation", "failure_class": _redact(text) or "post-mutation",
                 "retry_eligible": False, "timeout_class": "none", "business_mutation_started": True}
-    # pre-mutation: a SEMANTIC provisioning check failure is never retryable
-    semantic = any(str(c.get("id", "")).startswith(pref)
-                   for c in checks if not c.get("ok") and not c.get("skipped")
-                   for pref in ("P02", "P03", "P04", "I0"))
+    # pre-mutation: a GENUINE semantic provisioning check failure is never retryable. Exclude checks
+    # recorded as "aborted:" -- when a transient connection error aborts run_stack, its handler marks
+    # every UNREACHED check (incl. P03/P04/I0x) as "aborted: OperationalError ...". Those are a cascade
+    # of the real transient, NOT genuine migration/role/RLS/identity failures, and must not suppress
+    # the retry. A genuine semantic failure has a real assertion detail, not an "aborted:" prefix.
+    def _genuine_semantic(c: dict) -> bool:
+        return (any(str(c.get("id", "")).startswith(pref) for pref in ("P02", "P03", "P04", "I0"))
+                and not str(c.get("detail", "")).lstrip().lower().startswith("aborted:"))
+    semantic = any(_genuine_semantic(c) for c in checks
+                   if not c.get("ok") and not c.get("skipped"))
     is_transient = any(m in low for m in _TRANSIENT_MARKERS)
     timeout = "readiness-timeout" if "container not ready" in low else "none"
     if is_transient and not semantic:
