@@ -55,12 +55,21 @@ def scan_text(text: str, *, allow_test_fixtures: bool = False) -> dict[str, int]
     return findings
 
 
+#: The scanner defines the leak PATTERNS and a seeded self-test leak, so scanning its own
+#: source for those shapes is self-referential and not a real exposure (a linter does not
+#: lint its own rule definitions). It is excluded from the source scan; its behaviour is
+#: instead proven by the SS00 seeded-leak self-test.
+_SELF = "production_queue_secret_scan_guard.py"
+
+
 def _pr_source_files() -> list[Path]:
     out = subprocess.run(["git", "-C", str(ROOT), "diff", "--name-only", f"{BASE}..HEAD"],
                          capture_output=True, text=True, timeout=20)
     files = []
     for rel in out.stdout.split():
         p = ROOT / rel
+        if p.name == _SELF:
+            continue
         if p.suffix in (".py", ".mjs", ".ts", ".tsx", ".json") and p.exists():
             files.append(p)
     return files
