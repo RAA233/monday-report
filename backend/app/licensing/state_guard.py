@@ -116,7 +116,7 @@ def _seal(document: dict) -> bytes:
     import hmac as hmac_mod
 
     mac = hmac_mod.new(_test_key(), raw, hashlib.sha256).hexdigest()
-    return json.dumps({"mode": "test", "mac": mac, "body": body}).encode("utf-8")
+    return json.dumps({"mode": "test", "auth_tag": mac, "body": body}).encode("utf-8")
 
 
 def _unseal(blob: bytes) -> dict:
@@ -130,7 +130,7 @@ def _unseal(blob: bytes) -> dict:
         envelope = json.loads(blob.decode("utf-8"))
         body = envelope.get("body", {})
         expected = hmac_mod.new(_test_key(), canonical_bytes(body), hashlib.sha256).hexdigest()
-        if not hmac_mod.compare_digest(expected, str(envelope.get("mac", ""))):
+        if not hmac_mod.compare_digest(expected, str(envelope.get("auth_tag", ""))):
             raise StateIntegrityError("state MAC mismatch (tampered)")
     expected_integrity = canonical_hash(
         {"seal": STATE_SCHEMA_VERSION, "body": {k: v for k, v in body.items() if k != "integrity"}}

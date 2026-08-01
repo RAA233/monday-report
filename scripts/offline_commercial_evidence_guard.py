@@ -90,7 +90,7 @@ def main() -> int:
     rejects("OE10 private-key-presence-rejected",
             lambda m: m["package"].update(private_key_absent=False))
     rejects("OE11 leak-shape-rejected",
-            lambda m: m.update(diagnostic="adapter 00:1A:2B:3C:4D:5E failed"))
+            lambda m: m.update(diagnostic="adapter 00:1A:2B:3C:4D:5E failed"))  # leak-test fixture
     rejects("OE12 missing-installer-hash-rejected",
             lambda m: m["package"].update(installer_sha256=""))
 

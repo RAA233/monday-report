@@ -378,7 +378,7 @@ def activation_privacy_battery() -> None:
         "every component is a SHA-256 digest")
     raw_named = dict(request)
     raw_named["machine_binding"] = dict(request["machine_binding"])
-    raw_named["machine_binding"]["component_hashes"] = {"mac": "AA-BB-CC-DD-EE-FF"}
+    raw_named["machine_binding"]["component_hashes"] = {"mac": "AA-BB-CC-DD-EE-FF"}  # leak-test fixture
     try:
         ACT.validate_activation_request(raw_named)
         rec("LG32 raw-identifier-request-rejected", False, "raw identifier accepted")
