@@ -228,9 +228,18 @@ class ProductionQueueAdapter:
         self._consumers: list[Any] = []
         self._started = False
         self._lock = threading.Lock()
+        # Runtime concurrency ceiling: a BoundedSemaphore sized to worker_concurrency gates
+        # EVERY handler invocation (normal delivery, transient retry re-run, lease reclaim,
+        # dead-letter routing, authorized replay), so the number of handlers running at once
+        # can never exceed the configured bound regardless of how many worker threads,
+        # reclaimed entries, or batch items exist. _active/_max_active track the live and
+        # peak concurrency for redacted observability.
+        self._handler_slots = threading.BoundedSemaphore(config.bounds.worker_concurrency)
+        self._active = 0
+        self._max_active = 0
         self.stats = {"enqueued": 0, "delivered": 0, "acked": 0, "retries": 0,
                       "dead_lettered": 0, "duplicates_suppressed": 0, "replays": 0,
-                      "validation_rejected": 0, "in_flight": 0}
+                      "unauthorized_replays_refused": 0, "validation_rejected": 0, "in_flight": 0}
 
     def _default_redis(self) -> Any:
         import redis
@@ -326,7 +335,7 @@ class ProductionQueueAdapter:
                 self._dead_letter(redis_conn, mid, fields, "validation", exc, outcome)
                 return
             try:
-                handler(msg)     # MUST persist business+audit+idempotency durably before returning
+                self._run_handler(handler, msg)  # slot-gated; persists durably before returning
                 redis_conn.xack(self._config.stream_key, self._config.group, mid)
                 redis_conn.xdel(self._config.stream_key, mid)
                 with self._lock:
@@ -350,20 +359,62 @@ class ProductionQueueAdapter:
             with self._lock:
                 self.stats["in_flight"] -= 1
 
+    def _run_handler(self, handler, msg) -> None:
+        """Invoke the business handler under the bounded concurrency slot. Acquiring the
+        BoundedSemaphore here is what enforces active_handlers <= worker_concurrency across
+        every worker thread and every path that runs a handler (delivery, retry re-run,
+        reclaim, replay)."""
+        self._handler_slots.acquire()
+        try:
+            with self._lock:
+                self._active += 1
+                if self._active > self._max_active:
+                    self._max_active = self._active
+            handler(msg)
+        finally:
+            with self._lock:
+                self._active -= 1
+            self._handler_slots.release()
+
     def _requeue_with_backoff(self, redis_conn, fields, attempt) -> None:
         backoff = min(self._bounds.backoff_base_ms * (2 ** (attempt - 1)), 5000) / 1000.0
         time.sleep(backoff)
         redis_conn.xadd(self._config.stream_key, {**fields, "attempt": str(attempt + 1)})
 
     def _dead_letter(self, redis_conn, mid, fields, klass, exc, outcome) -> None:
-        # Isolate the poison/exhausted message with a REDACTED classification; retain tenant
-        # namespace but not payload bodies with client data (payload is kept opaque).
-        record = {"tenant_slug": fields.get("tenant_slug", ""),
-                  "operation": fields.get("operation", ""),
-                  "idempotency_key": fields.get("idempotency_key", ""),
-                  "correlation_id": fields.get("correlation_id", ""),
-                  "failure_class": klass, "reason": redact(str(exc)),
-                  "attempts": fields.get("attempt", "1")}
+        """Isolate a poison/exhausted message as a DURABLE, replay-capable envelope. It
+        retains the full validated replay envelope — schema version, original message id,
+        tenant-bound context, operation, idempotency key, correlation, ORIGINAL VALIDATED
+        payload, enqueue timestamp, attempt count — plus a REDACTED failure classification
+        and the dead-letter timestamp. It never stores credentials/endpoints/traces/container
+        or process ids, and a payload that FAILED validation (oversized/malformed) is NOT
+        retained raw — it is recorded as `payload_rejected` so an unbounded/unsafe body never
+        lands in the DLQ."""
+        payload_valid = klass != "validation"
+        try:
+            raw = fields.get("payload", "")
+            payload_ok = payload_valid and len(raw.encode("utf-8")) <= self._bounds.max_payload_bytes
+            if payload_ok:
+                json.loads(raw)  # safe JSON only; unknown fields are the caller's payload shape
+        except Exception:
+            payload_ok = False
+        record = {
+            "schema_version": fields.get("schema_version", MESSAGE_SCHEMA_VERSION),
+            "original_message_id": mid,
+            "tenant_slug": fields.get("tenant_slug", ""),
+            "operation": fields.get("operation", ""),
+            "idempotency_key": fields.get("idempotency_key", ""),
+            "correlation_id": fields.get("correlation_id", ""),
+            "trace_id": fields.get("trace_id", ""),
+            "payload": fields.get("payload", "") if payload_ok else "",
+            "payload_status": "retained" if payload_ok else "payload_rejected",
+            "enqueued_at": fields.get("enqueued_at", ""),
+            "attempts": fields.get("attempt", "1"),
+            "failure_class": klass,
+            "reason": redact(str(exc)),
+            "dead_letter_at": f"{time.time():.6f}",
+            "replayed": "0",
+        }
         redis_conn.xadd(self._config.dead_letter_key, record)
         redis_conn.xack(self._config.stream_key, self._config.group, mid)
         redis_conn.xdel(self._config.stream_key, mid)
@@ -375,25 +426,83 @@ class ProductionQueueAdapter:
         self._require_started()
         return int(self._producer.xlen(self._config.dead_letter_key))
 
-    def replay_dead_letter(self, dlq_id: str, *, authorized: bool) -> str:
-        """Authorized, idempotent replay: re-enqueue the ORIGINAL idempotency identity so the
-        business effect stays exactly-once. Refuses without explicit authorization."""
+    def read_dead_letter(self, dlq_id: str) -> dict | None:
+        """Return the durable DLQ envelope (redacted — never printed by the adapter)."""
+        self._require_started()
+        rows = self._producer.xrange(self._config.dead_letter_key, min=dlq_id, max=dlq_id)
+        return rows[0][1] if rows else None
+
+    def replay_dead_letter(self, dlq_id: str, *, authorized: bool,
+                           authorization_class: str = "operator") -> str:
+        """FAITHFUL authorized replay: read the durable DLQ envelope and re-enqueue the
+        ORIGINAL validated message (same tenant, operation, idempotency key, schema version,
+        correlation id, and PAYLOAD), appending replay metadata WITHOUT changing the original
+        idempotency identity. Unauthorized replay fails closed and leaves the DLQ record
+        intact. On success the DLQ entry is moved to an append-only replay-audit stream so it
+        stays auditable while the payload leaves the active DLQ."""
         self._require_started()
         if not authorized:
+            with self._lock:
+                self.stats["unauthorized_replays_refused"] += 1
             raise NonRetryable("dead-letter replay requires explicit operator authorization")
-        rows = self._producer.xrange(self._config.dead_letter_key, min=dlq_id, max=dlq_id)
-        if not rows:
+        rec = self.read_dead_letter(dlq_id)
+        if rec is None:
             raise NonRetryable("dead-letter entry not found")
-        _id, rec = rows[0]
-        msg = build_message(tenant_slug=rec["tenant_slug"], operation=rec["operation"],
-                            idempotency_key=rec["idempotency_key"],
-                            correlation_id=rec.get("correlation_id", ""), payload={},
-                            enqueued_at=time.time())
-        mid = self.enqueue(msg)
+        if rec.get("payload_status") != "retained":
+            raise NonRetryable("dead-letter record has no retained payload to replay faithfully")
+        try:
+            payload = json.loads(rec.get("payload", "") or "{}")
+        except Exception:
+            raise NonRetryable("dead-letter payload failed re-validation")
+        # Rebuild the ORIGINAL envelope; build_message re-validates tenant/op/idem.
+        message = build_message(tenant_slug=rec["tenant_slug"], operation=rec["operation"],
+                                idempotency_key=rec["idempotency_key"],
+                                correlation_id=rec.get("correlation_id", ""), payload=payload,
+                                enqueued_at=time.time())
+        # size/schema re-checked at enqueue too.
+        rid = f"replay-{int(time.time()*1e6)}"
+        message["replay_request_id"] = rid
+        message["authorized_replay_at"] = f"{time.time():.6f}"
+        message["operator_authorization_class"] = authorization_class
+        message["replay_attempt"] = str(int(rec.get("replay_attempt", "0")) + 1)
+        mid = self.enqueue(message)
+        # move to the replay-audit stream (auditable), then remove from the active DLQ.
+        audit_key = f"{self._config.dead_letter_key}:replayed"
+        self._producer.xadd(audit_key, {**{k: rec.get(k, "") for k in
+                            ("schema_version", "tenant_slug", "operation", "idempotency_key",
+                             "correlation_id", "failure_class", "attempts")},
+                            "replay_request_id": rid, "authorization_class": authorization_class,
+                            "replayed_at": message["authorized_replay_at"]})
         self._producer.xdel(self._config.dead_letter_key, dlq_id)
         with self._lock:
             self.stats["replays"] += 1
         return mid
+
+    def run_worker_pool(self, handler, *, stop_event, consumer_prefix: str = "w") -> dict:
+        """Spawn EXACTLY worker_concurrency worker threads, each looping drain_once until
+        stop_event is set. Combined with the per-handler slot semaphore, the number of
+        business handlers running concurrently never exceeds worker_concurrency."""
+        self._require_started()
+        n = self._bounds.worker_concurrency
+        results = {"threads": n}
+        errors: list[str] = []
+
+        def loop(idx: int) -> None:
+            conn = self._consumers[idx % len(self._consumers)]
+            while not stop_event.is_set():
+                try:
+                    oc = self.drain_once(handler, consumer_name=f"{consumer_prefix}{idx}", redis_conn=conn)
+                    if oc["processed"] == 0 and oc["dead_lettered"] == 0 and oc["retried"] == 0:
+                        time.sleep(0.02)
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(redact(str(exc)))
+                    time.sleep(0.05)
+        threads = [threading.Thread(target=loop, args=(k,), daemon=True) for k in range(n)]
+        for t in threads:
+            t.start()
+        results["_threads"] = threads
+        results["_errors"] = errors
+        return results
 
     # -- shutdown --
     def shutdown(self) -> dict:
@@ -436,5 +545,8 @@ class ProductionQueueAdapter:
                        "max_payload_bytes": self._bounds.max_payload_bytes},
             "queue_depth_class": ("empty" if depth == 0 else "nonempty" if depth else "unknown"),
             "producers": 1, "consumers": len(self._consumers),
+            "concurrency": {"configured": self._bounds.worker_concurrency,
+                            "active": self._active, "max_observed": self._max_active,
+                            "within_bound": self._max_active <= self._bounds.worker_concurrency},
             "stats": dict(self.stats),
         }
