@@ -17,7 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from .canonical import canonical_bytes, canonical_hash, signing_view
+from .canonical import CanonicalizationError, canonical_bytes, canonical_hash, signing_view
 from .contract import PRODUCT_NAME, ReasonCode
 
 LICENSE_SCHEMA_VERSION = "monday-report-license.v1"
@@ -152,7 +152,12 @@ def verify_signature(document: dict, public_key_bytes: bytes) -> None:
         raise LicenseFormatError(
             ReasonCode.WRONG_SIGNING_KEY, "embedded public key is malformed"
         ) from exc
-    message = canonical_bytes(signing_view(document))
+    try:
+        message = canonical_bytes(signing_view(document))
+    except CanonicalizationError as exc:
+        raise LicenseFormatError(
+            ReasonCode.PAYLOAD_MALFORMED, "license is not canonically serializable"
+        ) from exc
     try:
         public_key.verify(signature, message)
     except InvalidSignature as exc:

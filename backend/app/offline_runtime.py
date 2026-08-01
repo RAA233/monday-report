@@ -711,13 +711,25 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Localhost-only by default. LAN exposure requires BOTH explicit opt-ins
-    # and is intentionally not reachable from the packaged UI.
+    # AND authenticated client mode — the loopback trust boundary is what makes
+    # unauthenticated demo mode safe, so publishing to a LAN without
+    # credentials is refused rather than silently allowed.
     host = "127.0.0.1"
     if (
         os.getenv("MONDAY_REPORT_OFFLINE_LAN") == "1"
         and os.getenv("MONDAY_REPORT_OFFLINE_LAN_ACK") == "I_UNDERSTAND_LAN_EXPOSURE"
     ):
-        host = "0.0.0.0"  # documented, double-opt-in only
+        from .auth import api_key_configured
+
+        if os.environ.get("MONDAY_REPORT_CLIENT_DATA_MODE") != "client" or not api_key_configured():
+            print(json.dumps({
+                "refused": "lan_mode_requires_authentication",
+                "detail": "LAN mode requires MONDAY_REPORT_CLIENT_DATA_MODE=client and a "
+                          "configured MONDAY_REPORT_API_KEY; refusing to publish an "
+                          "unauthenticated API to the network.",
+            }))
+            return 2
+        host = "0.0.0.0"  # documented, double-opt-in + authenticated only
 
     env_port = os.getenv("MONDAY_REPORT_OFFLINE_PORT")
     port = select_port(args.port or (int(env_port) if env_port else None))

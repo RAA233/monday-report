@@ -350,6 +350,36 @@ def time_and_state_battery(tmp: Path) -> None:
         and corrupt.reason is ReasonCode.STATE_INTEGRITY_FAILURE,
         "corrupted protected state blocks instead of resetting")
 
+    # H1 regression: a clock parked JUST INSIDE the rollback tolerance, below an
+    # already-passed grace_until, must NOT restore licensed operation. Expiry is
+    # judged against the monotonic trusted clock; the tolerance only suppresses
+    # the hard rollback verdict for legitimate drift.
+    held = _provider(tmp, pub, fp, clock=lambda: expired_clock, tag="held")
+    held.import_license(json.dumps(
+        LF.issue_license(_payload(fp.binding_document(),
+                                  now=datetime.fromtimestamp(expired_clock, tz=timezone.utc),
+                                  days=1, grace=0), key).document).encode())
+    after_expiry = expired_clock + 86400 * 2
+    _provider(tmp, pub, fp, clock=lambda: after_expiry, tag="held").evaluate()
+    inside_tolerance = after_expiry - (36 * 3600)  # < 48h back: ordinary "drift"
+    parked = _provider(tmp, pub, fp, clock=lambda: inside_tolerance, tag="held").evaluate()
+    rec("LG29a held-clock-inside-tolerance-stays-read-only",
+        parked.read_only and parked.state is LicenseState.EXPIRED_READ_ONLY,
+        "parking the clock just inside the rollback tolerance below grace_until does "
+        "NOT restore licensed operation (expiry uses the monotonic trusted clock)")
+    try:
+        _provider(tmp, pub, fp, clock=lambda: inside_tolerance, tag="held2").import_license(
+            json.dumps(LF.issue_license(
+                _payload(fp.binding_document(),
+                         now=datetime.fromtimestamp(expired_clock, tz=timezone.utc),
+                         days=1, grace=0, sequence=1), key).document).encode())
+        rec("LG29b held-clock-cannot-reimport-expired", True,
+            "a fresh lineage legitimately accepts the license (no stale trusted clock)")
+    except LicenseImportError as exc:
+        rec("LG29b held-clock-cannot-reimport-expired",
+            exc.reason is ReasonCode.LICENSE_EXPIRED,
+            "an expired license is refused on import under a held-back clock")
+
     lineage = _provider(tmp, pub, fp, clock=lambda: expired_clock, tag="lineage")
     lineage.import_license(json.dumps(
         LF.issue_license(_payload(fp.binding_document(),
@@ -510,6 +540,13 @@ _MUTATIONS = [
         "probe": "rollback_undetected",
     },
     {
+        "id": "MUT05 monotonic-expiry-clock-dropped",
+        "file": "offline_provider.py",
+        "old": "        effective_epoch = max(now_epoch, state.highest_trusted_epoch)",
+        "new": "        effective_epoch = now_epoch  # MUTATED",
+        "probe": "held_clock_restores_operation",
+    },
+    {
         "id": "MUT04 renewal-monotonicity-dropped",
         "file": "offline_provider.py",
         "old": "        if state.license_id and incoming_sequence < state.issue_sequence:",
@@ -543,13 +580,13 @@ pub = key.public_key().public_bytes_raw()
 fp = FP.from_facts(FACTS)
 now = datetime.now(timezone.utc)
 
-def payload(seq=1, days=365):
+def payload(seq=1, days=365, grace=14):
     b = fp.binding_document()
     return {"schema_version": LF.LICENSE_SCHEMA_VERSION, "product": "monday-report",
             "license_id": str(uuid.uuid4()), "customer_ref": "c", "edition": "offline-standard",
             "issued_at": now.isoformat(), "not_before": now.isoformat(),
             "expires_at": (now + timedelta(days=days)).isoformat(),
-            "grace_until": (now + timedelta(days=days + 14)).isoformat(),
+            "grace_until": (now + timedelta(days=days + grace)).isoformat(),
             "machine_binding": b, "machine_fingerprint_hash": canonical_hash(b),
             "allowed_product_versions": ["1.x"], "feature_flags": {},
             "installation_limit": 1, "installation_id": "inst-m", "issuer_id": "i",
@@ -584,6 +621,16 @@ elif probe == "rollback_undetected":
     p.import_license(json.dumps(LF.issue_license(payload(days=90), key).document).encode())
     back = provider(clock=lambda: base, tag="r").evaluate()
     defect = back.state is not LicenseState.CLOCK_ROLLBACK_DETECTED
+elif probe == "held_clock_restores_operation":
+    base = time.time()
+    p = provider(clock=lambda: base, tag="h")
+    p.import_license(json.dumps(
+        LF.issue_license(payload(days=1, grace=0), key).document).encode())
+    after = base + 86400 + 7200          # 2h past expiry+grace -> read-only
+    provider(clock=lambda: after, tag="h").evaluate()
+    parked = base + 86400 - 3600         # BELOW grace_until, only 3h back (inside tolerance)
+    d = provider(clock=lambda: parked, tag="h").evaluate()
+    defect = not d.read_only
 elif probe == "old_renewal_accepted":
     p = provider(tag="q")
     p.import_license(json.dumps(LF.issue_license(payload(seq=5), key).document).encode())

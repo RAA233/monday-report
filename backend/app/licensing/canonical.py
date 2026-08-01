@@ -6,12 +6,21 @@ import hashlib
 import json
 
 
+class CanonicalizationError(ValueError):
+    """Raised when a document cannot be canonically serialized (e.g. a lone
+    surrogate). Callers translate this into a typed rejection reason rather
+    than letting a UnicodeEncodeError escape."""
+
+
 def canonical_bytes(document: dict) -> bytes:
     """Serialize a JSON document canonically (sorted keys, compact separators)."""
 
-    return json.dumps(
-        document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
-    ).encode("utf-8")
+    try:
+        return json.dumps(
+            document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        ).encode("utf-8")
+    except (UnicodeEncodeError, ValueError, TypeError) as exc:
+        raise CanonicalizationError(str(exc)) from exc
 
 
 def canonical_hash(document: dict) -> str:

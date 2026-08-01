@@ -48,8 +48,15 @@ def main() -> int:
         f"environment minimum honestly ({verdicts}, coverage_met={coverage_met})")
     import copy as _copy
     widened = _copy.deepcopy(payload)
+    # A CONSISTENT two-environment artifact: the matrix records two executed
+    # environments and the verdict block/coverage flag say what that implies.
+    # (An inconsistent one is rejected by OE12b/OE12c.)
     widened["results"]["package_matrix"]["environments_executed"] = [
         "windows-11-host", "windows-11-clean-vm"]
+    widened["environment_coverage"]["executed"] = ["windows-11-host", "windows-11-clean-vm"]
+    widened["environment_coverage"]["meets_minimum"] = True
+    widened["verdicts"]["package"] = E.PACKAGE_VERDICT
+    widened["verdicts"]["commercial"] = E.COMMERCIAL_VERDICT
     body = {k: v for k, v in widened.items() if k != "canonical_payload_hash"}
     widened["canonical_payload_hash"] = canonical_hash(body)
     widened_verdicts = E.control_verdicts(
@@ -93,6 +100,17 @@ def main() -> int:
             lambda m: m.update(diagnostic="adapter 00:1A:2B:3C:4D:5E failed"))  # leak-test fixture
     rejects("OE12 missing-installer-hash-rejected",
             lambda m: m["package"].update(installer_sha256=""))
+
+    def _claim_acceptance(m: dict) -> None:
+        m["verdicts"]["commercial"] = "OFFLINE_COMMERCIAL_PACKAGE_ACCEPTED"
+        m["verdicts"]["package"] = "OFFLINE_WINDOWS_PACKAGE_ACCEPTED"
+
+    rejects("OE12b overclaimed-verdict-rejected", _claim_acceptance,
+            detail="a hand-edited artifact cannot assert an acceptance the recorded "
+                   "results do not support, even with a recomputed canonical hash")
+    rejects("OE12c forged-coverage-flag-rejected",
+            lambda m: m["environment_coverage"].update(meets_minimum=True),
+            detail="meets_minimum must agree with the recorded executed environments")
 
     blocked = E.control_verdicts(payload, ["any reason"])
     rec("OE13 invalid-artifact-blocks-all-controls",

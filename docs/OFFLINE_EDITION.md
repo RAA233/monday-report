@@ -80,8 +80,10 @@ vendor values are excluded rather than bound. Raw values never leave
 
 - **MAC is one optional component, never sufficient**: a match requires at
   least one strong component (`machine_guid` or `smbios_uuid`).
-- **Tolerance (documented threshold)**: `max(2, n-1)` of the issued components
-  must match — one approved hardware change (adapter swap, re-serialized board)
+- **Tolerance (documented threshold)**: `min(n, max(2, n-1))` of the issued
+  components must match (the cap keeps a degraded single-component machine able
+  to match itself; a strong component is still mandatory, so cross-machine
+  rejection is unaffected) — one approved hardware change (adapter swap, re-serialized board)
   keeps a legitimate install working; a different machine fails.
 - **Virtual machines**: detected via SMBIOS manufacturer/model markers and
   reported explicitly as `reduced_virtual_machine` confidence. A fully cloned
@@ -118,6 +120,25 @@ UTC epochs make timezone changes and sleep irrelevant. Deleting ONE copy does
 not reset the lineage (surviving copy wins by write counter); corrupted copies
 fail closed (`STATE_INTEGRITY_FAILURE`).
 
+**Expiry uses the monotonic trusted clock, not the system clock.** Both
+evaluation and import compare against `max(system_clock, highest_trusted_epoch)`.
+The 48h tolerance exists ONLY to avoid declaring hard rollback on legitimate
+drift/NTP correction — it never hands licensed operation back. Without this, a
+clock parked just inside the tolerance below an already-passed `grace_until`
+would look like ordinary drift on every evaluation and restore full operation
+indefinitely. Regression coverage: `LG29a`/`LG29b`, and mutation cycle `MUT05`
+proves the gate is load-bearing.
+
+**Recovery when protected state cannot be read.** DPAPI blobs are user-scoped,
+so an admin-forced password reset, profile recreation, or moving the data
+directory between accounts can leave both copies undecryptable — the
+installation then reports `STATE_TAMPERED` / `STATE_INTEGRITY_FAILURE` and stays
+read-only (data readable, backups still available). Recovery: take a backup,
+delete both licensing-state files (`config\license_state.bin` and
+`data\.license_state.bin` — the second is hidden), restart, and re-import the
+current license. This re-anchors the clock lineage to the license issue time,
+which is the same bounded limitation documented above.
+
 **Honest limitation:** deleting every state copy in one pass re-anchors the
 lineage to the license's own issue time. Offline licensing DETERS unauthorized
 copying; it cannot make client-controlled hardware impossible to modify. No
@@ -153,9 +174,12 @@ wrong-key updates. No automatic Internet update checks exist.
 
 Default binding is `127.0.0.1` with a dynamically selected port (47613–47630,
 then ephemeral). LAN mode requires BOTH `MONDAY_REPORT_OFFLINE_LAN=1` and
-`MONDAY_REPORT_OFFLINE_LAN_ACK=I_UNDERSTAND_LAN_EXPOSURE`, is not reachable
-from any packaged UI, and is documented to additionally require client-mode
-credentials. A runtime lock file + live-port probe prevents two instances from
+`MONDAY_REPORT_OFFLINE_LAN_ACK=I_UNDERSTAND_LAN_EXPOSURE`, and is not reachable
+from any packaged UI. It is additionally **enforced** (not merely documented):
+the runtime REFUSES to start in LAN mode unless
+`MONDAY_REPORT_CLIENT_DATA_MODE=client` and a `MONDAY_REPORT_API_KEY` are
+configured — the loopback boundary is what makes unauthenticated local mode
+safe, so an unauthenticated API is never published to a network. A runtime lock file + live-port probe prevents two instances from
 mutating the same state; stale locks are recovered after crashes.
 
 ## 11. Verification map

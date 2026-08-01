@@ -203,11 +203,13 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
                 "schema_version": "monday-report-backup.v1", "data_version": 1,
                 "file_hashes": {"data/monday_report_state.json": "0" * 64}}))
             archive.writestr("data/monday_report_state.json", "{}")
+        before_rejected = state_file.read_text(encoding="utf-8")
         rejected = client.post("/offline/restore", json={"backup": corrupt.name})
         rec("RT16 corrupt-restore-rejected-with-rollback",
             rejected.status_code == 400
-            and state_file.read_text(encoding="utf-8") == state_file.read_text(encoding="utf-8"),
-            "a hash-mismatched backup is refused and current data stays intact")
+            and state_file.read_text(encoding="utf-8") == before_rejected,
+            "a hash-mismatched backup is refused and the CURRENT state file is "
+            "byte-identical to what it was before the attempt")
 
         rec("RT17 worker-gated-by-license",
             cache.decision().operational is False,

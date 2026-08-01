@@ -137,6 +137,14 @@ class OfflineSignedLicenseProvider(LicenseProvider):
                 document,
                 _blocked(LicenseState.CLOCK_ROLLBACK_DETECTED, ReasonCode.CLOCK_ROLLBACK_DETECTED),
             )
+        # Expiry is judged against the MONOTONIC trusted clock, never the bare
+        # system clock. The 48h tolerance exists only to avoid declaring hard
+        # rollback on legitimate drift/NTP corrections — it must NOT hand back
+        # licensed operation. Without this, a clock parked just inside the
+        # tolerance below an already-passed grace_until would restore full
+        # operation indefinitely (each evaluation looks like ordinary drift).
+        effective_epoch = max(now_epoch, state.highest_trusted_epoch)
+        effective_now = datetime.fromtimestamp(effective_epoch, tz=timezone.utc)
         # A license file with a LOWER sequence than the recorded lineage means an
         # old entitlement was copied back over a newer one.
         if state.license_id and (
@@ -197,10 +205,10 @@ class OfflineSignedLicenseProvider(LicenseProvider):
                 ),
             )
 
-        if now <= expires_at:
+        if effective_now <= expires_at:
             state_kind = (
                 LicenseState.EXPIRING_SOON
-                if (expires_at - now).total_seconds() <= EXPIRING_SOON_SECONDS
+                if (expires_at - effective_now).total_seconds() <= EXPIRING_SOON_SECONDS
                 else LicenseState.VALID
             )
             reason = (
@@ -209,7 +217,7 @@ class OfflineSignedLicenseProvider(LicenseProvider):
                 else ReasonCode.OK
             )
             read_only = False
-        elif now <= grace_until:
+        elif effective_now <= grace_until:
             state_kind, reason, read_only = (
                 LicenseState.GRACE,
                 ReasonCode.IN_GRACE_PERIOD,
@@ -312,13 +320,16 @@ class OfflineSignedLicenseProvider(LicenseProvider):
             raise LicenseImportError(
                 ReasonCode.LICENSE_FUTURE_ISSUED, "license is issued in the future"
             )
-        if grace_until.timestamp() < now_epoch:
-            raise LicenseImportError(ReasonCode.LICENSE_EXPIRED, "license is already expired")
 
         try:
             state = self._guard.load(license_issued_epoch=issued_at.timestamp())
         except StateIntegrityError as exc:
             raise LicenseImportError(ReasonCode.STATE_INTEGRITY_FAILURE, str(exc)) from exc
+        # Import uses the SAME monotonic trusted clock as evaluation, so a clock
+        # parked below the recorded lineage cannot make an expired license
+        # importable again.
+        if grace_until.timestamp() < max(now_epoch, state.highest_trusted_epoch):
+            raise LicenseImportError(ReasonCode.LICENSE_EXPIRED, "license is already expired")
         incoming_sequence = int(document["issue_sequence"])
         if state.license_id and incoming_sequence < state.issue_sequence:
             raise LicenseImportError(

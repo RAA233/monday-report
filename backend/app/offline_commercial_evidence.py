@@ -128,6 +128,32 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
         if pattern.search(text):
             reasons.append(f"evidence contains a leak shape: {pattern.pattern[:40]}")
             break
+
+    # The stored verdict block is a CLAIM; recompute it from the recorded
+    # results so a hand-edited artifact cannot assert an acceptance the
+    # controls do not support (the canonical hash alone is unsigned and
+    # recomputable by anyone editing the file).
+    if not reasons:
+        derived = control_verdicts(payload, [])
+        expected = {
+            "license": (LICENSE_VERDICT if derived["offline_license_enforcement"] == "PASS"
+                        else "OFFLINE_LICENSE_ENFORCEMENT_NOT_ACCEPTED"),
+            "package": (PACKAGE_VERDICT if derived["offline_windows_package"] == "PASS"
+                        else "OFFLINE_WINDOWS_PACKAGE_NOT_ACCEPTED"),
+            "commercial": (COMMERCIAL_VERDICT if derived["offline_commercial_package"] == "PASS"
+                           else "OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED"),
+        }
+        stored = payload.get("verdicts", {})
+        for key, value in expected.items():
+            if stored.get(key) != value:
+                reasons.append(
+                    f"stored verdict '{key}' disagrees with the verdict derived from the "
+                    f"recorded results"
+                )
+        coverage = payload.get("environment_coverage", {})
+        if coverage and coverage.get("meets_minimum") is not environment_coverage_met(payload):
+            reasons.append("environment_coverage.meets_minimum disagrees with the recorded "
+                           "executed environments")
     return reasons
 
 

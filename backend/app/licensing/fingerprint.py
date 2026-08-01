@@ -191,9 +191,15 @@ class Fingerprint:
 
 def required_matches(eligible: int) -> int:
     """Tolerate one changed component on well-populated machines while never
-    accepting fewer than MIN_MATCHES."""
+    accepting fewer than MIN_MATCHES.
 
-    return max(MIN_MATCHES, eligible - 1)
+    Capped at ``eligible`` so a degraded machine (only one collectable fact,
+    e.g. CIM/PowerShell blocked by policy) cannot be issued a binding that can
+    never match even itself. A strong component is still mandatory, so this
+    never weakens cross-machine rejection.
+    """
+
+    return min(max(eligible, 1), max(MIN_MATCHES, eligible - 1))
 
 
 def from_facts(facts: dict[str, str], *, is_virtual: bool = False) -> Fingerprint:
