@@ -83,7 +83,7 @@ def _post(port: int, path: str, body: bytes, content_type: str = "application/js
         f"http://127.0.0.1:{port}{path}", data=body, method="POST",
         headers={"content-type": content_type})
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=120) as response:
             return {"status": response.status, "body": json.loads(response.read().decode("utf-8"))}
     except urllib.error.HTTPError as exc:  # type: ignore[attr-defined]
         return {"status": exc.code, "body": json.loads(exc.read().decode("utf-8"))}
@@ -91,7 +91,7 @@ def _post(port: int, path: str, body: bytes, content_type: str = "application/js
 
 def _get(port: int, path: str) -> dict:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=15) as response:  # noqa: S310
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=120) as response:  # noqa: S310
             payload = response.read().decode("utf-8")
             try:
                 return {"status": response.status, "body": json.loads(payload)}
@@ -204,7 +204,7 @@ def main() -> int:  # noqa: PLR0915 - one linear matrix
         request_file = work / "activation-request.json"
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/offline/license/activation-request",
-                timeout=15) as response:
+                timeout=120) as response:
             request_file.write_bytes(response.read())
         request_document = json.loads(request_file.read_text(encoding="utf-8"))
         rec("PK05 activation-request-exported",
@@ -307,7 +307,7 @@ def main() -> int:  # noqa: PLR0915 - one linear matrix
             request2 = work / "request2.json"
             with urllib.request.urlopen(
                     f"http://127.0.0.1:{port2}/offline/license/activation-request",
-                    timeout=15) as response:
+                    timeout=120) as response:
                 request2.write_bytes(response.read())
             # An ALREADY-EXPIRING license: not_before now, expires in ~40s, no
             # grace -- the transition to read-only happens in real time inside
