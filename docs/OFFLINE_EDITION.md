@@ -1,0 +1,169 @@
+# Monday Report — Offline Edition (Windows-first)
+
+The commercial offline package: fully functional without Internet access, no
+Docker, no external PostgreSQL, no external Redis, localhost-only, signed
+offline licensing with machine binding, expiration/renewal, local
+backup/restore, and a SaaS-compatible licensing abstraction.
+
+This document records the Part-D runtime audit, every packaging/licensing
+decision, and the honest limitations. Nothing here claims production
+database/queue target acceptance, SaaS acceptance, or GA.
+
+## 1. Runtime audit (Part D) and deployment model
+
+| Aspect | Finding | Offline Edition decision |
+| --- | --- | --- |
+| Frontend build | Vite SPA; `VITE_API_BASE_URL` baked at build time (default `http://127.0.0.1:8000`) | Build with `VITE_API_BASE_URL=""` → same-origin; the backend serves `dist/` itself. No CORS surface, any port works |
+| Backend startup | `uvicorn backend.app.main:app` on 127.0.0.1 | Wrapped by `backend/app/offline_runtime.py`; `main.py` is byte-unmodified |
+| State | `LocalStateStore` durable JSON (atomicity remediation accepted); paths via `MONDAY_REPORT_STATE_PATH` etc. | Local JSON backend (`local_json` + `inline_worker`); paths under the installation data dir |
+| Queue | Inline enqueue + `worker.run_once()`; Redis optional | In-process worker thread (2s cadence), gated by the license decision |
+| Auth | Demo/local mode does not enforce API keys; client mode requires per-user credentials + readiness | Offline-local mode (single user, loopback trust boundary). LAN mode is OFF by default and documented to require client-mode credentials |
+| Python deps | FastAPI/uvicorn/pydantic/PyMuPDF/reportlab (+psycopg/redis lazily imported, PG-path only) | Packaged with PyInstaller; `psycopg`/`redis` excluded (verified lazy) |
+| Node | Build-time only | **Not required at runtime** |
+| Elevation | none required | Per-user install under `%LOCALAPPDATA%\Programs`; HKCU uninstall entry; **no administrator step exists** |
+
+**Selected model:** PyInstaller one-folder app (`MondayReportOffline.exe`) with
+prebuilt `dist/` bundled, per-user PowerShell installer (reviewed:
+`packaging/installer/install.ps1` / `uninstall.ps1`), plus an Inno Setup script
+(`packaging/innosetup/monday-report-offline.iss`) for the release pipeline that
+owns code signing (Inno Setup is not part of this repository's toolchain).
+
+## 2. Application data layout (Part L)
+
+```
+%LOCALAPPDATA%\Programs\MondayReportOffline\   application binaries (replaced on upgrade)
+%LOCALAPPDATA%\MondayReportOffline\            mutable customer data (never touched by installer)
+  config\      installation.json, license_state.bin (copy 1), runtime.lock.json, public key
+  data\        monday_report_state.json, storage\, exports\, .license_state.bin (copy 2)
+  licenses\    monday-report-license.json
+  logs\        runtime logs
+  backups\     monday-report-backup-*.zip
+  tmp\         staged restores, scratch
+```
+
+Binaries and customer data are fully separated. Uninstall preserves customer
+data by default; `uninstall.ps1 -RemoveData` is the explicit separate option.
+
+## 3. Licensing abstraction (Part E)
+
+`backend/app/licensing/contract.py` defines `LicenseProvider` with three
+editions: `OfflineSignedLicenseProvider` (fully implemented),
+`SaaSSubscriptionProvider` and `HybridOfflineLeaseProvider` (explicit
+fail-closed placeholders returning `PROVIDER_NOT_IMPLEMENTED`). Business logic
+consumes only the normalized `LicenseDecision` (state, edition, feature flags,
+times, machine-binding result, product-version eligibility, renewal sequence,
+read-only flag, typed `ReasonCode`, support code). SaaS support later means
+implementing a provider — not rewriting enforcement.
+
+## 4. License format (Part F)
+
+`monday-report-license.v1`: canonical JSON (sorted keys, compact separators),
+**Ed25519** via the audited `cryptography` library, signature over the document
+minus `signature`. Strict field policy: unknown fields rejected, missing fields
+rejected, wrong schema/product/algorithm rejected, `machine_fingerprint_hash`
+must commit to `machine_binding`. The application embeds ONLY the public
+verification key (`licensing_public_key.txt`, installed at package build). The
+private key is generated and stored exclusively by the operator CLI
+(`scripts/license_issuer_cli.py`) at an operator-chosen protected path or a
+process-local environment reference; it is never committed, packaged, logged,
+tested-in, evidenced, printed, or generated inside a customer installation.
+
+## 5. Machine fingerprint (Part G)
+
+`mr-machine-fingerprint.v1` — components (Windows): `machine_guid` (registry),
+`smbios_uuid`, `board_serial`, `system_volume_serial`, and ONE aggregated
+`physical_adapters` component (permanent addresses of physical adapters only;
+VPN/TAP/loopback/virtual/WSL/Docker/Bluetooth adapters excluded). Placeholder
+vendor values are excluded rather than bound. Raw values never leave
+`fingerprint.py`: each is normalized deterministically and hashed
+(SHA-256, domain-separated by version + component name).
+
+- **MAC is one optional component, never sufficient**: a match requires at
+  least one strong component (`machine_guid` or `smbios_uuid`).
+- **Tolerance (documented threshold)**: `max(2, n-1)` of the issued components
+  must match — one approved hardware change (adapter swap, re-serialized board)
+  keeps a legitimate install working; a different machine fails.
+- **Virtual machines**: detected via SMBIOS manufacturer/model markers and
+  reported explicitly as `reduced_virtual_machine` confidence. A fully cloned
+  VM shares every fact; clone resistance comes from the protected state/clock
+  lineage, and this limitation is stated, not hidden.
+- Missing optional facts degrade the component count; activation never crashes.
+- The ONLY diagnostic ever surfaced: fingerprint version, eligible component
+  count, confidence class, match/mismatch.
+
+## 6. Air-gapped activation and renewal (Part H)
+
+`monday-report-activation-request.v1` carries: schema, installation id, hashed
+machine binding + commitment hash, product version, requested edition, nonce,
+timestamp — **no raw hardware identifiers** (operator-side validation rejects
+raw component names/values). Flow: export request file → operator combines with
+commercial terms (outside the repository) + private key → signed license file →
+manual import. No Internet anywhere. Renewal = import a newer license;
+`issue_sequence` is strictly monotonic per installation lineage: older or
+same-sequence-different-id imports are rejected, and swapping an older license
+file back on disk is detected at evaluation (`LICENSE_ROLLBACK_REJECTED`).
+
+## 7. Clock rollback and tamper resistance (Part I)
+
+`mr-license-state.v1`: non-sensitive facts only (license id, issue sequence,
+highest trusted wall-clock epoch, last validation epoch, write counter,
+integrity value). Stored as TWO copies (config dir + data dir), DPAPI-protected
+on Windows (`CryptProtectData`, UI-forbidden, app entropy); the executable test
+mode must be selected explicitly via env and never silently replaces DPAPI.
+Backward movement beyond 48h tolerance ⇒ `CLOCK_ROLLBACK_DETECTED` (read-only).
+UTC epochs make timezone changes and sleep irrelevant. Deleting ONE copy does
+not reset the lineage (surviving copy wins by write counter); corrupted copies
+fail closed (`STATE_INTEGRITY_FAILURE`).
+
+**Honest limitation:** deleting every state copy in one pass re-anchors the
+lineage to the license's own issue time. Offline licensing DETERS unauthorized
+copying; it cannot make client-controlled hardware impossible to modify. No
+perfect anti-tamper claim is made.
+
+## 8. Expiration behavior (Part J)
+
+| State | Behavior |
+| --- | --- |
+| valid | full operation |
+| expiring soon (≤14d) | full operation + visible renewal warning |
+| grace (`grace_until`) | full operation + renewal warning |
+| expired | READ-ONLY: reads allowed, backups allowed, restore allowed (it cannot create licensed business operations); new mutations, report drafts, exports, signed-URL redemption, and worker business processing blocked with HTTP 423 |
+
+Every blocked action returns: typed `reason_code`, license state, expiry/grace
+dates, renewal action, `/license` page, `/offline/license/import` action, and a
+support code — never a silent no-op. Customer data is never deleted, encrypted,
+corrupted, or hidden by expiry, and backups always remain possible.
+
+**Backups exclude the license file and licensing state** (documented): licenses
+are machine-bound, so a backup restored on another machine requires that
+machine's own license.
+
+## 9. Offline update format (Part M)
+
+`monday-report-update.v1`: signed manifest (product, version, minimum
+compatible data version, prohibition floor, payload SHA-256, Ed25519).
+`update_format.verify_update_manifest` rejects unsigned, tampered,
+below-floor, older-than-installed, data-incompatible, wrong-product, and
+wrong-key updates. No automatic Internet update checks exist.
+
+## 10. Network posture
+
+Default binding is `127.0.0.1` with a dynamically selected port (47613–47630,
+then ephemeral). LAN mode requires BOTH `MONDAY_REPORT_OFFLINE_LAN=1` and
+`MONDAY_REPORT_OFFLINE_LAN_ACK=I_UNDERSTAND_LAN_EXPOSURE`, is not reachable
+from any packaged UI, and is documented to additionally require client-mode
+credentials. A runtime lock file + live-port probe prevents two instances from
+mutating the same state; stale locks are recovered after crashes.
+
+## 11. Verification map
+
+| Concern | Guard |
+| --- | --- |
+| License format, binding, expiry, rollback, updates, key hygiene, **mutation cycles** | `pnpm run audit:offline-license` |
+| Runtime enforcement, read-only mode, backup/restore, localhost, single instance | `pnpm run audit:offline-runtime` |
+| Built-package execution matrix (fresh install → uninstall) | `pnpm run audit:offline-package` |
+| Secret/privacy scan (seeded self-test) | `pnpm run audit:offline-secret-scan` |
+| Evidence artifact + fault mutations | `pnpm run audit:offline-commercial-evidence` |
+| Evidence generation | `pnpm run ga:offline-commercial-evidence` |
+
+Build: `python packaging/build_offline_package.py --public-key <hex file>`.
