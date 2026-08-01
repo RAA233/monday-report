@@ -17,7 +17,7 @@ database/queue target acceptance, SaaS acceptance, or GA.
 | Backend startup | `uvicorn backend.app.main:app` on 127.0.0.1 | Wrapped by `backend/app/offline_runtime.py`; `main.py` is byte-unmodified |
 | State | `LocalStateStore` durable JSON (atomicity remediation accepted); paths via `MONDAY_REPORT_STATE_PATH` etc. | Local JSON backend (`local_json` + `inline_worker`); paths under the installation data dir |
 | Queue | Inline enqueue + `worker.run_once()`; Redis optional | In-process worker thread (2s cadence), gated by the license decision |
-| Auth | Demo/local mode does not enforce API keys; client mode requires per-user credentials + readiness | Offline-local mode (single user, loopback trust boundary). LAN mode is OFF by default and documented to require client-mode credentials |
+| Auth | Demo/local mode does not enforce API keys; client mode requires per-user credentials + readiness | Offline-local mode (single user, loopback trust boundary). LAN mode is OFF by default and ENFORCES client mode + a configured API key before it will start |
 | Python deps | FastAPI/uvicorn/pydantic/PyMuPDF/reportlab (+psycopg/redis lazily imported, PG-path only) | Packaged with PyInstaller; `psycopg`/`redis` excluded (verified lazy) |
 | Node | Build-time only | **Not required at runtime** |
 | Elevation | none required | Per-user install under `%LOCALAPPDATA%\Programs`; HKCU uninstall entry; **no administrator step exists** |
