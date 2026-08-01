@@ -51,11 +51,20 @@ REQUIRED_BEHAVIORAL_DOMAINS: tuple[str, ...] = (
     "cross_tenant_isolation",
     "bounded_classified_retry",
     "poison_dead_letter_isolation",
-    "authorized_idempotent_replay",
+    # ---- gaps closed on this branch ----
+    "durable_dlq_envelope",
+    "payload_preserving_replay",
+    "authorized_replay_and_idempotency",
+    "uncommitted_replay_commits_once",
+    "post_commit_replay_suppressed",
+    "runtime_worker_concurrency_bounded",
+    "queue_database_tenant_coupling",
+    "cross_tenant_negative",
+    "executed_secret_scan",
+    # ---- lifecycle ----
     "bounded_concurrency_stress",
     "bounded_startup_and_shutdown",
     "redacted_observability",
-    "secret_scan",
 )
 
 PROVING_CLASSES = ("executed_disposable_test", "disposable_target_observation")

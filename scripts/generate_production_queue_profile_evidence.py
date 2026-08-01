@@ -35,7 +35,16 @@ DOMAIN_MAP = {
     "cross_tenant_isolation": lambda c: c.startswith("ST02"),
     "bounded_classified_retry": lambda c: c.startswith("RT01"),
     "poison_dead_letter_isolation": lambda c: c[:4] in ("DL01", "ST03"),
-    "authorized_idempotent_replay": lambda c: c[:4] in ("DL02", "DL03"),
+    # gaps closed on this branch
+    "durable_dlq_envelope": lambda c: c[:4] in ("DR01", "DR02"),
+    "payload_preserving_replay": lambda c: c.startswith("DR04"),
+    "authorized_replay_and_idempotency": lambda c: c[:4] in ("DR03", "DR04"),
+    "uncommitted_replay_commits_once": lambda c: c.startswith("DR05"),
+    "post_commit_replay_suppressed": lambda c: c.startswith("DR06"),
+    "runtime_worker_concurrency_bounded": lambda c: c.startswith("CC"),
+    "queue_database_tenant_coupling": lambda c: c.startswith("TC01"),
+    "cross_tenant_negative": lambda c: c[:4] in ("TC02", "TC04", "TC05"),
+    # lifecycle
     "bounded_concurrency_stress": lambda c: c[:4] in ("ST01", "ST04", "ST05"),
     "bounded_startup_and_shutdown": lambda c: c.startswith("LC"),
     "redacted_observability": lambda c: c.startswith("RD01"),
@@ -71,9 +80,12 @@ def main() -> int:
         try:
             G.workflow_and_idempotency(db, qa, dba)
             G.retry_and_dead_letter(db, qa, dba)
+            G.dlq_and_replay(db, qa, dba)
+            G.tenant_coupling(db, qa, dba)
             G.stress(db, qa, dba)
         finally:
             qa.shutdown(); dba.shutdown()
+        G.runtime_concurrency(db, br)
         G.lifecycle(db, br)
         _extra_proofs()
 
@@ -85,8 +97,16 @@ def main() -> int:
         domains[domain] = {"status": "PASS" if total and passed == total else "FAIL" if total else "NOT_PROVEN",
                            "observation_class": "executed_disposable_test", "checks_total": total,
                            "checks_passed": passed, "check_ids": sorted(c["check_id"].split()[0] for c in matched)}
-    domains["secret_scan"] = {"status": "PASS", "observation_class": "executed_disposable_test",
-                              "checks_total": 1, "checks_passed": 1, "check_ids": ["SS01"]}
+    # executed_secret_scan domain: driven by the REAL executed scan (not a literal assertion).
+    import production_queue_secret_scan_guard as SS
+    import contextlib, io as _io
+    with contextlib.redirect_stdout(_io.StringIO()):
+        ss_rc = SS.main()  # returns 0 only when clean + all checks pass
+    ss_ok = ss_rc == 0
+    domains["executed_secret_scan"] = {"status": "PASS" if ss_ok else "FAIL",
+                                       "observation_class": "executed_disposable_test",
+                                       "checks_total": 6, "checks_passed": 6 if ss_ok else 0,
+                                       "check_ids": ["SS00", "SS01", "SS02", "SS03", "SS04", "SS05"]}
     all_passed = all(c["ok"] for c in checks) and all(d["status"] == "PASS" for d in domains.values())
 
     payload = {

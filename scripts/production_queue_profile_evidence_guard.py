@@ -73,7 +73,7 @@ def main() -> int:
     rejects("FE11 incomplete-domain-rejected",
             lambda m: m["behavioral_domains"]["cross_tenant_isolation"].update(checks_passed=0),
             detail="a domain with fewer passed than total is rejected")
-    rejects("FE12 dropped-domain-rejected", lambda m: m["behavioral_domains"].pop("authorized_idempotent_replay"),
+    rejects("FE12 dropped-domain-rejected", lambda m: m["behavioral_domains"].pop("authorized_replay_and_idempotency"),
             detail="a missing required domain is rejected")
     rejects("FE13 not-all-passed-rejected", lambda m: m["totals"].update(all_passed=False),
             detail="totals.all_passed=false is rejected")
