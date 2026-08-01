@@ -333,7 +333,38 @@ def runtime_concurrency(db, br):
     stop.set(); [t.join(timeout=3) for t in pool["_threads"]]
     rec("CC03 shutdown-launches-no-new-handlers", qa.status()["concurrency"]["active"] == 0,
         "after stop, no handler remains active (shutdown launches no new work)")
-    qa.shutdown(); dba.shutdown()
+    qa.shutdown()
+
+    # CC04: drive MORE concurrent drain callers than worker_concurrency so the semaphore's
+    # blocking is genuinely exercised (not just proven by a matched thread count). With a
+    # bound of 2 but 8 threads each calling drain_once against a slow handler and >=16 ready
+    # messages, the max observed active handlers must still be exactly 2, and a 5th+ caller
+    # provably cannot enter until a slot releases.
+    b2 = Q.QueueBounds(producer_connections=2, consumer_connections=10, worker_concurrency=2, receive_batch_size=2,
+        enqueue_timeout_seconds=5, receive_block_ms=100, lease_ms=5000, ack_timeout_seconds=10, shutdown_drain_seconds=10,
+        max_payload_bytes=65536, max_retries=2, backoff_base_ms=10)
+    qa2 = Q.ProductionQueueAdapter(_qcfg(br, bounds=b2)); qa2.start()
+    def slow_handler(msg):
+        time.sleep(0.15)
+        with dba.tenant_transaction(msg["tenant_slug"]) as cur:
+            cur.execute("insert into queue_idem (tenant_slug, idem_key) values (%s,%s) on conflict do nothing",
+                        (msg["tenant_slug"], msg["idempotency_key"]))
+    for i in range(20):
+        qa2.enqueue(Q.build_message(tenant_slug="tenant-a", operation="effect", idempotency_key=f"ov-{i}",
+                                    correlation_id="c", payload={}, enqueued_at=time.time()))
+    stop2 = threading.Event()
+    overload = [threading.Thread(target=lambda idx=k: [
+        (qa2.drain_once(slow_handler, consumer_name=f"ov{idx}", redis_conn=qa2._consumers[idx % len(qa2._consumers)])
+         if not stop2.is_set() else None) for _ in range(50)], daemon=True) for k in range(8)]
+    for t in overload:
+        t.start()
+    time.sleep(2.5)
+    conc2 = qa2.status()["concurrency"]
+    rec("CC04 semaphore-blocks-excess-callers", conc2["max_observed"] == 2 and conc2["max_observed"] <= 2,
+        f"8 concurrent drain callers on a bound of 2 -> max observed active handlers = {conc2['max_observed']} (excess blocked by the semaphore)")
+    stop2.set(); [t.join(timeout=3) for t in overload]
+    qa2.shutdown()
+    dba.shutdown()
 
 
 def tenant_coupling(db, qa, dba):

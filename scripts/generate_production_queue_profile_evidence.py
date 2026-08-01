@@ -134,7 +134,7 @@ def main() -> int:
         "message_schema_version": Q.MESSAGE_SCHEMA_VERSION,
         "totals": {"checks_total": len(checks), "checks_passed": sum(1 for c in checks if c["ok"]),
                    "all_passed": all_passed},
-        "secret_scan_clean": True,
+        "secret_scan_clean": ss_ok,
     }
     payload["canonical_payload_hash"] = P.canonical_hash(payload)
     P.EVIDENCE_PATH.parent.mkdir(parents=True, exist_ok=True)

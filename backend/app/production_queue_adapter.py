@@ -386,10 +386,12 @@ class ProductionQueueAdapter:
         retains the full validated replay envelope — schema version, original message id,
         tenant-bound context, operation, idempotency key, correlation, ORIGINAL VALIDATED
         payload, enqueue timestamp, attempt count — plus a REDACTED failure classification
-        and the dead-letter timestamp. It never stores credentials/endpoints/traces/container
-        or process ids, and a payload that FAILED validation (oversized/malformed) is NOT
-        retained raw — it is recorded as `payload_rejected` so an unbounded/unsafe body never
-        lands in the DLQ."""
+        and the dead-letter timestamp. `trace_id` is the message's trace-CORRELATION id (a
+        Part-C envelope field), NOT a stack trace: the failure text goes through `redact()`
+        and no raw exception stack trace, credential, endpoint, container id, or process id is
+        ever stored. A payload that FAILED validation (oversized/malformed) is NOT retained
+        raw — it is recorded as `payload_rejected` so an unbounded/unsafe body never lands in
+        the DLQ."""
         payload_valid = klass != "validation"
         try:
             raw = fields.get("payload", "")
