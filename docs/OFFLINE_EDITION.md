@@ -90,6 +90,9 @@ vendor values are excluded rather than bound. Raw values never leave
 - Missing optional facts degrade the component count; activation never crashes.
 - The ONLY diagnostic ever surfaced: fingerprint version, eligible component
   count, confidence class, match/mismatch.
+- Collection cost: the runtime collects the fingerprint ONCE per process
+  (PowerShell CIM queries are expensive); every license evaluation reuses the
+  hashes, and a hardware change is observed on the next application start.
 
 ## 6. Air-gapped activation and renewal (Part H)
 

@@ -211,13 +211,13 @@ def main() -> int:  # noqa: PLR0915 - one linear matrix
             request_document.get("schema_version") == "monday-report-activation-request.v1",
             "the installation exports a portable activation request file")
 
-        # -- issue + import a SHORT license (expiry transition is executable) --
-        short_license = work / "license-short.json"
+        # -- issue + import a normal-term license (sequence 1) -----------------
+        # (a short-dated license would land in the EXPIRING_SOON advisory state
+        # by design; the dedicated seconds-scale license in the second
+        # environment exercises the real-time expiry transition instead)
+        short_license = work / "license-first.json"
         _issue_license(keys_dir, request_file, short_license,
-                       validity_days=1, grace_days=0, sequence=1)
-        # shrink to seconds: reissue with explicit not_before/expiry via terms is
-        # not supported; instead import the 1-day license, then a dedicated
-        # near-expiry license below exercises the transition without clock edits.
+                       validity_days=90, grace_days=14, sequence=1)
         imported = _post(port, "/offline/license/import",
                          short_license.read_bytes())
         rec("PK06 license-import-activates",
