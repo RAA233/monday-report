@@ -231,6 +231,171 @@ def stress(db, qa, dba, *, total=100):
         "worker/consumer count never exceeds the configured bound")
 
 
+def dlq_and_replay(db, qa, dba):
+    """Durable faithful DLQ envelope + payload-preserving authorized replay (both cases)."""
+    heal = {"on": False}
+    def handler(msg):
+        slug, idem, op = msg["tenant_slug"], msg["idempotency_key"], msg["operation"]
+        pl = msg["payload_obj"]
+        if op == "pre_db_fail" and not heal["on"]:
+            raise Q.NonRetryable("pre-commit failure")
+        with dba.tenant_transaction(slug) as cur:
+            cur.execute("insert into queue_idem (tenant_slug, idem_key) values (%s,%s) on conflict do nothing", (slug, idem))
+            if cur.rowcount == 1:
+                cur.execute("insert into queue_effect (tenant_slug, marker) values (%s,%s)", (slug, pl.get("m", idem)))
+    def mk(op, idem, payload): return Q.build_message(tenant_slug="tenant-a", operation=op, idempotency_key=idem,
+        correlation_id="corr-1", payload=payload, enqueued_at=time.time())
+    conn = qa._consumers[0]
+    # CASE 1: never committed -> dead-letter -> faithful authorized replay commits ONCE.
+    qa.enqueue(mk("pre_db_fail", "dlq-1", {"m": "pl-1", "n": 42}))
+    for _ in range(3):
+        qa.drain_once(handler, consumer_name="w", redis_conn=conn); time.sleep(0.05)
+    rows = qa._producer.xrange(qa._config.dead_letter_key); dlq_id, dlrec = rows[-1][0], rows[-1][1]
+    envelope_keys = {"schema_version", "original_message_id", "tenant_slug", "operation", "idempotency_key",
+                     "correlation_id", "payload", "enqueued_at", "attempts", "failure_class", "dead_letter_at"}
+    rec("DR01 dlq-durable-envelope", envelope_keys.issubset(set(dlrec)) and dlrec.get("payload_status") == "retained"
+        and json.loads(dlrec["payload"]) == {"m": "pl-1", "n": 42},
+        "the DLQ record retains the full validated replay envelope incl. the original payload")
+    rec("DR02 dlq-no-secret-or-trace-leak", "reason" in dlrec and "requirepass" not in json.dumps(dlrec)
+        and "redis://" not in json.dumps(dlrec), "the DLQ record carries a redacted class, no DSN/trace/credential")
+    # unauthorized replay refused, DLQ intact
+    try:
+        qa.replay_dead_letter(dlq_id, authorized=False); rec("DR03 unauthorized-replay-refused", False, "unauth accepted")
+    except Q.NonRetryable:
+        rec("DR03 unauthorized-replay-refused", qa.read_dead_letter(dlq_id) is not None,
+            "unauthorized replay fails closed and leaves the DLQ record intact")
+    heal["on"] = True
+    replay_mid = qa.replay_dead_letter(dlq_id, authorized=True, authorization_class="operator")
+    # the re-enqueued message must carry the SAME idempotency identity + payload + replay metadata
+    replayed = qa._producer.xrange(qa._config.stream_key, min=replay_mid, max=replay_mid)[0][1]
+    rec("DR04 replay-preserves-identity-and-payload",
+        replayed["idempotency_key"] == "dlq-1" and replayed["tenant_slug"] == "tenant-a"
+        and replayed["operation"] == "pre_db_fail" and json.loads(replayed["payload"]) == {"m": "pl-1", "n": 42}
+        and replayed.get("replay_request_id"),
+        "authorized replay re-enqueues the ORIGINAL tenant/op/idem/payload with replay metadata")
+    for _ in range(3):
+        qa.drain_once(handler, consumer_name="w", redis_conn=conn); time.sleep(0.05)
+    import psycopg
+    with psycopg.connect(db["migration_dsn"], autocommit=True) as c, c.cursor() as cur:
+        cur.execute("select count(*) from queue_effect where marker='pl-1'"); c1 = cur.fetchone()[0]
+    rec("DR05 uncommitted-replay-commits-once", c1 == 1, f"an uncommitted message's authorized replay commits exactly once ({c1})")
+    # CASE 2: committed then a same-idem DLQ record -> replay suppressed by idempotency (0 new effect).
+    qa.enqueue(mk("effect", "dlq-2", {"m": "pl-2"}))
+    for _ in range(3):
+        qa.drain_once(handler, consumer_name="w", redis_conn=conn); time.sleep(0.05)
+    heal["on"] = False
+    qa.enqueue(mk("pre_db_fail", "dlq-2", {"m": "pl-2"}))
+    for _ in range(3):
+        qa.drain_once(handler, consumer_name="w", redis_conn=conn); time.sleep(0.05)
+    heal["on"] = True
+    dlq2 = [r for r in qa._producer.xrange(qa._config.dead_letter_key) if r[1].get("idempotency_key") == "dlq-2"][-1][0]
+    qa.replay_dead_letter(dlq2, authorized=True)
+    for _ in range(3):
+        qa.drain_once(handler, consumer_name="w", redis_conn=conn); time.sleep(0.05)
+    with psycopg.connect(db["migration_dsn"], autocommit=True) as c, c.cursor() as cur:
+        cur.execute("select count(*) from queue_effect where marker='pl-2'"); c2 = cur.fetchone()[0]
+    rec("DR06 post-commit-replay-suppressed", c2 == 1, f"replay of an already-committed message adds zero new effects ({c2})")
+
+
+def runtime_concurrency(db, br):
+    """worker_concurrency is enforced INSIDE the adapter: with N=4 and >=20 simultaneously
+    available slow messages, the max observed active handlers is exactly 4, and the 5th does
+    not enter until a slot is released."""
+    import threading
+    dba = A.ProductionDatabaseAdapter(A.ProductionProfileConfig(profile="production", dsn=db["runtime_dsn"],
+        sslmode="verify-full", sslrootcert=db["ca_path"], migration_role=db["migration_role"])); dba.start()
+    bounds = Q.QueueBounds(producer_connections=2, consumer_connections=8, worker_concurrency=4, receive_batch_size=4,
+        enqueue_timeout_seconds=5, receive_block_ms=100, lease_ms=5000, ack_timeout_seconds=10, shutdown_drain_seconds=10,
+        max_payload_bytes=65536, max_retries=2, backoff_base_ms=10)
+    qa = Q.ProductionQueueAdapter(_qcfg(br, bounds=bounds)); qa.start()
+    barrier = threading.Barrier(4, timeout=10)
+    def handler(msg):
+        # force exactly 4 to be simultaneously in-handler; a 5th cannot get a slot until release
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            pass
+        time.sleep(0.1)
+        with dba.tenant_transaction(msg["tenant_slug"]) as cur:
+            cur.execute("insert into queue_idem (tenant_slug, idem_key) values (%s,%s) on conflict do nothing",
+                        (msg["tenant_slug"], msg["idempotency_key"]))
+    for i in range(24):
+        qa.enqueue(Q.build_message(tenant_slug="tenant-a", operation="effect", idempotency_key=f"cc-{i}",
+                                   correlation_id="c", payload={}, enqueued_at=time.time()))
+    stop = threading.Event()
+    pool = qa.run_worker_pool(handler, stop_event=stop)
+    time.sleep(3.0)
+    conc = qa.status()["concurrency"]
+    rec("CC01 max-observed-equals-configured", conc["max_observed"] == 4 and conc["configured"] == 4,
+        f"max observed active handlers = {conc['max_observed']} == configured 4")
+    rec("CC02 never-exceeds-bound", conc["within_bound"] and conc["max_observed"] <= 4,
+        "active handlers never exceed the configured worker_concurrency under any path")
+    stop.set(); [t.join(timeout=3) for t in pool["_threads"]]
+    rec("CC03 shutdown-launches-no-new-handlers", qa.status()["concurrency"]["active"] == 0,
+        "after stop, no handler remains active (shutdown launches no new work)")
+    qa.shutdown(); dba.shutdown()
+
+
+def tenant_coupling(db, qa, dba):
+    """Direct queue<->database tenant coupling + negative cross-tenant tests."""
+    def mk(slug, idem, op="effect"): return Q.build_message(tenant_slug=slug, operation=op, idempotency_key=idem,
+        correlation_id="c", payload={"m": idem}, enqueued_at=time.time())
+    conn = qa._consumers[0]
+    # 1. the DB transaction tenant is derived from the validated message; assert app.tenant_slug matches
+    seen = {}
+    def scope_handler(msg):
+        with dba.tenant_transaction(msg["tenant_slug"]) as cur:
+            cur.execute("select current_setting('app.tenant_slug', true)")
+            seen[msg["idempotency_key"]] = cur.fetchone()[0]
+            cur.execute("insert into queue_idem (tenant_slug, idem_key) values (%s,%s) on conflict do nothing",
+                        (msg["tenant_slug"], msg["idempotency_key"]))
+            if cur.rowcount == 1:
+                cur.execute("insert into queue_effect (tenant_slug, marker) values (%s,%s)", (msg["tenant_slug"], msg["idempotency_key"]))
+    qa.enqueue(mk("tenant-a", "tc-a")); qa.enqueue(mk("tenant-b", "tc-b"))
+    for _ in range(4):
+        qa.drain_once(scope_handler, consumer_name="w", redis_conn=conn); time.sleep(0.05)
+    rec("TC01 db-scope-derived-from-message", seen.get("tc-a") == "tenant-a" and seen.get("tc-b") == "tenant-b",
+        "the DB transaction-local tenant is derived from each message's validated context")
+    # 2. tenant A's message cannot write tenant B's RLS-protected row (WITH CHECK blocks it)
+    def cross_handler(msg):
+        with dba.tenant_transaction(msg["tenant_slug"]) as cur:
+            cur.execute("insert into tenants (name, slug) values ('x','tenant-b')")  # scoped to tenant-a
+    qa.enqueue(mk("tenant-a", "tc-cross"))
+    for _ in range(3):
+        qa.drain_once(cross_handler, consumer_name="w", redis_conn=conn); time.sleep(0.05)
+    import psycopg
+    with psycopg.connect(db["migration_dsn"], autocommit=True) as c, c.cursor() as cur:
+        cur.execute("select count(*) from tenants where slug='tenant-b'"); tb = cur.fetchone()[0]
+    rec("TC02 cross-tenant-write-blocked", tb == 0,
+        "a tenant-A message cannot create a tenant-B row (RLS WITH CHECK blocks it; message dead-lettered)")
+    # 3. missing/tampered tenant fails closed before DB access
+    try:
+        Q.build_message(tenant_slug="", operation="e", idempotency_key="i", correlation_id="c", payload={}, enqueued_at=1)
+        rec("TC03 missing-tenant-fails-closed", False, "missing tenant accepted")
+    except Q.MessageValidationError:
+        rec("TC03 missing-tenant-fails-closed", True, "a message without tenant context fails before any DB access")
+    # 4. reused pooled connection retains no prior tenant (alternate on the same conn)
+    scopes = []
+    def probe(msg):
+        with dba.tenant_transaction(msg["tenant_slug"]) as cur:
+            cur.execute("select current_setting('app.tenant_slug', true)"); scopes.append((msg["tenant_slug"], cur.fetchone()[0]))
+    for i in range(6):
+        slug = "tenant-a" if i % 2 == 0 else "tenant-b"
+        qa.enqueue(mk(slug, f"tc-reuse-{i}"))
+    for _ in range(6):
+        qa.drain_once(probe, consumer_name="w", redis_conn=conn); time.sleep(0.03)
+    rec("TC04 no-retained-tenant-on-reuse", all(s == m for m, s in scopes) and len(scopes) >= 6,
+        "a reused pooled connection never retains a prior message's tenant scope")
+    # 5. duplicate idem under a DIFFERENT tenant does not collide (composite (tenant, idem))
+    qa.enqueue(mk("tenant-a", "shared-key")); qa.enqueue(mk("tenant-b", "shared-key"))
+    for _ in range(4):
+        qa.drain_once(scope_handler, consumer_name="w", redis_conn=conn); time.sleep(0.05)
+    with psycopg.connect(db["migration_dsn"], autocommit=True) as c, c.cursor() as cur:
+        cur.execute("select count(*) from queue_effect where marker='shared-key'"); sk = cur.fetchone()[0]
+    rec("TC05 idem-tenant-scoped-no-collision", sk == 2,
+        "the same idempotency key under two tenants does not collide (tenant-scoped idempotency)")
+
+
 def lifecycle(db, br):
     dbcfg = A.ProductionProfileConfig(profile="production", dsn=db["runtime_dsn"], sslmode="verify-full",
         sslrootcert=db["ca_path"], migration_role=db["migration_role"])
@@ -260,9 +425,12 @@ def main() -> int:
         try:
             workflow_and_idempotency(db, qa, dba)
             retry_and_dead_letter(db, qa, dba)
+            dlq_and_replay(db, qa, dba)
+            tenant_coupling(db, qa, dba)
             stress(db, qa, dba)
         finally:
             qa.shutdown(); dba.shutdown()
+        runtime_concurrency(db, br)
         lifecycle(db, br)
     passed = sum(1 for c in CHECKS if c["ok"])
     print(json.dumps({
