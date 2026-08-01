@@ -707,7 +707,8 @@ def main(argv: list[str] | None = None) -> int:
     ):
         host = "0.0.0.0"  # documented, double-opt-in only
 
-    port = select_port(args.port)
+    env_port = os.getenv("MONDAY_REPORT_OFFLINE_PORT")
+    port = select_port(args.port or (int(env_port) if env_port else None))
     if not acquire_single_instance(paths, port):
         existing = _existing_instance_port(paths)
         print(json.dumps({"already_running": True, "url": f"http://127.0.0.1:{existing}/"}))

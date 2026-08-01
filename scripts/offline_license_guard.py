@@ -453,9 +453,11 @@ def key_hygiene_battery() -> None:
     offenders: list[str] = []
     for rel in tracked:
         path = ROOT / rel
-        # Secret-SCANNER definitions legitimately contain seeded leak SHAPES as
-        # self-tests (the same exclusion those scanners apply to themselves).
-        if "secret_scan" in path.name:
+        # Secret-SCANNER definitions (and this guard's own pattern literals)
+        # legitimately contain leak SHAPES as self-tests — the same exclusion
+        # those scanners apply to themselves. Their behavior is proven by the
+        # seeded self-tests, not by scanning their definitions.
+        if "secret_scan" in path.name or path.name == Path(__file__).name:
             continue
         if path.suffix in (".py", ".ts", ".tsx", ".json", ".md", ".txt", ".ps1", ".iss",
                            ".spec", ".mjs") and path.exists():

@@ -84,7 +84,7 @@ def _post(port: int, path: str, body: bytes, content_type: str = "application/js
 
 def _get(port: int, path: str) -> dict:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=15) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=15) as response:  # noqa: S310
             payload = response.read().decode("utf-8")
             try:
                 return {"status": response.status, "body": json.loads(payload)}
@@ -170,12 +170,14 @@ def main() -> int:  # noqa: PLR0915 - one linear matrix
     process: subprocess.Popen | None = None
     try:
         # -- fresh install / unlicensed first launch --------------------------
-        process = _spawn(env)
-        runtime = _wait_http(port, "/offline/runtime")
+        process = _spawn(env, "--port", str(port))
+        runtime = _wait_http(port, "/offline/runtime", timeout=120.0)
         rec("PK01 fresh-launch-minimal-path",
             runtime is not None and runtime.get("edition_mode") == "offline",
             "the packaged exe starts from a fresh data root with only System32 on PATH "
             "(no Node.js/Python/pnpm/Docker resolvable)")
+        if runtime is None:
+            raise RuntimeError("packaged app did not come up; aborting the matrix")
 
         status = _get(port, "/offline/license/status")["body"]
         rec("PK02 first-launch-unlicensed", status.get("state") == "no_license",
@@ -223,8 +225,8 @@ def main() -> int:  # noqa: PLR0915 - one linear matrix
         # -- forced termination + crash restart --------------------------------
         process.kill()
         process.wait(timeout=30)
-        process = _spawn(env)
-        runtime = _wait_http(port, "/offline/runtime")
+        process = _spawn(env, "--port", str(port))
+        runtime = _wait_http(port, "/offline/runtime", timeout=120.0)
         survived = _get(port, "/workspaces")
         rec("PK08 crash-restart-preserves-state",
             runtime is not None and survived["status"] == 200
@@ -292,9 +294,9 @@ def main() -> int:  # noqa: PLR0915 - one linear matrix
         # -- expiry transition on a SECOND fresh environment --------------------
         env2 = _minimal_env(work / "env2", 47652)
         port2 = 47652
-        second = _spawn(env2)
+        second = _spawn(env2, "--port", str(port2))
         try:
-            _wait_http(port2, "/offline/runtime")
+            _wait_http(port2, "/offline/runtime", timeout=120.0)
             request2 = work / "request2.json"
             with urllib.request.urlopen(
                     f"http://127.0.0.1:{port2}/offline/license/activation-request",
@@ -425,6 +427,8 @@ def main() -> int:  # noqa: PLR0915 - one linear matrix
         rec("PK22 private-key-absent-from-package",
             key_file.exists() and not leak,
             "the package embeds ONLY the public key; the private key hex appears nowhere")
+    except RuntimeError as exc:
+        rec("PK99 matrix-aborted", False, str(exc))
     finally:
         if process is not None:
             process.kill()

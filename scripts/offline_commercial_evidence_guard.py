@@ -38,11 +38,27 @@ def main() -> int:
     rec("OE00 baseline-valid", reasons == [],
         f"the generated artifact validates at its exact head ({reasons or 'valid'})")
     verdicts = E.control_verdicts(payload, reasons)
-    rec("OE01 controls-pass-for-honest-artifact",
-        verdicts == {"offline_license_enforcement": "PASS",
-                     "offline_windows_package": "PASS",
-                     "offline_commercial_package": "PASS"},
-        f"the three OFFLINE controls PASS together ({verdicts})")
+    coverage_met = E.environment_coverage_met(payload)
+    expected_package = "PASS" if coverage_met else "BLOCKED"
+    rec("OE01 controls-consistent-with-coverage",
+        verdicts["offline_license_enforcement"] == "PASS"
+        and verdicts["offline_windows_package"] == expected_package
+        and verdicts["offline_commercial_package"] == expected_package,
+        f"license control PASSes on green batteries; package/commercial follow the "
+        f"environment minimum honestly ({verdicts}, coverage_met={coverage_met})")
+    import copy as _copy
+    widened = _copy.deepcopy(payload)
+    widened["results"]["package_matrix"]["environments_executed"] = [
+        "windows-11-host", "windows-11-clean-vm"]
+    body = {k: v for k, v in widened.items() if k != "canonical_payload_hash"}
+    widened["canonical_payload_hash"] = canonical_hash(body)
+    widened_verdicts = E.control_verdicts(
+        widened, E.validate(widened, current_commit=commit, current_tree=tree))
+    rec("OE01b coverage-gate-load-bearing",
+        widened_verdicts["offline_windows_package"] == "PASS"
+        and widened_verdicts["offline_commercial_package"] == "PASS",
+        "the SAME green matrix with two executed environments flips package/commercial "
+        "to PASS — the environment gate is the only blocker and works in both directions")
 
     def rehash(document: dict) -> dict:
         body = {k: v for k, v in document.items() if k != "canonical_payload_hash"}

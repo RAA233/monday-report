@@ -139,9 +139,26 @@ def load_and_validate() -> tuple[dict | None, list[str]]:
                              current_tree=git_rev("HEAD^{tree}"))
 
 
+#: Part-O minimum: one current Windows 11 environment PLUS one second clean
+#: Windows environment or VM. A matrix executed on fewer environments can be
+#: fully green and still must NOT yield package acceptance.
+REQUIRED_ENVIRONMENT_MINIMUM = 2
+
+
+def environment_coverage_met(payload: dict) -> bool:
+    environments = (payload.get("results", {}).get("package_matrix", {})
+                    .get("environments_executed", []))
+    return isinstance(environments, list) and len(environments) >= REQUIRED_ENVIRONMENT_MINIMUM
+
+
 def control_verdicts(payload: dict, reasons: list[str]) -> dict[str, str]:
     """The three OFFLINE controls. Deliberately separate from — and unable to
-    influence — the production-target and GA controls."""
+    influence — the production-target and GA controls.
+
+    ``offline_windows_package`` (and therefore ``offline_commercial_package``)
+    requires the executed-environment minimum — a single-host matrix stays
+    BLOCKED no matter how green it is.
+    """
 
     if reasons:
         return {"offline_license_enforcement": "BLOCKED",
@@ -149,10 +166,11 @@ def control_verdicts(payload: dict, reasons: list[str]) -> dict[str, str]:
                 "offline_commercial_package": "BLOCKED"}
     results = payload.get("results", {})
     license_pass = (results.get("license_battery", {}).get("failed") == 0
-                    and results.get("runtime_battery", {}).get("failed") == 0)
-    package_pass = results.get("package_matrix", {}).get("failed") == 0
+                    and results.get("runtime_battery", {}).get("failed") == 0
+                    and results.get("secret_scan", {}).get("failed") == 0)
+    package_pass = (results.get("package_matrix", {}).get("failed") == 0
+                    and environment_coverage_met(payload))
     commercial_pass = (license_pass and package_pass
-                       and results.get("secret_scan", {}).get("failed") == 0
                        and payload.get("package", {}).get("private_key_absent") is True)
     return {
         "offline_license_enforcement": "PASS" if license_pass else "BLOCKED",

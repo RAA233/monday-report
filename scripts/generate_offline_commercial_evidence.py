@@ -69,6 +69,14 @@ def main() -> int:
     all_passed = all(block["failed"] == 0 and block["passed"] > 0
                      for block in (results["license_battery"], results["runtime_battery"],
                                    results["package_matrix"], results["secret_scan"]))
+    # Part-O environment minimum: the package (and commercial) verdicts require
+    # at least E.REQUIRED_ENVIRONMENT_MINIMUM executed clean environments. A
+    # single-host matrix is reported honestly and stays NOT_ACCEPTED.
+    coverage_met = len(results["package_matrix"]["environments_executed"]) >= \
+        E.REQUIRED_ENVIRONMENT_MINIMUM
+    license_accepted = all_passed
+    package_accepted = all_passed and coverage_met
+    commercial_accepted = license_accepted and package_accepted
 
     payload = {
         "schema_version": E.SCHEMA_VERSION,
@@ -95,10 +103,18 @@ def main() -> int:
         },
         "disclosures": dict(E.REQUIRED_DISCLOSURES),
         "results": results,
+        "environment_coverage": {
+            "executed": results["package_matrix"]["environments_executed"],
+            "required_minimum": E.REQUIRED_ENVIRONMENT_MINIMUM,
+            "meets_minimum": coverage_met,
+        },
         "verdicts": {
-            "license": E.LICENSE_VERDICT if all_passed else "OFFLINE_LICENSE_ENFORCEMENT_NOT_ACCEPTED",
-            "package": E.PACKAGE_VERDICT if all_passed else "OFFLINE_WINDOWS_PACKAGE_NOT_ACCEPTED",
-            "commercial": E.COMMERCIAL_VERDICT if all_passed else "OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED",
+            "license": E.LICENSE_VERDICT if license_accepted
+                       else "OFFLINE_LICENSE_ENFORCEMENT_NOT_ACCEPTED",
+            "package": E.PACKAGE_VERDICT if package_accepted
+                       else "OFFLINE_WINDOWS_PACKAGE_NOT_ACCEPTED",
+            "commercial": E.COMMERCIAL_VERDICT if commercial_accepted
+                          else "OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED",
         },
     }
     payload["canonical_payload_hash"] = canonical_hash(payload)
