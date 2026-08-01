@@ -26,6 +26,7 @@ import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -172,6 +173,16 @@ def load_public_key(paths: OfflinePaths) -> bytes | None:
 # Provider assembly
 
 
+@lru_cache(maxsize=1)
+def cached_machine_fingerprint():
+    """Machine facts are stable for the lifetime of the process, but collecting
+    them spawns several PowerShell CIM queries. The runtime therefore collects
+    ONCE per process — every license evaluation and activation export reuses
+    the hashes. A hardware change is picked up on the next application start."""
+
+    return collect_fingerprint()
+
+
 def build_provider(paths: OfflinePaths, install: dict) -> OfflineSignedLicenseProvider | None:
     public_key = load_public_key(paths)
     if public_key is None:
@@ -183,6 +194,7 @@ def build_provider(paths: OfflinePaths, install: dict) -> OfflineSignedLicensePr
             state_secondary_path=paths.data_dir / ".license_state.bin",
             public_key=public_key,
             installation_id=str(install["installation_id"]),
+            fingerprint_supplier=cached_machine_fingerprint,
         )
     )
 
@@ -465,7 +477,7 @@ def build_offline_app(paths: OfflinePaths | None = None):
     @offline_app.get("/offline/license/activation-request")
     async def activation_request():
         document = build_activation_request(
-            collect_fingerprint(),
+            cached_machine_fingerprint(),
             installation_id=str(install["installation_id"]),
             requested_edition="offline-standard",
         )
@@ -675,7 +687,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.activation_request:
         document = build_activation_request(
-            collect_fingerprint(),
+            cached_machine_fingerprint(),
             installation_id=str(install["installation_id"]),
             requested_edition="offline-standard",
         )
