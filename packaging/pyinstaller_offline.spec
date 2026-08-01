@@ -38,6 +38,15 @@ a = Analysis(
         "psycopg",
         "redis",
         "tkinter",
+        # Accidental transitive bundles: nothing in the offline runtime uses
+        # these, and nltk's PyInstaller runtime hook crashes on machines
+        # without a populated user profile.
+        "nltk",
+        "matplotlib",
+        "numpy",
+        "pandas",
+        "scipy",
+        "IPython",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

@@ -45,16 +45,23 @@ def rec(cid: str, ok: bool, detail: str = "") -> None:
 
 
 def _minimal_env(data_dir: Path, port: int) -> dict:
-    """A stripped environment: system32 only on PATH, so the packaged app cannot
-    resolve Node.js, Python, pnpm, or Docker CLIs even if it tried."""
+    """A stripped environment: System32 (+ PowerShell) only on PATH, so the
+    packaged app cannot resolve Node.js, Python, pnpm, or Docker CLIs even if
+    it tried. Standard user-profile variables stay present — every real clean
+    Windows machine has them; the load-bearing restriction is PATH."""
 
     system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    profile = data_dir / "profile"
     return {
         "SystemRoot": system_root,
-        "PATH": f"{system_root}\\System32",
+        "SystemDrive": os.environ.get("SystemDrive", "C:"),
+        "PATH": (f"{system_root}\\System32;"
+                 f"{system_root}\\System32\\WindowsPowerShell\\v1.0"),
         "TEMP": str(data_dir / "tmp"),
         "TMP": str(data_dir / "tmp"),
-        "LOCALAPPDATA": str(data_dir / "localappdata"),
+        "USERPROFILE": str(profile),
+        "APPDATA": str(profile / "AppData" / "Roaming"),
+        "LOCALAPPDATA": str(profile / "AppData" / "Local"),
         "MONDAY_REPORT_OFFLINE_DATA_DIR": str(data_dir / "install"),
         "MONDAY_REPORT_OFFLINE_PORT": str(port),
     }
