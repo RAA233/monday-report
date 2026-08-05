@@ -51,9 +51,15 @@ try {
 
     # Copy the package out of the read-only mapping so the installer can run.
     $work = "C:\env2"
-    New-Item -ItemType Directory -Force "$work\pkg" | Out-Null
-    Copy-Item -Path "C:\pkg\*" -Destination "$work\pkg" -Recurse -Force
-    Write-Signal "03-package-staged.txt" "package copied into the sandbox working area"
+    New-Item -ItemType Directory -Force $work | Out-Null
+    # Verify the installer archive hash INSIDE the sandbox before expanding it,
+    # so Environment 2 proves it received the exact same package bytes.
+    $meta0 = Get-Content "C:	ool\package-meta.json" -Raw | ConvertFrom-Json
+    $zip = (Get-ChildItem "C:\pkg\*.zip" | Select-Object -First 1).FullName
+    $zipHash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+    Set-Content "C:\out-installer-hash.txt" -Value ("installer_sha256=" + $zipHash + " matches_host=" + ($zipHash -eq $meta0.installer_sha256.ToLower())) -Encoding UTF8
+    Expand-Archive -Path $zip -DestinationPath $work -Force
+    Write-Signal "03-package-staged.txt" "installer archive verified and expanded in the sandbox"
 
     $runner = "C:\tool\offline_env_runner.ps1"
     $common = @{

@@ -41,7 +41,7 @@ PS_RUNNER = ROOT / "scripts" / "offline_env_runner.ps1"
 DEFAULT_APP_DIR = ROOT / "output" / "offline-package" / "stage" / "MondayReportOffline"
 
 #: Deliberately SHORT (see the template comment).
-DEFAULT_TRANSFER_ROOT = Path(r"C:\mrx-env2")
+DEFAULT_TRANSFER_ROOT = Path(r"C:\mr-sbx\e2")
 
 
 def _sha256(path: Path) -> str:
@@ -100,8 +100,16 @@ def main(argv: list[str] | None = None) -> int:
     for d in (pkg, tool, inbox, outbox):
         d.mkdir(parents=True, exist_ok=True)
 
-    # Stage the EXACT package bytes.
-    shutil.copytree(app_dir, pkg, dirs_exist_ok=True)
+    # Stage the EXACT package bytes as the single installer archive. Mapping a
+    # 1437-file directory into Windows Sandbox reliably stalls its logon session
+    # (the VM boots but never runs the LogonCommand); a one-file mapping boots
+    # cleanly, and the guest expands and hash-verifies the archive itself.
+    archives = sorted(app_dir.parents[1].glob("MondayReportOffline-*-win64.zip"))
+    if not archives:
+        print(json.dumps({"guard": "offline_sandbox", "detail": "installer archive missing",
+                          "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
+        return 1
+    shutil.copy2(archives[-1], pkg / archives[-1].name)
     shutil.copy2(PS_RUNNER, tool / PS_RUNNER.name)
     shutil.copy2(SESSION, tool / SESSION.name)
 
@@ -168,8 +176,15 @@ def main(argv: list[str] | None = None) -> int:
                          label="environment 2 matrix completion"):
             return 1
     finally:
-        if not args.keep_open:
-            close_sandbox()
+        # The guest shuts itself down after MATRIX_COMPLETE. Only wait here --
+        # repeated host-side force-teardown is what degraded the Sandbox logon
+        # service previously.
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            probe = subprocess.run(["tasklist"], capture_output=True, text=True, timeout=60)
+            if "vmmemWindowsSandbox" not in probe.stdout and "WindowsSandboxServer" not in probe.stdout:
+                break
+            time.sleep(5)
 
     error_marker = outbox / "99-session-error.txt"
     result_path = outbox / "environment-result.json"
