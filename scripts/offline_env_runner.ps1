@@ -111,7 +111,10 @@ function Invoke-Api {
           [int]$TimeoutSec = 120)
     $uri = "http://127.0.0.1:$P$Route"
     try {
-        if ($Body -ne $null) {
+        # A [string] parameter defaulting to $null is bound as "" -- comparing
+        # against $null would be true for a GET and PowerShell then refuses to
+        # send a content-body with that verb. Test for actual content instead.
+        if (-not [string]::IsNullOrEmpty($Body)) {
             $r = Invoke-WebRequest -Uri $uri -Method $Method -Body $Body `
                  -ContentType "application/json" -TimeoutSec $TimeoutSec -UseBasicParsing
         } else {

@@ -16,6 +16,9 @@
     key argument and reads none.
 #>
 $ErrorActionPreference = "Stop"
+# Child processes report through their own logs and exit codes; a non-zero child
+# must not abort this driver before it writes the environment result.
+$PSNativeCommandUseErrorActionPreference = $false
 
 function Write-Signal {
     param([string]$Name, [string]$Text = "")

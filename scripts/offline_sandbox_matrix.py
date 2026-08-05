@@ -134,8 +134,10 @@ def main(argv: list[str] | None = None) -> int:
     wsb = root / "environment2.wsb"
     wsb.write_text(config, encoding="utf-8")
 
+    # A previous VM must be fully released before the next one starts; launching
+    # too soon leaves a sandbox that boots but never runs its LogonCommand.
     close_sandbox()
-    time.sleep(3)
+    time.sleep(25)
     subprocess.Popen([str(SANDBOX_EXE), str(wsb)])
 
     try:
