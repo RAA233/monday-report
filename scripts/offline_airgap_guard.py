@@ -144,6 +144,70 @@ def boundary_battery(work: Path) -> None:
         "the operator refuses to sign a request carrying raw identifier material")
 
 
+PS_RUNNER = ROOT / "scripts" / "offline_env_runner.ps1"
+
+
+def _run_ps_runner(extra_args: list[str], *, env_overrides: dict | None = None,
+                   work: Path) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env.update(env_overrides or {})
+    args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(PS_RUNNER),
+            "-Phase", "request", "-EnvLabel", "AIRGAP_PROBE",
+            "-PackageDir", str(work / "pkg"), "-WorkDir", str(work / "env"),
+            "-TransferOut", str(work / "out"), *extra_args]
+    return subprocess.run(args, env=env, capture_output=True, text=True, timeout=300)
+
+
+def powershell_boundary_battery(work: Path) -> None:
+    """The Sandbox environment has no Python, so its runner is PowerShell. The
+    SAME boundary must hold there — proven by execution, not by analogy."""
+
+    if not PS_RUNNER.exists():
+        rec("AG21 powershell-runner-present", False, "PowerShell environment runner missing")
+        return
+    rec("AG21 powershell-runner-present", True,
+        "a PowerShell environment runner exists for Python-free environments")
+
+    source = PS_RUNNER.read_text(encoding="utf-8")
+    # Ask PowerShell for the DECLARED parameter names rather than grepping the
+    # text (which false-positives on the guard's own key-detection variables).
+    listing = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         f"(Get-Command '{PS_RUNNER}').Parameters.Keys -join ','"],
+        capture_output=True, text=True, timeout=180).stdout.strip()
+    declared = {p.strip().lower() for p in listing.split(",") if p.strip()}
+    key_shaped = {p for p in declared
+                  if any(tok in p for tok in ("key", "private", "secret", "signing"))}
+    rec("AG22 powershell-runner-declares-no-key-parameter",
+        bool(declared) and not key_shaped,
+        f"the PowerShell runner declares no signing-key parameter "
+        f"({len(declared)} parameters, none key-shaped)")
+
+    def aborted(completed: subprocess.CompletedProcess) -> bool:
+        return (completed.returncode == 2
+                and "AIRGAP_BOUNDARY_VIOLATION" in completed.stdout)
+
+    rec("AG23 powershell-key-argument-refused",
+        aborted(_run_ps_runner(["-KeyFile", "C:\\k.hex"], work=work)),
+        "a key-shaped argument aborts the PowerShell runner as a boundary "
+        "violation (captured before parameter binding can mask it)")
+    rec("AG24 powershell-key-env-refused",
+        aborted(_run_ps_runner([], env_overrides={
+            "MONDAY_REPORT_OFFLINE_KEYS_DIR": str(work / "keys")}, work=work)),
+        "a key-shaped environment reference aborts the PowerShell runner")
+
+    smuggle = work / "ps-smuggle"
+    smuggle.mkdir(parents=True, exist_ok=True)
+    (smuggle / "issuer_private.hex").write_text(secrets.token_hex(32), encoding="utf-8")
+    rec("AG25 powershell-key-file-in-transfer-refused",
+        aborted(_run_ps_runner(["-TransferIn", str(smuggle)], work=work)),
+        "private-key material in the transfer folder aborts the PowerShell runner")
+
+    rec("AG26 powershell-runner-cannot-sign",
+        "Ed25519" not in source and "sign(" not in source.lower(),
+        "the PowerShell runner has no signing capability at all")
+
+
 def protocol_battery(work: Path) -> None:
     """The full request -> issue -> return round trip, with only signed licenses
     crossing back into the environment."""
@@ -279,6 +343,7 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="offline-airgap-"))
     try:
         boundary_battery(work)
+        powershell_boundary_battery(work)
         protocol_battery(work)
         mutation_cycle(work)
     finally:
