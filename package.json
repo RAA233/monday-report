@@ -145,11 +145,15 @@
     "audit:local-snapshot-atomicity": "python scripts/local_snapshot_atomicity_guard.py",
     "audit:offline-license": "python scripts/offline_license_guard.py",
     "audit:offline-runtime": "python scripts/offline_runtime_guard.py",
-    "audit:offline-package": "python scripts/offline_package_guard.py",
+    "audit:offline-package": "python scripts/offline_package_matrix.py",
     "audit:offline-secret-scan": "python scripts/offline_secret_scan_guard.py",
     "audit:offline-commercial-evidence": "python scripts/offline_commercial_evidence_guard.py",
     "ga:offline-commercial-evidence": "python scripts/generate_offline_commercial_evidence.py",
-    "build:offline-package": "python packaging/build_offline_package.py"
+    "build:offline-package": "python packaging/build_offline_package.py",
+    "audit:offline-airgap": "python scripts/offline_airgap_guard.py",
+    "offline:environment-runner": "python scripts/offline_env_runner.py",
+    "offline:issue-test-license": "python scripts/offline_operator_issue.py",
+    "offline:combine-environments": "python scripts/offline_combine_environments.py"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
