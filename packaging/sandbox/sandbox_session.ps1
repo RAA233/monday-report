@@ -26,6 +26,7 @@ function Write-Signal {
 }
 
 try {
+    Write-Signal "BOOT_STARTED.txt" ("sandbox session started; PS " + $PSVersionTable.PSVersion)
     Write-Signal "00-session-started.txt" ("sandbox session started; PS " + $PSVersionTable.PSVersion)
 
     # Clean-state facts BEFORE anything is installed.
@@ -68,6 +69,7 @@ try {
         -SourceCommit $meta.source_commit -SourceTree $meta.source_tree `
         -PackageVersion $meta.package_version -InstallerSha256 $meta.installer_sha256 `
         *> "C:\out\04-request-phase.log"
+    Write-Signal "ACTIVATION_REQUEST_READY.txt" "activation request exported"
     Write-Signal "05-awaiting-license.txt" "activation request exported; awaiting signed license from the host"
 
     # PAUSE: wait for the host to sign OUTSIDE the sandbox.
@@ -76,6 +78,7 @@ try {
         if ((Get-Date) -gt $deadline) { throw "timed out waiting for the signed license" }
         Start-Sleep -Seconds 3
     }
+    Write-Signal "LICENSE_IMPORTED.txt" "signed license received from the host"
     Write-Signal "06-license-received.txt" "signed license received; resuming the matrix"
 
     & powershell -NoProfile -ExecutionPolicy Bypass -File $runner `
@@ -86,8 +89,16 @@ try {
         -PackageVersion $meta.package_version -InstallerSha256 $meta.installer_sha256 `
         *> "C:\out\07-resume-phase.log"
 
+    Write-Signal "MATRIX_COMPLETE.txt" "environment 2 matrix finished"
     Write-Signal "99-session-complete.txt" "environment 2 matrix finished"
 } catch {
     Set-Content "C:\out\99-session-error.txt" -Value ("sandbox session failed: " + $_.Exception.Message) -Encoding UTF8
     Write-Signal "99-session-complete.txt" "environment 2 matrix aborted"
 }
+
+# Exit the sandbox NORMALLY from inside. Windows Sandbox does not close when its
+# LogonCommand returns, and host-side force-teardown is what degraded the
+# Sandbox logon service on this machine -- so the guest shuts itself down and
+# the host merely waits for the VM to release.
+Start-Sleep -Seconds 5
+try { Stop-Computer -Force -ErrorAction Stop } catch { & shutdown.exe /s /t 0 }

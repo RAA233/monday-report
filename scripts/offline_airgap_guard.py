@@ -203,9 +203,29 @@ def powershell_boundary_battery(work: Path) -> None:
         aborted(_run_ps_runner(["-TransferIn", str(smuggle)], work=work)),
         "private-key material in the transfer folder aborts the PowerShell runner")
 
-    rec("AG26 powershell-runner-cannot-sign",
-        "Ed25519" not in source and "sign(" not in source.lower(),
-        "the PowerShell runner has no signing capability at all")
+    # Capability, not vocabulary: strip comments first, then look for APIs that
+    # could actually produce a signature. A comment explaining why an Ed25519
+    # PUBLIC key is 32 bytes is documentation, not signing power.
+    executable_lines = []
+    in_block = False
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("<#"):
+            in_block = True
+        if in_block:
+            if "#>" in stripped:
+                in_block = False
+            continue
+        executable_lines.append(line.split("#", 1)[0])
+    executable = "\n".join(executable_lines).lower()
+    # Only PRIVATE-KEY primitives count. Hashing (SHA-256) is not signing and is
+    # required here: the environment must recompute package hashes itself.
+    signing_apis = (".signdata(", ".signhash(", "ed25519privatekey", "rsacryptoserviceprovider",
+                    "ecdsacng", "new-selfsignedcertificate", "bouncycastle",
+                    "cryptography.rsa]", "cryptography.ecdsa]", "cryptography.dsa]")
+    found = [api for api in signing_apis if api in executable]
+    rec("AG26 powershell-runner-cannot-sign", not found,
+        f"the PowerShell runner invokes no signing API in executable code ({found or 'none'})")
 
 
 def protocol_battery(work: Path) -> None:
