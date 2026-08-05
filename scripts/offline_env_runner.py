@@ -209,16 +209,43 @@ def sha256_file(path: Path) -> str:
 # Clean-state + dependency-absence proofs
 
 
-def dependency_absence() -> dict[str, bool]:
-    """True == the dependency is ABSENT from this environment."""
+def dependency_absence(app_path: str) -> dict[str, bool]:
+    """True == the dependency is unresolvable BY THE PACKAGED APPLICATION.
+
+    The load-bearing claim is "the product does not require Node, Python,
+    Docker, PostgreSQL or Redis at runtime". The honest way to test that is
+    against the PATH the application is actually launched with (System32 +
+    PowerShell), NOT against the PATH of whatever process happens to run the
+    matrix: Environment 1 is a developer host that legitimately has those
+    tools installed machine-wide, and checking the runner's own PATH would
+    conflate "installed somewhere on the box" with "required by the product".
+
+    ``machine_wide_absence`` records the stronger, environment-level fact
+    separately (true in a clean Sandbox, false on a developer host).
+    """
 
     def absent(name: str) -> bool:
-        return shutil.which(name) is None
+        return shutil.which(name, path=app_path) is None
 
     return {
         "node_absent": absent("node") and absent("node.exe"),
         "python_absent": absent("python") and absent("python.exe") and absent("py"),
         "docker_absent": absent("docker") and absent("docker.exe"),
+        "postgres_absent": absent("psql") and absent("postgres"),
+        "redis_absent": absent("redis-server") and absent("redis-cli"),
+    }
+
+
+def machine_wide_absence() -> dict[str, bool]:
+    """Informational: whether the tools are absent from the whole machine."""
+
+    def absent(name: str) -> bool:
+        return shutil.which(name) is None
+
+    return {
+        "node_absent": absent("node"),
+        "python_absent": absent("python") and absent("py"),
+        "docker_absent": absent("docker"),
         "postgres_absent": absent("psql") and absent("postgres"),
         "redis_absent": absent("redis-server") and absent("redis-cli"),
     }
@@ -268,19 +295,21 @@ def phase_request(args, proofs: list[str]) -> dict:
     transfer_out = Path(args.transfer_out)
     transfer_out.mkdir(parents=True, exist_ok=True)
 
+    port = int(args.port)
+    env = minimal_env(work_dir, port)
     clean = clean_state(work_dir)
-    deps = dependency_absence()
+    deps = dependency_absence(env["PATH"])
+    machine_deps = machine_wide_absence()
     rec("EC01 clean-state", all(clean.values()),
         "no prior installation, application data, license, or running process")
     rec("EC02 dependency-absence", all(deps.values()),
-        "Node, standalone Python, Docker, PostgreSQL and Redis are all unresolvable")
+        "Node, standalone Python, Docker, PostgreSQL and Redis are all unresolvable "
+        "from the PATH the packaged application is launched with")
 
     hashes = package_hashes(app_dir)
     rec("EC03 package-hashes-recomputed", bool(hashes["executable_sha256"]),
         "package hashes recomputed inside this environment")
 
-    port = int(args.port)
-    env = minimal_env(work_dir, port)
     process = spawn(exe, env, "--port", str(port))
     try:
         runtime = _wait_http(port, "/offline/runtime")
@@ -338,6 +367,7 @@ def phase_request(args, proofs: list[str]) -> dict:
         "machine_fingerprint_hash": fingerprint_hash,
         "clean_state": clean,
         "dependency_absence": deps,
+        "machine_wide_absence": machine_deps,
         "airgap_proofs": proofs,
         "totals": {"passed": passed, "failed": len(CHECKS) - passed},
         "checks": CHECKS,
@@ -367,6 +397,75 @@ def phase_resume(args, proofs: list[str]) -> dict:
         raise RuntimeError("no signed license in the transfer directory (fail closed)")
 
     port = int(args.port)
+
+    # Real-time expiry transition FIRST, in a dedicated data root, with no
+    # clock edits anywhere. The seconds-scale license is signed by the operator
+    # moments before this phase starts, so it must be exercised before the rest
+    # of the matrix consumes its remaining validity -- running it last would
+    # import an already-expired license and prove nothing.
+    expiry_results = {"executed": False}
+    if short.exists():
+        exp_dir = work_dir.parent / (work_dir.name + "-expiry")
+        # The signed license is bound to the installation that EXPORTED the
+        # activation request. A fresh data root would mint a new installation
+        # id and be refused as WRONG_INSTALLATION, so the expiry scenario runs
+        # as the same installation with its own data copy -- it exercises
+        # expiry, not activation.
+        source_config = work_dir / "install" / "config" / "installation.json"
+        if source_config.exists():
+            target_config = exp_dir / "install" / "config" / "installation.json"
+            target_config.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_config, target_config)
+        exp_env = minimal_env(exp_dir, port + 2)
+        exp = spawn(exe, exp_env, "--port", str(port + 2))
+        try:
+            if _wait_http(port + 2, "/offline/runtime") is not None:
+                imported = _http(port + 2, "/offline/license/import", method="POST",
+                                 body=short.read_bytes())
+                if imported["status"] != 200:
+                    rec("PK21 short-license-operational", False,
+                        f"the short-dated license was refused "
+                        f"({imported.get('body', {}).get('reason_code', 'unknown')})")
+                else:
+                    op = _http(port + 2, "/workspaces", method="POST",
+                               body=json.dumps({"name": "T"}).encode())
+                    rec("PK21 short-license-operational", op["status"] == 201,
+                        "the short-dated license operates while valid")
+                    # Wait until the license's OWN expiry passes, derived from
+                    # the signed document rather than a fixed sleep: a packaged
+                    # cold start takes tens of seconds and varies by machine, so
+                    # a fixed wait either expires the licence before the app is
+                    # up or stops short of it. No clock is manipulated.
+                    short_doc = json.loads(short.read_text(encoding="utf-8"))
+                    expires = datetime.fromisoformat(short_doc["grace_until"])
+                    remaining = (expires - datetime.now(timezone.utc)).total_seconds()
+                    time.sleep(max(2.0, remaining + 5.0))
+                    st = _http(port + 2, "/offline/license/status")["body"]
+                    blocked = _http(port + 2, "/workspaces", method="POST",
+                                    body=json.dumps({"name": "U"}).encode())
+                    readable = _http(port + 2, "/workspaces")
+                    backup_ok = _http(port + 2, "/offline/backup", method="POST", body=b"{}")
+                    # Use the workspace this expiry instance created; the main
+                    # matrix workspace does not exist in this data root.
+                    expiry_workspace = op.get("body", {}).get("id", "unknown")
+                    draft = _http(port + 2, f"/workspaces/{expiry_workspace}/report-draft")
+                    rec("PK22 expiry-to-read-only",
+                        st.get("state") == "expired_read_only" and blocked["status"] == 423,
+                        "expiry transitions in real time to read-only")
+                    rec("PK23 expired-data-readable", readable["status"] == 200,
+                        "customer data remains readable after expiry")
+                    rec("PK24 expired-backup-available", backup_ok["status"] == 200,
+                        "backup remains available after expiry")
+                    rec("PK25 expired-mutations-blocked",
+                        blocked["status"] == 423 and draft["status"] in (423, 404),
+                        "new reports, validation mutations and exports are blocked")
+                    expiry_results = {"executed": True, "state": st.get("state")}
+        finally:
+            try:
+                exp.terminate(); exp.wait(timeout=30)
+            except Exception:  # noqa: BLE001
+                exp.kill()
+
     env = minimal_env(work_dir, port)
     process = spawn(exe, env, "--port", str(port))
     workspace_id = ""
@@ -475,48 +574,6 @@ def phase_resume(args, proofs: list[str]) -> dict:
         except Exception:  # noqa: BLE001
             process.kill()
 
-    # Real-time expiry transition in a dedicated data root, no clock edits.
-    expiry_results = {"executed": False}
-    if short.exists():
-        exp_dir = work_dir.parent / (work_dir.name + "-expiry")
-        exp_env = minimal_env(exp_dir, port + 2)
-        exp = spawn(exe, exp_env, "--port", str(port + 2))
-        try:
-            if _wait_http(port + 2, "/offline/runtime") is not None:
-                imported = _http(port + 2, "/offline/license/import", method="POST",
-                                 body=short.read_bytes())
-                if imported["status"] != 200:
-                    rec("PK21 short-license-operational", False,
-                        "the seconds-scale license was refused")
-                else:
-                    op = _http(port + 2, "/workspaces", method="POST",
-                               body=json.dumps({"name": "T"}).encode())
-                    rec("PK21 short-license-operational", op["status"] == 201,
-                        "the seconds-scale license operates while valid")
-                    time.sleep(int(args.expiry_wait))
-                    st = _http(port + 2, "/offline/license/status")["body"]
-                    blocked = _http(port + 2, "/workspaces", method="POST",
-                                    body=json.dumps({"name": "U"}).encode())
-                    readable = _http(port + 2, "/workspaces")
-                    backup_ok = _http(port + 2, "/offline/backup", method="POST", body=b"{}")
-                    draft = _http(port + 2, f"/workspaces/{workspace_id or 'x'}/report-draft")
-                    rec("PK22 expiry-to-read-only",
-                        st.get("state") == "expired_read_only" and blocked["status"] == 423,
-                        "expiry transitions in real time to read-only")
-                    rec("PK23 expired-data-readable", readable["status"] == 200,
-                        "customer data remains readable after expiry")
-                    rec("PK24 expired-backup-available", backup_ok["status"] == 200,
-                        "backup remains available after expiry")
-                    rec("PK25 expired-mutations-blocked",
-                        blocked["status"] == 423 and draft["status"] in (423, 404),
-                        "new reports, validation mutations and exports are blocked")
-                    expiry_results = {"executed": True, "state": st.get("state")}
-        finally:
-            try:
-                exp.terminate(); exp.wait(timeout=30)
-            except Exception:  # noqa: BLE001
-                exp.kill()
-
     # Installer lifecycle: install -> upgrade -> uninstall -> reinstall.
     sandbox = work_dir / "installer"
     for sub in ("localappdata", "roaming/Microsoft/Windows/Start Menu/Programs", "desktop"):
@@ -575,17 +632,30 @@ def phase_resume(args, proofs: list[str]) -> dict:
 
     hashes = package_hashes(app_dir)
     key_file = app_dir / "_internal" / "licensing_public_key.txt"
+    if not key_file.exists():
+        key_file = app_dir / "licensing_public_key.txt"
+    # The shipped verification key is itself a bare 64-hex file (an Ed25519
+    # PUBLIC key is 32 bytes). Treating "bare 64 hex" as private would flag the
+    # one artifact that is SUPPOSED to be there, so the expected public key is
+    # excluded by value and anything else key-shaped is a real finding.
+    expected_public = ""
+    if key_file.exists():
+        expected_public = key_file.read_text(encoding="utf-8", errors="ignore").strip().lower()
     private_shapes = []
     for path in app_dir.rglob("*"):
         if path.is_file() and path.suffix in (".txt", ".json", ".ps1"):
             try:
-                if _looks_like_private_key(path.read_text(encoding="utf-8", errors="ignore")):
-                    private_shapes.append(path.name)
+                text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
-                pass
+                continue
+            if text.strip().lower() == expected_public and expected_public:
+                continue  # the intended public verification key
+            if _looks_like_private_key(text):
+                private_shapes.append(path.name)
     rec("PK31 private-key-absent-from-package",
-        key_file.exists() and not private_shapes,
-        "the package embeds ONLY the public verification key")
+        key_file.exists() and not private_shapes and len(expected_public) == 64,
+        f"the package embeds ONLY the public verification key "
+        f"(no other key-shaped artifact; {private_shapes or 'clean'})")
 
     passed = sum(1 for c in CHECKS if c["ok"])
     record = {

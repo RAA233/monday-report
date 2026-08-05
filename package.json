@@ -153,7 +153,8 @@
     "audit:offline-airgap": "python scripts/offline_airgap_guard.py",
     "offline:environment-runner": "python scripts/offline_env_runner.py",
     "offline:issue-test-license": "python scripts/offline_operator_issue.py",
-    "offline:combine-environments": "python scripts/offline_combine_environments.py"
+    "offline:combine-environments": "python scripts/offline_combine_environments.py",
+    "audit:offline-sandbox": "python scripts/offline_sandbox_matrix.py"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

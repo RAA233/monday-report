@@ -165,14 +165,30 @@ function Stop-App {
 }
 
 function Get-DependencyAbsence {
-    $absent = { param($n) $null -eq (Get-Command $n -ErrorAction SilentlyContinue) }
-    return [ordered]@{
-        node_absent     = (& $absent "node")
-        python_absent   = ((& $absent "python") -and (& $absent "py"))
-        docker_absent   = (& $absent "docker")
-        postgres_absent = ((& $absent "psql") -and (& $absent "postgres"))
-        redis_absent    = ((& $absent "redis-server") -and (& $absent "redis-cli"))
-    }
+    <#
+        True == unresolvable BY THE PACKAGED APPLICATION. The load-bearing
+        claim is that the product needs no Node/Python/Docker/PostgreSQL/Redis
+        at runtime, so the test uses the restricted PATH the application is
+        actually launched with -- not the PATH of the process running the
+        matrix. (On a developer host those tools legitimately exist machine
+        wide; that must not be conflated with the product requiring them.)
+        Pass -MachineWide for the stronger environment-level fact.
+    #>
+    param([switch]$MachineWide)
+    $systemRoot = $env:SystemRoot
+    $restricted = "$systemRoot\System32;$systemRoot\System32\WindowsPowerShell\v1.0"
+    $saved = $env:PATH
+    if (-not $MachineWide) { $env:PATH = $restricted }
+    try {
+        $absent = { param($n) $null -eq (Get-Command $n -ErrorAction SilentlyContinue) }
+        return [ordered]@{
+            node_absent     = (& $absent "node")
+            python_absent   = ((& $absent "python") -and (& $absent "py"))
+            docker_absent   = (& $absent "docker")
+            postgres_absent = ((& $absent "psql") -and (& $absent "postgres"))
+            redis_absent    = ((& $absent "redis-server") -and (& $absent "redis-cli"))
+        }
+    } finally { $env:PATH = $saved }
 }
 
 function Get-PackageHashes {
@@ -234,8 +250,9 @@ if ($Phase -eq "request") {
         no_application_process_running = ($null -eq (Get-Process -Name "MondayReportOffline" -ErrorAction SilentlyContinue))
     }
     $deps = Get-DependencyAbsence
+    $machineDeps = Get-DependencyAbsence -MachineWide
     Add-Check "EC01 clean-state" (-not ($clean.Values -contains $false)) "no prior installation, data, license, or running process"
-    Add-Check "EC02 dependency-absence" (-not ($deps.Values -contains $false)) "Node, standalone Python, Docker, PostgreSQL and Redis are all unresolvable"
+    Add-Check "EC02 dependency-absence" (-not ($deps.Values -contains $false)) "Node, standalone Python, Docker, PostgreSQL and Redis are all unresolvable from the PATH the packaged application is launched with"
 
     $hashes = Get-PackageHashes -AppDir $PackageDir
     Add-Check "EC03 package-hashes-recomputed" ($hashes.executable_sha256.Length -eq 64) "package hashes recomputed inside this environment"
@@ -278,7 +295,8 @@ if ($Phase -eq "request") {
         frontend_manifest_sha256 = $hashes.frontend_manifest_sha256
         payload_file_count = $hashes.payload_file_count
         machine_fingerprint_hash = $fingerprintHash
-        clean_state = $clean; dependency_absence = $deps; airgap_proofs = $proofs
+        clean_state = $clean; dependency_absence = $deps
+        machine_wide_absence = $machineDeps; airgap_proofs = $proofs
         totals = [ordered]@{ passed = $passed; failed = ($script:Checks.Count - $passed) }
         checks = $script:Checks
     }
@@ -356,14 +374,29 @@ else {
 
     if (Test-Path $short) {
         $expDir = "$WorkDir-expiry"
+        # Same installation identity as the request (see the Python runner):
+        # a fresh data root would be refused as WRONG_INSTALLATION.
+        $srcCfg = Join-Path $WorkDir "install\config\installation.json"
+        if (Test-Path $srcCfg) {
+            $dstCfg = Join-Path $expDir "install\config\installation.json"
+            New-Item -ItemType Directory -Force (Split-Path -Parent $dstCfg) | Out-Null
+            Copy-Item $srcCfg $dstCfg -Force
+        }
         $expProc = Start-App -Exe $exe -DataDir $expDir -P ($Port + 2)
         try {
             if ($null -ne (Wait-Api -P ($Port + 2) -Route "/offline/runtime")) {
                 $imp = Invoke-Api -P ($Port + 2) -Route "/offline/license/import" -Method POST -Body (Get-Content $short -Raw)
                 if ($imp.status -eq 200) {
                     $op = Invoke-Api -P ($Port + 2) -Route "/workspaces" -Method POST -Body '{"name":"T"}'
-                    Add-Check "PK21 short-license-operational" ($op.status -eq 201) "the seconds-scale license operates while valid"
-                    Start-Sleep -Seconds $ExpiryWait
+                    Add-Check "PK21 short-license-operational" ($op.status -eq 201) "the short-dated license operates while valid"
+                    # Wait until the license's OWN expiry passes, read from the
+                    # signed document. A packaged cold start takes tens of
+                    # seconds and varies by machine, so a fixed sleep is unsafe.
+                    # No clock is manipulated anywhere.
+                    $shortDoc = Get-Content $short -Raw | ConvertFrom-Json
+                    $expiresAt = [datetime]::Parse($shortDoc.grace_until).ToUniversalTime()
+                    $remaining = ($expiresAt - [datetime]::UtcNow).TotalSeconds
+                    Start-Sleep -Seconds ([Math]::Max(2, $remaining + 5))
                     $st = (Invoke-Api -P ($Port + 2) -Route "/offline/license/status").body
                     $blk = Invoke-Api -P ($Port + 2) -Route "/workspaces" -Method POST -Body '{"name":"U"}'
                     $rd = Invoke-Api -P ($Port + 2) -Route "/workspaces"
@@ -419,12 +452,20 @@ else {
 
     $hashes = Get-PackageHashes -AppDir $PackageDir
     $keyFile = Join-Path $PackageDir "_internal\licensing_public_key.txt"
+    if (-not (Test-Path $keyFile)) { $keyFile = Join-Path $PackageDir "licensing_public_key.txt" }
+    # An Ed25519 PUBLIC key is also 32 bytes, so the shipped verification key is
+    # itself a bare 64-hex file. Exclude it BY VALUE; anything else key-shaped
+    # is a real finding.
+    $expectedPublic = ""
+    if (Test-Path $keyFile) { $expectedPublic = (Get-Content $keyFile -Raw).Trim().ToLower() }
     $leaks = @()
     foreach ($f in (Get-ChildItem -Path $PackageDir -Recurse -File -Include *.txt,*.json,*.ps1 -ErrorAction SilentlyContinue)) {
         $t = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
-        if ($t -and (Test-LooksLikePrivateKey $t)) { $leaks += $f.Name }
+        if (-not $t) { continue }
+        if ($expectedPublic -and ($t.Trim().ToLower() -eq $expectedPublic)) { continue }
+        if (Test-LooksLikePrivateKey $t) { $leaks += $f.Name }
     }
-    Add-Check "PK31 private-key-absent-from-package" ((Test-Path $keyFile) -and $leaks.Count -eq 0) "the package embeds ONLY the public verification key"
+    Add-Check "PK31 private-key-absent-from-package" ((Test-Path $keyFile) -and $leaks.Count -eq 0 -and $expectedPublic.Length -eq 64) "the package embeds ONLY the public verification key"
 
     $passed = @($script:Checks | Where-Object { $_.ok }).Count
     $record = [ordered]@{

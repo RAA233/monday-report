@@ -1,0 +1,57 @@
+<!--
+  Locked-down Windows Sandbox configuration for ENVIRONMENT_2.
+
+  Networking is disabled, every redirection channel is off, and NO host profile,
+  repository, credential, or signing-key directory is mapped. Only four
+  task-specific transfer folders are exposed:
+
+    C:\pkg  package input            (read-only)
+    C:\in   signed-license input     (host -> sandbox; signed licenses ONLY)
+    C:\out  activation-request output + redacted results (sandbox -> host)
+    C:\tool environment-side runner  (read-only; PowerShell, no signing code)
+
+  The operator signing-key directory is never mapped. The runner inside the
+  sandbox refuses key-shaped arguments, key-shaped environment references, and
+  key material found in C:\in.
+
+  NOTE: mapped HostFolder paths must be SHORT. Windows Sandbox silently fails to
+  start the logon session when a mapped host path is very long, which presents
+  as a sandbox that boots but never runs its LogonCommand.
+
+  __PLACEHOLDERS__ are substituted by scripts/offline_sandbox_matrix.py.
+-->
+<Configuration>
+  <VGpu>Disable</VGpu>
+  <Networking>Disable</Networking>
+  <AudioInput>Disable</AudioInput>
+  <VideoInput>Disable</VideoInput>
+  <PrinterRedirection>Disable</PrinterRedirection>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
+  <ProtectedClient>Disable</ProtectedClient>
+  <MemoryInMB>8192</MemoryInMB>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>__PKG__</HostFolder>
+      <SandboxFolder>C:\pkg</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>__TOOL__</HostFolder>
+      <SandboxFolder>C:\tool</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>__IN__</HostFolder>
+      <SandboxFolder>C:\in</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>__OUT__</HostFolder>
+      <SandboxFolder>C:\out</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell -NoProfile -ExecutionPolicy Bypass -File C:\tool\sandbox_session.ps1</Command>
+  </LogonCommand>
+</Configuration>

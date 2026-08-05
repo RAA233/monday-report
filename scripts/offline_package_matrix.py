@@ -129,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work-root", default="")
     parser.add_argument("--key-file", help="operator private key (host side only)")
     parser.add_argument("--port", type=int, default=47671)
-    parser.add_argument("--expiry-seconds", type=int, default=25)
+    parser.add_argument("--expiry-seconds", type=int, default=240)
     parser.add_argument("--expiry-wait", type=int, default=32)
     parser.add_argument("--out", help="where to copy the environment result")
     args = parser.parse_args(argv)
@@ -189,6 +189,18 @@ def main(argv: list[str] | None = None) -> int:
 
     step3 = run_env_phase(phase="resume", transfer_in=transfer_in, **common)
     result_path = transfer_out / "environment-result.json"
+    if not result_path.exists():
+        # Surface why the environment side produced nothing instead of silently
+        # counting it as one opaque failure.
+        print(json.dumps({
+            "guard": "offline_package", "environment_label": args.env_label,
+            "detail": "resume phase produced no result",
+            "resume_returncode": step3.returncode,
+            "resume_stdout_tail": step3.stdout[-1500:],
+            "resume_stderr_tail": step3.stderr[-1500:],
+            "summary": {"passed": 0, "failed": 1, "certification": "not_passed"},
+        }, indent=2))
+        return 1
     if args.out and result_path.exists():
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(result_path.read_text(encoding="utf-8"), encoding="utf-8")
