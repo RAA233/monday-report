@@ -47,25 +47,50 @@ def main() -> int:
         f"license control PASSes on green batteries; package/commercial follow the "
         f"environment minimum honestly ({verdicts}, coverage_met={coverage_met})")
     import copy as _copy
-    widened = _copy.deepcopy(payload)
-    # A CONSISTENT two-environment artifact: the matrix records two executed
-    # environments and the verdict block/coverage flag say what that implies.
-    # (An inconsistent one is rejected by OE12b/OE12c.)
-    widened["results"]["package_matrix"]["environments_executed"] = [
-        "windows-11-host", "windows-11-clean-vm"]
-    widened["environment_coverage"]["executed"] = ["windows-11-host", "windows-11-clean-vm"]
-    widened["environment_coverage"]["meets_minimum"] = True
-    widened["verdicts"]["package"] = E.PACKAGE_VERDICT
-    widened["verdicts"]["commercial"] = E.COMMERCIAL_VERDICT
-    body = {k: v for k, v in widened.items() if k != "canonical_payload_hash"}
-    widened["canonical_payload_hash"] = canonical_hash(body)
+
+    def _consistent(document: dict, environments: list[str], accepted: bool = True) -> dict:
+        """Rewrite the coverage-bearing fields consistently, then rehash.
+
+        An INCONSISTENT edit is what OE12b/OE12c reject; this helper produces the
+        consistent form so the coverage gate itself is what is under test.
+        """
+
+        document["results"]["package_matrix"]["environments_executed"] = list(environments)
+        document["environment_coverage"]["executed"] = list(environments)
+        meets = len(environments) >= E.REQUIRED_ENVIRONMENT_MINIMUM and accepted
+        document["environment_coverage"]["meets_minimum"] = (
+            len(environments) >= E.REQUIRED_ENVIRONMENT_MINIMUM)
+        document["verdicts"]["package"] = (
+            E.PACKAGE_VERDICT if meets else "OFFLINE_WINDOWS_PACKAGE_NOT_ACCEPTED")
+        document["verdicts"]["commercial"] = (
+            E.COMMERCIAL_VERDICT if meets else "OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED")
+        body = {k: v for k, v in document.items() if k != "canonical_payload_hash"}
+        document["canonical_payload_hash"] = canonical_hash(body)
+        return document
+
+    # The gate must work in BOTH directions. Now that Environment 2 is a real
+    # clean Hyper-V VM, the artifact genuinely carries two environments, so the
+    # load-bearing direction to prove is that NARROWING it back to one blocks.
+    widened = _consistent(_copy.deepcopy(payload),
+                          ["windows-11-host-isolated", "windows-11-hyperv"])
     widened_verdicts = E.control_verdicts(
         widened, E.validate(widened, current_commit=commit, current_tree=tree))
-    rec("OE01b coverage-gate-load-bearing",
+    rec("OE01b coverage-gate-passes-on-two-environments",
         widened_verdicts["offline_windows_package"] == "PASS"
         and widened_verdicts["offline_commercial_package"] == "PASS",
-        "the SAME green matrix with two executed environments flips package/commercial "
-        "to PASS — the environment gate is the only blocker and works in both directions")
+        "a green matrix across two distinct environments yields package/commercial PASS")
+
+    narrowed = _consistent(_copy.deepcopy(payload), ["windows-11-host-isolated"])
+    narrowed_verdicts = E.control_verdicts(
+        narrowed, E.validate(narrowed, current_commit=commit, current_tree=tree))
+    rec("OE01c coverage-gate-blocks-single-environment",
+        narrowed_verdicts["offline_windows_package"] == "BLOCKED"
+        and narrowed_verdicts["offline_commercial_package"] == "BLOCKED"
+        and narrowed_verdicts["offline_license_enforcement"] ==
+            widened_verdicts["offline_license_enforcement"],
+        "the SAME green matrix narrowed to one environment blocks package/commercial "
+        "while leaving the license control untouched — the environment gate is the "
+        "only thing that moved")
 
     def rehash(document: dict) -> dict:
         body = {k: v for k, v in document.items() if k != "canonical_payload_hash"}
@@ -111,6 +136,40 @@ def main() -> int:
     rejects("OE12c forged-coverage-flag-rejected",
             lambda m: m["environment_coverage"].update(meets_minimum=True),
             detail="meets_minimum must agree with the recorded executed environments")
+
+    # ---- the two-environment record the package matrix is derived from ----
+    rec("OE16 two-environment-record-bound",
+        isinstance(payload.get("two_environment_record"), dict)
+        and payload["two_environment_record"].get("schema_version")
+            == E.TWO_ENVIRONMENT_RECORD_SCHEMA
+        and payload["two_environment_record"].get("accepted") is True,
+        "the artifact carries the accepted two-environment record its package "
+        "matrix was derived from")
+
+    rejects("OE17 missing-two-environment-record-rejected",
+            lambda m: m.pop("two_environment_record"),
+            detail="evidence without a two-environment record cannot claim two environments")
+    rejects("OE18 unaccepted-two-environment-record-rejected",
+            lambda m: m["two_environment_record"].update(accepted=False))
+    rejects("OE19 non-identical-package-bytes-rejected",
+            lambda m: m["two_environment_record"].update(identical_package_bytes=False),
+            detail="the two environments must have run byte-identical package bytes")
+    rejects("OE20 duplicate-environment-identity-rejected",
+            lambda m: m["two_environment_record"].update(independent_identities=False),
+            detail="one machine reported twice is not two environments")
+    rejects("OE21 repeated-environment-class-rejected",
+            lambda m: m["results"]["package_matrix"].update(
+                environments_executed=["windows-11-hyperv", "windows-11-hyperv"]),
+            detail="the same environment class listed twice is one environment counted twice")
+
+    # ---- the proofs that make the second environment meaningful ----
+    for cid, section in (("OE22", "airgap_boundary"),
+                         ("OE23", "hyperv_isolation"),
+                         ("OE24", "combiner_faults")):
+        rejects(f"{cid} missing-{section.replace('_', '-')}-section-rejected",
+                lambda m, s=section: m["results"].pop(s))
+        rejects(f"{cid}b failing-{section.replace('_', '-')}-rejected",
+                lambda m, s=section: m["results"][s].update(failed=1))
 
     blocked = E.control_verdicts(payload, ["any reason"])
     rec("OE13 invalid-artifact-blocks-all-controls",

@@ -44,7 +44,19 @@ REQUIRED_RESULT_SECTIONS = (
     "runtime_battery",
     "package_matrix",
     "secret_scan",
+    # Added when Environment 2 moved to a task-owned clean Hyper-V VM. The
+    # package matrix now spans two machines, so the artifact must also carry the
+    # proofs that make the second environment meaningful: the air-gapped signing
+    # boundary, the Hyper-V isolation and security posture, and the combiner
+    # refusals that stop one environment masquerading as two. Additive only --
+    # no section was removed or renamed, and the schema version is unchanged.
+    "airgap_boundary",
+    "hyperv_isolation",
+    "combiner_faults",
 )
+
+#: The two-environment record the package matrix is derived from.
+TWO_ENVIRONMENT_RECORD_SCHEMA = "offline-two-environment-record.v1"
 
 #: Leak shapes that must never appear anywhere in the evidence document.
 _LEAK_PATTERNS = (
@@ -109,6 +121,29 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
         environments = matrix.get("environments_executed", [])
         if not isinstance(environments, list) or not environments:
             reasons.append("package matrix reports no executed environment")
+        elif len(set(environments)) != len(environments):
+            # Two entries naming the same environment class are one environment
+            # counted twice, which is exactly what the Part-O minimum forbids.
+            reasons.append("package matrix lists the same environment class twice")
+
+    # The package matrix is now derived from the two-environment record, so the
+    # record itself must be present, accepted, and internally consistent.
+    record = payload.get("two_environment_record", {})
+    if not isinstance(record, dict) or not record:
+        reasons.append("no two-environment record is bound to this evidence")
+    else:
+        if record.get("schema_version") != TWO_ENVIRONMENT_RECORD_SCHEMA:
+            reasons.append("two-environment record carries the wrong schema version")
+        if record.get("accepted") is not True:
+            reasons.append("the two-environment record was not accepted")
+        if int(record.get("environment_count", 0)) != REQUIRED_ENVIRONMENT_MINIMUM:
+            reasons.append("the two-environment record does not carry exactly two environments")
+        if record.get("identical_package_bytes") is not True:
+            reasons.append("the two environments did not run identical package bytes")
+        if record.get("independent_identities") is not True:
+            reasons.append("the two environments did not report independent identities")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(record.get("record_hash", ""))):
+            reasons.append("two-environment record hash missing or malformed")
 
     package = payload.get("package", {})
     if not isinstance(package, dict) or package.get("private_key_absent") is not True:
@@ -193,8 +228,15 @@ def control_verdicts(payload: dict, reasons: list[str]) -> dict[str, str]:
     results = payload.get("results", {})
     license_pass = (results.get("license_battery", {}).get("failed") == 0
                     and results.get("runtime_battery", {}).get("failed") == 0
-                    and results.get("secret_scan", {}).get("failed") == 0)
+                    and results.get("secret_scan", {}).get("failed") == 0
+                    and results.get("airgap_boundary", {}).get("failed") == 0)
+    record = payload.get("two_environment_record", {})
     package_pass = (results.get("package_matrix", {}).get("failed") == 0
+                    and results.get("hyperv_isolation", {}).get("failed") == 0
+                    and results.get("combiner_faults", {}).get("failed") == 0
+                    and isinstance(record, dict) and record.get("accepted") is True
+                    and record.get("identical_package_bytes") is True
+                    and record.get("independent_identities") is True
                     and environment_coverage_met(payload))
     commercial_pass = (license_pass and package_pass
                        and payload.get("package", {}).get("private_key_absent") is True)

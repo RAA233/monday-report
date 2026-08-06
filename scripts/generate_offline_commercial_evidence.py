@@ -1,7 +1,17 @@
 """ga:offline-commercial-evidence -- generate the exact-head Offline Edition
-evidence artifact (gitignored output) by EXECUTING the license battery, the
-runtime battery, the package matrix, and the offline secret scan, then binding
-the redacted results to the exact commit/tree.
+evidence artifact (gitignored output).
+
+Executes the license battery, the runtime battery, the offline secret scan, the
+air-gap boundary guard, the Hyper-V isolation guard and the combiner fault
+battery, then binds their redacted results to the exact commit/tree.
+
+The package matrix is NOT re-executed here. It spans two machines -- the host
+and a task-owned clean Hyper-V VM -- so it cannot be reproduced inside a single
+generator process, and re-running the retired single-host guard would have
+reported one environment forever. It is instead DERIVED from the two-environment
+record produced by scripts/offline_two_environment_matrix.py, which is itself
+bound to the same commit, tree and package hashes. Absent that record, the
+package and commercial verdicts stay honestly NOT_ACCEPTED.
 """
 from __future__ import annotations
 
@@ -38,6 +48,53 @@ def _run_guard(module_name: str) -> dict:
     return summary
 
 
+#: Where the two-environment orchestrator leaves its record, repo-relative so
+#: the artifact is reproducible without a machine-specific path.
+TWO_ENVIRONMENT_RECORD = (ROOT / "output" / "offline-commercial"
+                          / "offline-two-environment-record.v1.json")
+
+
+def _two_environment_matrix() -> tuple[dict, dict, dict]:
+    """Derive the package-matrix block from the two-environment record.
+
+    Returns (raw record, redacted binding block, package_matrix block). When the
+    record is absent the matrix is reported as zero environments and a failure,
+    so the package verdict stays NOT_ACCEPTED rather than silently passing.
+    """
+
+    if not TWO_ENVIRONMENT_RECORD.exists():
+        return {}, {}, {"passed": 0, "failed": 1, "environments_executed": []}
+
+    record = json.loads(TWO_ENVIRONMENT_RECORD.read_text(encoding="utf-8"))
+    environments = record.get("environments", {})
+    passed = sum(int(env.get("totals", {}).get("passed", 0)) for env in environments.values())
+    failed = sum(int(env.get("totals", {}).get("failed", 1)) for env in environments.values())
+    if record.get("accepted") is not True:
+        failed += 1
+
+    executed = [str(env.get("environment_class", "")) for env in environments.values()]
+    binding = {
+        "schema_version": record.get("schema_version"),
+        "record_hash": record.get("record_hash"),
+        "accepted": record.get("accepted"),
+        "environment_count": record.get("environment_count"),
+        "identical_package_bytes": record.get("identical_package_bytes"),
+        "independent_identities": record.get("independent_identities"),
+        # Redacted per-environment facts only: the class, the identity digest
+        # (never the fingerprint hash), and the totals.
+        "environments": {
+            label: {
+                "environment_class": env.get("environment_class"),
+                "fingerprint_identity_digest": env.get("fingerprint_identity_digest"),
+                "totals": env.get("totals", {}),
+            }
+            for label, env in sorted(environments.items())
+        },
+    }
+    return record, binding, {"passed": passed, "failed": failed,
+                             "environments_executed": executed}
+
+
 def main() -> int:
     commit = E.git_rev("HEAD")
     tree = E.git_rev("HEAD^{tree}")
@@ -51,31 +108,44 @@ def main() -> int:
 
     license_battery = _run_guard("offline_license_guard")
     runtime_battery = _run_guard("offline_runtime_guard")
-    package_matrix = _run_guard("offline_package_guard")
     secret_scan = _run_guard("offline_secret_scan_guard")
+    airgap = _run_guard("offline_airgap_guard")
+    hyperv = _run_guard("offline_hyperv_guard")
+    combiner = _run_guard("offline_combine_environments_faults_guard")
+
+    record, record_block, matrix_block = _two_environment_matrix()
 
     results = {
         "license_battery": {"passed": license_battery.get("passed", 0),
                             "failed": license_battery.get("failed", 1)},
         "runtime_battery": {"passed": runtime_battery.get("passed", 0),
                             "failed": runtime_battery.get("failed", 1)},
-        "package_matrix": {"passed": package_matrix.get("passed", 0),
-                           "failed": package_matrix.get("failed", 1),
-                           "environments_executed":
-                               package_matrix.get("environments_executed", [])},
+        "package_matrix": matrix_block,
         "secret_scan": {"passed": secret_scan.get("passed", 0),
                         "failed": secret_scan.get("failed", 1)},
+        "airgap_boundary": {"passed": airgap.get("passed", 0),
+                            "failed": airgap.get("failed", 1)},
+        "hyperv_isolation": {"passed": hyperv.get("passed", 0),
+                             "failed": hyperv.get("failed", 1)},
+        "combiner_faults": {"passed": combiner.get("passed", 0),
+                            "failed": combiner.get("failed", 1)},
     }
     all_passed = all(block["failed"] == 0 and block["passed"] > 0
                      for block in (results["license_battery"], results["runtime_battery"],
-                                   results["package_matrix"], results["secret_scan"]))
+                                   results["package_matrix"], results["secret_scan"],
+                                   results["airgap_boundary"], results["hyperv_isolation"],
+                                   results["combiner_faults"]))
     # Part-O environment minimum: the package (and commercial) verdicts require
-    # at least E.REQUIRED_ENVIRONMENT_MINIMUM executed clean environments. A
-    # single-host matrix is reported honestly and stays NOT_ACCEPTED.
+    # at least E.REQUIRED_ENVIRONMENT_MINIMUM executed clean environments, and
+    # the two-environment record must itself have been accepted. A single-host
+    # matrix is reported honestly and stays NOT_ACCEPTED.
     coverage_met = len(results["package_matrix"]["environments_executed"]) >= \
         E.REQUIRED_ENVIRONMENT_MINIMUM
+    record_ok = (record_block.get("accepted") is True
+                 and record_block.get("identical_package_bytes") is True
+                 and record_block.get("independent_identities") is True)
     license_accepted = all_passed
-    package_accepted = all_passed and coverage_met
+    package_accepted = all_passed and coverage_met and record_ok
     commercial_accepted = license_accepted and package_accepted
 
     payload = {
@@ -90,8 +160,14 @@ def main() -> int:
             "installer_sha256": build_summary.get("installer_sha256", ""),
             "payload_file_count": build_summary.get("payload_files", 0),
             "public_key_fingerprint": build_summary.get("public_key_fingerprint", ""),
+            # Key absence is proven in four independent places: the secret scan
+            # over package/payload/frontend/logs/evidence, PK31 inside each
+            # environment matrix, the air-gap boundary battery, and the Hyper-V
+            # guard's guest and transfer-set checks.
             "private_key_absent": results["secret_scan"]["failed"] == 0
-                                  and results["package_matrix"]["failed"] == 0,
+                                  and results["package_matrix"]["failed"] == 0
+                                  and results["airgap_boundary"]["failed"] == 0
+                                  and results["hyperv_isolation"]["failed"] == 0,
         },
         "licensing": {
             "license_schema": "monday-report-license.v1",
@@ -103,6 +179,7 @@ def main() -> int:
         },
         "disclosures": dict(E.REQUIRED_DISCLOSURES),
         "results": results,
+        "two_environment_record": record_block,
         "environment_coverage": {
             "executed": results["package_matrix"]["environments_executed"],
             "required_minimum": E.REQUIRED_ENVIRONMENT_MINIMUM,
