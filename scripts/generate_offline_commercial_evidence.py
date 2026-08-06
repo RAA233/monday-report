@@ -60,8 +60,14 @@ def _pk31_executed_everywhere(record: dict) -> bool:
     environments = (record or {}).get("environments", {})
     if not environments:
         return False
-    return all("PK31" not in (env.get("missing_or_failing_checks") or ["PK31"])
-               for env in environments.values())
+    for env in environments.values():
+        missing = env.get("missing_or_failing_checks")
+        # An EMPTY list means nothing is missing, which is the good case. Using
+        # `or ["PK31"]` as the absent-fallback made the empty list falsy and
+        # substituted the failure sentinel for the success case.
+        if missing is None or "PK31" in missing:
+            return False
+    return True
 
 
 def _two_environment_matrix() -> tuple[dict, dict, dict]:
@@ -121,6 +127,13 @@ def _two_environment_matrix() -> tuple[dict, dict, dict]:
                 "executable_sha256": env.get("executable_sha256"),
                 "payload_manifest_sha256": env.get("payload_manifest_sha256"),
                 "frontend_manifest_sha256": env.get("frontend_manifest_sha256"),
+                # The head each environment actually ran at, so the chain can
+                # compare it against the sealed record rather than the artifact
+                # asserting it.
+                "source_commit": env.get("source_commit"),
+                "source_tree": env.get("source_tree"),
+                "missing_or_failing_checks": env.get("missing_or_failing_checks"),
+                "executed_check_count": env.get("executed_check_count"),
             }
             for label, env in sorted(environments.items())
         },
