@@ -21,7 +21,7 @@ record depends on is asserted here as an executable fact rather than prose:
   * no runnable Environment 2 path, evidence generator or package command still
     reaches the retired Windows Sandbox implementation
 
-Five mutation cycles prove the guard is discriminating rather than always-green:
+Six mutation cycles prove the guard is discriminating rather than always-green:
 each introduces a real defect, requires the guard to fail FOR THE INTENDED
 REASON, restores the baseline, and requires it to pass again. Mutations act on
 copies; tracked source is never modified.
@@ -404,6 +404,20 @@ def _environment_body(label: str, *, fingerprint: str, installer: str,
         {"check_id": "PK27 upgrade-preserves-data-and-license", "ok": True},
         {"check_id": "PK28 uninstall-preserves-data", "ok": True},
         {"check_id": "PK29 reinstall-detects-preserved-data", "ok": True},
+        {"check_id": "EC01 clean-state", "ok": True},
+        {"check_id": "EC03 package-hashes-recomputed", "ok": True},
+        {"check_id": "PK02 first-launch-unlicensed", "ok": True},
+        {"check_id": "PK03 unlicensed-mutation-blocked", "ok": True},
+        {"check_id": "PK06 activation-request-no-raw-identifiers", "ok": True},
+        {"check_id": "PK09 licensed-business-operation", "ok": True},
+        {"check_id": "PK10 licensed-restart", "ok": True},
+        {"check_id": "PK12 single-instance", "ok": True},
+        {"check_id": "PK16 renewal", "ok": True},
+        {"check_id": "PK17 older-license-rejected", "ok": True},
+        {"check_id": "PK20 normal-shutdown", "ok": True},
+        {"check_id": "PK26 per-user-install-no-elevation", "ok": True},
+        {"check_id": "PK30 explicit-data-removal-path-separate", "ok": True},
+        {"check_id": "PK31 private-key-absent-from-package", "ok": True},
     ]
     request_record = {
         "environment_label": label,
@@ -416,8 +430,10 @@ def _environment_body(label: str, *, fingerprint: str, installer: str,
         "totals": {"passed": len(checks), "failed": 0},
         "checks": checks,
     }
+    from offline_combine_environments import missing_or_failing
     result = {
         "environment_label": label,
+        "missing_or_failing_checks": missing_or_failing(checks),
         "environment_class": f"{label.lower()}-class",
         "source_commit": commit,
         "source_tree": tree,
@@ -817,10 +833,21 @@ def mutation_cycles(work: Path, vm_name: str) -> None:
     meta["installer_sha256"] = "9" * 64
     (dirs2["tool"] / "package-meta.json").write_text(json.dumps(meta), encoding="utf-8")
     mutated_proc = _run_session(SESSION, dirs2, stage="stage-package")
-    mutated_rejected = mutated_proc.returncode != 0 and "MATRIX_FAILED" in (mutated_proc.stdout or "")
+    # Require the refusal to name the HASH MISMATCH. Accepting any MATRIX_FAILED
+    # made this cycle pass even with the hash gate deleted, because expanding the
+    # stub archive then failed for an unrelated reason -- so the cycle proved the
+    # stage aborts, not that the equality check exists.
+    mutated_text = (mutated_proc.stdout or "")
+    mutated_rejected = (mutated_proc.returncode != 0
+                        and "installer hash mismatch" in mutated_text)
+    hash_line = ""
+    hash_file = dirs2["out"] / "02-installer-hash.txt"
+    if hash_file.exists():
+        hash_line = hash_file.read_text(encoding="utf-8", errors="ignore").strip()
     rec("MUT-HV03 different-package-hash-is-detected-in-guest",
-        baseline_matched and mutated_rejected,
-        f"baseline hash matched={baseline_matched}, mutated rejected={mutated_rejected}")
+        baseline_matched and mutated_rejected and "matches_host=False" in hash_line,
+        f"baseline hash matched={baseline_matched}; the mutant is refused naming the "
+        f"installer hash mismatch={mutated_rejected}; guest recorded '{hash_line[-40:]}'")
 
     # MUT-HV06 -- the requirement-bypass detector is itself load-bearing. It was
     # the only detector behind the increment's strongest claim with no mutation

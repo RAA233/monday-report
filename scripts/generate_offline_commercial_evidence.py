@@ -54,6 +54,16 @@ TWO_ENVIRONMENT_RECORD = (ROOT / "output" / "offline-commercial"
                           / "offline-two-environment-record.v1.json")
 
 
+def _pk31_executed_everywhere(record: dict) -> bool:
+    """Every environment must have actually run PK31, not merely not failed it."""
+
+    environments = (record or {}).get("environments", {})
+    if not environments:
+        return False
+    return all("PK31" not in (env.get("missing_or_failing_checks") or ["PK31"])
+               for env in environments.values())
+
+
 def _two_environment_matrix() -> tuple[dict, dict, dict]:
     """Derive the package-matrix block from the two-environment record.
 
@@ -181,11 +191,15 @@ def main() -> int:
             # Key absence is proven in four independent places: the secret scan
             # over package/payload/frontend/logs/evidence, PK31 inside each
             # environment matrix, the air-gap boundary battery, and the Hyper-V
-            # guard's guest and transfer-set checks.
+            # guard's guest and transfer-set checks. PK31 is required EXPLICITLY
+            # rather than inferred from a clean matrix total -- a matrix that
+            # never ran PK31 also has a clean total, so the previous derivation
+            # asserted a proof that had not been executed.
             "private_key_absent": results["secret_scan"]["failed"] == 0
                                   and results["package_matrix"]["failed"] == 0
                                   and results["airgap_boundary"]["failed"] == 0
-                                  and results["hyperv_isolation"]["failed"] == 0,
+                                  and results["hyperv_isolation"]["failed"] == 0
+                                  and _pk31_executed_everywhere(record),
         },
         "licensing": {
             "license_schema": "monday-report-license.v1",

@@ -69,9 +69,14 @@ TWO_ENVIRONMENT_RECORD_PATH = (ROOT / "output" / "offline-commercial"
 ENVIRONMENT_RECORDS_DIR = ROOT / "output" / "offline-commercial" / "environments"
 
 #: Per-environment fields the embedded copy must reproduce exactly.
+#: source_commit/source_tree are included deliberately: omitting them left the
+#: environments' exact-head binding readable from the artifact's own copy, so a
+#: single string edit certified environments that had actually run at a
+#: different commit while the sealed record still said so.
 _ENVIRONMENT_BOUND_FIELDS = (
     "environment_class", "fingerprint_identity_digest", "installer_sha256",
     "executable_sha256", "payload_manifest_sha256", "frontend_manifest_sha256",
+    "source_commit", "source_tree",
 )
 
 
@@ -124,6 +129,14 @@ def validate_record_chain(payload: dict) -> list[str]:
                                    f"sealed record")
             if env.get("totals") != source.get("totals"):
                 reasons.append(f"environment {label} totals disagree with the sealed record")
+
+    # The head the ENVIRONMENTS actually ran at must be the head this evidence
+    # belongs to, and it is read from the SEALED record, never from the copy.
+    for label, env in record_envs.items():
+        if str(env.get("source_commit", "")) != str(payload.get("git_commit", "")):
+            reasons.append(f"environment {label} ran at a different commit than this evidence")
+        if str(env.get("source_tree", "")) != str(payload.get("git_tree", "")):
+            reasons.append(f"environment {label} ran at a different tree than this evidence")
     return reasons
 
 #: Contractual floors on how much each section must actually have executed.
@@ -139,7 +152,11 @@ MINIMUM_SECTION_DEPTH = {
     "hyperv_isolation": 40,
     "combiner_faults": 25,
     "secret_scan": 5,
-    "package_matrix": 40,
+    # 34 checks per environment across two environments. The previous floor of
+    # 40 was exactly twice the 20 ids the named proof groups referenced, so a
+    # matrix that silently dropped the other 14 -- including PK31
+    # private-key-absent-from-package -- still cleared it.
+    "package_matrix": 68,
 }
 
 #: Keys that legitimately differ between two independent generations at the same
@@ -233,10 +250,12 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
         environments = matrix.get("environments_executed", [])
         if not isinstance(environments, list) or not environments:
             reasons.append("package matrix reports no executed environment")
-        elif len(set(environments)) != len(environments):
-            # Two entries naming the same environment class are one environment
-            # counted twice, which is exactly what the Part-O minimum forbids.
-            reasons.append("package matrix lists the same environment class twice")
+        # Two entries naming the same CLASS are not two entries naming the same
+        # machine. Part-O allows "one current Windows 11 environment PLUS one
+        # second clean Windows environment or VM", and two clean Windows 11
+        # hosts legitimately share a class. Independence is established below
+        # from distinct machine identity digests, which is the fact that
+        # actually matters; rejecting on the label rejected honest pairs.
 
     # The package matrix is now derived from the two-environment record, so the
     # record itself must be present, accepted, and internally consistent.

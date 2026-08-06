@@ -5,6 +5,7 @@ asserts this tier CANNOT influence the production-target or GA controls.
 from __future__ import annotations
 
 import copy
+import re
 import json
 import sys
 from pathlib import Path
@@ -66,10 +67,13 @@ def main() -> int:
                 if str(env.get("environment_class", "")) in set(environments)}
         record["environments"] = keep
         record["environment_count"] = len(keep)
+        # Mirror the validator's derivation: distinct MACHINE IDENTITIES, not
+        # distinct class labels.
         record["independent_identities"] = (
             len({e.get("fingerprint_identity_digest") for e in keep.values()}) == len(keep)
-            and len({e.get("environment_class") for e in keep.values()}) == len(keep)
-            and all(e.get("fingerprint_identity_digest") for e in keep.values()))
+            and all(re.fullmatch(r"[0-9a-f]{32}",
+                                 str(e.get("fingerprint_identity_digest", "")) or "")
+                    for e in keep.values()))
         document["results"]["package_matrix"]["passed"] = sum(
             int(e.get("totals", {}).get("passed", 0)) for e in keep.values())
         meets = len(environments) >= E.REQUIRED_ENVIRONMENT_MINIMUM and accepted
@@ -207,12 +211,17 @@ def main() -> int:
     rejects("OE18 unaccepted-two-environment-record-rejected",
             lambda m: m["two_environment_record"].update(accepted=False),
             expect="was not accepted")
+    def _first_environment(m: dict) -> dict | None:
+        envs = list(m.get("two_environment_record", {}).get("environments", {}).values())
+        return envs[0] if envs else None
+
     def _really_different_bytes(m: dict) -> None:
         # A CONSISTENT claim that the environments ran different bytes: the
         # per-environment hash differs and the summary boolean agrees, so the
         # refusal comes from the derived fact rather than from a disagreement.
-        list(m["two_environment_record"]["environments"].values())[0][
-            "installer_sha256"] = "9" * 64
+        env = _first_environment(m)
+        if env is not None:
+            env["installer_sha256"] = "9" * 64
         m["two_environment_record"]["identical_package_bytes"] = False
 
     def _really_one_machine(m: dict) -> None:
@@ -249,11 +258,16 @@ def main() -> int:
     rejects("OE20c record-from-a-different-tree-rejected",
             lambda m: m["two_environment_record"].update(source_tree="0" * 40),
             expect="different tree")
-    rejects("OE21 repeated-environment-class-rejected",
+    # A repeated class in the executed list is no longer refused for BEING
+    # repeated -- two clean Windows 11 hosts legitimately share a class -- but it
+    # must still match the classes the record carries, so listing one class twice
+    # against a record holding two different ones is a disagreement.
+    rejects("OE21 executed-list-must-match-the-recorded-classes",
             lambda m: m["results"]["package_matrix"].update(
                 environments_executed=["windows-11-hyperv", "windows-11-hyperv"]),
-            expect="same environment class twice",
-            detail="the same environment class listed twice is one environment counted twice")
+            expect="environments_executed disagrees",
+            detail="the executed list is runner-supplied text and must match the "
+                   "classes the sealed record actually carries")
 
     # ---- forgeries an independent review demonstrated against the artifact ----
     # Each of these validated cleanly as OFFLINE_COMMERCIAL_PACKAGE_ACCEPTED
@@ -299,8 +313,8 @@ def main() -> int:
             detail="the executed labels are runner-supplied text; they must match "
                    "the classes the record actually carries")
     rejects("OE30 failing-per-environment-totals-rejected",
-            lambda m: list(m["two_environment_record"]["environments"].values())[0]
-                       .update(totals={"passed": 34, "failed": 99}),
+            lambda m: (_first_environment(m) or {}).update(
+                totals={"passed": 34, "failed": 99}),
             expect="did not pass its matrix cleanly")
     rejects("OE31 forged-independence-boolean-rejected",
             lambda m: m["two_environment_record"].update(independent_identities=False),
@@ -309,8 +323,7 @@ def main() -> int:
             lambda m: m["two_environment_record"].update(identical_package_bytes=False),
             expect="identical_package_bytes disagrees")
     rejects("OE33 differing-per-environment-package-hash-rejected",
-            lambda m: list(m["two_environment_record"]["environments"].values())[0]
-                       .update(installer_sha256="9" * 64),
+            lambda m: (_first_environment(m) or {}).update(installer_sha256="9" * 64),
             expect="did not run identical package bytes")
     rejects("OE34 environment-count-disagreeing-with-record-rejected",
             lambda m: m["two_environment_record"].update(environment_count=3),
@@ -332,10 +345,19 @@ def main() -> int:
         set(blocked.values()) == {"BLOCKED"},
         "an invalid artifact can never yield a PASS control")
 
-    # ---- the chain: artifact -> sealed record -> RAW runner outputs ----
+    # ---- the chain: artifact -> sealed record -> RAW runner outputs -> host ----
     # Everything above reasons about the artifact's own contents. This section
-    # walks back to the files the runners actually wrote, which is the only step
-    # an editor cannot satisfy without fabricating the environment execution.
+    # walks back to the files the runners wrote, and then to a LIVE measurement.
+    #
+    # Honest scope, because an earlier version of this comment overclaimed: the
+    # raw runner records are ordinary JSON in a gitignored directory. Nothing
+    # signs them, so an editor who rewrites all of them consistently and reseals
+    # the record can still produce a self-consistent chain. What that editor
+    # cannot do is make ENVIRONMENT_1's fingerprint match a fingerprint computed
+    # live on this host at guard time (OE40), or make the Hyper-V guard's live
+    # host-vs-guest identity comparison agree with a fabricated second machine.
+    # Beyond that the residual is the documented one: anti-tamper here is
+    # deterrence, not proof, exactly as the artifact's own disclosure states.
     import offline_combine_environments as CB  # noqa: PLC0415
 
     raw_dir = E.ENVIRONMENT_RECORDS_DIR
@@ -399,11 +421,39 @@ def main() -> int:
             bool(forged_reasons),
             f"one machine's block copied under the other label is refused "
             f"({forged_reasons[:2]})")
+
+        # OE40 -- the live anchor. ENVIRONMENT_1 ran on THIS host, so its raw
+        # fingerprint must equal one computed here, now. This is the step a
+        # rewritten set of raw records cannot satisfy: the value is measured
+        # rather than read. ENVIRONMENT_2 must then differ from it.
+        from backend.app.licensing import fingerprint as FP  # noqa: PLC0415
+        live_host = FP.collect_fingerprint().fingerprint_hash()
+        e1_raw = json.loads(
+            (raw_dir / "environment-1-request-record.json").read_text(encoding="utf-8"))
+        e2_raw = json.loads(
+            (raw_dir / "environment-2-request-record.json").read_text(encoding="utf-8"))
+        e1_fp = str(e1_raw.get("machine_fingerprint_hash", ""))
+        e2_fp = str(e2_raw.get("machine_fingerprint_hash", ""))
+        rec("OE40 environment-1-fingerprint-matches-this-live-host",
+            bool(live_host) and e1_fp == live_host and e2_fp != live_host and bool(e2_fp),
+            "ENVIRONMENT_1's recorded machine fingerprint equals one computed live on "
+            "this host, and ENVIRONMENT_2's differs from it — the one link in the "
+            "chain that is measured rather than read")
+
+        # OE41 -- completeness travels, and is enforced.
+        thin = {label: env.get("missing_or_failing_checks")
+                for label, env in sealed.get("environments", {}).items()}
+        rec("OE41 every-required-check-executed-in-both-environments",
+            all(v == [] for v in thin.values()) and len(thin) == 2,
+            f"both environments executed every required check id "
+            f"(missing/failing: {thin})")
     else:
         for cid in ("OE36 sealed-record-rederives-from-raw-runner-output",
                     "OE37 sealed-record-seal-verifies",
                     "OE38 identity-digests-trace-to-raw-fingerprints",
-                    "OE39 copied-environment-relabelled-as-a-second-machine-rejected"):
+                    "OE39 copied-environment-relabelled-as-a-second-machine-rejected",
+                    "OE40 environment-1-fingerprint-matches-this-live-host",
+                    "OE41 every-required-check-executed-in-both-environments"):
             rec(cid, False, "raw runner records unavailable; the chain cannot be walked")
 
     ga_registry = ROOT / "evals" / "ga" / "blocker_registry.v1.json"

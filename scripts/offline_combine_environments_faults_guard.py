@@ -60,16 +60,22 @@ def environment(label: str, *, fingerprint: str, installer: str = "1" * 64,
                 airgap: bool = True, failed_total: int = 0) -> dict:
     """A structurally faithful pair of runner records for one environment."""
 
-    ids = ["EC02 dependency-absence", "PK01 offline-first-launch",
-           "PK04 loopback-only-binding", "PK05 activation-request-exported",
+    ids = ["EC01 clean-state", "EC02 dependency-absence", "EC03 package-hashes-recomputed",
+           "PK01 offline-first-launch", "PK02 first-launch-unlicensed",
+           "PK03 unlicensed-mutation-blocked", "PK04 loopback-only-binding",
+           "PK05 activation-request-exported", "PK06 activation-request-no-raw-identifiers",
            "PK07 signed-license-received", "PK08 offline-activation-import",
-           "PK11 crash-recovery", "PK13 backup", "PK14 backup-validation",
-           "PK15 restore", "PK18 wrong-machine-license-rejected",
-           "PK19 other-environment-license-rejected",
+           "PK09 licensed-business-operation", "PK10 licensed-restart",
+           "PK11 crash-recovery", "PK12 single-instance", "PK13 backup",
+           "PK14 backup-validation", "PK15 restore", "PK16 renewal",
+           "PK17 older-license-rejected", "PK18 wrong-machine-license-rejected",
+           "PK19 other-environment-license-rejected", "PK20 normal-shutdown",
            "PK21 short-license-operational", "PK22 expiry-to-read-only",
            "PK23 expired-data-readable", "PK24 expired-backup-available",
-           "PK25 expired-mutations-blocked", "PK27 upgrade-preserves-data-and-license",
-           "PK28 uninstall-preserves-data", "PK29 reinstall-detects-preserved-data"]
+           "PK25 expired-mutations-blocked", "PK26 per-user-install-no-elevation",
+           "PK27 upgrade-preserves-data-and-license", "PK28 uninstall-preserves-data",
+           "PK29 reinstall-detects-preserved-data", "PK30 explicit-data-removal-path-separate",
+           "PK31 private-key-absent-from-package"]
     checks = []
     for cid in ids:
         if drop_check and cid.startswith(drop_check):
@@ -88,8 +94,10 @@ def environment(label: str, *, fingerprint: str, installer: str = "1" * 64,
         "totals": {"passed": len(checks), "failed": 0},
         "checks": [],
     }
+    from offline_combine_environments import missing_or_failing
     result = {
         "environment_label": label,
+        "missing_or_failing_checks": missing_or_failing(checks),
         "environment_class": f"{label.lower()}-class",
         "source_commit": commit, "source_tree": tree, "package_version": version,
         "installer_sha256": installer, "executable_sha256": executable,

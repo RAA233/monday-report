@@ -97,8 +97,10 @@ def boundary_battery(work: Path) -> None:
 
     # AG02: an explicit private-key argument is refused (process-level).
     refused = _run_env_runner(["--key-file", str(work / "nope.hex")], work=work)
-    rec("AG02 private-key-argument-refused", _aborted_on_boundary(refused)
-        or refused.returncode == 2,
+    # The `or returncode == 2` fallback made this pass on argparse's own exit
+    # code for an unknown option, so the boundary abort it names was never
+    # actually tested. Require the explicit envelope.
+    rec("AG02 private-key-argument-refused", _aborted_on_boundary(refused),
         "passing a private-key argument aborts with AIRGAP_BOUNDARY_VIOLATION")
 
     # AG03: a private-key environment variable is refused.

@@ -249,6 +249,25 @@ the combiner requires it of both environments.
 | Evidence artifact + fault mutations | `pnpm run audit:offline-commercial-evidence` |
 | Evidence generation | `pnpm run ga:offline-commercial-evidence` |
 
+**Reproducing the evidence.** `ga:offline-commercial-evidence` executes the
+secret scan, whose `OS04` compares the shipped package against the operator's
+private key and FAILS CLOSED when it cannot. Regenerating the artifact therefore
+requires `MONDAY_REPORT_OFFLINE_KEYS_DIR` to point at the operator keypair. This
+is a real limitation on independent reproduction: a third party without the
+signing key can re-derive every other section, and can verify the artifact's
+seals, the sealed two-environment record and its re-derivation from the raw
+runner records, but cannot regenerate `reproducible_payload_hash` end to end.
+
+**What the chain proves, and what it does not.** Validation walks artifact ->
+sealed record -> raw runner records -> a live fingerprint measured on the host at
+guard time (`OE40`). The raw runner records are ordinary JSON in a gitignored
+directory and nothing signs them, so an editor who rewrites all of them
+consistently and reseals the record produces a self-consistent chain; what that
+editor cannot produce is a fingerprint matching one measured live on this host,
+or a Hyper-V guest whose live identity comparison agrees with a fabricated second
+machine. Beyond that the residual is the documented one: anti-tamper here is
+deterrence, not proof.
+
 Provision Environment 2:
 `pnpm run offline:provision-environment-2 -- -Action all -IsoPath <verified media>`.
 

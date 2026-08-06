@@ -57,9 +57,30 @@ _REQUIRED_CHECKS = {
 }
 
 
+#: EVERY check the matrix is supposed to execute, not just the ones the named
+#: proof groups happen to reference. Requiring only the grouped subset left 14
+#: of the 34 optional in practice: an environment could drop PK31
+#: (private-key-absent-from-package), PK03, PK16, PK17, PK20, PK26, PK30, EC01
+#: and EC03 and still be accepted with a clean total, while the evidence
+#: generator went on deriving private_key_absent from that same clean total.
+REQUIRED_CHECK_IDS = (
+    "EC01", "EC02", "EC03",
+    "PK01", "PK02", "PK03", "PK04", "PK05", "PK06", "PK07", "PK08", "PK09",
+    "PK10", "PK11", "PK12", "PK13", "PK14", "PK15", "PK16", "PK17", "PK18",
+    "PK19", "PK20", "PK21", "PK22", "PK23", "PK24", "PK25", "PK26", "PK27",
+    "PK28", "PK29", "PK30", "PK31",
+)
+
+
 def _passed(checks: list[dict], prefix: str) -> bool:
     matched = [c for c in checks if str(c.get("check_id", "")).startswith(prefix)]
     return bool(matched) and all(c.get("ok") for c in matched)
+
+
+def missing_or_failing(checks: list[dict]) -> list[str]:
+    """Ids the environment did not execute, or executed and failed."""
+
+    return [cid for cid in REQUIRED_CHECK_IDS if not _passed(checks, cid)]
 
 
 def redact(record: dict, request_record: dict) -> dict:
@@ -91,6 +112,11 @@ def redact(record: dict, request_record: dict) -> dict:
         "airgap_proofs": record.get("airgap_proofs", []),
         "results": {name: all(_passed(checks, p) for p in prefixes)
                     for name, prefixes in _REQUIRED_CHECKS.items()},
+        # The complete executed set, so a thinned matrix is visible rather than
+        # hidden behind a clean total.
+        "missing_or_failing_checks": missing_or_failing(checks),
+        "executed_check_count": len({str(c.get("check_id", "")).split()[0]
+                                     for c in checks if c.get("check_id")}),
         "totals": {
             "passed": record.get("totals", {}).get("passed", 0)
             + request_record.get("totals", {}).get("passed", 0),
@@ -119,10 +145,19 @@ def validate_pair(env1: dict, env2: dict) -> list[str]:
         label = env.get("environment_label", "?")
         if env.get("totals", {}).get("failed", 1) != 0:
             reasons.append(f"{label} has failing checks")
-        if not all(env.get("clean_state", {}).values()):
+        # all({}) is True, so an environment that recorded NO clean-state or
+        # dependency facts was accepted as having proven both. Require the maps
+        # to be populated as well as true.
+        clean = env.get("clean_state", {})
+        if not clean or not all(clean.values()):
             reasons.append(f"{label} failed its clean-state proof")
-        if not all(env.get("dependency_absence", {}).values()):
+        deps = env.get("dependency_absence", {})
+        if not deps or not all(deps.values()):
             reasons.append(f"{label} failed its dependency-absence proof")
+        thin = env.get("missing_or_failing_checks")
+        if thin is None or thin:
+            reasons.append(f"{label} did not execute every required check "
+                           f"({thin if thin else 'the completeness field is absent'})")
         if not env.get("airgap_proofs"):
             reasons.append(f"{label} carries no air-gap proof")
         for name, ok in dict(env.get("results", {})).items():
