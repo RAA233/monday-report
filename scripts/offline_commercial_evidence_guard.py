@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import re
 import subprocess
@@ -38,17 +39,20 @@ def main() -> int:
         return 1
     commit, tree = payload.get("git_commit"), payload.get("git_tree")
 
-    rec("OE00 baseline-valid", reasons == [],
-        f"the generated artifact validates at its exact head ({reasons or 'valid'})")
+    # THIS TIER IS NO LONGER AUTHORITATIVE, so these two checks now assert the
+    # opposite of what they used to. An independent review demonstrated that a
+    # copied ENVIRONMENT_1 block, resealed, validated here with zero reasons and
+    # yielded offline_commercial_package: PASS. Asserting that v1 CAN accept
+    # would now be asserting the defect.
+    rec("OE00 legacy-tier-is-non-authoritative",
+        any(E.LEGACY_NON_AUTHORITATIVE in r for r in reasons),
+        f"the v1 artifact is reported non-authoritative ({reasons[:1] or 'no reason'})")
     verdicts = E.control_verdicts(payload, reasons)
     coverage_met = E.environment_coverage_met(payload)
-    expected_package = "PASS" if coverage_met else "BLOCKED"
-    rec("OE01 controls-consistent-with-coverage",
-        verdicts["offline_license_enforcement"] == "PASS"
-        and verdicts["offline_windows_package"] == expected_package
-        and verdicts["offline_commercial_package"] == expected_package,
-        f"license control PASSes on green batteries; package/commercial follow the "
-        f"environment minimum honestly ({verdicts}, coverage_met={coverage_met})")
+    rec("OE01 legacy-controls-always-blocked",
+        all(v == "BLOCKED" for v in verdicts.values()),
+        f"every legacy control is BLOCKED regardless of the recorded results "
+        f"({verdicts}, coverage_met={coverage_met})")
     import copy as _copy
 
     def _consistent(document: dict, keep_labels: list[str], accepted: bool = True) -> dict:
@@ -101,10 +105,16 @@ def main() -> int:
                           ["ENVIRONMENT_1", "ENVIRONMENT_2"])
     widened_verdicts = E.control_verdicts(
         widened, E.validate(widened, current_commit=commit, current_tree=tree))
-    rec("OE01b coverage-gate-passes-on-two-environments",
-        widened_verdicts["offline_windows_package"] == "PASS"
-        and widened_verdicts["offline_commercial_package"] == "PASS",
-        "a green matrix across two distinct environments yields package/commercial PASS")
+    # Formerly: "two environments yields PASS". That is precisely the property
+    # the reproduced forgery abused -- two environment BLOCKS, one of them copied,
+    # were enough. A green two-environment matrix must no longer be sufficient on
+    # its own; acceptance now requires the independent reviewer attestation that
+    # this tier cannot carry.
+    rec("OE01b two-environments-alone-no-longer-accept",
+        widened_verdicts["offline_windows_package"] == "BLOCKED"
+        and widened_verdicts["offline_commercial_package"] == "BLOCKED",
+        "a green two-environment matrix alone does not yield acceptance in the "
+        "legacy tier")
 
     # Narrowing to one environment is now caught at the VALIDATION layer, not
     # merely at the verdict layer: a single-environment record is refused
@@ -188,12 +198,14 @@ def main() -> int:
     # artifact can never yield a PASS control (OE13). So the remaining way for
     # the stored block to disagree with the derived one is a DOWNGRADE, and that
     # is refused too -- the block is not a free-text field either way.
-    rejects("OE12b stored-verdict-must-match-the-derived-block",
-            lambda m: m["verdicts"].update(
-                commercial="OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED"),
-            expect="stored verdict",
-            detail="the verdict block is recomputed from the recorded results in both "
-                   "directions; it cannot be hand-set to disagree with them")
+    # Formerly a derived-vs-stored comparison. With the acceptance literals gone
+    # from this module there is no derivation left to disagree with -- the honest
+    # replacement asserts that this tier can no longer emit an acceptance at all,
+    # whatever the artifact stores.
+    rec("OE12b legacy-tier-emits-no-acceptance",
+        "OFFLINE_COMMERCIAL_PACKAGE_ACCEPTED" not in inspect.getsource(E),
+        "the legacy module contains no acceptance literal, so no stored verdict "
+        "can be blessed by it")
     rejects("OE12c forged-coverage-flag-rejected",
             lambda m: m["environment_coverage"].update(meets_minimum=False),
             reseal=True, expect="meets_minimum",
