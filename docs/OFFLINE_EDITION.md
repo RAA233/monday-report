@@ -259,14 +259,25 @@ seals, the sealed two-environment record and its re-derivation from the raw
 runner records, but cannot regenerate `reproducible_payload_hash` end to end.
 
 **What the chain proves, and what it does not.** Validation walks artifact ->
-sealed record -> raw runner records -> a live fingerprint measured on the host at
-guard time (`OE40`). The raw runner records are ordinary JSON in a gitignored
-directory and nothing signs them, so an editor who rewrites all of them
-consistently and reseals the record produces a self-consistent chain; what that
-editor cannot produce is a fingerprint matching one measured live on this host,
-or a Hyper-V guest whose live identity comparison agrees with a fabricated second
-machine. Beyond that the residual is the documented one: anti-tamper here is
-deterrence, not proof.
+sealed record -> raw runner records, requiring them to agree field for field,
+the record to re-derive from the raw records, and its seal to verify. Three
+facts are MEASURED at guard time rather than read: this host's fingerprint
+(`OE40`), the guest's fingerprint components (`OE42`), and the SHA-256 of the
+archive, executable and manifests actually on disk (`OE43`).
+
+It does NOT prove that either environment matrix was executed. `OE42` measures a
+property of the VM, not of the run — anyone able to run the guard can run the
+same probe against the same VM and record the result. No artifact-level check
+can close that gap, because the verifier and the author are the same principal.
+That is exactly what the artifact's `anti_tamper_is_deterrence_not_absolute`
+disclosure means, and it is the same honest limitation §7 already states about
+offline licensing: this tier DETERS fabrication and makes it laborious and
+visible; it does not make it impossible.
+
+Two earlier versions of this paragraph claimed more — first that a Hyper-V
+guest's live identity comparison would disagree with a fabricated second
+machine, then that an editor could not match a live fingerprint measurement.
+Independent review demonstrated both false. Neither is claimed here.
 
 Provision Environment 2:
 `pnpm run offline:provision-environment-2 -- -Action all -IsoPath <verified media>`.

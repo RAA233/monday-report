@@ -95,9 +95,13 @@ def redact(record: dict, request_record: dict) -> dict:
     # export. Reading the bindings from the result record alone left that half
     # free to claim a different commit, tree, version or package hash while the
     # pair still certified.
+    # An ABSENT field is not agreement. Guarding with `field in request_record`
+    # meant deleting the fields outright satisfied the rule, producing a
+    # byte-identical artifact from a request half that could have come from any
+    # run at all. Every field must be PRESENT and equal.
     request_binding_disagreements = [
         field for field in _MUST_MATCH
-        if field in request_record and request_record.get(field) != record.get(field)
+        if field not in request_record or request_record.get(field) != record.get(field)
     ]
     body = {
         "environment_label": record.get("environment_label"),

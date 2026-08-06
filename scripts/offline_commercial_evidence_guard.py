@@ -352,24 +352,28 @@ def main() -> int:
     # Everything above reasons about the artifact's own contents. This section
     # walks back to the files the runners wrote, and then to a LIVE measurement.
     #
-    # Honest scope, because an earlier version of this comment overclaimed: the
-    # raw runner records are ordinary JSON in a gitignored directory. Nothing
-    # signs them, so an editor who rewrites all of them consistently and reseals
-    # the record can still produce a self-consistent chain. What that editor
-    # cannot do is make ENVIRONMENT_1's fingerprint match one computed live on
-    # this host (OE40), make ENVIRONMENT_2's fingerprint components match ones
-    # re-measured live inside the guest (OE42), or make the declared package
-    # hashes match the archive and executable actually on disk (OE43).
+    # HONEST SCOPE. Successive reviews showed each stronger claim here to be
+    # false, so this states only what is actually established.
     #
-    # An earlier version of this comment also claimed the Hyper-V guard's
-    # host-vs-guest identity comparison would disagree with a fabricated second
-    # machine. That was false: HV42 reads no environment record and emits only a
-    # boolean, so it is structurally incapable of noticing. It is not part of
-    # this chain and is not cited as though it were.
+    # The chain proves INTERNAL CONSISTENCY -- artifact, sealed record and raw
+    # runner records agree field for field, the record re-derives from the raw
+    # records, and its seal verifies -- plus three measurements taken at guard
+    # time: this host's fingerprint (OE40), the guest's fingerprint components
+    # (OE42), and the package hashes of the archive, executable and manifests
+    # actually on disk (OE43).
     #
-    # Beyond those three live measurements the residual is the documented one:
-    # anti-tamper here is deterrence, not proof, exactly as the artifact's own
-    # anti_tamper_is_deterrence_not_absolute disclosure states.
+    # It does NOT prove that either matrix was executed. OE42 measures a property
+    # of the VM, not of the run: anyone who can run this guard can run the same
+    # probe against the same VM and paste the result into a record. No
+    # artifact-level check can close that, because the verifier and the author
+    # are the same principal -- which is precisely what the artifact's
+    # anti_tamper_is_deterrence_not_absolute disclosure means.
+    #
+    # An earlier version of this comment claimed an editor could not make
+    # ENVIRONMENT_2's components match a live measurement, and before that
+    # claimed the Hyper-V host-vs-guest comparison would notice a fabricated
+    # second machine. Both were false. Neither is claimed now.
+
     import offline_combine_environments as CB  # noqa: PLC0415
 
     raw_dir = E.ENVIRONMENT_RECORDS_DIR
@@ -478,6 +482,23 @@ def main() -> int:
                     (e2_raw.get("machine_binding", {}).get("component_hashes") or {}).items()}
         shared = set(measured) & set(recorded)
         agree = bool(shared) and all(measured[k] == recorded[k] for k in shared)
+        # OE44 -- the fingerprint hash must commit to the binding it claims to
+        # summarise. license_format.py enforces exactly this for licences; the
+        # environment records did not, so machine_binding could describe the live
+        # guest while machine_fingerprint_hash -- the sole source of
+        # fingerprint_identity_digest, and thus of the whole independence claim --
+        # committed to nothing.
+        commitments = {}
+        for label, raw in (("ENVIRONMENT_1", e1_raw), ("ENVIRONMENT_2", e2_raw)):
+            binding = raw.get("machine_binding")
+            commitments[label] = (
+                isinstance(binding, dict) and bool(binding)
+                and canonical_hash(binding) == str(raw.get("machine_fingerprint_hash", "")))
+        rec("OE44 fingerprint-hash-commits-to-the-binding",
+            all(commitments.values()),
+            f"each environment's machine_fingerprint_hash is the canonical hash of the "
+            f"machine_binding it carries ({commitments})")
+
         rec("OE42 environment-2-fingerprint-matches-the-live-guest",
             bool(measured) and agree and len(shared) >= 2,
             f"{len(shared)} fingerprint component(s) re-measured live in the guest agree "
@@ -524,13 +545,24 @@ def main() -> int:
         env_exes = {str(e.get("executable_sha256", "")).lower() for e in env_blocks.values()}
         env_manifests = {str(e.get("payload_manifest_sha256", "")).lower()
                          for e in env_blocks.values()}
+        # The frontend manifest digest is DERIVABLE from the payload manifest
+        # already hashed above, so leaving it unbound let it be fabricated freely.
+        manifest_doc = json.loads((app_dir / "payload-manifest.json").read_text(encoding="utf-8"))
+        frontend = {k: v for k, v in manifest_doc.get("files", {}).items()
+                    if k.startswith("_internal/dist/") or k.startswith("dist/")}
+        real_frontend = hashlib.sha256(
+            json.dumps(frontend, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        env_frontends = {str(e.get("frontend_manifest_sha256", "")).lower()
+                         for e in env_blocks.values()}
         rec("OE43 declared-package-hashes-match-the-built-artifacts",
             str(declared.get("installer_sha256", "")).lower() == real_installer
             and env_installers == {real_installer}
             and env_exes == {real_exe}
-            and env_manifests == {real_manifest},
+            and env_manifests == {real_manifest}
+            and env_frontends == {real_frontend},
             "the artifact's and both environments' package hashes equal SHA-256 of the "
-            "archive, executable and payload manifest actually on disk")
+            "archive, executable and payload manifest actually on disk, and the frontend "
+            "digest re-derived from that manifest")
     else:
         rec("OE43 declared-package-hashes-match-the-built-artifacts", False,
             "the built package is not present, so its declared hashes cannot be re-measured")
