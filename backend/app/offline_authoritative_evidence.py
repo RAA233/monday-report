@@ -101,9 +101,16 @@ EVIDENCE_PATH = ROOT / "output" / "offline-commercial" / "offline-commercial-pac
 
 #: The review key identity, PINNED IN TRACKED SOURCE. A trust-root file that
 #: names a different key is rejected -- so substituting the file is not enough,
-#: the substitution has to appear in a reviewed commit. Set during reviewer
-#: bootstrap; the placeholder below is itself a rejection.
-PINNED_REVIEW_KEY_FINGERPRINT = "0000000000000000"
+#: the substitution has to appear in a reviewed commit.
+#:
+#: Derived from the key bytes (``sha256(public_key)[:16]``), never accepted as a
+#: free string beside a key, so a document cannot name one identity while
+#: carrying another. The value below was produced by the reviewer principal in
+#: its own logon session; the authoring process only ever saw the public half.
+#:
+#: The all-zero placeholder is itself a rejection: an unpinned tier must not
+#: accept anything.
+PINNED_REVIEW_KEY_FINGERPRINT = "f958c05d422f8368"
 
 MAX_REVIEW_AGE_DAYS = 30
 
