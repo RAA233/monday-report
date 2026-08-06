@@ -220,6 +220,28 @@ def main(argv: list[str] | None = None) -> int:
         if source.exists():
             shutil.copy2(source, results / name)
 
+    # Refuse anything that did not come from THIS head before combining. A stale
+    # per-environment result is otherwise indistinguishable from a fresh one, and
+    # the combiner would report the mismatch as "environments disagree" rather
+    # than as the substitution it actually is.
+    stale = []
+    for label in ("1", "2"):
+        for kind in ("result", "request-record"):
+            path = results / f"environment-{label}-{kind}.json"
+            if not path.exists():
+                stale.append(f"environment-{label}-{kind}.json is missing")
+                continue
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            if str(doc.get("source_commit", "")) != commit or str(doc.get("source_tree", "")) != tree:
+                stale.append(f"environment-{label}-{kind}.json was produced at "
+                             f"{str(doc.get('source_commit', ''))[:12]}, not this head")
+    if stale:
+        print(json.dumps({"orchestrator": "offline_two_environment", "accepted": False,
+                          "stages": stages,
+                          "detail": "refusing to combine results that are not from this head",
+                          "stale": stale}, indent=2))
+        return 1
+
     env1 = redact(json.loads((results / "environment-1-result.json").read_text(encoding="utf-8")),
                   json.loads((results / "environment-1-request-record.json").read_text(encoding="utf-8")))
     env2 = redact(json.loads((results / "environment-2-result.json").read_text(encoding="utf-8")),

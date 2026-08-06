@@ -295,6 +295,14 @@ def main(argv: list[str] | None = None) -> int:
     # ------------------------------------------------------------- request
     if args.phase in ("request", "full"):
         root.mkdir(parents=True, exist_ok=True)
+        # Clear the PREVIOUS run's artifacts from the transfer root. Only the
+        # pkg/tool/in/out subdirectories were wiped, so a failed run left last
+        # run's environment-result.json in place -- and the two-environment
+        # orchestrator, finding the file present, folded a stale Environment 2
+        # from an earlier commit into a fresh record.
+        for stale in ("activation-request.json", "environment-request-record.json",
+                      "environment-result.json", "orchestrator-state.json"):
+            (root / stale).unlink(missing_ok=True)
         try:
             archive, meta = stage_transfer_set(app_dir=app_dir, root=root)
         except FileNotFoundError as exc:
