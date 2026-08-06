@@ -2,7 +2,7 @@
 ENVIRONMENT-SIDE half of the air-gapped activation protocol.
 
 This runner executes INSIDE the environment under test (an isolated
-installation on the host, or a Windows Sandbox instance). It may install the
+installation on the host, or the clean Hyper-V Environment 2 guest). It may install the
 package, launch it, export an activation request, wait for a signed license,
 import it, and run the package matrix.
 
@@ -221,7 +221,7 @@ def dependency_absence(app_path: str) -> dict[str, bool]:
     conflate "installed somewhere on the box" with "required by the product".
 
     ``machine_wide_absence`` records the stronger, environment-level fact
-    separately (true in a clean Sandbox, false on a developer host).
+    separately (true in the clean Hyper-V guest, false on a developer host).
     """
 
     def absent(name: str) -> bool:

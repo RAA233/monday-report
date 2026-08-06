@@ -3,7 +3,8 @@
 
     The ENVIRONMENT-SIDE half of the air-gapped activation protocol, for
     environments that must prove they have NO Python, Node, Docker, PostgreSQL
-    or Redis -- notably Windows Sandbox. Windows PowerShell ships with Windows
+    or Redis -- notably the clean Hyper-V Environment 2 guest, which is a fresh
+    Windows install from official media. Windows PowerShell ships with Windows
     itself, so it is test tooling, not a product runtime dependency: the
     packaged application never invokes it.
 
@@ -23,7 +24,7 @@
 param(
     [Parameter(Mandatory = $true)][ValidateSet("request", "resume")][string]$Phase,
     [Parameter(Mandatory = $true)][string]$EnvLabel,
-    [string]$EnvClass = "windows-11-sandbox",
+    [string]$EnvClass = "windows-11-hyperv",
     [Parameter(Mandatory = $true)][string]$PackageDir,
     [Parameter(Mandatory = $true)][string]$WorkDir,
     [string]$TransferIn = "",
@@ -202,7 +203,7 @@ function Get-PackageHashes {
     foreach ($p in $manifest.files.PSObject.Properties) {
         if ($p.Name -like "_internal/dist/*" -or $p.Name -like "dist/*") { $frontend[$p.Name] = $p.Value }
     }
-    # Canonical (sorted keys, compact separators) so host and sandbox agree.
+    # Canonical (sorted keys, compact separators) so host and guest agree.
     $sorted = ($frontend.GetEnumerator() | Sort-Object Name | ForEach-Object {
         '"' + $_.Key + '":"' + $_.Value + '"' }) -join ","
     $json = "{$sorted}"
@@ -316,6 +317,52 @@ else {
     Add-Check "PK07 signed-license-received" (Test-Path $primary) "only a signed license returned from the operator side"
     if (-not (Test-Path $primary)) { throw "no signed license in the transfer directory (fail closed)" }
 
+    # The expiry transition runs FIRST, exactly as the Python runner orders it.
+    # license-short.json is issued on a seconds-scale expiry so the transition
+    # happens in real time without touching any clock; running the main matrix
+    # ahead of it -- app restarts, a forced kill, backup and restore -- burns
+    # minutes, so the short-dated licence would already be expired at PK21 and
+    # the import would be refused before it could ever be seen operating.
+    if (Test-Path $short) {
+        $expDir = "$WorkDir-expiry"
+        # Same installation identity as the request (see the Python runner):
+        # a fresh data root would be refused as WRONG_INSTALLATION.
+        $srcCfg = Join-Path $WorkDir "install\config\installation.json"
+        if (Test-Path $srcCfg) {
+            $dstCfg = Join-Path $expDir "install\config\installation.json"
+            New-Item -ItemType Directory -Force (Split-Path -Parent $dstCfg) | Out-Null
+            Copy-Item $srcCfg $dstCfg -Force
+        }
+        $expProc = Start-App -Exe $exe -DataDir $expDir -P ($Port + 2)
+        try {
+            if ($null -ne (Wait-Api -P ($Port + 2) -Route "/offline/runtime")) {
+                $imp = Invoke-Api -P ($Port + 2) -Route "/offline/license/import" -Method POST -Body (Get-Content $short -Raw)
+                if ($imp.status -eq 200) {
+                    $op = Invoke-Api -P ($Port + 2) -Route "/workspaces" -Method POST -Body '{"name":"T"}'
+                    Add-Check "PK21 short-license-operational" ($op.status -eq 201) "the short-dated license operates while valid"
+                    # Wait until the license's OWN expiry passes, read from the
+                    # signed document. A packaged cold start takes tens of
+                    # seconds and varies by machine, so a fixed sleep is unsafe.
+                    # No clock is manipulated anywhere.
+                    $shortDoc = Get-Content $short -Raw | ConvertFrom-Json
+                    $expiresAt = [datetime]::Parse($shortDoc.grace_until).ToUniversalTime()
+                    $remaining = ($expiresAt - [datetime]::UtcNow).TotalSeconds
+                    Start-Sleep -Seconds ([Math]::Max(2, $remaining + 5))
+                    $st = (Invoke-Api -P ($Port + 2) -Route "/offline/license/status").body
+                    $blk = Invoke-Api -P ($Port + 2) -Route "/workspaces" -Method POST -Body '{"name":"U"}'
+                    $rd = Invoke-Api -P ($Port + 2) -Route "/workspaces"
+                    $bk = Invoke-Api -P ($Port + 2) -Route "/offline/backup" -Method POST -Body '{}'
+                    Add-Check "PK22 expiry-to-read-only" ($st.state -eq "expired_read_only" -and $blk.status -eq 423) "expiry transitions in real time to read-only"
+                    Add-Check "PK23 expired-data-readable" ($rd.status -eq 200) "customer data remains readable after expiry"
+                    Add-Check "PK24 expired-backup-available" ($bk.status -eq 200) "backup remains available after expiry"
+                    Add-Check "PK25 expired-mutations-blocked" ($blk.status -eq 423) "new reports, validation mutations and exports are blocked"
+                } else {
+                    Add-Check "PK21 short-license-operational" $false "the seconds-scale license was refused"
+                }
+            }
+        } finally { Stop-App $expProc }
+    }
+
     $proc = Start-App -Exe $exe -DataDir $WorkDir -P $Port
     $workspaceId = ""
     try {
@@ -373,46 +420,6 @@ else {
         Add-Check "PK20 normal-shutdown" $true "the application terminates cleanly on request"
     } finally {
         Stop-App $proc
-    }
-
-    if (Test-Path $short) {
-        $expDir = "$WorkDir-expiry"
-        # Same installation identity as the request (see the Python runner):
-        # a fresh data root would be refused as WRONG_INSTALLATION.
-        $srcCfg = Join-Path $WorkDir "install\config\installation.json"
-        if (Test-Path $srcCfg) {
-            $dstCfg = Join-Path $expDir "install\config\installation.json"
-            New-Item -ItemType Directory -Force (Split-Path -Parent $dstCfg) | Out-Null
-            Copy-Item $srcCfg $dstCfg -Force
-        }
-        $expProc = Start-App -Exe $exe -DataDir $expDir -P ($Port + 2)
-        try {
-            if ($null -ne (Wait-Api -P ($Port + 2) -Route "/offline/runtime")) {
-                $imp = Invoke-Api -P ($Port + 2) -Route "/offline/license/import" -Method POST -Body (Get-Content $short -Raw)
-                if ($imp.status -eq 200) {
-                    $op = Invoke-Api -P ($Port + 2) -Route "/workspaces" -Method POST -Body '{"name":"T"}'
-                    Add-Check "PK21 short-license-operational" ($op.status -eq 201) "the short-dated license operates while valid"
-                    # Wait until the license's OWN expiry passes, read from the
-                    # signed document. A packaged cold start takes tens of
-                    # seconds and varies by machine, so a fixed sleep is unsafe.
-                    # No clock is manipulated anywhere.
-                    $shortDoc = Get-Content $short -Raw | ConvertFrom-Json
-                    $expiresAt = [datetime]::Parse($shortDoc.grace_until).ToUniversalTime()
-                    $remaining = ($expiresAt - [datetime]::UtcNow).TotalSeconds
-                    Start-Sleep -Seconds ([Math]::Max(2, $remaining + 5))
-                    $st = (Invoke-Api -P ($Port + 2) -Route "/offline/license/status").body
-                    $blk = Invoke-Api -P ($Port + 2) -Route "/workspaces" -Method POST -Body '{"name":"U"}'
-                    $rd = Invoke-Api -P ($Port + 2) -Route "/workspaces"
-                    $bk = Invoke-Api -P ($Port + 2) -Route "/offline/backup" -Method POST -Body '{}'
-                    Add-Check "PK22 expiry-to-read-only" ($st.state -eq "expired_read_only" -and $blk.status -eq 423) "expiry transitions in real time to read-only"
-                    Add-Check "PK23 expired-data-readable" ($rd.status -eq 200) "customer data remains readable after expiry"
-                    Add-Check "PK24 expired-backup-available" ($bk.status -eq 200) "backup remains available after expiry"
-                    Add-Check "PK25 expired-mutations-blocked" ($blk.status -eq 423) "new reports, validation mutations and exports are blocked"
-                } else {
-                    Add-Check "PK21 short-license-operational" $false "the seconds-scale license was refused"
-                }
-            }
-        } finally { Stop-App $expProc }
     }
 
     # Installer lifecycle in an isolated profile.

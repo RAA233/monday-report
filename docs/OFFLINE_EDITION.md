@@ -182,15 +182,74 @@ configured — the loopback boundary is what makes unauthenticated local mode
 safe, so an unauthenticated API is never published to a network. A runtime lock file + live-port probe prevents two instances from
 mutating the same state; stale locks are recovered after crashes.
 
-## 11. Verification map
+## 11. Environment 2 — a task-owned clean Hyper-V virtual machine
+
+The Part-O minimum (`REQUIRED_ENVIRONMENT_MINIMUM = 2`,
+`backend/app/offline_commercial_evidence.py`) needs a second clean Windows
+environment. The first attempt used Windows Sandbox; it stopped executing its
+logon command after a few launches on the certification host, so that
+implementation is **retired** — the orchestrator, the `.wsb` template, the
+session driver and the `audit:offline-sandbox` command are all removed, and the
+Hyper-V route is the only supported Environment 2. The shared licensing,
+activation, issuer, package-builder, evidence and combiner components are
+unchanged.
+
+**Installation.** Official Windows 11 Enterprise Evaluation media from the
+Microsoft Evaluation Center, verified by full SHA-256, successful mount, an
+Enterprise Evaluation image index, x64 confirmation, `Get-WindowsImage` metadata
+and Microsoft signature posture. The image is applied with DISM
+(`Expand-WindowsImage`) to a GPT/EFI VHDX, made bootable with BCDBoot, and
+answered with a supported unattend file. **No requirement is bypassed** — no
+`BypassNRO`, no registry injection, no offline hive edit, no TPM/Secure
+Boot/CPU/activation/licensing bypass. If supported setup cannot complete, the
+run stops with `HYPERV_WINDOWS_SETUP_NOT_ACCEPTED`.
+
+**Mandatory security posture**, re-queried rather than assumed: Generation 2,
+Secure Boot **On** with the **`MicrosoftWindows`** template (not a third-party
+UEFI CA template), a local key protector, and a virtual TPM — verified host-side
+via `Get-VMFirmware`/`Get-VMSecurity` and in-guest via `Confirm-SecureBootUEFI`
+and `Get-Tpm`. Failure stops with
+`HYPERV_WINDOWS11_SECURITY_POSTURE_NOT_ACCEPTED` and the matrix does not run.
+
+**Isolation.** Zero network adapters during certification. A temporary adapter
+bound to *no* virtual switch is permitted during installation only and is removed
+before the clean baseline; the guest then proves no default route, no configured
+DNS server and no external reachability. Transport is non-network throughout:
+`Copy-VMFile` host→guest, PowerShell Direct guest→host.
+
+**Guest credential.** Generated per VM, never reused, protected at rest by BOTH
+DPAPI (bound to the elevated host user) and a filesystem ACL restricted to that
+user and SYSTEM. Decrypted in memory only, immediately before a bounded
+PowerShell Direct call. Never printed, logged, committed, packaged or evidenced;
+a corrupted or absent blob fails closed with no blank/prompted fallback.
+
+**Key isolation.** The operator private key never enters the VM, the guest disk,
+the guest registry, the package, the transfer set, the guest result, the logs or
+the evidence. The guest exports only a privacy-validated activation request; the
+host signs outside the product and outside the VM; only signed licenses return.
+
+**Cross-environment proof.** Both request phases run before either resume, so
+the operator can issue each environment a *genuine* license bound to the **other**
+environment's fingerprint. `PK19` then proves rejection in both directions, and
+the combiner requires it of both environments.
+
+## 12. Verification map
 
 | Concern | Guard |
 | --- | --- |
 | License format, binding, expiry, rollback, updates, key hygiene, **mutation cycles** | `pnpm run audit:offline-license` |
 | Runtime enforcement, read-only mode, backup/restore, localhost, single instance | `pnpm run audit:offline-runtime` |
-| Built-package execution matrix (fresh install → uninstall) | `pnpm run audit:offline-package` |
+| Built-package execution matrix (fresh install → uninstall), one environment | `pnpm run audit:offline-package` |
+| Air-gapped signing boundary | `pnpm run audit:offline-airgap` |
+| Environment 2 matrix inside the clean Hyper-V VM | `pnpm run audit:offline-hyperv` |
+| Hyper-V isolation, security posture, credential protection, cross-environment rejection, **mutation cycles** | `pnpm run audit:offline-hyperv-isolation` |
+| Two-environment combiner refusals, **mutation cycles** | `pnpm run audit:offline-combiner-faults` |
+| Both matrices + the two-environment record | `pnpm run offline:two-environment-matrix` |
 | Secret/privacy scan (seeded self-test) | `pnpm run audit:offline-secret-scan` |
 | Evidence artifact + fault mutations | `pnpm run audit:offline-commercial-evidence` |
 | Evidence generation | `pnpm run ga:offline-commercial-evidence` |
+
+Provision Environment 2:
+`pnpm run offline:provision-environment-2 -- -Action all -IsoPath <verified media>`.
 
 Build: `python packaging/build_offline_package.py --public-key <hex file>`.

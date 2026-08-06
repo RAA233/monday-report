@@ -138,7 +138,10 @@ def boundary_battery(work: Path) -> None:
         "a hashes-only activation request is accepted for signing")
 
     dirty = json.loads(json.dumps(good))
-    dirty["machine_binding"]["component_hashes"]["physical_adapters"] = "00:1A:2B:3C:4D:5E"
+    # leak-test fixture: a deliberately raw identifier, present so AG11 can prove
+    # the operator REFUSES to sign it. Marked for the secret scanner's
+    # allow-definitions pass, which otherwise reads the negative test as a leak.
+    dirty["machine_binding"]["component_hashes"]["physical_adapters"] = "00:1A:2B:3C:4D:5E"  # leak-test fixture
     rec("AG11 operator-refuses-raw-identifier-request",
         OP.assess_request_privacy(dirty) != [],
         "the operator refuses to sign a request carrying raw identifier material")
@@ -159,8 +162,9 @@ def _run_ps_runner(extra_args: list[str], *, env_overrides: dict | None = None,
 
 
 def powershell_boundary_battery(work: Path) -> None:
-    """The Sandbox environment has no Python, so its runner is PowerShell. The
-    SAME boundary must hold there — proven by execution, not by analogy."""
+    """The clean Hyper-V Environment 2 guest has no Python, so its runner is
+    PowerShell. The SAME boundary must hold there — proven by execution, not by
+    analogy."""
 
     if not PS_RUNNER.exists():
         rec("AG21 powershell-runner-present", False, "PowerShell environment runner missing")

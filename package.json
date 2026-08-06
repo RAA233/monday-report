@@ -154,7 +154,11 @@
     "offline:environment-runner": "python scripts/offline_env_runner.py",
     "offline:issue-test-license": "python scripts/offline_operator_issue.py",
     "offline:combine-environments": "python scripts/offline_combine_environments.py",
-    "audit:offline-sandbox": "python scripts/offline_sandbox_matrix.py"
+    "audit:offline-combiner-faults": "python scripts/offline_combine_environments_faults_guard.py",
+    "audit:offline-hyperv": "python scripts/offline_hyperv_matrix.py",
+    "audit:offline-hyperv-isolation": "python scripts/offline_hyperv_guard.py",
+    "offline:two-environment-matrix": "python scripts/offline_two_environment_matrix.py",
+    "offline:provision-environment-2": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/hyperv/provision_vm.ps1"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

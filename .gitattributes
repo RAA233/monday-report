@@ -53,6 +53,18 @@
 *.cfg  text eol=lf
 *.ini  text eol=lf
 *.example text eol=lf
+
+# --- PowerShell sources and rendered-file templates ---
+#     *.ps1 resolved eol=unspecified until the Hyper-V Environment 2 work landed,
+#     even though three .ps1 files were already tracked. The isolation guard reads
+#     packaging/hyperv/*.ps1 to prove the guest path cannot sign and declares no
+#     key parameter, so their bytes are now load-bearing. Every tracked .ps1 blob
+#     is already LF, so pinning the rule renormalizes nothing.
+#     *.template covers packaging/hyperv/unattend.xml.template, whose extension is
+#     .template rather than .xml; the rendered unattend is written to the guest
+#     volume, never checked out.
+*.ps1      text eol=lf
+*.template text eol=lf
 .gitignore    text eol=lf
 .gitattributes text eol=lf
 .npmrc        text eol=lf
