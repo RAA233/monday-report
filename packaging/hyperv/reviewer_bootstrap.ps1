@@ -231,7 +231,7 @@ if ($ExportSource) {
     # HAND instead of trusting a string the author handed it.
     #
     # Administrative only: no credential is involved and none is prompted for.
-    $dest = "$HvRooteviewer-src"
+    $dest = "$HvRoot\reviewer-src"
     $head = (& git.exe -C $SourceRepo rev-parse HEAD).Trim()
     $tree = (& git.exe -C $SourceRepo rev-parse 'HEAD^{tree}').Trim()
     Write-Fact 'exporting head' $head
