@@ -204,8 +204,13 @@ def loopback_only(pid: int) -> tuple[bool, int]:
     for family in ("TCP", "TCPv6"):
         completed = subprocess.run(["netstat", "-ano", "-p", family],
                                    capture_output=True, text=True, timeout=60)
-        rows += [line.split() for line in completed.stdout.splitlines()
-                 if line.strip().startswith("TCP") and line.strip().endswith(str(pid))]
+        for line in completed.stdout.splitlines():
+            parts = line.split()
+            # Match the owning-PID COLUMN exactly. endswith() is a decimal
+            # suffix test, so pid 4 also attracted every row owned by 1234,
+            # 34, 654 and so on -- rows this process does not own.
+            if len(parts) >= 5 and parts[0] == "TCP" and parts[-1] == str(pid):
+                rows.append(parts)
     non_local = [r for r in rows if not (r[1].startswith("127.") or r[1].startswith("[::1]"))]
     return (not non_local and len(rows) >= 1, len(rows))
 

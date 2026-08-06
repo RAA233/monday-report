@@ -271,10 +271,27 @@ def main() -> int:
     rejects("OE27 empty-environments-map-rejected",
             lambda m: m["two_environment_record"].update(environments={}),
             expect="no per-environment data")
-    rejects("OE28 same-environment-class-in-record-rejected",
-            lambda m: [e.update(environment_class="windows-11-host-isolated")
-                       for e in m["two_environment_record"]["environments"].values()],
-            expect="independent identities")
+    # Independence must key on distinct MACHINE IDENTITIES, not on distinct
+    # class labels. Two genuinely separate clean Windows 11 hosts share a class
+    # and are still two environments -- the Part-O wording allows exactly that --
+    # so requiring distinct labels would reject an honest pair. Checked against
+    # validate() alone: the sealed-record chain deliberately pins the real
+    # classes, and that is OE39's job, not this one's.
+    same_class = _copy.deepcopy(payload)
+    for env in same_class["two_environment_record"]["environments"].values():
+        env["environment_class"] = "windows-11-clean-host"
+    same_class["results"]["package_matrix"]["environments_executed"] = [
+        "windows-11-clean-host", "windows-11-clean-host"]
+    same_class["environment_coverage"]["executed"] = ["windows-11-clean-host",
+                                                      "windows-11-clean-host"]
+    same_class["reproducible_payload_hash"] = E.reproducible_hash(same_class)
+    rehash(same_class)
+    same_class_reasons = E.validate(same_class, current_commit=commit, current_tree=tree)
+    rec("OE28 same-class-distinct-identities-still-independent",
+        not any("independent identities" in r for r in same_class_reasons),
+        "two environments sharing a class label but reporting different machine "
+        "identities are not treated as one environment; only the repeated-class "
+        "listing rule (OE21) objects")
     rejects("OE29 unbacked-environments-executed-rejected",
             lambda m: m["results"]["package_matrix"].update(
                 environments_executed=["alpha", "beta"]),
@@ -314,6 +331,80 @@ def main() -> int:
     rec("OE13 invalid-artifact-blocks-all-controls",
         set(blocked.values()) == {"BLOCKED"},
         "an invalid artifact can never yield a PASS control")
+
+    # ---- the chain: artifact -> sealed record -> RAW runner outputs ----
+    # Everything above reasons about the artifact's own contents. This section
+    # walks back to the files the runners actually wrote, which is the only step
+    # an editor cannot satisfy without fabricating the environment execution.
+    import offline_combine_environments as CB  # noqa: PLC0415
+
+    raw_dir = E.ENVIRONMENT_RECORDS_DIR
+    sealed_path = E.TWO_ENVIRONMENT_RECORD_PATH
+    raw_names = ("environment-1-result.json", "environment-1-request-record.json",
+                 "environment-2-result.json", "environment-2-request-record.json")
+    have_raw = sealed_path.exists() and all((raw_dir / n).exists() for n in raw_names)
+    rec("OE35 raw-environment-records-retained", have_raw,
+        f"the four raw runner records are kept beside the sealed record "
+        f"({raw_dir.name}/)" if have_raw else "raw runner records are missing")
+
+    if have_raw:
+        sealed = json.loads(sealed_path.read_text(encoding="utf-8"))
+        rederived = CB.redact(
+            json.loads((raw_dir / "environment-1-result.json").read_text(encoding="utf-8")),
+            json.loads((raw_dir / "environment-1-request-record.json").read_text(encoding="utf-8")))
+        rederived2 = CB.redact(
+            json.loads((raw_dir / "environment-2-result.json").read_text(encoding="utf-8")),
+            json.loads((raw_dir / "environment-2-request-record.json").read_text(encoding="utf-8")))
+        pair_reasons = CB.validate_pair(rederived, rederived2)
+        rec("OE36 sealed-record-rederives-from-raw-runner-output",
+            sealed.get("environments", {}).get("ENVIRONMENT_1") == rederived
+            and sealed.get("environments", {}).get("ENVIRONMENT_2") == rederived2
+            and not pair_reasons,
+            "re-running the combiner's redaction over the raw runner records "
+            "reproduces the sealed record's environments exactly, and the pair "
+            "is still accepted")
+
+        seal = canonical_hash({k: v for k, v in sealed.items() if k != "record_hash"})
+        rec("OE37 sealed-record-seal-verifies", seal == sealed.get("record_hash"),
+            "the sealed record's own record_hash re-derives from its content")
+
+        # The identity digests must come from the raw fingerprint hashes, so a
+        # copied environment block cannot be relabelled into a second machine.
+        raw_fp = {}
+        for label, name in (("ENVIRONMENT_1", "environment-1-request-record.json"),
+                            ("ENVIRONMENT_2", "environment-2-request-record.json")):
+            doc = json.loads((raw_dir / name).read_text(encoding="utf-8"))
+            raw_fp[label] = canonical_hash({"fp": str(doc.get("machine_fingerprint_hash", ""))})[:32]
+        embedded_envs = payload.get("two_environment_record", {}).get("environments", {})
+        rec("OE38 identity-digests-trace-to-raw-fingerprints",
+            all(embedded_envs.get(label, {}).get("fingerprint_identity_digest") == digest
+                for label, digest in raw_fp.items())
+            and len(set(raw_fp.values())) == len(raw_fp),
+            "each environment's identity digest is the digest of the machine "
+            "fingerprint its own runner reported, and the two differ")
+
+        # Load-bearing: a COPIED environment block relabelled as a second
+        # machine -- the exact forgery that defeated the previous validator --
+        # must be refused.
+        forged = copy.deepcopy(payload)
+        one = copy.deepcopy(forged["two_environment_record"]["environments"]["ENVIRONMENT_1"])
+        one["environment_class"] = "windows-11-hyperv"
+        one["fingerprint_identity_digest"] = "d" * 32
+        forged["two_environment_record"]["environments"]["ENVIRONMENT_2"] = one
+        forged["reproducible_payload_hash"] = E.reproducible_hash(forged)
+        rehash(forged)
+        forged_reasons = (E.validate(forged, current_commit=commit, current_tree=tree)
+                          + E.validate_record_chain(forged))
+        rec("OE39 copied-environment-relabelled-as-a-second-machine-rejected",
+            bool(forged_reasons),
+            f"one machine's block copied under the other label is refused "
+            f"({forged_reasons[:2]})")
+    else:
+        for cid in ("OE36 sealed-record-rederives-from-raw-runner-output",
+                    "OE37 sealed-record-seal-verifies",
+                    "OE38 identity-digests-trace-to-raw-fingerprints",
+                    "OE39 copied-environment-relabelled-as-a-second-machine-rejected"):
+            rec(cid, False, "raw runner records unavailable; the chain cannot be walked")
 
     ga_registry = ROOT / "evals" / "ga" / "blocker_registry.v1.json"
     if ga_registry.exists():

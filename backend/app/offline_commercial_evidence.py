@@ -58,6 +58,74 @@ REQUIRED_RESULT_SECTIONS = (
 #: The two-environment record the package matrix is derived from.
 TWO_ENVIRONMENT_RECORD_SCHEMA = "offline-two-environment-record.v1"
 
+#: The combiner's own output, and the raw runner records it was folded from.
+#: Deriving the acceptance facts from the embedded COPY of the record proved
+#: nothing: the copy is unauthenticated free text inside the artifact, so one
+#: machine's block duplicated under a second label with a different digest still
+#: validated. The embedded copy must therefore agree with the sealed record on
+#: disk, and that record must re-derive from the raw environment records.
+TWO_ENVIRONMENT_RECORD_PATH = (ROOT / "output" / "offline-commercial"
+                               / "offline-two-environment-record.v1.json")
+ENVIRONMENT_RECORDS_DIR = ROOT / "output" / "offline-commercial" / "environments"
+
+#: Per-environment fields the embedded copy must reproduce exactly.
+_ENVIRONMENT_BOUND_FIELDS = (
+    "environment_class", "fingerprint_identity_digest", "installer_sha256",
+    "executable_sha256", "payload_manifest_sha256", "frontend_manifest_sha256",
+)
+
+
+def validate_record_chain(payload: dict) -> list[str]:
+    """Bind the artifact's embedded record to the sealed record on disk.
+
+    ``record_hash`` was format-checked and never recomputed, so it anchored
+    nothing. Here the on-disk record's own seal is re-derived, the artifact's
+    ``record_hash`` must equal it, and every per-environment field the artifact
+    carries must match the record field for field. Fabricating an environment
+    now requires editing the sealed record too -- and the guard additionally
+    re-derives that record from the raw runner outputs.
+    """
+
+    reasons: list[str] = []
+    embedded = payload.get("two_environment_record")
+    if not isinstance(embedded, dict) or not embedded:
+        return reasons  # absence is already reported by validate()
+
+    if not TWO_ENVIRONMENT_RECORD_PATH.exists():
+        return ["the sealed two-environment record is absent, so the artifact's "
+                "embedded copy cannot be verified"]
+    try:
+        record = json.loads(TWO_ENVIRONMENT_RECORD_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ["the sealed two-environment record could not be read"]
+
+    sealed = canonical_hash({k: v for k, v in record.items() if k != "record_hash"})
+    if sealed != record.get("record_hash"):
+        reasons.append("the two-environment record's own seal does not verify")
+    if embedded.get("record_hash") != record.get("record_hash"):
+        reasons.append("the artifact's record_hash does not match the sealed record")
+
+    for field in ("accepted", "environment_count", "identical_package_bytes",
+                  "independent_identities"):
+        if embedded.get(field) != record.get(field):
+            reasons.append(f"the artifact's {field} disagrees with the sealed record")
+
+    embedded_envs = embedded.get("environments", {}) or {}
+    record_envs = record.get("environments", {}) or {}
+    if set(embedded_envs) != set(record_envs):
+        reasons.append("the artifact carries different environment labels than the "
+                       "sealed record")
+    else:
+        for label, env in embedded_envs.items():
+            source = record_envs.get(label, {})
+            for field in _ENVIRONMENT_BOUND_FIELDS:
+                if env.get(field) != source.get(field):
+                    reasons.append(f"environment {label} {field} disagrees with the "
+                                   f"sealed record")
+            if env.get("totals") != source.get("totals"):
+                reasons.append(f"environment {label} totals disagree with the sealed record")
+    return reasons
+
 #: Contractual floors on how much each section must actually have executed.
 #: Requiring only ``passed > 0`` let every recorded count be shrunk to 1 while
 #: the artifact still validated as accepted -- the numbers carried no enforced
@@ -202,8 +270,15 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
 
             digests = [str(e.get("fingerprint_identity_digest", "")) for e in environments.values()]
             classes = [str(e.get("environment_class", "")) for e in environments.values()]
-            derived_independent = (all(digests) and len(set(digests)) == len(digests)
-                                   and len(set(classes)) == len(classes) and all(classes))
+            # Independence rests on distinct MACHINE IDENTITIES, not on distinct
+            # class labels: two genuinely separate clean Windows 11 hosts share a
+            # class and are still two environments, which the Part-O wording
+            # explicitly allows. The digest is a fixed-width hash, so require its
+            # shape too -- an unconstrained string was accepted as an identity.
+            derived_independent = (
+                all(re.fullmatch(r"[0-9a-f]{32}", d or "") for d in digests)
+                and len(set(digests)) == len(digests)
+                and all(classes))
             if record.get("independent_identities") is not derived_independent:
                 reasons.append("independent_identities disagrees with the recorded "
                                "per-environment identities")
@@ -219,6 +294,14 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
                     derived_identical = False
                 elif len(set(values)) != 1:
                     derived_identical = False
+            # The environments must also have run the package this artifact
+            # describes. Without this the top-level installer hash and the
+            # per-environment ones were never compared to each other.
+            env_installers = {str(e.get("installer_sha256", "")) for e in environments.values()}
+            declared_installer = str(payload.get("package", {}).get("installer_sha256", ""))
+            if env_installers and env_installers != {declared_installer}:
+                reasons.append("the environments did not run the package this evidence "
+                               "describes")
             if record.get("identical_package_bytes") is not derived_identical:
                 reasons.append("identical_package_bytes disagrees with the recorded "
                                "per-environment package hashes")
@@ -305,8 +388,12 @@ def load_and_validate() -> tuple[dict | None, list[str]]:
     if not EVIDENCE_PATH.exists():
         return None, ["no evidence artifact"]
     payload = json.loads(EVIDENCE_PATH.read_text(encoding="utf-8"))
-    return payload, validate(payload, current_commit=git_rev("HEAD"),
-                             current_tree=git_rev("HEAD^{tree}"))
+    reasons = validate(payload, current_commit=git_rev("HEAD"),
+                       current_tree=git_rev("HEAD^{tree}"))
+    # The chain check needs the filesystem, so it lives here rather than in the
+    # pure validate(). It is not optional: without it the artifact's embedded
+    # record is self-describing and a fabricated environment passes.
+    return payload, reasons + validate_record_chain(payload)
 
 
 #: Part-O minimum: one current Windows 11 environment PLUS one second clean

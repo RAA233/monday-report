@@ -324,12 +324,16 @@ if ($Phase -eq "request") {
         # The unary comma keeps each row an ARRAY of columns; without it the
         # pipeline flattens every row into one long token list and $_[1] would
         # index a character rather than the local address.
+        # Match the owning-PID COLUMN exactly. EndsWith() is a decimal suffix
+        # test, so pid 4 also attracted every row owned by 1234, 34, 654 and so
+        # on -- rows this process does not own.
         $splitter = [regex]"\s+"
         $rows = @()
         foreach ($family in @("TCP", "TCPv6")) {
-            $rows += @(netstat -ano -p $family | Where-Object {
-                $_.Trim().StartsWith("TCP") -and $_.Trim().EndsWith([string]$proc.Id)
-            } | ForEach-Object { , @($splitter.Split($_.Trim())) })
+            $rows += @(netstat -ano -p $family | ForEach-Object {
+                $cols = @($splitter.Split($_.Trim()))
+                if ($cols.Count -ge 5 -and $cols[0] -eq "TCP" -and $cols[-1] -eq [string]$proc.Id) { , $cols }
+            })
         }
         $nonLocal = @($rows | Where-Object {
             -not ($_[1].StartsWith("127.") -or $_[1].StartsWith("[::1]"))
@@ -521,7 +525,11 @@ else {
     try {
         $installedExe = Join-Path $env:LOCALAPPDATA "Programs\MondayReportOffline\MondayReportOffline.exe"
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
-        Add-Check "PK26 per-user-install-no-elevation" (Test-Path $installedExe) "the installer lays down a per-user installation with no elevation"
+        # The Python runner requires returncode 0 on every installer step; the
+        # exit code was discarded here, so an installer that errored while
+        # leaving the exe in place still passed.
+        $installCode = $LASTEXITCODE
+        Add-Check "PK26 per-user-install-no-elevation" (($installCode -eq 0) -and (Test-Path $installedExe)) "the installer lays down a per-user installation with no elevation"
 
         $dataMarker = Join-Path $env:LOCALAPPDATA "MondayReportOffline\data"
         New-Item -ItemType Directory -Force $dataMarker | Out-Null
@@ -531,9 +539,11 @@ else {
         Set-Content -Path (Join-Path $licMarker "monday-report-license.json") -Value "{}" -Encoding UTF8
 
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
-        Add-Check "PK27 upgrade-preserves-data-and-license" ((Test-Path (Join-Path $dataMarker "monday_report_state.json")) -and (Test-Path (Join-Path $licMarker "monday-report-license.json"))) "re-running the installer preserves customer data and the license"
+        $upgradeCode = $LASTEXITCODE
+        Add-Check "PK27 upgrade-preserves-data-and-license" (($upgradeCode -eq 0) -and (Test-Path (Join-Path $dataMarker "monday_report_state.json")) -and (Test-Path (Join-Path $licMarker "monday-report-license.json"))) "re-running the installer preserves customer data and the license"
 
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Split-Path -Parent $installedExe) "uninstall.ps1") | Out-Null
+        $uninstallCode = $LASTEXITCODE
         Start-Sleep -Seconds 6
         # uninstall.ps1 hands the final directory removal to a DETACHED process,
         # so poll rather than sleeping a fixed interval. Asserting only that the
@@ -543,14 +553,16 @@ else {
             if (-not (Test-Path $installedExe)) { $binariesRemoved = $true; break }
             Start-Sleep -Seconds 1
         }
-        Add-Check "PK28 uninstall-preserves-data" ($binariesRemoved -and (Test-Path (Join-Path $dataMarker "monday_report_state.json"))) ("default uninstall REMOVES the binaries (removed=" + $binariesRemoved + ") and preserves customer data")
+        Add-Check "PK28 uninstall-preserves-data" (($uninstallCode -eq 0) -and $binariesRemoved -and (Test-Path (Join-Path $dataMarker "monday_report_state.json"))) ("default uninstall REMOVES the binaries (removed=" + $binariesRemoved + ") and preserves customer data")
 
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
-        Add-Check "PK29 reinstall-detects-preserved-data" ((Test-Path (Join-Path $dataMarker "monday_report_state.json")) -and (Test-Path $installedExe)) "reinstalling finds the preserved data directory in place"
+        $reinstallCode = $LASTEXITCODE
+        Add-Check "PK29 reinstall-detects-preserved-data" (($reinstallCode -eq 0) -and (Test-Path (Join-Path $dataMarker "monday_report_state.json")) -and (Test-Path $installedExe)) "reinstalling finds the preserved data directory in place"
 
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Split-Path -Parent $installedExe) "uninstall.ps1") -RemoveData | Out-Null
+        $removeDataCode = $LASTEXITCODE
         Start-Sleep -Seconds 6
-        Add-Check "PK30 explicit-data-removal-path-separate" (-not (Test-Path (Join-Path $env:LOCALAPPDATA "MondayReportOffline"))) "explicit -RemoveData is a separate, deliberate path"
+        Add-Check "PK30 explicit-data-removal-path-separate" (($removeDataCode -eq 0) -and -not (Test-Path (Join-Path $env:LOCALAPPDATA "MondayReportOffline"))) "explicit -RemoveData is a separate, deliberate path"
     } finally {
         $env:LOCALAPPDATA = $oldLocal; $env:APPDATA = $oldRoaming; $env:USERPROFILE = $oldProfile
     }

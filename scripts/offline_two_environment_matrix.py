@@ -250,6 +250,18 @@ def main(argv: list[str] | None = None) -> int:
     repo_copy.parent.mkdir(parents=True, exist_ok=True)
     repo_copy.write_text(serialized, encoding="utf-8")
 
+    # Keep the RAW runner records beside it. The evidence guard re-derives the
+    # sealed record from these four files, which is the only anchor that cannot
+    # be satisfied by editing the record: forging it means forging the runner
+    # output, i.e. fabricating the environment execution itself.
+    raw_dir = repo_copy.parent / "environments"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("environment-1-result.json", "environment-1-request-record.json",
+                 "environment-2-result.json", "environment-2-request-record.json"):
+        source = results / name
+        if source.exists():
+            shutil.copy2(source, raw_dir / name)
+
     print(json.dumps({
         "orchestrator": "offline_two_environment",
         "claim_scope": "both complete environment matrices against one frozen package, "

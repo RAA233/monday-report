@@ -53,6 +53,7 @@ ORCHESTRATOR = ROOT / "scripts" / "offline_hyperv_matrix.py"
 DEFAULT_VM = "MR-OFFLINE-E2"
 DEFAULT_STATE_ROOT = Path(r"C:\mr-hv\state")
 DEFAULT_MEDIA_RECORD = Path(r"C:\mr-hv\media\media-record.json")
+DEFAULT_ISO = Path(r"C:\mr-hv\media\win11-enterprise-eval-x64.iso")
 DEFAULT_XFER = Path(r"C:\mr-hv\xfer")
 
 CHECKS: list[dict] = []
@@ -591,7 +592,8 @@ def credential_battery(state_root: Path, xfer_root: Path, vm_name: str) -> None:
 
 # --------------------------------------------------------------- live VM tier
 
-def vm_battery(vm_name: str, media_record: Path, xfer_root: Path) -> None:
+def vm_battery(vm_name: str, media_record: Path, xfer_root: Path,
+               iso_path: Path) -> None:
     probe = _powershell([
         "-Command",
         "$vm = Get-VM -Name '%s' -ErrorAction SilentlyContinue;"
@@ -656,30 +658,63 @@ def vm_battery(vm_name: str, media_record: Path, xfer_root: Path) -> None:
     # against the local file. A hand-written "source_domain" checked with
     # endswith("microsoft.com") proved nothing, because the value and the test
     # would both have been authored by whoever wanted the claim to pass.
+    # Reading a stored record and believing its facts -- and its own checks array
+    # -- is not a proof: a JSON file at a fixed path is exactly as forgeable as
+    # the hand-written domain string it replaced. The provisioning script's
+    # media-verify action is EXECUTED here and its stdout consumed directly, so
+    # nothing between the media and this verdict is trusted. It re-hashes the
+    # ISO, re-mounts it, re-reads the image metadata, re-checks the Microsoft
+    # signature posture, resolves the official fwlink again, and compares the
+    # served length against the local file.
     official_hosts = {"software-static.download.prss.microsoft.com",
                       "software.download.prss.microsoft.com",
                       "download.microsoft.com"}
-    if media_record.exists():
-        # Windows PowerShell's Set-Content -Encoding UTF8 emits a BOM.
-        record = json.loads(media_record.read_text(encoding="utf-8-sig"))
-        facts = record.get("facts", {})
+    if not Path(iso_path).exists():
+        rec("HV41 approved-clean-media", False,
+            "the approved media is not present, so its provenance cannot be re-derived")
+        rec("HV41b stored-media-record-matches-live-measurement", False,
+            "no media to measure")
+    else:
+        with tempfile.TemporaryDirectory(prefix="hv-media-") as tmp:
+            proc = _powershell(["-File", str(PROVISION), "-Action", "media-verify",
+                                "-IsoPath", str(iso_path),
+                                "-MediaRecordPath", str(Path(tmp) / "record.json")],
+                               timeout=2400)
+        live = {}
+        text = (proc.stdout or "").strip()
+        if text.startswith("{"):
+            try:
+                live = json.loads(text)
+            except json.JSONDecodeError:
+                live = {}
+        facts = live.get("facts", {})
+        checks = {c.get("check_id", "").split()[0]: c.get("ok") for c in live.get("checks", [])}
         sha = str(facts.get("media_sha256", ""))
         edition = str(facts.get("edition_class", ""))
         arch = str(facts.get("architecture", ""))
         resolved = str(facts.get("resolved_delivery_host", ""))
         size_ok = bool(facts.get("local_size_matches_served"))
-        checks = {c.get("check_id", "").split()[0]: c.get("ok") for c in record.get("checks", [])}
-        ok = (bool(re.fullmatch(r"[0-9a-f]{64}", sha))
-              and "Evaluation" in edition and arch == "x64"
-              and resolved in official_hosts and size_ok
-              and checks.get("HM07") is True
-              and checks.get("HM08") is True and checks.get("HM09") is True)
-        rec("HV41 approved-clean-media", ok,
-            f"edition={edition}; architecture={arch}; official delivery host resolved="
-            f"{resolved in official_hosts}; served length matches local media={size_ok}; "
-            f"Microsoft signature posture={checks.get('HM07')}")
-    else:
-        rec("HV41 approved-clean-media", False, "no media provenance record")
+        all_gates = all(checks.get(f"HM{n:02d}") is True for n in range(1, 10))
+        rec("HV41 approved-clean-media",
+            bool(re.fullmatch(r"[0-9a-f]{64}", sha)) and "Evaluation" in edition
+            and arch == "x64" and resolved in official_hosts and size_ok and all_gates,
+            f"re-derived live: edition={edition}; architecture={arch}; official "
+            f"delivery host={resolved in official_hosts}; served length matches local "
+            f"media={size_ok}; all nine media gates={all_gates}")
+
+        # The retained record must agree with what was just measured, so tampering
+        # with it is caught rather than merely bypassed.
+        if media_record.exists():
+            stored = json.loads(media_record.read_text(encoding="utf-8-sig")).get("facts", {})
+            rec("HV41b stored-media-record-matches-live-measurement",
+                str(stored.get("media_sha256", "")) == sha
+                and str(stored.get("resolved_delivery_host", "")) == resolved
+                and str(stored.get("edition_class", "")) == edition
+                and bool(sha),
+                "the retained media record reports what a fresh measurement reports")
+        else:
+            rec("HV41b stored-media-record-matches-live-measurement", False,
+                "no retained media record to compare against")
 
     # HV42 -- the guest is a DIFFERENT machine from Environment 1, proven
     # directly rather than inferred from matrix output, so the claim holds
@@ -850,6 +885,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-root", default=str(DEFAULT_STATE_ROOT))
     parser.add_argument("--media-record", default=str(DEFAULT_MEDIA_RECORD))
     parser.add_argument("--transfer-root", default=str(DEFAULT_XFER))
+    parser.add_argument("--iso-path", default=str(DEFAULT_ISO),
+                        help="approved media; HV41 re-derives its provenance live")
     args = parser.parse_args(argv)
 
     with tempfile.TemporaryDirectory(prefix="offline-hyperv-") as tmp:
@@ -859,7 +896,8 @@ def main(argv: list[str] | None = None) -> int:
         boundary_battery(work)
         record_battery()
         credential_battery(Path(args.state_root), Path(args.transfer_root), args.vm_name)
-        vm_battery(args.vm_name, Path(args.media_record), Path(args.transfer_root))
+        vm_battery(args.vm_name, Path(args.media_record), Path(args.transfer_root),
+                   Path(args.iso_path))
         mutation_cycles(work, args.vm_name)
 
     passed = sum(1 for c in CHECKS if c["ok"])
