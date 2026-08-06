@@ -169,6 +169,24 @@ print(json.dumps({"environment": os.environ.get("MONDAY_REPORT_API_BASE"), "runt
     checks.append(assert_check("Roadmap guard requires Roadmap screenshot", "10-roadmap.png" in ui_markers, "active UI markers"))
     checks.append(assert_check("Roadmap guard rejects obsolete Roadmap screenshot", "09-roadmap.png" not in ui_markers, "active UI markers"))
 
+    # Redundant assertion of the offline evidence contract's membership in
+    # audit:all. It lives HERE, deliberately outside the offline guard: a
+    # meta-guard that sits inside the step it guards is the original defect with
+    # one extra hop, since deleting both entries in one commit fails nothing.
+    # audit_harness_guard is step 1 of audit:all and carries several unrelated
+    # checks, so removing it to hide an offline regression is a conspicuous edit.
+    #
+    # Deterrence, not impossibility: removal now needs coordinated edits to
+    # package.json, offline_audit_membership_manifest.py, and this file.
+    membership = load_module(
+        "monday_report_offline_audit_membership",
+        ROOT / "scripts" / "offline_audit_membership_manifest.py")
+    membership_reasons = membership.verify_membership()
+    checks.append(assert_check(
+        "audit:all pins the offline evidence contract",
+        not membership_reasons,
+        membership_reasons or "python scripts/offline_evidence_contract_guard.py pinned"))
+
     failed = [check for check in checks if not check["ok"]]
     for check in checks:
         status = "PASS" if check["ok"] else "FAIL"

@@ -21,9 +21,26 @@ from .licensing.canonical import canonical_hash
 SCHEMA_VERSION = "offline-commercial-package-evidence.v1"
 EVIDENCE_TYPE = "offline_commercial_package_behavior"
 
-LICENSE_VERDICT = "OFFLINE_LICENSE_ENFORCEMENT_ACCEPTED"
-PACKAGE_VERDICT = "OFFLINE_WINDOWS_PACKAGE_ACCEPTED"
-COMMERCIAL_VERDICT = "OFFLINE_COMMERCIAL_PACKAGE_ACCEPTED"
+#: THIS TIER IS NO LONGER AUTHORITATIVE.
+#:
+#: An independent review demonstrated that this chain accepted a fabricated
+#: second environment: replacing ``ENVIRONMENT_2`` with a verbatim copy of
+#: ``ENVIRONMENT_1``, changing only ``environment_class`` and
+#: ``fingerprint_identity_digest``, and resealing the author-controlled hashes
+#: passed ``validate()`` + ``validate_record_chain()`` + ``load_and_validate()``
+#: with ZERO reasons and yielded ``offline_commercial_package: PASS``. Every
+#: anchor here is author-controlled, so the author can satisfy all of them.
+#:
+#: The acceptance strings are therefore GONE from this module. They exist in
+#: exactly one place -- ``offline_authoritative_evidence`` -- which requires an
+#: Ed25519 attestation from a separate Windows principal. Reintroducing an
+#: ACCEPTED literal here would restore the bypass, because
+#: ``import offline_commercial_evidence`` is the name every existing script
+#: already reaches for.
+LEGACY_NON_AUTHORITATIVE = "LEGACY_OFFLINE_EVIDENCE_NON_AUTHORITATIVE"
+LICENSE_VERDICT = "OFFLINE_LICENSE_ENFORCEMENT_NOT_ACCEPTED"
+PACKAGE_VERDICT = "OFFLINE_WINDOWS_PACKAGE_NOT_ACCEPTED"
+COMMERCIAL_VERDICT = "OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED"
 
 ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE_PATH = ROOT / "output" / "offline-commercial" / "offline-commercial-package-evidence.v1.json"
@@ -375,31 +392,21 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
             reasons.append(f"evidence contains a leak shape: {pattern.pattern[:40]}")
             break
 
-    # The stored verdict block is a CLAIM; recompute it from the recorded
-    # results so a hand-edited artifact cannot assert an acceptance the
-    # controls do not support (the canonical hash alone is unsigned and
-    # recomputable by anyone editing the file).
-    if not reasons:
-        derived = control_verdicts(payload, [])
-        expected = {
-            "license": (LICENSE_VERDICT if derived["offline_license_enforcement"] == "PASS"
-                        else "OFFLINE_LICENSE_ENFORCEMENT_NOT_ACCEPTED"),
-            "package": (PACKAGE_VERDICT if derived["offline_windows_package"] == "PASS"
-                        else "OFFLINE_WINDOWS_PACKAGE_NOT_ACCEPTED"),
-            "commercial": (COMMERCIAL_VERDICT if derived["offline_commercial_package"] == "PASS"
-                           else "OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED"),
-        }
-        stored = payload.get("verdicts", {})
-        for key, value in expected.items():
-            if stored.get(key) != value:
-                reasons.append(
-                    f"stored verdict '{key}' disagrees with the verdict derived from the "
-                    f"recorded results"
-                )
-        coverage = payload.get("environment_coverage", {})
-        if coverage and coverage.get("meets_minimum") is not environment_coverage_met(payload):
-            reasons.append("environment_coverage.meets_minimum disagrees with the recorded "
-                           "executed environments")
+    # This tier is non-authoritative BY CONSTRUCTION, and says so unconditionally
+    # rather than behind ``if not reasons:``. Gating the self-grading control on
+    # an empty reasons list meant a document that was both stale AND overclaiming
+    # reported only staleness -- backwards for what is meant to be the
+    # anti-self-grading check.
+    reasons.append(
+        "this artifact is a legacy v1 document: "
+        + LEGACY_NON_AUTHORITATIVE
+        + " -- offline acceptance requires the v2 tier with an independent "
+          "reviewer attestation")
+
+    coverage = payload.get("environment_coverage", {})
+    if coverage and coverage.get("meets_minimum") is not environment_coverage_met(payload):
+        reasons.append("environment_coverage.meets_minimum disagrees with the recorded "
+                       "executed environments")
     return reasons
 
 
@@ -435,35 +442,24 @@ def environment_coverage_met(payload: dict) -> bool:
 
 
 def control_verdicts(payload: dict, reasons: list[str]) -> dict[str, str]:
-    """The three OFFLINE controls. Deliberately separate from — and unable to
-    influence — the production-target and GA controls.
+    """Unconditionally BLOCKED. This tier can no longer grade itself.
 
-    ``offline_windows_package`` (and therefore ``offline_commercial_package``)
-    requires the executed-environment minimum — a single-host matrix stays
-    BLOCKED no matter how green it is.
+    The previous body took the failure list as a CALLER ARGUMENT and returned
+    PASS whenever that list was empty -- so ``control_verdicts(payload, [])``
+    yielded ``offline_commercial_package: PASS`` with no commit check, no tree
+    check and no signature, and both the generator and ``validate()`` called it
+    exactly that way. A control whose result the caller chooses is not a
+    control.
+
+    Authoritative verdicts now come only from
+    ``offline_authoritative_evidence.load_and_validate_authoritative()``, which
+    reads the artifact itself and requires an Ed25519 attestation from a
+    separate Windows principal.
+
+    The signature keeps ``payload``/``reasons`` so existing callers and tests
+    still work; neither can influence the result.
     """
 
-    if reasons:
-        return {"offline_license_enforcement": "BLOCKED",
-                "offline_windows_package": "BLOCKED",
-                "offline_commercial_package": "BLOCKED"}
-    results = payload.get("results", {})
-    license_pass = (results.get("license_battery", {}).get("failed") == 0
-                    and results.get("runtime_battery", {}).get("failed") == 0
-                    and results.get("secret_scan", {}).get("failed") == 0
-                    and results.get("airgap_boundary", {}).get("failed") == 0)
-    record = payload.get("two_environment_record", {})
-    package_pass = (results.get("package_matrix", {}).get("failed") == 0
-                    and results.get("hyperv_isolation", {}).get("failed") == 0
-                    and results.get("combiner_faults", {}).get("failed") == 0
-                    and isinstance(record, dict) and record.get("accepted") is True
-                    and record.get("identical_package_bytes") is True
-                    and record.get("independent_identities") is True
-                    and environment_coverage_met(payload))
-    commercial_pass = (license_pass and package_pass
-                       and payload.get("package", {}).get("private_key_absent") is True)
-    return {
-        "offline_license_enforcement": "PASS" if license_pass else "BLOCKED",
-        "offline_windows_package": "PASS" if package_pass else "BLOCKED",
-        "offline_commercial_package": "PASS" if commercial_pass else "BLOCKED",
-    }
+    return {"offline_license_enforcement": "BLOCKED",
+            "offline_windows_package": "BLOCKED",
+            "offline_commercial_package": "BLOCKED"}
