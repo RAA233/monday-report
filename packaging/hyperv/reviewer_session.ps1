@@ -109,8 +109,30 @@ function Get-ReviewerPython {
 # --------------------------------------------------------------------------
 Assert-NoIssuerMaterial
 
+# VERIFY the reviewer-owned tree; do not silently depend on being able to create
+# it. When the tree was missing, this script died on its first New-Item with a
+# PowerShell abnormal-termination code and produced no artifact at all -- which
+# is indistinguishable from a credential failure and sent diagnosis down the
+# wrong path. Provisioning is the bootstrap's job (-ProvisionPaths); this entry
+# point's job is to say so plainly when it has not happened.
+$missing = @()
 foreach ($d in @($ReviewerRoot, $StateRoot, $OutRoot)) {
-    New-Item -ItemType Directory -Force -Path $d | Out-Null
+    if (-not (Test-Path $d)) { $missing += $d; continue }
+    try {
+        $probe = Join-Path $d ('.write-probe-' + [Guid]::NewGuid().ToString('N'))
+        Set-Content -Path $probe -Value 'x' -ErrorAction Stop
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+    } catch { $missing += $d }
+}
+if ($missing.Count -gt 0) {
+    # Report where we can. $OutRoot may itself be the unwritable path, so fall
+    # back to the transcript rather than failing to report the reason.
+    $names = ($missing | ForEach-Object { Split-Path $_ -Leaf }) -join ','
+    Write-Output ("[reviewer] BOOTSTRAP_INCOMPLETE: reviewer-owned directories missing or " +
+                  "not writable: $names")
+    Write-Output ("[reviewer] remedy: run reviewer_bootstrap.ps1 -ProvisionPaths " +
+                  "(administrative, no credential prompt)")
+    exit 6
 }
 
 $command = Get-RequestedStage

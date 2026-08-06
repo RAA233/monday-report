@@ -37,14 +37,113 @@
 [CmdletBinding()]
 param(
     [switch]$Verify,
+    [switch]$ProvisionPaths,
     [string]$User      = 'MR-OFFLINE-REVIEWER',
     [string]$TaskName  = 'MR-OFFLINE-REVIEWER-RUN',
-    [string]$SessionScript = "$PSScriptRoot\reviewer_session.ps1"
+    [string]$SessionScript = "$PSScriptRoot\reviewer_session.ps1",
+    [string]$HvRoot    = 'C:\mr-hv'
 )
 
 $ErrorActionPreference = 'Stop'
 
 function Write-Fact { param([string]$k, $v) Write-Output ("  {0,-38} {1}" -f $k, $v) }
+
+function Initialize-ReviewerPaths {
+    <#
+      Provision the directory tree the reviewer session entry point requires.
+
+      This is NOT optional plumbing. Without it the scheduled task logs on
+      correctly and then dies immediately, because the reviewer holds no rights
+      anywhere under the Hyper-V root and cannot create its own state or output
+      directories. The symptom is a task that reaches Running, disappears, and
+      leaves a PowerShell abnormal-termination result with no artifact -- which
+      looks exactly like a credential problem and is not one.
+
+      Directions are explicit, per directory, rather than a blanket grant:
+        reviewer\   reviewer writes its state and results; author may only READ,
+                    so the author process cannot edit bytes it will later be
+                    shown as reviewer-produced evidence.
+        trust\      reviewer writes the trust root; author may only READ, which
+                    is what makes the validator's write-probe meaningful.
+        xchg\       author writes commands and signed licences; reviewer reads.
+        xchg\requests\  reviewer writes activation requests; author reads.
+
+      SYSTEM keeps Full everywhere: Copy-VMFile reads host-side sources in the
+      vmms (SYSTEM) context, and a SYSTEM-denied path fails as an opaque
+      transport error.
+    #>
+    param([string]$Root, [string]$Account, [string]$SessionSource)
+
+    $reviewerOwned = @("$Root\reviewer", "$Root\reviewer\state", "$Root\reviewer\out",
+                       "$Root\trust", "$Root\xchg\requests")
+    # reviewer-bin\ is author-writable so the entry point can be INSTALLED,
+    # and reviewer read+execute so it can be RUN.
+    #
+    # It deliberately does NOT live in the author's worktree: the reviewer holds
+    # no rights anywhere under the author profile, so a task registered against
+    # the worktree path cannot read its own entry point and dies at process
+    # start with no artifact -- which reads exactly like a credential failure.
+    #
+    # It is a SIBLING of reviewer\, not a child, because reviewer\ is locked to
+    # reviewer-Full/author-Read: nesting the install directory inside it leaves
+    # the author unable to create or update the entry point on any re-run.
+    $authorOwned   = @("$Root\xchg", "$Root\xchg\licences", "$Root\reviewer-bin")
+
+    foreach ($d in @($Root) + $authorOwned + $reviewerOwned) {
+        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+    }
+
+    $me = "$env:USERDOMAIN\$env:USERNAME"
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    foreach ($d in $reviewerOwned) {
+        & icacls.exe $d /inheritance:r | Out-Null
+        & icacls.exe $d /grant:r "${Account}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${me}:(OI)(CI)R" | Out-Null
+    }
+    foreach ($d in $authorOwned) {
+        & icacls.exe $d /inheritance:r | Out-Null
+        & icacls.exe $d /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)R" | Out-Null
+    }
+    # The reviewer must traverse the root to reach its own directories, but must
+    # not gain read over sibling author material (state\, results\, xfer\).
+    & icacls.exe $Root /grant "${Account}:(NP)(X)" | Out-Null
+    $ErrorActionPreference = $prev
+
+    if ($SessionSource -and (Test-Path $SessionSource)) {
+        Copy-Item -Path $SessionSource -Destination (Get-InstalledSessionScript -Root $Root) -Force
+    }
+    return $reviewerOwned + $authorOwned
+}
+
+function Get-InstalledSessionScript {
+    param([string]$Root)
+    return "$Root\reviewer-bin\reviewer_session.ps1"
+}
+
+function Remove-TaskIfPresent {
+    <#
+      Delete the task ONLY when it exists.
+
+      Unconditionally pre-deleting emitted
+      "ERROR: The system cannot find the file specified." on every first-run
+      bootstrap -- schtasks writes that to stderr and returns 1 when the name is
+      absent, which is the DESIRED state at that point. Proven by reproduction:
+      the same call against a random unused task name produces byte-identical
+      text, while secedit export and a task query produce nothing of the kind.
+
+      It was never a functional fault, but it made a successful bootstrap
+      indistinguishable from a failed one in the operator's transcript, which is
+      its own defect.
+    #>
+    param([string]$Name)
+
+    if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        & schtasks.exe /Delete /TN $Name /F | Out-Null
+        $ErrorActionPreference = $prev
+        return $true
+    }
+    return $false
+}
 
 function Test-Elevated {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -119,6 +218,28 @@ if (-not (Test-Elevated)) {
 
 $existing = Get-LocalUser -Name $User -ErrorAction SilentlyContinue
 
+if ($ProvisionPaths) {
+    # Repair path for an ALREADY-BOOTSTRAPPED host. Creating directories and
+    # setting ACLs is an administrative operation, not a credential operation,
+    # so this needs no password and must never prompt for one -- the operator
+    # should not be asked to re-enter a secret to fix a directory tree.
+    if (-not $existing) {
+        Write-Output '  STOP: the reviewer account does not exist; run without -ProvisionPaths first.'
+        Write-Output '  verdict: OFFLINE_INDEPENDENT_ATTESTOR_REQUIRED'
+        exit 2
+    }
+    $paths = Initialize-ReviewerPaths -Root $HvRoot -Account $User -SessionSource $SessionScript
+    $installed = Get-InstalledSessionScript -Root $HvRoot
+    Write-Fact 'reviewer path tree' "provisioned ($($paths.Count) directories)"
+    Write-Fact 'entry point installed' (Test-Path $installed)
+    Write-Fact 'credential' 'untouched (no prompt, no reset)'
+    Write-Output ''
+    Write-Output '  Paths provisioned. The registered scheduled task is unchanged.'
+    Write-Output '  If the task action still targets the authoring worktree, repoint it with:'
+    Write-Output "    schtasks /Change /TN <task> /TR ..."
+    exit 0
+}
+
 if ($Verify) {
     Write-Fact 'account exists' ([bool]$existing)
     if ($existing) {
@@ -133,11 +254,58 @@ if ($Verify) {
         Write-Fact 'has batch logon right' `
             ([bool]($line -match [regex]::Escape($existing.SID.Value) -or $line -match [regex]::Escape($User)))
     }
-    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & schtasks.exe /Query /TN $TaskName | Out-Null
-    $taskRc = $LASTEXITCODE
-    $ErrorActionPreference = $prev
-    Write-Fact 'scheduled task registered' ($taskRc -eq 0)
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    Write-Fact 'scheduled task registered' ([bool]$task)
+    if ($task) {
+        Write-Fact 'logon type (want Password)' $task.Principal.LogonType
+        Write-Fact 'run level (want Limited)' $task.Principal.RunLevel
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName
+        Write-Fact 'last task result' ("0x{0:X}" -f $info.LastTaskResult)
+
+        # The defect this exists to catch: a task whose action targets a path the
+        # REVIEWER cannot read. powershell.exe then fails at process start, the
+        # task reports an abnormal-termination code, no artifact appears, and it
+        # looks exactly like a bad credential. Registering against the authoring
+        # worktree does this every time, because the reviewer holds no rights
+        # anywhere under the author profile.
+        $target = $null
+        if (@($task.Actions)[0].Arguments -match '-File\s+"?([^"]+)"?') {
+            $target = $matches[1].Trim('"')
+        }
+        if ($target) {
+            Write-Fact 'action target exists' (Test-Path $target)
+            # EXACT identities only. A substring match on "Users" silently
+            # matched an unrelated local group whose name merely ends in
+            # "Users", and reported a file the reviewer provably could not read
+            # as readable -- false assurance on the one check that matters here.
+            $granting = @("$env:COMPUTERNAME\$User", $User, 'BUILTIN\Users',
+                          'Everyone', 'NT AUTHORITY\Authenticated Users')
+            $readable = $false
+            if (Test-Path $target) {
+                $acl = Get-Acl $target
+                $readable = @($acl.Access | Where-Object {
+                    $_.AccessControlType -eq 'Allow' -and
+                    ($granting -contains $_.IdentityReference.Value) -and
+                    $_.FileSystemRights -match 'Read|ReadAndExecute|FullControl'
+                }).Count -gt 0
+            }
+            Write-Fact 'action target reviewer-readable' $readable
+            $installed = Get-InstalledSessionScript -Root $HvRoot
+            Write-Fact 'action targets installed copy' ($target -eq $installed)
+            if (-not $readable -or $target -ne $installed) {
+                Write-Output ''
+                Write-Output '  DEFECT: the task action does not target a reviewer-readable'
+                Write-Output '  installed entry point. The reviewer cannot run. Re-register with'
+                Write-Output '  reviewer_bootstrap.ps1 (the operator must re-enter the password;'
+                Write-Output '  both supported update mechanisms require the credential).'
+                Write-Output '  verdict: OFFLINE_REVIEWER_BOOTSTRAP_OPERATOR_ACTION_REQUIRED'
+            }
+        }
+    }
+    foreach ($d in @("$HvRoot\reviewer", "$HvRoot\reviewer\state", "$HvRoot\reviewer\out",
+                     "$HvRoot\trust", "$HvRoot\reviewer-bin")) {
+        Write-Fact ("path present: " + (Split-Path $d -Leaf)) (Test-Path $d)
+    }
     Write-Output ''
     Write-Output '  (no secret is printed by this script in any mode)'
     exit 0
@@ -195,9 +363,23 @@ try {
 
     if (-not (Test-Path $SessionScript)) { throw "reviewer session script not found: $SessionScript" }
 
-    $action = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$SessionScript`""
+    # Provision BEFORE registering: a task whose entry point cannot create its
+    # own state directory logs on correctly and then dies with no artifact.
+    $paths = Initialize-ReviewerPaths -Root $HvRoot -Account $User -SessionSource $SessionScript
+    $installed = Get-InstalledSessionScript -Root $HvRoot
+    Write-Fact 'reviewer path tree' "provisioned ($($paths.Count) directories)"
+    Write-Fact 'entry point installed' (Test-Path $installed)
+    if (-not (Test-Path $installed)) { throw "reviewer entry point was not installed to $installed" }
+
+    # Target the INSTALLED copy. The worktree copy is unreadable by the reviewer.
+    $action = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installed`""
+    $removed = Remove-TaskIfPresent -Name $TaskName
+    Write-Fact 'prior task removed' $removed
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & schtasks.exe /Delete /TN $TaskName /F | Out-Null
+    # /SC ONCE with a past /ST warns that the one-time schedule will not fire.
+    # That is intended: this task exists solely for on-demand `schtasks /Run`,
+    # never for a timed run. Verified by NextRunTime being empty with zero
+    # missed runs, so no schedule-driven execution is pending or required.
     & schtasks.exe /Create /TN $TaskName /TR $action /SC ONCE /ST 00:00 `
         /RL LIMITED /RU "$env:COMPUTERNAME\$User" /RP $s1 /F | Out-Null
     $rc = $LASTEXITCODE
