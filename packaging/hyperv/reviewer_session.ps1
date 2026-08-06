@@ -34,7 +34,9 @@ Set-StrictMode -Version 2.0
 $XchgRoot     = 'C:\mr-hv\xchg'
 $ReviewerRoot = 'C:\mr-hv\reviewer'
 $CommandFile  = Join-Path $XchgRoot 'reviewer-command.json'
-$SourceRoot   = Join-Path $ReviewerRoot 'src'          # pristine export, read-only
+# SIBLING of reviewer\, not a child: reviewer\ is locked reviewer-Full/author-Read,
+# so the author cannot create or refresh an export nested inside it.
+$SourceRoot   = 'C:\mr-hv\reviewer-src'          # pristine export, reviewer-readable
 $StateRoot    = Join-Path $ReviewerRoot 'state'        # reviewer-owned secrets
 $OutRoot      = Join-Path $ReviewerRoot 'out'          # reviewer-owned results
 

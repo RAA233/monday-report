@@ -38,6 +38,8 @@
 param(
     [switch]$Verify,
     [switch]$ProvisionPaths,
+    [switch]$ExportSource,
+    [string]$SourceRepo = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
     [string]$User      = 'MR-OFFLINE-REVIEWER',
     [string]$TaskName  = 'MR-OFFLINE-REVIEWER-RUN',
     [string]$SessionScript = "$PSScriptRoot\reviewer_session.ps1",
@@ -87,7 +89,8 @@ function Initialize-ReviewerPaths {
     # It is a SIBLING of reviewer\, not a child, because reviewer\ is locked to
     # reviewer-Full/author-Read: nesting the install directory inside it leaves
     # the author unable to create or update the entry point on any re-run.
-    $authorOwned   = @("$Root\xchg", "$Root\xchg\licences", "$Root\reviewer-bin")
+    $authorOwned   = @("$Root\xchg", "$Root\xchg\licences", "$Root\reviewer-bin",
+                   "$Root\reviewer-src")
 
     foreach ($d in @($Root) + $authorOwned + $reviewerOwned) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
@@ -217,6 +220,45 @@ if (-not (Test-Elevated)) {
 }
 
 $existing = Get-LocalUser -Name $User -ErrorAction SilentlyContinue
+
+if ($ExportSource) {
+    # Publish a PRISTINE, REVIEWER-READABLE checkout at the exact current head.
+    #
+    # A local clone rather than `git worktree add`: a worktree's .git is a file
+    # pointing back into the author's repository, which the reviewer cannot read,
+    # so the reviewer could not verify anything for itself. With its own clone the
+    # reviewer runs `git rev-parse HEAD` and establishes the source head FIRST
+    # HAND instead of trusting a string the author handed it.
+    #
+    # Administrative only: no credential is involved and none is prompted for.
+    $dest = "$HvRooteviewer-src"
+    $head = (& git.exe -C $SourceRepo rev-parse HEAD).Trim()
+    $tree = (& git.exe -C $SourceRepo rev-parse 'HEAD^{tree}').Trim()
+    Write-Fact 'exporting head' $head
+    if (Test-Path "$dest\.git") { Remove-Item $dest -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & git.exe clone --local --no-hardlinks --quiet $SourceRepo $dest | Out-Null
+    & git.exe -C $dest checkout --quiet --detach $head | Out-Null
+    $ErrorActionPreference = $prev
+
+    $exportedHead = (& git.exe -C $dest rev-parse HEAD).Trim()
+    $exportedTree = (& git.exe -C $dest rev-parse 'HEAD^{tree}').Trim()
+    Write-Fact 'exported head matches' ($exportedHead -eq $head)
+    Write-Fact 'exported tree matches' ($exportedTree -eq $tree)
+    if ($exportedHead -ne $head -or $exportedTree -ne $tree) {
+        throw 'the pristine export does not match the source head'
+    }
+
+    $me = "$env:USERDOMAIN\$env:USERNAME"
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & icacls.exe $dest /inheritance:r | Out-Null
+    & icacls.exe $dest /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" | Out-Null
+    $ErrorActionPreference = $prev
+    Write-Fact 'export ACL' 'author full, reviewer read+execute, SYSTEM full'
+    Write-Fact 'reviewer driver present' (Test-Path "$dest\scripts\offline_reviewer_execute.py")
+    exit 0
+}
 
 if ($ProvisionPaths) {
     # Repair path for an ALREADY-BOOTSTRAPPED host. Creating directories and
