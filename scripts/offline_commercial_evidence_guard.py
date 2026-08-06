@@ -57,6 +57,21 @@ def main() -> int:
 
         document["results"]["package_matrix"]["environments_executed"] = list(environments)
         document["environment_coverage"]["executed"] = list(environments)
+        # Narrow the RECORD to match, or the document contradicts itself and is
+        # refused for that contradiction rather than for the coverage gate this
+        # pair is isolating.
+        record = document.get("two_environment_record", {})
+        envs = record.get("environments", {})
+        keep = {label: env for label, env in sorted(envs.items())
+                if str(env.get("environment_class", "")) in set(environments)}
+        record["environments"] = keep
+        record["environment_count"] = len(keep)
+        record["independent_identities"] = (
+            len({e.get("fingerprint_identity_digest") for e in keep.values()}) == len(keep)
+            and len({e.get("environment_class") for e in keep.values()}) == len(keep)
+            and all(e.get("fingerprint_identity_digest") for e in keep.values()))
+        document["results"]["package_matrix"]["passed"] = sum(
+            int(e.get("totals", {}).get("passed", 0)) for e in keep.values())
         meets = len(environments) >= E.REQUIRED_ENVIRONMENT_MINIMUM and accepted
         document["environment_coverage"]["meets_minimum"] = (
             len(environments) >= E.REQUIRED_ENVIRONMENT_MINIMUM)
@@ -84,17 +99,21 @@ def main() -> int:
         and widened_verdicts["offline_commercial_package"] == "PASS",
         "a green matrix across two distinct environments yields package/commercial PASS")
 
+    # Narrowing to one environment is now caught at the VALIDATION layer, not
+    # merely at the verdict layer: a single-environment record is refused
+    # outright, so every control is BLOCKED rather than just package/commercial.
+    # That is strictly stronger than blocking the two package controls, so the
+    # check asserts the behaviour that actually holds.
     narrowed = _consistent(_copy.deepcopy(payload), ["windows-11-host-isolated"])
-    narrowed_verdicts = E.control_verdicts(
-        narrowed, E.validate(narrowed, current_commit=commit, current_tree=tree))
+    narrowed_reasons = E.validate(narrowed, current_commit=commit, current_tree=tree)
+    narrowed_verdicts = E.control_verdicts(narrowed, narrowed_reasons)
     rec("OE01c coverage-gate-blocks-single-environment",
-        narrowed_verdicts["offline_windows_package"] == "BLOCKED"
-        and narrowed_verdicts["offline_commercial_package"] == "BLOCKED"
-        and narrowed_verdicts["offline_license_enforcement"] ==
-            widened_verdicts["offline_license_enforcement"],
-        "the SAME green matrix narrowed to one environment blocks package/commercial "
-        "while leaving the license control untouched — the environment gate is the "
-        "only thing that moved")
+        bool(narrowed_reasons)
+        and any("exactly two environments" in r for r in narrowed_reasons)
+        and set(narrowed_verdicts.values()) == {"BLOCKED"},
+        f"the SAME green matrix narrowed to one environment is refused outright "
+        f"({[r for r in narrowed_reasons if 'two environments' in r][:1]}) and no "
+        f"control can then be PASS")
 
     def rehash(document: dict) -> dict:
         body = {k: v for k, v in document.items() if k != "canonical_payload_hash"}
@@ -155,21 +174,19 @@ def main() -> int:
             lambda m: m["package"].update(installer_sha256=""),
             expect="installer hash")
 
-    def _claim_acceptance(m: dict) -> None:
-        # Narrow coverage to ONE environment consistently -- executed list and
-        # meets_minimum agree, so nothing else in the document is malformed --
-        # while leaving the ACCEPTED verdicts in place. The only thing wrong is
-        # that the stored verdicts outrun what the recorded results support.
-        m["results"]["package_matrix"]["environments_executed"] = ["windows-11-host-isolated"]
-        m["environment_coverage"]["executed"] = ["windows-11-host-isolated"]
-        m["environment_coverage"]["meets_minimum"] = False
-        m["verdicts"]["package"] = E.PACKAGE_VERDICT
-        m["verdicts"]["commercial"] = E.COMMERCIAL_VERDICT
-
-    rejects("OE12b overclaimed-verdict-rejected", _claim_acceptance, reseal=True,
+    # The verdict block is RECOMPUTED, never copied, and the recomputation is
+    # tested in the only direction still reachable. Overclaiming is now caught
+    # earlier and harder: any recorded result that fails to support acceptance
+    # makes the whole artifact invalid (OE07-OE12, OE17-OE34), and an invalid
+    # artifact can never yield a PASS control (OE13). So the remaining way for
+    # the stored block to disagree with the derived one is a DOWNGRADE, and that
+    # is refused too -- the block is not a free-text field either way.
+    rejects("OE12b stored-verdict-must-match-the-derived-block",
+            lambda m: m["verdicts"].update(
+                commercial="OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED"),
             expect="stored verdict",
-            detail="a hand-edited artifact cannot assert an acceptance the recorded "
-                   "results do not support, even with both seals recomputed")
+            detail="the verdict block is recomputed from the recorded results in both "
+                   "directions; it cannot be hand-set to disagree with them")
     rejects("OE12c forged-coverage-flag-rejected",
             lambda m: m["environment_coverage"].update(meets_minimum=False),
             reseal=True, expect="meets_minimum",
@@ -190,13 +207,24 @@ def main() -> int:
     rejects("OE18 unaccepted-two-environment-record-rejected",
             lambda m: m["two_environment_record"].update(accepted=False),
             expect="was not accepted")
-    rejects("OE19 non-identical-package-bytes-rejected",
-            lambda m: m["two_environment_record"].update(identical_package_bytes=False),
-            expect="identical package bytes",
+    def _really_different_bytes(m: dict) -> None:
+        # A CONSISTENT claim that the environments ran different bytes: the
+        # per-environment hash differs and the summary boolean agrees, so the
+        # refusal comes from the derived fact rather than from a disagreement.
+        list(m["two_environment_record"]["environments"].values())[0][
+            "installer_sha256"] = "9" * 64
+        m["two_environment_record"]["identical_package_bytes"] = False
+
+    def _really_one_machine(m: dict) -> None:
+        for env in m["two_environment_record"]["environments"].values():
+            env["fingerprint_identity_digest"] = "a" * 32
+        m["two_environment_record"]["independent_identities"] = False
+
+    rejects("OE19 non-identical-package-bytes-rejected", _really_different_bytes,
+            expect="did not run identical package bytes",
             detail="the two environments must have run byte-identical package bytes")
-    rejects("OE20 duplicate-environment-identity-rejected",
-            lambda m: m["two_environment_record"].update(independent_identities=False),
-            expect="independent identities",
+    rejects("OE20 duplicate-environment-identity-rejected", _really_one_machine,
+            expect="did not report independent identities",
             detail="one machine reported twice is not two environments")
     # The reproducible hash must be exactly what a second run at this head would
     # agree on: everything except when the run happened.
