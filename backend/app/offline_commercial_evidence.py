@@ -58,6 +58,32 @@ REQUIRED_RESULT_SECTIONS = (
 #: The two-environment record the package matrix is derived from.
 TWO_ENVIRONMENT_RECORD_SCHEMA = "offline-two-environment-record.v1"
 
+#: Keys that legitimately differ between two independent generations at the same
+#: head. ``canonical_payload_hash`` binds the whole document INCLUDING the
+#: timestamp -- it is a tamper seal, not a reproducibility claim, and it uses the
+#: licensing canonicalizer, which must not be changed because real licenses are
+#: signed over it. ``reproducible_payload_hash`` is the separate, additive claim:
+#: two independent runs at one commit must agree on everything except when they
+#: ran. The sibling production-profile evidence tiers exclude the same keys.
+NON_REPRODUCIBLE_KEYS = frozenset({
+    "canonical_payload_hash", "reproducible_payload_hash", "generated_at",
+})
+
+
+def _strip_volatile(obj):
+    if isinstance(obj, dict):
+        return {k: _strip_volatile(v) for k, v in obj.items()
+                if k not in NON_REPRODUCIBLE_KEYS}
+    if isinstance(obj, list):
+        return [_strip_volatile(v) for v in obj]
+    return obj
+
+
+def reproducible_hash(payload: dict) -> str:
+    """Hash of everything a second generation at the same head must reproduce."""
+
+    return canonical_hash(_strip_volatile(payload))
+
 #: Leak shapes that must never appear anywhere in the evidence document.
 _LEAK_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----"),
@@ -165,6 +191,8 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
     body = {k: v for k, v in payload.items() if k != "canonical_payload_hash"}
     if canonical_hash(body) != expected_hash:
         reasons.append("canonical payload hash mismatch")
+    if reproducible_hash(payload) != payload.get("reproducible_payload_hash", ""):
+        reasons.append("reproducible payload hash mismatch")
 
     text = json.dumps(payload)
     for pattern in _LEAK_PATTERNS:

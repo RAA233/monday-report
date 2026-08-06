@@ -157,6 +157,20 @@ def main() -> int:
     rejects("OE20 duplicate-environment-identity-rejected",
             lambda m: m["two_environment_record"].update(independent_identities=False),
             detail="one machine reported twice is not two environments")
+    # The reproducible hash must be exactly what a second run at this head would
+    # agree on: everything except when the run happened.
+    rec("OE15b reproducible-hash-excludes-only-the-timestamp",
+        E.reproducible_hash(payload) == payload.get("reproducible_payload_hash")
+        and E.reproducible_hash({**payload, "generated_at": "1999-01-01T00:00:00+00:00"})
+            == payload.get("reproducible_payload_hash"),
+        "the reproducible hash is stable across generation time and unchanged by it")
+    rejects("OE15c reproducible-hash-tamper-rejected",
+            lambda m: m.update(reproducible_payload_hash="f" * 64))
+    rejects("OE15d reproducible-hash-covers-results",
+            lambda m: m["results"]["license_battery"].update(passed=999),
+            detail="a changed result changes the reproducible hash, so a second "
+                   "run at the same head could not agree with it")
+
     rejects("OE20b record-from-a-different-commit-rejected",
             lambda m: m["two_environment_record"].update(source_commit="0" * 40),
             detail="a record produced at another head cannot be bound to this evidence")

@@ -158,12 +158,6 @@ def main() -> int:
     # matrix is reported honestly and stays NOT_ACCEPTED.
     coverage_met = len(results["package_matrix"]["environments_executed"]) >= \
         E.REQUIRED_ENVIRONMENT_MINIMUM
-    record_ok = (record_block.get("accepted") is True
-                 and record_block.get("identical_package_bytes") is True
-                 and record_block.get("independent_identities") is True)
-    license_accepted = all_passed
-    package_accepted = all_passed and coverage_met and record_ok
-    commercial_accepted = license_accepted and package_accepted
 
     payload = {
         "schema_version": E.SCHEMA_VERSION,
@@ -202,15 +196,28 @@ def main() -> int:
             "required_minimum": E.REQUIRED_ENVIRONMENT_MINIMUM,
             "meets_minimum": coverage_met,
         },
-        "verdicts": {
-            "license": E.LICENSE_VERDICT if license_accepted
-                       else "OFFLINE_LICENSE_ENFORCEMENT_NOT_ACCEPTED",
-            "package": E.PACKAGE_VERDICT if package_accepted
-                       else "OFFLINE_WINDOWS_PACKAGE_NOT_ACCEPTED",
-            "commercial": E.COMMERCIAL_VERDICT if commercial_accepted
-                          else "OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED",
-        },
     }
+
+    # Derive the verdicts from the SAME authority the validator recomputes them
+    # with, rather than restating the rule here. Two independent expressions of
+    # one rule drift: this generator previously gated the license verdict on the
+    # package matrix as well, so a green licensing tier with a failing matrix
+    # stored NOT_ACCEPTED while the validator derived PASS and rejected the
+    # artifact as self-contradictory.
+    derived = E.control_verdicts(payload, [])
+    payload["verdicts"] = {
+        "license": (E.LICENSE_VERDICT if derived["offline_license_enforcement"] == "PASS"
+                    else "OFFLINE_LICENSE_ENFORCEMENT_NOT_ACCEPTED"),
+        "package": (E.PACKAGE_VERDICT if derived["offline_windows_package"] == "PASS"
+                    else "OFFLINE_WINDOWS_PACKAGE_NOT_ACCEPTED"),
+        "commercial": (E.COMMERCIAL_VERDICT if derived["offline_commercial_package"] == "PASS"
+                       else "OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED"),
+    }
+    license_accepted = derived["offline_license_enforcement"] == "PASS"
+    package_accepted = derived["offline_windows_package"] == "PASS"
+    commercial_accepted = derived["offline_commercial_package"] == "PASS"
+    # Set BEFORE the canonical seal so the seal covers it.
+    payload["reproducible_payload_hash"] = E.reproducible_hash(payload)
     payload["canonical_payload_hash"] = canonical_hash(payload)
     E.EVIDENCE_PATH.parent.mkdir(parents=True, exist_ok=True)
     E.EVIDENCE_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -219,6 +226,7 @@ def main() -> int:
         "results": results,
         "verdicts": payload["verdicts"],
         "canonical_payload_hash": payload["canonical_payload_hash"],
+        "reproducible_payload_hash": payload["reproducible_payload_hash"],
     }, indent=2))
     return 0 if all_passed else 1
 
