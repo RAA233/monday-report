@@ -283,3 +283,116 @@ Provision Environment 2:
 `pnpm run offline:provision-environment-2 -- -Action all -IsoPath <verified media>`.
 
 Build: `python packaging/build_offline_package.py --public-key <hex file>`.
+
+## 13. The dual-principal acceptance protocol (supersedes §12 as authoritative)
+
+§12 described a chain in which the author computed the results, the hashes, the
+seals **and** the verdict. Independent review reproduced the consequence:
+replacing `ENVIRONMENT_2` with a verbatim copy of `ENVIRONMENT_1`, changing only
+`environment_class` and `fingerprint_identity_digest`, and resealing the
+author-controlled hashes passed `validate()` + `validate_record_chain()` +
+`load_and_validate()` with **zero reasons** and yielded
+`offline_commercial_package: PASS`. A second finding: `audit:all` expanded to 70
+steps containing **zero** authoritative offline validation, and its membership
+was invariant under removal of the offline evidence command.
+
+Both are closed by moving the anchor to a fact the authoring process cannot
+produce.
+
+### Principals
+
+| | author | reviewer |
+|---|---|---|
+| account | the developing user | `MR-OFFLINE-REVIEWER`, task-owned |
+| holds | worktree, package build, **licence-issuer key**, evidence body | **Ed25519 review key**, both matrix executions, the attestation |
+| must not hold | the review key | the issuer key, worktree write, Git or cloud credentials |
+| privileges | — | `Users` + `Hyper-V Administrators`, **not** `Administrators`; `SeBatchLogonRight` only |
+
+**The operator sets the reviewer's password** (`packaging/hyperv/reviewer_bootstrap.ps1`).
+The authoring process never learns it, so it cannot create a reviewer logon
+session and cannot decrypt the DPAPI-sealed review key. It drives the reviewer
+with `schtasks /Run`, which uses the stored credential and does **not** require
+the password.
+
+**Red line.** The author must never "repair" the protocol by resetting the
+reviewer password. An administrative reset destroys the DPAPI master-key chain,
+the review key becomes permanently undecryptable, and no attestation can be
+produced. That failure mode is deliberate: denial, not silent forgery.
+
+### Ordering is load-bearing
+
+1. author creates the account and grants the batch-logon right
+2. **operator** sets the password
+3. **only then** the reviewer generates its Ed25519 key in its own session and
+   writes the pinned trust root
+
+A key generated before step 2 would be recoverable by whoever set the original
+password — through an ordinary logon, not through account takeover.
+
+### Trust root
+
+`C:\mr-hv\trust\offline-review-trust-root.v1.json`, written by the reviewer,
+author-readable and author-unwritable. The validator resolves it from a **fixed
+constant path and honours no environment variable**, derives the fingerprint
+from the key bytes, and requires it to equal a constant pinned in **tracked
+source** — so substituting the file is not enough, the substitution has to
+appear in a reviewed commit. It also **access-probes** the file for writability
+and recomputes both principal digests from **live SID lookups**, because
+comparing two stored digests would reduce "two distinct principals" to "two hex
+strings differ" — the same shape as the original forgery.
+
+### What the v2 validator refuses
+
+Legacy v1 acceptance · missing, unsigned or replaced attestation · a review key
+supplied only by the artifact · author and reviewer sharing a key or a principal
+· a copied `ENVIRONMENT_1` block masquerading as `ENVIRONMENT_2` **even when
+re-sealed and re-signed with a valid signature** · resealed author-controlled
+hashes · different package hashes · a different commit or tree · an attestation
+reused for a new package or new transcripts · a modified transcript · a
+hand-edited `accepted` field.
+
+The verdict is **derived**. `accepted`, `verdict`, `checks_passed` and
+`environment_count` are untrusted inputs. The author-side validator can only
+**downgrade**: acceptance requires both the reviewer's signed verdict and the
+locally derived one.
+
+### `audit:all`
+
+`audit:offline-evidence-contract` runs at **position 2** — early, because
+`audit:all` stops at a known inherited failure and an appended step would never
+execute. It is hermetic: no VM, no package, no real artifact, a throwaway
+keypair driving the real validator. Membership is pinned in
+`scripts/offline_audit_membership_manifest.py` and asserted redundantly from
+`audit_harness_guard`, which is *not* the offline guard — a meta-guard living
+inside the step it guards is the original defect with one extra hop.
+
+## 14. What this protocol does NOT claim
+
+Stated plainly, because each of these was at some point claimed and was wrong.
+
+1. **It does not resist a host administrator** who takes ownership of the
+   reviewer account. Declared non-goal.
+2. **A signature does not prove the matrices executed.** It proves the review
+   key signed a set of values.
+3. **The reviewer executes code the author wrote.** A runner committed by the
+   author that emitted an all-PASS check list without executing anything would
+   produce genuine hashes and a genuine signature over fabricated facts. Tool
+   hashes record *which* binary ran, never that it was honest. **This is the
+   protocol's real residual, and it is closed only by human review of the exact
+   attested commit.**
+4. **Validator integrity rests on human review** of that same commit. A program
+   cannot authenticate itself to itself.
+5. **`matrix_completion_challenge` is not anti-replay.** Every input to it is a
+   deterministic function of files on disk. The anti-replay anchor is the
+   author-signed issuance witness bound to a reviewer-minted nonce inside a
+   seconds-scale licence lifetime.
+6. **Audit membership is deterrence, not impossibility.** Removal now requires
+   coordinated edits to `package.json`, the frozen manifest, and
+   `audit_harness_guard` — it is no longer a one-line invisible edit.
+7. **DPAPI here is a process guard,** not cryptographic separation between
+   humans: it prevents the authoring tooling and any accidental cross-account
+   read from decrypting the review key on the ordinary path.
+
+Commands: `pnpm run audit:offline-evidence-contract` (hermetic, in `audit:all`),
+`pnpm run audit:offline-audit-membership`.
+Bootstrap: `.\packaging\hyperv\reviewer_bootstrap.ps1` — **run by the operator.**
