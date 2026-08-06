@@ -124,12 +124,27 @@ function Invoke-Api {
         $parsed = $null
         try { $parsed = $r.Content | ConvertFrom-Json } catch { }
         return @{ status = [int]$r.StatusCode; body = $parsed; text = $r.Content }
-    } catch [System.Net.WebException] {
+    } catch {
         $resp = $_.Exception.Response
         if ($resp) {
             $code = [int]$resp.StatusCode
-            $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-            $content = $reader.ReadToEnd()
+            # Invoke-WebRequest has already drained the response stream by the
+            # time the terminating error surfaces, so GetResponseStream() reads
+            # EMPTY and every typed reason_code assertion silently degrades to a
+            # null comparison. PowerShell keeps the body in ErrorDetails.Message;
+            # read that first and fall back to the stream only if it is absent.
+            $content = ""
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                $content = [string]$_.ErrorDetails.Message
+            } else {
+                try {
+                    $stream = $resp.GetResponseStream()
+                    if ($stream) {
+                        $reader = New-Object System.IO.StreamReader($stream)
+                        $content = $reader.ReadToEnd()
+                    }
+                } catch { $content = "" }
+            }
             $parsed = $null
             try { $parsed = $content | ConvertFrom-Json } catch { }
             return @{ status = $code; body = $parsed; text = $content }
@@ -274,9 +289,23 @@ if ($Phase -eq "request") {
         $blocked = Invoke-Api -P $Port -Route "/workspaces" -Method POST -Body '{"name":"X"}'
         Add-Check "PK03 unlicensed-mutation-blocked" ($blocked.status -eq 423 -and $blocked.body.reason_code -eq "NO_LICENSE_INSTALLED") "business mutations refused with a typed, actionable payload"
 
-        $conns = Get-NetTCPConnection -OwningProcess $proc.Id -ErrorAction SilentlyContinue
-        $nonLocal = @($conns | Where-Object { $_.LocalAddress -notin @("127.0.0.1", "::1") })
-        Add-Check "PK04 loopback-only-binding" ($nonLocal.Count -eq 0 -and @($conns).Count -ge 1) "every TCP endpoint for the application is loopback"
+        # Enumerate exactly as the Python runner does. Get-NetTCPConnection also
+        # reports sockets in the transient Bound state, whose LocalAddress is
+        # still 0.0.0.0 because no address has been assigned yet -- an outbound
+        # client socket mid-setup, not a published endpoint. netstat lists only
+        # listening and connected sockets, so both environments must use it or
+        # PK04 does not mean the same thing on each side of the combiner.
+        # The unary comma keeps each row an ARRAY of columns; without it the
+        # pipeline flattens every row into one long token list and $_[1] would
+        # index a character rather than the local address.
+        $splitter = [regex]"\s+"
+        $rows = @(netstat -ano -p TCP | Where-Object {
+            $_.Trim().StartsWith("TCP") -and $_.Trim().EndsWith([string]$proc.Id)
+        } | ForEach-Object { , @($splitter.Split($_.Trim())) })
+        $nonLocal = @($rows | Where-Object {
+            -not ($_[1].StartsWith("127.") -or $_[1].StartsWith("[::1]"))
+        })
+        Add-Check "PK04 loopback-only-binding" ($nonLocal.Count -eq 0 -and $rows.Count -ge 1) ("every TCP endpoint for the application is loopback (" + $rows.Count + " rows)")
 
         $reqPath = Join-Path $TransferOut "activation-request.json"
         $req = Invoke-Api -P $Port -Route "/offline/license/activation-request"

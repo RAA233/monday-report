@@ -333,7 +333,15 @@ switch ($Action) {
         } catch {
             $diag = [ordered]@{ markers = @(); log_tails = @{}; error = "guest unreachable" }
         } finally { $cred = $null }
-        Emit ([ordered]@{ control = $Action; ok = $true; diagnostics = $diag })
+        # Invoke-Command decorates every returned object with PSComputerName,
+        # RunspaceId and PSShowComputerName. Strip them: the diagnostics payload
+        # is retained on a failure path and must carry no VM or runspace
+        # identifier.
+        $clean = [ordered]@{}
+        foreach ($k in @("markers", "log_tails", "uptime_minutes", "error")) {
+            if ($null -ne $diag.$k) { $clean[$k] = $diag.$k }
+        }
+        Emit ([ordered]@{ control = $Action; ok = $true; diagnostics = $clean })
     }
 
     "shutdown" {

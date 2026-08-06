@@ -168,16 +168,34 @@ def stage_transfer_set(*, app_dir: Path, root: Path) -> tuple[Path, dict]:
     return archive, meta
 
 
-def push_transfer_set(*, vm: str, root: Path) -> list[dict]:
+def push_tools(*, vm: str, root: Path) -> list[dict]:
+    """Transfer ONLY the test tooling: the session driver, the environment
+    runner and the package metadata.
+
+    These must land before the clean-state stage, because that stage is executed
+    BY the session driver. None of them is the product: the clean-state claim is
+    about a prior Monday Report installation, its data, its licence and the
+    absence of development dependencies, and no product file is transferred here.
+    """
+
     steps = []
     for guest in (GUEST_PKG, GUEST_TOOL, GUEST_IN, GUEST_OUT):
         steps.append(control("mkdir", vm=vm, GuestPath=guest, timeout=180))
-    for source in sorted((root / "pkg").iterdir()):
-        steps.append(control("push", vm=vm, SourcePath=str(source),
-                             GuestPath=f"{GUEST_PKG}\\{source.name}", timeout=1800))
     for source in sorted((root / "tool").iterdir()):
         steps.append(control("push", vm=vm, SourcePath=str(source),
                              GuestPath=f"{GUEST_TOOL}\\{source.name}", timeout=600))
+    return steps
+
+
+def push_package(*, vm: str, root: Path) -> list[dict]:
+    """Transfer the frozen package itself, AFTER the guest has proven it is
+    clean, so the clean-state proof cannot be read as having been taken with the
+    product already present."""
+
+    steps = []
+    for source in sorted((root / "pkg").iterdir()):
+        steps.append(control("push", vm=vm, SourcePath=str(source),
+                             GuestPath=f"{GUEST_PKG}\\{source.name}", timeout=1800))
     return steps
 
 
@@ -299,6 +317,14 @@ def main(argv: list[str] | None = None) -> int:
                                  detail="the VM carries a network adapter during certification",
                                  states=states, transitions=transitions)
 
+        # Tooling first: the clean-state stage is executed BY the session driver.
+        for step in push_tools(vm=vm, root=root):
+            record(step, step.get("control", "push-tool"))
+            if not step.get("ok"):
+                return stop_honestly(vm=vm, state="VM_READY",
+                                     detail=step.get("detail", "tool transfer failed"),
+                                     states=states, transitions=transitions)
+
         clean = control("invoke-stage", vm=vm, Stage="clean", TimeoutSeconds=600, timeout=900)
         record(clean, "clean")
         if clean.get("guest_state") != "CLEAN_STATE_READY":
@@ -306,11 +332,12 @@ def main(argv: list[str] | None = None) -> int:
                                  states=states, transitions=transitions)
         states.append("CLEAN_STATE_READY")
 
-        for step in push_transfer_set(vm=vm, root=root):
-            record(step, step.get("control", "push"))
+        # The product only crosses AFTER the guest has proven it was clean.
+        for step in push_package(vm=vm, root=root):
+            record(step, step.get("control", "push-package"))
             if not step.get("ok"):
                 return stop_honestly(vm=vm, state="CLEAN_STATE_READY",
-                                     detail=step.get("detail", "transfer failed"),
+                                     detail=step.get("detail", "package transfer failed"),
                                      states=states, transitions=transitions)
 
         staged = control("invoke-stage", vm=vm, Stage="stage-package", TimeoutSeconds=1200, timeout=1500)
