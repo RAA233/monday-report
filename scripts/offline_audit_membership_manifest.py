@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 #: ``audit:all`` failed "for the usual reason". The contract must therefore run
 #: BEFORE anything that can fail.
 CONTRACT_COMMAND = "audit:offline-evidence-contract"
-CONTRACT_SCRIPT = "python scripts/offline_evidence_contract_guard.py"
+CONTRACT_SCRIPT = "python -I scripts/offline_evidence_contract_guard.py"
 MAX_POSITION = 2
 
 #: Guards that must independently assert this membership. Listing them here is

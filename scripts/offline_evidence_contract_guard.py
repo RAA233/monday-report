@@ -65,7 +65,7 @@ from backend.app.offline_review_attestation import (  # noqa: E402
 )
 
 CONTRACT_COMMAND = "audit:offline-evidence-contract"
-CONTRACT_SCRIPT = "python scripts/offline_evidence_contract_guard.py"
+CONTRACT_SCRIPT = "python -I scripts/offline_evidence_contract_guard.py"
 
 #: Synthetic principals. Resolved through the injected resolver, never live.
 AUTHOR_ACCOUNT = "SYNTHETIC-AUTHOR"

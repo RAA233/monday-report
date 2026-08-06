@@ -185,7 +185,7 @@ print(json.dumps({"environment": os.environ.get("MONDAY_REPORT_API_BASE"), "runt
     checks.append(assert_check(
         "audit:all pins the offline evidence contract",
         not membership_reasons,
-        membership_reasons or "python scripts/offline_evidence_contract_guard.py pinned"))
+        membership_reasons or "python -I scripts/offline_evidence_contract_guard.py pinned"))
 
     failed = [check for check in checks if not check["ok"]]
     for check in checks:
