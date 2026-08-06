@@ -39,6 +39,11 @@ _REQUIRED_CHECKS = {
     "dependency_absence": ("EC02",),
     "activation": ("PK05", "PK08"),
     "machine_binding": ("PK18",),
+    # Part L requires cross-environment rejection in BOTH directions, so PK19 is
+    # required of every environment rather than only the one that happened to be
+    # handed the other environment's license. An environment that never ran the
+    # check has no matching id, `_passed` is False, and the pair is refused.
+    "cross_environment_license": ("PK19",),
     "backup": ("PK13", "PK14"),
     "restore": ("PK15",),
     "expiry_read_only": ("PK22", "PK23", "PK24", "PK25"),
