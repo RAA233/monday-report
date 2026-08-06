@@ -90,7 +90,7 @@ function Initialize-ReviewerPaths {
     # reviewer-Full/author-Read: nesting the install directory inside it leaves
     # the author unable to create or update the entry point on any re-run.
     $authorOwned   = @("$Root\xchg", "$Root\xchg\licences", "$Root\reviewer-bin",
-                   "$Root\reviewer-src")
+                   "$Root\reviewer-src", "$Root\reviewer-pkg")
 
     foreach ($d in @($Root) + $authorOwned + $reviewerOwned) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }

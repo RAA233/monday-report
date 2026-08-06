@@ -41,7 +41,7 @@ $StateRoot    = Join-Path $ReviewerRoot 'state'        # reviewer-owned secrets
 $OutRoot      = Join-Path $ReviewerRoot 'out'          # reviewer-owned results
 
 #: The complete set of things the authoring process may ask the reviewer to do.
-$AllowedStages = @('bootstrap', 'preflight', 'review', 'status')
+$AllowedStages = @('bootstrap', 'preflight', 'e1', 'e2', 'review', 'status')
 
 function New-Status {
     param([string]$Stage, [string]$State, [string]$Detail = '', $Extra = $null)

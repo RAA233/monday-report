@@ -308,6 +308,158 @@ def _is_admin() -> bool:
         return False
 
 
+
+PACKAGE_ROOT = Path("C:/mr-hv/reviewer-pkg")
+
+
+def _frozen_package() -> dict:
+    """Read the frozen package descriptor and RE-HASH the staged artifacts.
+
+    The descriptor is a claim. The reviewer recomputes digests from the bytes
+    actually staged for it, so a descriptor that disagrees with its own package
+    is caught here instead of being inherited into the transcript.
+    """
+
+    descriptor = PACKAGE_ROOT / "frozen-package.json"
+    if not descriptor.exists():
+        raise FileNotFoundError("the author has not staged a frozen package")
+    frozen = json.loads(descriptor.read_text(encoding="utf-8"))
+    app_dir = PACKAGE_ROOT / "app"
+    recomputed = {"executable_sha256": sha256_file(app_dir / "MondayReportOffline.exe")}
+    installer = PACKAGE_ROOT / str(frozen.get("installer_name", ""))
+    if installer.is_file():
+        recomputed["installer_sha256"] = sha256_file(installer)
+    disagreements = [k for k, v in recomputed.items() if frozen.get(k) != v]
+    return {"frozen": frozen, "recomputed": recomputed, "disagreements": disagreements}
+
+
+def _run_runner(source: Path, python_exe: str, *, phase: str, label: str,
+                env_class: str, work_dir: Path, transfer_in, transfer_out: Path,
+                frozen: dict):
+    """Invoke the environment runner, which accepts NO key material by design --
+    and this driver has none to offer."""
+
+    cmd = [python_exe, str(source / "scripts" / "offline_env_runner.py"),
+           "--phase", phase, "--env-label", label, "--env-class", env_class,
+           "--package-dir", str(PACKAGE_ROOT / "app"), "--work-dir", str(work_dir),
+           "--transfer-out", str(transfer_out),
+           "--source-commit", str(frozen.get("source_commit", "")),
+           "--source-tree", str(frozen.get("source_tree", "")),
+           "--package-version", str(frozen.get("package_version", "")),
+           "--installer-sha256", str(frozen.get("installer_sha256", ""))]
+    if transfer_in is not None:
+        cmd += ["--transfer-in", str(transfer_in)]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+
+
+def stage_environment(args, label: str, env_class: str) -> int:
+    """Execute one COMPLETE environment matrix under the reviewer principal.
+
+    The reviewer runs the matrix itself and obtains licences only by asking the
+    author through the exchange directory, so it never holds the issuer key.
+    What it signs later is what it observed here, not a summary handed to it.
+    """
+
+    source = Path(args.source_root)
+    sys.path.insert(0, str(source))
+    sys.path.insert(0, str(source / "scripts"))
+    import offline_issuance_broker as broker
+
+    out = Path(args.out_root)
+    out.mkdir(parents=True, exist_ok=True)
+    transcript_path = out / (label + "-transcript.json")
+
+    def fail(payload: dict, code: int) -> int:
+        transcript_path.write_text(json.dumps(payload, indent=2, sort_keys=True),
+                                   encoding="utf-8")
+        print(json.dumps({"stage": label, "state": "FAILED"}, indent=2))
+        return code
+
+    work = Path(args.state_root).parent / "work" / label
+    transfer_in = work / "in"
+    transfer_out = work / "out"
+    for d in (work, transfer_in, transfer_out):
+        d.mkdir(parents=True, exist_ok=True)
+
+    try:
+        package = _frozen_package()
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        return fail({"state": "FAILED", "phase": "package", "detail": str(exc)}, 4)
+    if package["disagreements"]:
+        return fail({"state": "FAILED", "phase": "package",
+                     "detail": "staged package disagrees with its descriptor",
+                     "fields": package["disagreements"]}, 4)
+    frozen = package["frozen"]
+
+    # Minted BEFORE the run, so the author witness cannot predate it.
+    nonce = secrets.token_hex(32)
+    python_exe = sys.executable
+    started = datetime.now(timezone.utc).isoformat()
+
+    request = _run_runner(source, python_exe, phase="request", label=label,
+                          env_class=env_class, work_dir=work / "app",
+                          transfer_in=None, transfer_out=transfer_out, frozen=frozen)
+    request_record = transfer_out / "environment-request-record.json"
+    if request.returncode != 0 or not request_record.exists():
+        return fail({"state": "FAILED", "phase": "request", "rc": request.returncode,
+                     "stdout_tail": request.stdout[-1500:],
+                     "stderr_tail": request.stderr[-800:]}, 5)
+
+    activation = transfer_out / "activation-request.json"
+    os.environ[broker.BROKER_FLAG] = "1"
+    try:
+        issued = broker.request_bundle(request=activation, transfer_in=transfer_in,
+                                       sequence=1, nonce=nonce, label=label)
+    except (TimeoutError, ValueError, OSError) as exc:
+        return fail({"state": "FAILED", "phase": "issuance", "detail": str(exc)}, 6)
+
+    resume = _run_runner(source, python_exe, phase="resume", label=label,
+                         env_class=env_class, work_dir=work / "app",
+                         transfer_in=transfer_in, transfer_out=transfer_out,
+                         frozen=frozen)
+    resume_record = transfer_out / "environment-resume-record.json"
+    ok = resume.returncode == 0 and resume_record.exists()
+
+    transcript = {
+        "state": "COMPLETE" if ok else "FAILED",
+        "environment_label": label,
+        "environment_class": env_class,
+        "review_nonce": nonce,
+        "issuance_witness": issued.get("witness"),
+        "licences_received": issued.get("licences"),
+        "recomputed_package": package["recomputed"],
+        "frozen_package": frozen,
+        "started_at": started,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "request_rc": request.returncode,
+        "resume_rc": resume.returncode,
+        "raw_request_record_sha256": sha256_file(request_record),
+        "raw_resume_record_sha256": sha256_file(resume_record) if resume_record.exists() else "",
+    }
+    if not ok:
+        transcript["stdout_tail"] = resume.stdout[-1500:]
+        transcript["stderr_tail"] = resume.stderr[-800:]
+    transcript_path.write_text(json.dumps(transcript, indent=2, sort_keys=True),
+                               encoding="utf-8")
+    print(json.dumps({"stage": label, "state": transcript["state"]}, indent=2))
+    return 0 if ok else 7
+
+
+def stage_e1(args) -> int:
+    return stage_environment(args, "ENVIRONMENT_1", "windows-11-host-isolated")
+
+
+def stage_e2(args) -> int:
+    # Environment 2 needs the guest credential re-protected under reviewer
+    # DPAPI. That handoff is not built, and the reviewer must not simply be
+    # handed the author blob, so this refuses rather than pretending.
+    print(json.dumps({
+        "stage": "e2", "state": "NOT_IMPLEMENTED",
+        "detail": "guest credential handoff to the reviewer principal is not built"},
+        indent=2))
+    return 8
+
+
 def stage_review(args: argparse.Namespace) -> int:
     """Full independent execution. Requires a bootstrapped key and a green
     preflight; refuses to sign anything it did not itself derive."""
@@ -335,7 +487,8 @@ def stage_review(args: argparse.Namespace) -> int:
     return 0
 
 
-STAGES = {"bootstrap": stage_bootstrap, "preflight": stage_preflight, "review": stage_review}
+STAGES = {"bootstrap": stage_bootstrap, "preflight": stage_preflight,
+          "e1": stage_e1, "e2": stage_e2, "review": stage_review}
 
 
 def main() -> int:
