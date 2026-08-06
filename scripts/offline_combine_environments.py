@@ -88,6 +88,17 @@ def redact(record: dict, request_record: dict) -> dict:
 
     checks = list(record.get("checks", [])) + list(request_record.get("checks", []))
     fingerprint_hash = str(request_record.get("machine_fingerprint_hash", ""))
+
+    # The REQUEST record carries its own copies of every binding field, and 9 of
+    # the 34 checks live in it -- clean state, dependency absence, in-environment
+    # hash recomputation, first launch, localhost-only binding and the activation
+    # export. Reading the bindings from the result record alone left that half
+    # free to claim a different commit, tree, version or package hash while the
+    # pair still certified.
+    request_binding_disagreements = [
+        field for field in _MUST_MATCH
+        if field in request_record and request_record.get(field) != record.get(field)
+    ]
     body = {
         "environment_label": record.get("environment_label"),
         "environment_class": record.get("environment_class"),
@@ -115,6 +126,7 @@ def redact(record: dict, request_record: dict) -> dict:
         # The complete executed set, so a thinned matrix is visible rather than
         # hidden behind a clean total.
         "missing_or_failing_checks": missing_or_failing(checks),
+        "request_binding_disagreements": request_binding_disagreements,
         "executed_check_count": len({str(c.get("check_id", "")).split()[0]
                                      for c in checks if c.get("check_id")}),
         "totals": {
@@ -154,6 +166,10 @@ def validate_pair(env1: dict, env2: dict) -> list[str]:
         deps = env.get("dependency_absence", {})
         if not deps or not all(deps.values()):
             reasons.append(f"{label} failed its dependency-absence proof")
+        drift = env.get("request_binding_disagreements")
+        if drift is None or drift:
+            reasons.append(f"{label} request and result records disagree on their "
+                           f"binding fields ({drift if drift else 'the field is absent'})")
         thin = env.get("missing_or_failing_checks")
         if thin is None or thin:
             reasons.append(f"{label} did not execute every required check "

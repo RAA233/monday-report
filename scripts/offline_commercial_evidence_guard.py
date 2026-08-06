@@ -5,8 +5,10 @@ asserts this tier CANNOT influence the production-target or GA controls.
 from __future__ import annotations
 
 import copy
-import re
+import hashlib
 import json
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,22 +51,23 @@ def main() -> int:
         f"environment minimum honestly ({verdicts}, coverage_met={coverage_met})")
     import copy as _copy
 
-    def _consistent(document: dict, environments: list[str], accepted: bool = True) -> dict:
+    def _consistent(document: dict, keep_labels: list[str], accepted: bool = True) -> dict:
         """Rewrite the coverage-bearing fields consistently, then rehash.
 
-        An INCONSISTENT edit is what OE12b/OE12c reject; this helper produces the
-        consistent form so the coverage gate itself is what is under test.
+        Selection is by environment LABEL, never by class string. Filtering on a
+        hardcoded pair of class names made this helper produce an EMPTY record
+        for any honest pair that happened to share a class -- so the very
+        second-environment shape Part-O allows failed the gate here even after
+        the validator was corrected to accept it.
         """
 
-        document["results"]["package_matrix"]["environments_executed"] = list(environments)
-        document["environment_coverage"]["executed"] = list(environments)
-        # Narrow the RECORD to match, or the document contradicts itself and is
-        # refused for that contradiction rather than for the coverage gate this
-        # pair is isolating.
         record = document.get("two_environment_record", {})
         envs = record.get("environments", {})
         keep = {label: env for label, env in sorted(envs.items())
-                if str(env.get("environment_class", "")) in set(environments)}
+                if label in set(keep_labels)}
+        environments = [str(e.get("environment_class", "")) for e in keep.values()]
+        document["results"]["package_matrix"]["environments_executed"] = list(environments)
+        document["environment_coverage"]["executed"] = list(environments)
         record["environments"] = keep
         record["environment_count"] = len(keep)
         # Mirror the validator's derivation: distinct MACHINE IDENTITIES, not
@@ -95,7 +98,7 @@ def main() -> int:
     # clean Hyper-V VM, the artifact genuinely carries two environments, so the
     # load-bearing direction to prove is that NARROWING it back to one blocks.
     widened = _consistent(_copy.deepcopy(payload),
-                          ["windows-11-host-isolated", "windows-11-hyperv"])
+                          ["ENVIRONMENT_1", "ENVIRONMENT_2"])
     widened_verdicts = E.control_verdicts(
         widened, E.validate(widened, current_commit=commit, current_tree=tree))
     rec("OE01b coverage-gate-passes-on-two-environments",
@@ -108,7 +111,7 @@ def main() -> int:
     # outright, so every control is BLOCKED rather than just package/commercial.
     # That is strictly stronger than blocking the two package controls, so the
     # check asserts the behaviour that actually holds.
-    narrowed = _consistent(_copy.deepcopy(payload), ["windows-11-host-isolated"])
+    narrowed = _consistent(_copy.deepcopy(payload), ["ENVIRONMENT_1"])
     narrowed_reasons = E.validate(narrowed, current_commit=commit, current_tree=tree)
     narrowed_verdicts = E.control_verdicts(narrowed, narrowed_reasons)
     rec("OE01c coverage-gate-blocks-single-environment",
@@ -353,11 +356,20 @@ def main() -> int:
     # raw runner records are ordinary JSON in a gitignored directory. Nothing
     # signs them, so an editor who rewrites all of them consistently and reseals
     # the record can still produce a self-consistent chain. What that editor
-    # cannot do is make ENVIRONMENT_1's fingerprint match a fingerprint computed
-    # live on this host at guard time (OE40), or make the Hyper-V guard's live
-    # host-vs-guest identity comparison agree with a fabricated second machine.
-    # Beyond that the residual is the documented one: anti-tamper here is
-    # deterrence, not proof, exactly as the artifact's own disclosure states.
+    # cannot do is make ENVIRONMENT_1's fingerprint match one computed live on
+    # this host (OE40), make ENVIRONMENT_2's fingerprint components match ones
+    # re-measured live inside the guest (OE42), or make the declared package
+    # hashes match the archive and executable actually on disk (OE43).
+    #
+    # An earlier version of this comment also claimed the Hyper-V guard's
+    # host-vs-guest identity comparison would disagree with a fabricated second
+    # machine. That was false: HV42 reads no environment record and emits only a
+    # boolean, so it is structurally incapable of noticing. It is not part of
+    # this chain and is not cited as though it were.
+    #
+    # Beyond those three live measurements the residual is the documented one:
+    # anti-tamper here is deterrence, not proof, exactly as the artifact's own
+    # anti_tamper_is_deterrence_not_absolute disclosure states.
     import offline_combine_environments as CB  # noqa: PLC0415
 
     raw_dir = E.ENVIRONMENT_RECORDS_DIR
@@ -440,6 +452,38 @@ def main() -> int:
             "this host, and ENVIRONMENT_2's differs from it — the one link in the "
             "chain that is measured rather than read")
 
+        # OE42 -- ENVIRONMENT_2's identity is MEASURED, not self-asserted.
+        # OE40 anchors Environment 1 to this host; without a matching anchor for
+        # Environment 2 the second machine was pure assertion, and one machine's
+        # records relabelled with an invented fingerprint satisfied the Part-O
+        # minimum. The guest's component hashes are re-measured live over
+        # PowerShell Direct using the same mr-machine-fingerprint.v1 scheme and
+        # must agree with the ones ENVIRONMENT_2's runner recorded.
+        control = ROOT / "packaging" / "hyperv" / "hyperv_control.ps1"
+        probe = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(control),
+             "-Action", "guest-fingerprint-components", "-VmName", "MR-OFFLINE-E2",
+             "-TimeoutSeconds", "1800"],
+            capture_output=True, text=True, timeout=3000)
+        live = {}
+        for line in (probe.stdout or "").splitlines():
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    live = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        measured = {k: str(v).lower() for k, v in (live.get("components") or {}).items()}
+        recorded = {k: str(v).lower() for k, v in
+                    (e2_raw.get("machine_binding", {}).get("component_hashes") or {}).items()}
+        shared = set(measured) & set(recorded)
+        agree = bool(shared) and all(measured[k] == recorded[k] for k in shared)
+        rec("OE42 environment-2-fingerprint-matches-the-live-guest",
+            bool(measured) and agree and len(shared) >= 2,
+            f"{len(shared)} fingerprint component(s) re-measured live in the guest agree "
+            f"with what ENVIRONMENT_2's runner recorded (measured={sorted(measured)}, "
+            f"recorded={sorted(recorded)})")
+
         # OE41 -- completeness travels, and is enforced.
         thin = {label: env.get("missing_or_failing_checks")
                 for label, env in sealed.get("environments", {}).items()}
@@ -455,6 +499,41 @@ def main() -> int:
                     "OE40 environment-1-fingerprint-matches-this-live-host",
                     "OE41 every-required-check-executed-in-both-environments"):
             rec(cid, False, "raw runner records unavailable; the chain cannot be walked")
+
+    # OE43 -- the PACKAGE itself is re-measured. Every hash in the chain was
+    # copied from a gitignored build summary and only ever compared against
+    # other copies of itself, so the whole chain could agree on a package that
+    # does not exist. Hash the real artifacts here.
+    app_dir = ROOT / "output" / "offline-package" / "stage" / "MondayReportOffline"
+    archives = sorted((ROOT / "output" / "offline-package").glob("MondayReportOffline-*-win64.zip"))
+
+    def _sha(path: Path) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    if archives and (app_dir / "MondayReportOffline.exe").exists():
+        real_installer = _sha(archives[-1])
+        real_exe = _sha(app_dir / "MondayReportOffline.exe")
+        real_manifest = _sha(app_dir / "payload-manifest.json")
+        declared = payload.get("package", {})
+        env_blocks = payload.get("two_environment_record", {}).get("environments", {})
+        env_installers = {str(e.get("installer_sha256", "")).lower() for e in env_blocks.values()}
+        env_exes = {str(e.get("executable_sha256", "")).lower() for e in env_blocks.values()}
+        env_manifests = {str(e.get("payload_manifest_sha256", "")).lower()
+                         for e in env_blocks.values()}
+        rec("OE43 declared-package-hashes-match-the-built-artifacts",
+            str(declared.get("installer_sha256", "")).lower() == real_installer
+            and env_installers == {real_installer}
+            and env_exes == {real_exe}
+            and env_manifests == {real_manifest},
+            "the artifact's and both environments' package hashes equal SHA-256 of the "
+            "archive, executable and payload manifest actually on disk")
+    else:
+        rec("OE43 declared-package-hashes-match-the-built-artifacts", False,
+            "the built package is not present, so its declared hashes cannot be re-measured")
 
     ga_registry = ROOT / "evals" / "ga" / "blocker_registry.v1.json"
     if ga_registry.exists():

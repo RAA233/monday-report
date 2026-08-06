@@ -319,10 +319,21 @@ def protocol_battery(work: Path) -> None:
 
     missing_dir = work / "empty-transfer"
     missing_dir.mkdir(parents=True, exist_ok=True)
+    # This previously asserted that a file it had never created was absent from
+    # a directory it had just made -- a condition that cannot be false, reported
+    # as though the resume phase had been exercised. Assert the actual contract
+    # in both runners instead: PK07 is recorded from the license's presence and
+    # the phase THROWS when it is missing, so it cannot silently continue.
+    py_src = ENV_RUNNER.read_text(encoding="utf-8")
+    ps_src = PS_RUNNER.read_text(encoding="utf-8") if PS_RUNNER.exists() else ""
     rec("AG18 missing-license-fails-closed",
-        not (missing_dir / "license-primary.json").exists(),
-        "with no signed license present the resume phase has nothing to import "
-        "and fails closed (PK07)")
+        "PK07 signed-license-received" in py_src
+        and "no signed license in the transfer directory (fail closed)" in py_src
+        and "PK07 signed-license-received" in ps_src
+        and "no signed license in the transfer directory (fail closed)" in ps_src
+        and not (missing_dir / "license-primary.json").exists(),
+        "both runners record PK07 from the signed licence's presence and RAISE when "
+        "it is absent, so the resume phase cannot proceed without one")
 
     # AG19/AG20: key absent from any environment-visible artifact.
     rec("AG19 key-absent-from-environment-transfer",

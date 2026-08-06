@@ -373,8 +373,23 @@ def time_and_state_battery(tmp: Path) -> None:
                 _payload(fp.binding_document(),
                          now=datetime.fromtimestamp(expired_clock, tz=timezone.utc),
                          days=1, grace=0, sequence=1), key).document).encode())
-        rec("LG29b held-clock-cannot-reimport-expired", True,
-            "a fresh lineage legitimately accepts the license (no stale trusted clock)")
+        # Both branches previously recorded PASS unconditionally, so the id
+        # asserted more than the check enforced. The honest invariant is that
+        # the import path judges expiry against max(clock, highest_trusted_epoch)
+        # -- NOT that a fresh lineage must refuse. A fresh lineage has no trusted
+        # clock to hold back, so accepting here is correct and is the documented
+        # "deleting every state copy re-anchors the lineage" limitation. What
+        # must hold either way: the decision is operational if and only if the
+        # effective clock is genuinely before the licence's own grace_until.
+        fresh = _provider(tmp, pub, fp, clock=lambda: inside_tolerance, tag="held2")
+        decision = fresh.evaluate()
+        within_grace = inside_tolerance < (expired_clock + 86400)
+        rec("LG29b held-clock-cannot-reimport-expired",
+            decision.operational == within_grace,
+            f"a fresh lineage judges the re-import against its own effective clock: "
+            f"operational={decision.operational} with the effective clock "
+            f"{'before' if within_grace else 'after'} grace_until — an established "
+            f"lineage cannot be rewound this way (LG29a, MUT05)")
     except LicenseImportError as exc:
         rec("LG29b held-clock-cannot-reimport-expired",
             exc.reason is ReasonCode.LICENSE_EXPIRED,

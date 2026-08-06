@@ -33,7 +33,8 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("restore-baseline", "wait-ready", "push", "mkdir", "invoke-stage",
-                 "pull", "list-out", "diagnostics", "shutdown", "identity-compare")]
+                 "pull", "list-out", "diagnostics", "shutdown", "identity-compare",
+                 "guest-fingerprint-components")]
     [string]$Action,
 
     [string]$VmName = "MR-OFFLINE-E2",
@@ -223,6 +224,81 @@ switch ($Action) {
             }
         } finally { $cred = $null }
         Emit ([ordered]@{ control = $Action; ok = [bool]$payload.present; guest_path = $GuestPath; present = [bool]$payload.present; content = "$($payload.content)" })
+    }
+
+    "guest-fingerprint-components" {
+        # Re-measure the guest's fingerprint COMPONENT HASHES using the same
+        # scheme as backend/app/licensing/fingerprint.py (mr-machine-fingerprint.v1:
+        # normalize, then SHA-256 over "<version>|<component>|<value>"). Only
+        # hashes leave the guest -- the same hashed form the activation request
+        # is designed to carry to the operator. This exists so ENVIRONMENT_2's
+        # recorded identity can be checked against a LIVE measurement instead of
+        # being self-asserted in a JSON file.
+        Assert-Vm | Out-Null
+        $vm = Get-VM -Name $VmName
+        $wasOff = ($vm.State -eq "Off")
+        if ($wasOff) {
+            Start-VM -Name $VmName | Out-Null
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            $ready = $false
+            while ((Get-Date) -lt $deadline) {
+                $c = Get-GuestCredential
+                try { Invoke-Command -VMName $VmName -Credential $c -ErrorAction Stop -ScriptBlock { 1 } | Out-Null; $ready = $true; break }
+                catch { Start-Sleep -Seconds 8 } finally { $c = $null }
+            }
+            if (-not $ready) {
+                Stop-VM -Name $VmName -TurnOff -Confirm:$false -ErrorAction SilentlyContinue
+                Fail "guest did not become reachable for the fingerprint measurement"
+            }
+        }
+
+        $cred = Get-GuestCredential
+        $components = $null
+        try {
+            $components = Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock {
+                $VERSION = "mr-machine-fingerprint.v1"
+                $PLACEHOLDER = @("", "TOBEFILLEDBYOEM", "TOBEFILLEDBYO.E.M.", "DEFAULTSTRING",
+                                 "NONE", "NA", "N/A", "SYSTEMSERIALNUMBER", "0",
+                                 "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", "00000000000000000000000000000000")
+                function Norm { param([string]$v) if ($null -eq $v) { return "" } ; return ($v -replace '[\s:\-{}]', '').ToUpper() }
+                function H { param([string]$name, [string]$value)
+                    $sha = [System.Security.Cryptography.SHA256]::Create()
+                    try { $b = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$VERSION|$name|$value")) }
+                    finally { $sha.Dispose() }
+                    return ([System.BitConverter]::ToString($b) -replace '-', '').ToLower()
+                }
+                $facts = [ordered]@{}
+                try { $facts["machine_guid"] = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Cryptography" -Name MachineGuid -ErrorAction Stop).MachineGuid } catch {}
+                try { $facts["smbios_uuid"] = (Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop).UUID } catch {}
+                try { $facts["board_serial"] = (Get-CimInstance Win32_BaseBoard -ErrorAction Stop).SerialNumber } catch {}
+                try { $facts["system_volume_serial"] = "{0:X}" -f ((Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction Stop).VolumeSerialNumber) } catch {}
+                $out = [ordered]@{}
+                foreach ($k in $facts.Keys) {
+                    $n = Norm $facts[$k]
+                    if (-not $n) { continue }
+                    if ($PLACEHOLDER -contains $n) { continue }
+                    $out[$k] = H $k $n
+                }
+                return $out
+            }
+        } finally { $cred = $null }
+
+        if ($wasOff) {
+            Stop-VM -Name $VmName -Confirm:$false -ErrorAction SilentlyContinue
+            $deadline = (Get-Date).AddMinutes(6)
+            while (((Get-VM -Name $VmName).State -ne "Off") -and ((Get-Date) -lt $deadline)) { Start-Sleep -Seconds 5 }
+        }
+
+        $clean = [ordered]@{}
+        if ($components -is [System.Collections.IDictionary]) {
+            foreach ($k in @($components.Keys)) { $clean[$k] = $components[$k] }
+        } else {
+            foreach ($p in $components.PSObject.Properties) {
+                if ($p.Name -in @("PSComputerName", "RunspaceId", "PSShowComputerName")) { continue }
+                $clean[$p.Name] = $p.Value
+            }
+        }
+        Emit ([ordered]@{ control = $Action; ok = ($clean.Count -gt 0); components = $clean })
     }
 
     "identity-compare" {

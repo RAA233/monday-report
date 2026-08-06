@@ -409,6 +409,13 @@ def load_and_validate() -> tuple[dict | None, list[str]]:
     payload = json.loads(EVIDENCE_PATH.read_text(encoding="utf-8"))
     reasons = validate(payload, current_commit=git_rev("HEAD"),
                        current_tree=git_rev("HEAD^{tree}"))
+    # RE-MEASURE cleanliness rather than trusting the stored boolean. git_tree is
+    # HEAD^{tree}, the COMMITTED tree, so an uncommitted edit changes neither it
+    # nor the recorded flag -- yet the chain re-derives the sealed record using
+    # the current worktree's combiner, which an uncommitted edit would silently
+    # supply. The sibling tenant tier already re-checks this.
+    if not worktree_is_clean():
+        reasons.append("the worktree is dirty at validation time")
     # The chain check needs the filesystem, so it lives here rather than in the
     # pure validate(). It is not optional: without it the artifact's embedded
     # record is self-describing and a fabricated environment passes.
