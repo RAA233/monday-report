@@ -64,6 +64,10 @@ def main() -> int:
             E.PACKAGE_VERDICT if meets else "OFFLINE_WINDOWS_PACKAGE_NOT_ACCEPTED")
         document["verdicts"]["commercial"] = (
             E.COMMERCIAL_VERDICT if meets else "OFFLINE_COMMERCIAL_PACKAGE_NOT_ACCEPTED")
+        # Refresh BOTH seals, or the coverage gate under test is masked by a
+        # stale-hash rejection that blocks every control including the licensing
+        # one -- which is exactly what this pair is trying to hold still.
+        document["reproducible_payload_hash"] = E.reproducible_hash(document)
         body = {k: v for k, v in document.items() if k != "canonical_payload_hash"}
         document["canonical_payload_hash"] = canonical_hash(body)
         return document
@@ -97,44 +101,78 @@ def main() -> int:
         document["canonical_payload_hash"] = canonical_hash(body)
         return document
 
-    def rejects(cid: str, mutate, *, skip_rehash: bool = False, detail: str = "") -> None:
+    def rejects(cid: str, mutate, *, skip_rehash: bool = False, detail: str = "",
+                expect: str | None = None, reseal: bool = True) -> None:
+        """Require the mutation to be refused -- and, when ``expect`` is given,
+        refused FOR THAT REASON rather than incidentally by a stale seal.
+
+        ``reseal`` refreshes the reproducible hash too, so a mutation aimed at a
+        semantic rule is not masked by a hash mismatch.
+        """
+
         mutant = copy.deepcopy(payload)
         mutate(mutant)
+        if reseal:
+            mutant["reproducible_payload_hash"] = E.reproducible_hash(mutant)
         if not skip_rehash:
             rehash(mutant)
         result = E.validate(mutant, current_commit=commit, current_tree=tree)
-        rec(cid, len(result) > 0, detail or (result[0] if result else "NOT rejected"))
+        ok = len(result) > 0 and (expect is None or any(expect in r for r in result))
+        rec(cid, ok, detail or (("; ".join(result))[:200] if result else "NOT rejected"))
 
-    rejects("OE02 wrong-commit-rejected", lambda m: m.update(git_commit="0" * 40))
-    rejects("OE03 wrong-tree-rejected", lambda m: m.update(git_tree="0" * 40))
+    # Every rejection below reseals the reproducible hash first, so the refusal
+    # comes from the RULE under test and not incidentally from a stale seal, and
+    # each asserts the reason it is meant to trigger.
+    rejects("OE02 wrong-commit-rejected", lambda m: m.update(git_commit="0" * 40),
+            expect="current exact commit")
+    rejects("OE03 wrong-tree-rejected", lambda m: m.update(git_tree="0" * 40),
+            expect="current exact tree")
     rejects("OE04 hash-tamper-rejected",
-            lambda m: m.update(canonical_payload_hash="f" * 64), skip_rehash=True)
+            lambda m: m.update(canonical_payload_hash="f" * 64), skip_rehash=True,
+            reseal=False, expect="canonical payload hash")
     rejects("OE05 stale-artifact-rejected",
-            lambda m: m.update(generated_at="2020-01-01T00:00:00+00:00"))
+            lambda m: m.update(generated_at="2020-01-01T00:00:00+00:00"),
+            expect="stale")
     rejects("OE06 dropped-disclosure-rejected",
-            lambda m: m["disclosures"].update(not_ga_acceptance=False))
+            lambda m: m["disclosures"].update(not_ga_acceptance=False),
+            expect="disclosure")
     rejects("OE07 failing-battery-rejected",
-            lambda m: m["results"]["license_battery"].update(failed=3))
+            lambda m: m["results"]["license_battery"].update(failed=3),
+            expect="not fully passing")
     rejects("OE08 missing-section-rejected",
-            lambda m: m["results"].pop("package_matrix"))
+            lambda m: m["results"].pop("package_matrix"),
+            expect="missing result section")
     rejects("OE09 empty-environment-matrix-rejected",
-            lambda m: m["results"]["package_matrix"].update(environments_executed=[]))
+            lambda m: m["results"]["package_matrix"].update(environments_executed=[]),
+            expect="no executed environment")
     rejects("OE10 private-key-presence-rejected",
-            lambda m: m["package"].update(private_key_absent=False))
+            lambda m: m["package"].update(private_key_absent=False),
+            expect="private-key-absence")
     rejects("OE11 leak-shape-rejected",
-            lambda m: m.update(diagnostic="adapter 00:1A:2B:3C:4D:5E failed"))  # leak-test fixture
+            lambda m: m.update(diagnostic="adapter 00:1A:2B:3C:4D:5E failed"),  # leak-test fixture
+            expect="leak shape")
     rejects("OE12 missing-installer-hash-rejected",
-            lambda m: m["package"].update(installer_sha256=""))
+            lambda m: m["package"].update(installer_sha256=""),
+            expect="installer hash")
 
     def _claim_acceptance(m: dict) -> None:
-        m["verdicts"]["commercial"] = "OFFLINE_COMMERCIAL_PACKAGE_ACCEPTED"
-        m["verdicts"]["package"] = "OFFLINE_WINDOWS_PACKAGE_ACCEPTED"
+        # Narrow coverage to ONE environment consistently -- executed list and
+        # meets_minimum agree, so nothing else in the document is malformed --
+        # while leaving the ACCEPTED verdicts in place. The only thing wrong is
+        # that the stored verdicts outrun what the recorded results support.
+        m["results"]["package_matrix"]["environments_executed"] = ["windows-11-host-isolated"]
+        m["environment_coverage"]["executed"] = ["windows-11-host-isolated"]
+        m["environment_coverage"]["meets_minimum"] = False
+        m["verdicts"]["package"] = E.PACKAGE_VERDICT
+        m["verdicts"]["commercial"] = E.COMMERCIAL_VERDICT
 
-    rejects("OE12b overclaimed-verdict-rejected", _claim_acceptance,
+    rejects("OE12b overclaimed-verdict-rejected", _claim_acceptance, reseal=True,
+            expect="stored verdict",
             detail="a hand-edited artifact cannot assert an acceptance the recorded "
-                   "results do not support, even with a recomputed canonical hash")
+                   "results do not support, even with both seals recomputed")
     rejects("OE12c forged-coverage-flag-rejected",
-            lambda m: m["environment_coverage"].update(meets_minimum=True),
+            lambda m: m["environment_coverage"].update(meets_minimum=False),
+            reseal=True, expect="meets_minimum",
             detail="meets_minimum must agree with the recorded executed environments")
 
     # ---- the two-environment record the package matrix is derived from ----
@@ -147,15 +185,18 @@ def main() -> int:
         "matrix was derived from")
 
     rejects("OE17 missing-two-environment-record-rejected",
-            lambda m: m.pop("two_environment_record"),
+            lambda m: m.pop("two_environment_record"), expect="no two-environment record",
             detail="evidence without a two-environment record cannot claim two environments")
     rejects("OE18 unaccepted-two-environment-record-rejected",
-            lambda m: m["two_environment_record"].update(accepted=False))
+            lambda m: m["two_environment_record"].update(accepted=False),
+            expect="was not accepted")
     rejects("OE19 non-identical-package-bytes-rejected",
             lambda m: m["two_environment_record"].update(identical_package_bytes=False),
+            expect="identical package bytes",
             detail="the two environments must have run byte-identical package bytes")
     rejects("OE20 duplicate-environment-identity-rejected",
             lambda m: m["two_environment_record"].update(independent_identities=False),
+            expect="independent identities",
             detail="one machine reported twice is not two environments")
     # The reproducible hash must be exactly what a second run at this head would
     # agree on: everything except when the run happened.
@@ -165,20 +206,25 @@ def main() -> int:
             == payload.get("reproducible_payload_hash"),
         "the reproducible hash is stable across generation time and unchanged by it")
     rejects("OE15c reproducible-hash-tamper-rejected",
-            lambda m: m.update(reproducible_payload_hash="f" * 64))
+            lambda m: m.update(reproducible_payload_hash="f" * 64),
+            reseal=False, expect="reproducible payload hash")
     rejects("OE15d reproducible-hash-covers-results",
             lambda m: m["results"]["license_battery"].update(passed=999),
+            reseal=False, expect="reproducible payload hash",
             detail="a changed result changes the reproducible hash, so a second "
                    "run at the same head could not agree with it")
 
     rejects("OE20b record-from-a-different-commit-rejected",
             lambda m: m["two_environment_record"].update(source_commit="0" * 40),
+            expect="different commit",
             detail="a record produced at another head cannot be bound to this evidence")
     rejects("OE20c record-from-a-different-tree-rejected",
-            lambda m: m["two_environment_record"].update(source_tree="0" * 40))
+            lambda m: m["two_environment_record"].update(source_tree="0" * 40),
+            expect="different tree")
     rejects("OE21 repeated-environment-class-rejected",
             lambda m: m["results"]["package_matrix"].update(
                 environments_executed=["windows-11-hyperv", "windows-11-hyperv"]),
+            expect="same environment class twice",
             detail="the same environment class listed twice is one environment counted twice")
 
     # ---- the proofs that make the second environment meaningful ----
@@ -186,9 +232,11 @@ def main() -> int:
                          ("OE23", "hyperv_isolation"),
                          ("OE24", "combiner_faults")):
         rejects(f"{cid} missing-{section.replace('_', '-')}-section-rejected",
-                lambda m, s=section: m["results"].pop(s))
+                lambda m, s=section: m["results"].pop(s),
+                expect="missing result section")
         rejects(f"{cid}b failing-{section.replace('_', '-')}-rejected",
-                lambda m, s=section: m["results"][s].update(failed=1))
+                lambda m, s=section: m["results"][s].update(failed=1),
+                expect="not fully passing")
 
     blocked = E.control_verdicts(payload, ["any reason"])
     rec("OE13 invalid-artifact-blocks-all-controls",
