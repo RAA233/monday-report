@@ -432,7 +432,7 @@ def record_battery() -> None:
 
 # ----------------------------------------------------------- credential tier
 
-def credential_battery(state_root: Path, xfer_root: Path) -> None:
+def credential_battery(state_root: Path, xfer_root: Path, vm_name: str) -> None:
     cred_path = state_root / "e2-guest.cred"
 
     # HV28 -- the stored artifact is a DPAPI blob, not plaintext.
@@ -496,25 +496,38 @@ def credential_battery(state_root: Path, xfer_root: Path) -> None:
         else "no credential material in results, logs or evidence")
     plaintext = None
 
-    # HV31 -- a corrupted blob fails CLOSED rather than falling back.
+    # HV31 -- a corrupted or absent blob fails CLOSED rather than falling back.
+    # Aimed at the REAL VM so the VM-existence precondition passes and the
+    # credential gate is what is actually under test; the operation never
+    # reaches the guest because decryption stops it first.
     with tempfile.TemporaryDirectory(prefix="hv-cred-") as tmp:
-        fake_state = Path(tmp)
-        (fake_state / "e2-guest.cred").write_text("not-a-dpapi-blob", encoding="utf-8")
+        corrupt_state = Path(tmp) / "corrupt"
+        corrupt_state.mkdir()
+        (corrupt_state / "e2-guest.cred").write_text("not-a-dpapi-blob", encoding="utf-8")
         proc = _powershell(["-File", str(CONTROL), "-Action", "list-out",
-                            "-VmName", "NO-SUCH-VM-FOR-GUARD",
-                            "-StateRoot", str(fake_state)])
+                            "-VmName", vm_name, "-StateRoot", str(corrupt_state)])
         failed_closed = ("HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" in (proc.stdout or "")
                          and proc.returncode != 0)
+
         empty_state = Path(tmp) / "empty"
         empty_state.mkdir()
         proc2 = _powershell(["-File", str(CONTROL), "-Action", "list-out",
-                             "-VmName", "NO-SUCH-VM-FOR-GUARD",
-                             "-StateRoot", str(empty_state)])
+                             "-VmName", vm_name, "-StateRoot", str(empty_state)])
         absent_closed = ("HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" in (proc2.stdout or "")
                          and proc2.returncode != 0)
-    rec("HV31 credential-removal-fails-closed", failed_closed and absent_closed,
-        "a corrupted blob and an absent blob both stop the control surface; "
-        "there is no blank, default or prompted fallback")
+
+        # An empty-but-present blob must not be treated as a blank password.
+        blank_state = Path(tmp) / "blank"
+        blank_state.mkdir()
+        (blank_state / "e2-guest.cred").write_text("", encoding="utf-8")
+        proc3 = _powershell(["-File", str(CONTROL), "-Action", "list-out",
+                             "-VmName", vm_name, "-StateRoot", str(blank_state)])
+        blank_closed = ("HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" in (proc3.stdout or "")
+                        and proc3.returncode != 0)
+    rec("HV31 credential-removal-fails-closed",
+        failed_closed and absent_closed and blank_closed,
+        f"corrupted={failed_closed}, absent={absent_closed}, blank={blank_closed}; "
+        "each stops the control surface with no blank, default or prompted fallback")
 
     # HV32 -- ACL restricted to the current user and SYSTEM.
     acl = _powershell(["-Command",
@@ -538,12 +551,16 @@ def vm_battery(vm_name: str, media_record: Path, xfer_root: Path) -> None:
         "$fw = Get-VMFirmware -VMName '%s'; $sec = Get-VMSecurity -VMName '%s';"
         "$na = @(Get-VMNetworkAdapter -VMName '%s');"
         "$snap = @(Get-VMSnapshot -VMName '%s' -ErrorAction SilentlyContinue | ForEach-Object { $_.Name });"
+        # Get-VMSecurity exposes no KeyProtector property; an unconfigured VM
+        # returns a 4-byte placeholder from Get-VMKeyProtector.
+        "$kpLen = 0; try { $kp = Get-VMKeyProtector -VMName '%s';"
+        " if ($kp -is [byte[]]) { $kpLen = $kp.Length } } catch { $kpLen = 0 };"
         "@{present=$true; generation=$vm.Generation; state=\"$($vm.State)\";"
         " secure_boot=\"$($fw.SecureBoot)\"; template=\"$($fw.SecureBootTemplate)\";"
-        " tpm=[bool]$sec.TpmEnabled;"
-        " key_protector=($null -ne $sec.KeyProtector -and $sec.KeyProtector.Length -gt 0);"
+        " tpm=[bool]$sec.TpmEnabled; key_protector_bytes=$kpLen;"
+        " key_protector=($kpLen -gt 4);"
         " adapters=$na.Count; checkpoints=$snap} | ConvertTo-Json -Depth 5 -Compress }"
-        % (vm_name, vm_name, vm_name, vm_name, vm_name)], timeout=240)
+        % (vm_name, vm_name, vm_name, vm_name, vm_name, vm_name)], timeout=240)
     payload = {}
     for line in (probe.stdout or "").splitlines():
         line = line.strip()
@@ -572,7 +589,8 @@ def vm_battery(vm_name: str, media_record: Path, xfer_root: Path) -> None:
     rec("HV36 windows-secure-boot-template", str(payload.get("template")) == "MicrosoftWindows",
         f"effective template={payload.get('template')}")
     rec("HV37 local-key-protector", bool(payload.get("key_protector")),
-        "a local key protector is configured")
+        f"local key protector present, {payload.get('key_protector_bytes', 0)} bytes "
+        f"(an unconfigured VM returns a 4-byte placeholder)")
     rec("HV38 virtual-tpm-enabled", bool(payload.get("tpm")),
         f"TpmEnabled={payload.get('tpm')}")
     rec("HV39 zero-network-adapters", int(payload.get("adapters", -1)) == 0,
@@ -598,19 +616,27 @@ def vm_battery(vm_name: str, media_record: Path, xfer_root: Path) -> None:
     else:
         rec("HV41 approved-clean-media", False, "no media provenance record")
 
-    # HV42 -- the guest identity differs from the host identity.
-    e1 = xfer_root.parent / "results" / "environment-1-result.json"
-    e2 = xfer_root / "environment-result.json"
-    if e1.exists() and e2.exists():
-        r1 = json.loads(e1.read_text(encoding="utf-8"))
-        r2 = json.loads(e2.read_text(encoding="utf-8"))
-        f1 = r1.get("machine_fingerprint_hash") or r1.get("fingerprint_identity_digest")
-        f2 = r2.get("machine_fingerprint_hash") or r2.get("fingerprint_identity_digest")
-        rec("HV42 vm-independent-from-environment-1", bool(f1) and bool(f2) and f1 != f2,
-            "the two environments report distinct machine identities")
-    else:
-        rec("HV42 vm-independent-from-environment-1", False,
-            "both environment results are required to compare identities")
+    # HV42 -- the guest is a DIFFERENT machine from Environment 1, proven
+    # directly rather than inferred from matrix output, so the claim holds
+    # before the matrices have run. The same domain-separated digest is computed
+    # on both sides and only the comparison result crosses the boundary: no
+    # MachineGuid, SMBIOS UUID, board serial, MAC or volume identifier is ever
+    # exposed, transported or recorded.
+    probe = _powershell(["-File", str(CONTROL), "-Action", "identity-compare",
+                         "-VmName", vm_name], timeout=600)
+    payload = {}
+    for line in (probe.stdout or "").splitlines():
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    rec("HV42 vm-independent-from-environment-1",
+        bool(payload.get("ok")) and bool(payload.get("identities_differ")),
+        f"host and guest machine identities differ "
+        f"(host components={payload.get('host_components')}, "
+        f"guest components={payload.get('guest_components')}); no identifier exposed")
 
 
 # ------------------------------------------------------------- mutation tier
@@ -731,7 +757,7 @@ def main(argv: list[str] | None = None) -> int:
         sandbox_retirement_battery()
         boundary_battery(work)
         record_battery()
-        credential_battery(Path(args.state_root), Path(args.transfer_root))
+        credential_battery(Path(args.state_root), Path(args.transfer_root), args.vm_name)
         vm_battery(args.vm_name, Path(args.media_record), Path(args.transfer_root))
         mutation_cycles(work, args.vm_name)
 

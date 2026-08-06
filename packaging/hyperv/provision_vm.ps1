@@ -133,7 +133,15 @@ function Get-ProtectedCredential {
     if (-not (Test-Path $CredPath)) {
         Stop-With "HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" "protected guest credential is absent"
     }
-    $blob = (Get-Content -Path $CredPath -Raw).Trim()
+    # Get-Content -Raw returns $null for an empty file, and $null.Trim() throws
+    # under ErrorActionPreference=Stop -- which would abort with an untyped
+    # crash instead of the typed fail-closed verdict.
+    $raw = Get-Content -Path $CredPath -Raw -ErrorAction SilentlyContinue
+    $blob = ""
+    if ($null -ne $raw) { $blob = ([string]$raw).Trim() }
+    if (-not $blob) {
+        Stop-With "HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" "protected guest credential is empty"
+    }
     try {
         $secure = ConvertTo-SecureString -String $blob -ErrorAction Stop
     } catch {
@@ -242,7 +250,13 @@ function Invoke-Provision {
 
         $efi = New-Partition -DiskNumber $disk.Number -Size 260MB -GptType "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"
         Format-Volume -Partition $efi -FileSystem FAT32 -NewFileSystemLabel "SYSTEM" -Confirm:$false | Out-Null
-        New-Partition -DiskNumber $disk.Number -Size 16MB -GptType "{e3c9e316-0b5c-4db8-817d-f92df00215ae}" | Out-Null
+        # Initialize-Disk already lays down a Microsoft Reserved partition on GPT;
+        # creating a second one leaves the disk with two MSRs.
+        $msrType = "{e3c9e316-0b5c-4db8-817d-f92df00215ae}"
+        $existingMsr = @(Get-Partition -DiskNumber $disk.Number | Where-Object { $_.GptType -eq $msrType })
+        if ($existingMsr.Count -eq 0) {
+            New-Partition -DiskNumber $disk.Number -Size 16MB -GptType $msrType | Out-Null
+        }
         $win = New-Partition -DiskNumber $disk.Number -UseMaximumSize -GptType "{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}"
         Format-Volume -Partition $win -FileSystem NTFS -NewFileSystemLabel "Windows" -Confirm:$false | Out-Null
 
@@ -259,8 +273,17 @@ function Invoke-Provision {
         Add-Check "HP01 image-applied-with-dism" (Test-Path "$($winLetter):\Windows\System32\ntoskrnl.exe") "Expand-WindowsImage completed"
 
         # ---- supported boot configuration ----
-        $bcd = & "$($winLetter):\Windows\System32\bcdboot.exe" "$($winLetter):\Windows" /s "$($efiLetter):" /f UEFI 2>&1
-        Add-Check "HP02 bcdboot-uefi" (Test-Path "$($efiLetter):\EFI\Microsoft\Boot\bootmgfw.efi") ("bcdboot: " + ($bcd -join " ").Trim())
+        # Use the HOST's bcdboot, not the one inside the applied image: an image
+        # copy invoked outside its own servicing context exits 0xC0DE0002 and
+        # writes nothing, which silently leaves the VHDX unbootable.
+        $bcdboot = Join-Path $env:SystemRoot "System32\bcdboot.exe"
+        $bcd = & $bcdboot "$($winLetter):\Windows" /s "$($efiLetter):" /f UEFI 2>&1
+        $bcdCode = $LASTEXITCODE
+        $booted = (Test-Path "$($efiLetter):\EFI\Microsoft\Boot\bootmgfw.efi") -and ($bcdCode -eq 0)
+        Add-Check "HP02 bcdboot-uefi" $booted ("bcdboot exit=" + $bcdCode + ": " + ($bcd -join " ").Trim())
+        if (-not $booted) {
+            Stop-With "HYPERV_WINDOWS_SETUP_NOT_ACCEPTED" "BCDBoot did not produce a UEFI boot path; the VHDX would not boot"
+        }
 
         # ---- supported unattend, rendered in memory, written into the guest ----
         $panther = "$($winLetter):\Windows\Panther"
@@ -271,11 +294,20 @@ function Invoke-Provision {
             Replace("__ADMIN_PASSWORD_B64__", $pwB64).
             Replace("__TIMEZONE__", $TimeZone)
         [System.IO.File]::WriteAllText((Join-Path $panther "unattend.xml"), $xml, (New-Object System.Text.UTF8Encoding($false)))
-        # bypass-token-allowed: the next two lines NAME the token in order to
-        # assert its absence. The isolation guard skips lines carrying this
-        # marker so a negative assertion is not mistaken for a bypass.
-        $noBypass = -not ($xml -match "BypassNRO")   # bypass-token-allowed
-        Add-Check "HP03 unattend-contains-no-bypass" $noBypass "rendered unattend carries no BypassNRO or requirement bypass"   # bypass-token-allowed
+        # bypass-token-allowed: the next lines NAME the tokens in order to assert
+        # their absence. The isolation guard skips lines carrying this marker so a
+        # negative assertion is not mistaken for a bypass.
+        # The template's own disclaimer names the tokens inside an XML comment, so
+        # match against the comment-stripped body -- otherwise the disclaimer
+        # itself reads as a bypass.
+        $renderedCode = [regex]::Replace($xml, "(?s)<!--.*?-->", " ")   # bypass-token-allowed
+        $bypassTokens = @("BypassNRO", "BypassTPMCheck", "BypassSecureBootCheck", "BypassCPUCheck", "BypassRAMCheck", "BypassStorageCheck", "LabConfig")   # bypass-token-allowed
+        $found = @($bypassTokens | Where-Object { $renderedCode -match [regex]::Escape($_) })   # bypass-token-allowed
+        $noBypass = ($found.Count -eq 0)   # bypass-token-allowed
+        Add-Check "HP03 unattend-contains-no-bypass" $noBypass ("rendered unattend executable content carries no requirement bypass; tokens found: " + ($found -join ","))   # bypass-token-allowed
+        if (-not $noBypass) {
+            Stop-With "HYPERV_WINDOWS_SETUP_NOT_ACCEPTED" "the rendered unattend contains a Windows requirement bypass"
+        }
         $xml = $null
         $pwB64 = $null
         $plain = $null
@@ -336,16 +368,26 @@ function Invoke-Posture {
     # Re-query the EFFECTIVE state rather than trusting the provisioning calls.
     $fw = Get-VMFirmware -VMName $VmName
     $sec = Get-VMSecurity -VMName $VmName
+    # Get-VMSecurity exposes no KeyProtector property; the protector itself comes
+    # from Get-VMKeyProtector. An unconfigured VM returns a 4-byte placeholder,
+    # so a real local protector is anything longer.
+    $kpLength = 0
+    try {
+        $kp = Get-VMKeyProtector -VMName $VmName
+        if ($kp -is [byte[]]) { $kpLength = $kp.Length }
+    } catch { $kpLength = 0 }
+
     $script:Facts["generation"] = $vm.Generation
     $script:Facts["secure_boot"] = "$($fw.SecureBoot)"
     $script:Facts["secure_boot_template"] = "$($fw.SecureBootTemplate)"
     $script:Facts["tpm_enabled"] = [bool]$sec.TpmEnabled
-    $script:Facts["key_protector_present"] = ($null -ne $sec.KeyProtector -and $sec.KeyProtector.Length -gt 0)
+    $script:Facts["key_protector_bytes"] = $kpLength
+    $script:Facts["key_protector_present"] = ($kpLength -gt 4)
 
     Add-Check "HS01 generation-2" ($vm.Generation -eq 2) "generation=$($vm.Generation)"
     Add-Check "HS02 secure-boot-enabled" ("$($fw.SecureBoot)" -eq "On") "SecureBoot=$($fw.SecureBoot)"
     Add-Check "HS03 windows-secure-boot-template" ("$($fw.SecureBootTemplate)" -eq "MicrosoftWindows") "effective template=$($fw.SecureBootTemplate)"
-    Add-Check "HS04 local-key-protector-configured" ($script:Facts["key_protector_present"]) "key protector length=$(if ($sec.KeyProtector) { $sec.KeyProtector.Length } else { 0 })"
+    Add-Check "HS04 local-key-protector-configured" ($kpLength -gt 4) ("key protector bytes=" + $kpLength)
     Add-Check "HS05 virtual-tpm-enabled" ([bool]$sec.TpmEnabled) "TpmEnabled=$($sec.TpmEnabled)"
 
     $failed = @($script:Checks | Where-Object { (-not $_.ok) -and $_.check_id -like "HS0*" }).Count
@@ -474,22 +516,32 @@ function Invoke-Baseline {
 
     $cred = Get-ProtectedCredential
     $net = Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock {
-        $up = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" })
+        $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
+        $up = @($adapters | Where-Object { $_.Status -eq "Up" })
         $routes = @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue)
-        $dns = @(Get-DnsClientServerAddress -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses.Count -gt 0 })
+        # Windows hardcodes three site-local IPv6 resolvers on the Loopback
+        # Pseudo-Interface of EVERY installation. They are not a configured
+        # external dependency and are unroutable with no adapter attached, so
+        # the dependency question is whether any OTHER resolver is configured.
+        $defaults = @("fec0:0:0:ffff::1", "fec0:0:0:ffff::2", "fec0:0:0:ffff::3")
+        $real = @(Get-DnsClientServerAddress -ErrorAction SilentlyContinue |
+                  ForEach-Object { $_.ServerAddresses } |
+                  Where-Object { $_ -and ($defaults -notcontains $_) })
         $reach = $false
         try { $reach = [bool](Test-NetConnection -ComputerName "8.8.8.8" -Port 53 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop) } catch { $reach = $false }
         [ordered]@{
+            adapters = $adapters.Count
             up_adapters = $up.Count
             default_routes = $routes.Count
-            dns_servers = $dns.Count
+            dns_servers_non_default = $real.Count
+            dns_loopback_defaults_only = ($real.Count -eq 0)
             external_reachable = $reach
         }
     }
     $cred = $null
     $script:Facts["guest_network"] = $net
-    Add-Check "HB03 no-external-route" ([int]$net.default_routes -eq 0) "default routes=$($net.default_routes)"
-    Add-Check "HB04 no-dns-dependency" ([int]$net.dns_servers -eq 0) "configured DNS servers=$($net.dns_servers)"
+    Add-Check "HB03 no-external-route" ([int]$net.default_routes -eq 0) "default routes=$($net.default_routes); adapters=$($net.adapters)"
+    Add-Check "HB04 no-dns-dependency" ([int]$net.dns_servers_non_default -eq 0) "resolvers outside the Windows loopback defaults=$($net.dns_servers_non_default)"
     Add-Check "HB05 no-internet" (-not [bool]$net.external_reachable) "external probe reachable=$($net.external_reachable)"
 
     # Graceful shutdown, then the task-owned clean baseline checkpoint.
@@ -500,6 +552,11 @@ function Invoke-Baseline {
     Add-Check "HB06 graceful-shutdown" ("$state" -eq "Off") "state=$state"
 
     if ("$state" -eq "Off") {
+        # Idempotent: a re-run replaces the baseline instead of leaving two
+        # checkpoints with the same name.
+        Get-VMSnapshot -VMName $VmName -Name "clean-baseline" -ErrorAction SilentlyContinue |
+            Remove-VMSnapshot -Confirm:$false
+        Start-Sleep -Seconds 5
         Checkpoint-VM -Name $VmName -SnapshotName "clean-baseline"
     }
     $snap = Get-VMSnapshot -VMName $VmName -Name "clean-baseline" -ErrorAction SilentlyContinue

@@ -138,11 +138,19 @@ if ($Stage -eq "clean") {
     }
     $reach = $false
     try { $reach = [bool](Test-NetConnection -ComputerName "8.8.8.8" -Port 53 -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop) } catch { $reach = $false }
+    # Windows hardcodes three site-local IPv6 resolvers on the Loopback
+    # Pseudo-Interface of every installation; they are not a configured external
+    # dependency and are unroutable with no adapter attached.
+    $dnsDefaults = @("fec0:0:0:ffff::1", "fec0:0:0:ffff::2", "fec0:0:0:ffff::3")
+    $dnsReal = @(Get-DnsClientServerAddress -ErrorAction SilentlyContinue |
+                 ForEach-Object { $_.ServerAddresses } |
+                 Where-Object { $_ -and ($dnsDefaults -notcontains $_) })
     $net = [ordered]@{
-        up_adapters        = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" }).Count
-        default_routes     = @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue).Count
-        dns_servers        = @(Get-DnsClientServerAddress -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses.Count -gt 0 }).Count
-        external_reachable = $reach
+        adapters                = @(Get-NetAdapter -ErrorAction SilentlyContinue).Count
+        up_adapters             = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Up" }).Count
+        default_routes          = @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue).Count
+        dns_servers_non_default = $dnsReal.Count
+        external_reachable      = $reach
     }
     $facts = [ordered]@{ clean_state = $clean; dependency_absence = $deps; network = $net }
     $facts | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $OutDir "01-clean-state.json") -Encoding UTF8
@@ -150,7 +158,7 @@ if ($Stage -eq "clean") {
     $ok = $true
     foreach ($k in $clean.Keys) { if (-not $clean[$k]) { $ok = $false } }
     foreach ($k in $deps.Keys) { if (-not $deps[$k]) { $ok = $false } }
-    if ($net.default_routes -ne 0 -or $net.dns_servers -ne 0 -or $net.external_reachable) { $ok = $false }
+    if ($net.adapters -ne 0 -or $net.default_routes -ne 0 -or $net.dns_servers_non_default -ne 0 -or $net.external_reachable) { $ok = $false }
 
     if ($ok) {
         Write-Marker "CLEAN_STATE_READY.txt" "clean state proved before installation"

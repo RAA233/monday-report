@@ -33,7 +33,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("restore-baseline", "wait-ready", "push", "mkdir", "invoke-stage",
-                 "pull", "list-out", "diagnostics", "shutdown")]
+                 "pull", "list-out", "diagnostics", "shutdown", "identity-compare")]
     [string]$Action,
 
     [string]$VmName = "MR-OFFLINE-E2",
@@ -72,7 +72,12 @@ function Get-GuestCredential {
     if (-not (Test-Path $CredPath)) {
         Fail "protected guest credential is absent" "HYPERV_GUEST_CREDENTIAL_UNAVAILABLE"
     }
-    $blob = (Get-Content -Path $CredPath -Raw).Trim()
+    # Get-Content -Raw returns $null for an empty file, and $null.Trim() throws
+    # under ErrorActionPreference=Stop -- which would abort with an untyped
+    # crash instead of the typed fail-closed verdict.
+    $raw = Get-Content -Path $CredPath -Raw -ErrorAction SilentlyContinue
+    $blob = ""
+    if ($null -ne $raw) { $blob = ([string]$raw).Trim() }
     if (-not $blob) { Fail "protected guest credential is empty" "HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" }
     $secure = $null
     try { $secure = ConvertTo-SecureString -String $blob -ErrorAction Stop } catch {
@@ -207,6 +212,87 @@ switch ($Action) {
             }
         } finally { $cred = $null }
         Emit ([ordered]@{ control = $Action; ok = [bool]$payload.present; guest_path = $GuestPath; present = [bool]$payload.present; content = "$($payload.content)" })
+    }
+
+    "identity-compare" {
+        # Proves the guest is a DIFFERENT machine from the host without exposing
+        # any identifier. The same domain-separated digest is computed on both
+        # sides and only the comparison result leaves this script -- never a
+        # MachineGuid, SMBIOS UUID, MAC address or volume serial.
+        Assert-Vm | Out-Null
+        $compute = {
+            $parts = @()
+            try {
+                $g = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Cryptography" -Name MachineGuid -ErrorAction Stop).MachineGuid
+                if ($g) { $parts += ("machine_guid=" + ($g -replace '[\s:\-{}]', '').ToUpper()) }
+            } catch {}
+            try {
+                $u = (Get-CimInstance Win32_ComputerSystemProduct -ErrorAction Stop).UUID
+                if ($u -and $u -notmatch '^[F0-]+$') { $parts += ("smbios_uuid=" + ($u -replace '[\s:\-{}]', '').ToUpper()) }
+            } catch {}
+            try {
+                $b = (Get-CimInstance Win32_BaseBoard -ErrorAction Stop).SerialNumber
+                if ($b -and $b.Trim() -and $b -notmatch '^(To be filled|Default string|None|N/A)') {
+                    $parts += ("board_serial=" + ($b -replace '[\s:\-{}]', '').ToUpper())
+                }
+            } catch {}
+            if ($parts.Count -eq 0) { return @{ components = 0; digest = "" } }
+            $joined = ($parts -join "|")
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            try {
+                $bytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("mr-environment-identity.v1|" + $joined))
+            } finally { $sha.Dispose() }
+            @{ components = $parts.Count; digest = ([System.BitConverter]::ToString($bytes) -replace '-', '').ToLower() }
+        }
+
+        $hostIdentity = & $compute
+
+        # Self-contained: the baseline leaves the VM Off, so start it if needed
+        # and put the power state back exactly as it was found.
+        $vm = Get-VM -Name $VmName
+        $wasOff = ($vm.State -eq "Off")
+        if ($wasOff) {
+            Start-VM -Name $VmName | Out-Null
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            $ready = $false
+            while ((Get-Date) -lt $deadline) {
+                $c = Get-GuestCredential
+                try {
+                    Invoke-Command -VMName $VmName -Credential $c -ErrorAction Stop -ScriptBlock { 1 } | Out-Null
+                    $ready = $true
+                    break
+                } catch { Start-Sleep -Seconds 8 } finally { $c = $null }
+            }
+            if (-not $ready) {
+                Stop-VM -Name $VmName -TurnOff -Confirm:$false -ErrorAction SilentlyContinue
+                Fail "guest did not become reachable for the identity comparison"
+            }
+        }
+
+        $cred = Get-GuestCredential
+        $guestIdentity = $null
+        try {
+            $guestIdentity = Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock $compute
+        } finally { $cred = $null }
+
+        if ($wasOff) {
+            Stop-VM -Name $VmName -Confirm:$false -ErrorAction SilentlyContinue
+            $deadline = (Get-Date).AddMinutes(6)
+            while (((Get-VM -Name $VmName).State -ne "Off") -and ((Get-Date) -lt $deadline)) { Start-Sleep -Seconds 5 }
+        }
+
+        $differ = ($hostIdentity.digest -ne $guestIdentity.digest)
+        $both = ($hostIdentity.components -gt 0 -and $guestIdentity.components -gt 0)
+        Emit ([ordered]@{
+            control = $Action
+            ok = ($differ -and $both)
+            identities_differ = $differ
+            host_components = $hostIdentity.components
+            guest_components = $guestIdentity.components
+            # Deliberately NOT the digests: only the comparison result crosses
+            # this boundary.
+            detail = "host and guest identities compared by domain-separated digest; no identifier exposed"
+        })
     }
 
     "list-out" {
