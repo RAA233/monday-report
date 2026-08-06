@@ -72,11 +72,28 @@ def _two_environment_matrix() -> tuple[dict, dict, dict]:
     if record.get("accepted") is not True:
         failed += 1
 
+    # The environments must agree with EACH OTHER and with the head the evidence
+    # is being generated at. Without this, a record produced at an earlier commit
+    # could be bound to evidence claiming a later one: every per-environment
+    # field would still match its sibling and the combiner would still have
+    # accepted the pair.
+    commits = {str(env.get("source_commit", "")) for env in environments.values()}
+    trees = {str(env.get("source_tree", "")) for env in environments.values()}
+    head, head_tree = E.git_rev("HEAD"), E.git_rev("HEAD^{tree}")
+    bound_commit = commits.pop() if len(commits) == 1 else ""
+    bound_tree = trees.pop() if len(trees) == 1 else ""
+    if bound_commit != head or bound_tree != head_tree:
+        failed += 1
+
     executed = [str(env.get("environment_class", "")) for env in environments.values()]
     binding = {
         "schema_version": record.get("schema_version"),
         "record_hash": record.get("record_hash"),
         "accepted": record.get("accepted"),
+        # Carried so the validator can refuse a record produced at a different
+        # head, independently of this generator.
+        "source_commit": bound_commit,
+        "source_tree": bound_tree,
         "environment_count": record.get("environment_count"),
         "identical_package_bytes": record.get("identical_package_bytes"),
         "independent_identities": record.get("independent_identities"),

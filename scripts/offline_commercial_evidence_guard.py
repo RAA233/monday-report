@@ -157,6 +157,11 @@ def main() -> int:
     rejects("OE20 duplicate-environment-identity-rejected",
             lambda m: m["two_environment_record"].update(independent_identities=False),
             detail="one machine reported twice is not two environments")
+    rejects("OE20b record-from-a-different-commit-rejected",
+            lambda m: m["two_environment_record"].update(source_commit="0" * 40),
+            detail="a record produced at another head cannot be bound to this evidence")
+    rejects("OE20c record-from-a-different-tree-rejected",
+            lambda m: m["two_environment_record"].update(source_tree="0" * 40))
     rejects("OE21 repeated-environment-class-rejected",
             lambda m: m["results"]["package_matrix"].update(
                 environments_executed=["windows-11-hyperv", "windows-11-hyperv"]),

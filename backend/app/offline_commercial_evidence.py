@@ -144,6 +144,14 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
             reasons.append("the two environments did not report independent identities")
         if not re.fullmatch(r"[0-9a-f]{64}", str(record.get("record_hash", ""))):
             reasons.append("two-environment record hash missing or malformed")
+        # The bound record must come from the SAME head as the evidence. Without
+        # this, a record produced at an earlier commit could be attached to
+        # evidence claiming a later one: every per-environment field would still
+        # agree with its sibling and the combiner would still have accepted it.
+        if str(record.get("source_commit", "")) != str(payload.get("git_commit", "")):
+            reasons.append("the two-environment record was produced at a different commit")
+        if str(record.get("source_tree", "")) != str(payload.get("git_tree", "")):
+            reasons.append("the two-environment record was produced at a different tree")
 
     package = payload.get("package", {})
     if not isinstance(package, dict) or package.get("private_key_absent") is not True:

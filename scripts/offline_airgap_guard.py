@@ -39,10 +39,28 @@ def rec(cid: str, ok: bool, detail: str = "") -> None:
                    "detail": detail})
 
 
+#: Key-shaped names an OPERATOR may legitimately have exported -- the offline
+#: secret scan needs MONDAY_REPORT_OFFLINE_KEYS_DIR, for instance. They must
+#: never leak into this guard's baseline probes: the runner aborts on the
+#: boundary when it sees one, so an ambient value makes the "restored baseline"
+#: step of a mutation cycle abort too and the cycle reports a false failure. A
+#: guard whose result depends on the operator's shell is not measuring the
+#: product. Refusal is proven by setting these EXPLICITLY, never by inheriting.
+_AMBIENT_KEY_NAMES = (
+    "MONDAY_REPORT_OFFLINE_KEYS_DIR", "MONDAY_REPORT_LICENSE_PRIVATE_KEY",
+    "MONDAY_REPORT_SIGNING_PRIVATE_KEY", "MONDAY_REPORT_ISSUER_PRIVATE_KEY",
+    "OFFLINE_ISSUER_KEY", "MONDAY_REPORT_OPERATOR_KEY_FILE",
+)
+
+
+def _clean_env() -> dict:
+    return {k: v for k, v in os.environ.items() if k not in _AMBIENT_KEY_NAMES}
+
+
 def _run_env_runner(extra_args: list[str], *, env_overrides: dict | None = None,
                     transfer_in: Path | None = None, work: Path,
                     runner: Path = ENV_RUNNER) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
+    env = _clean_env()
     env.update(env_overrides or {})
     args = [sys.executable, str(runner), "--phase", "request",
             "--env-label", "AIRGAP_PROBE", "--package-dir", str(work / "pkg"),
@@ -152,7 +170,7 @@ PS_RUNNER = ROOT / "scripts" / "offline_env_runner.ps1"
 
 def _run_ps_runner(extra_args: list[str], *, env_overrides: dict | None = None,
                    work: Path) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
+    env = _clean_env()
     env.update(env_overrides or {})
     args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(PS_RUNNER),
             "-Phase", "request", "-EnvLabel", "AIRGAP_PROBE",

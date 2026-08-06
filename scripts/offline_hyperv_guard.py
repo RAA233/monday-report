@@ -97,8 +97,21 @@ def _strip_xml_comments(text: str) -> str:
     return re.sub(r"<!--.*?-->", " ", "\n".join(kept), flags=re.S).lower()
 
 
+#: Key-shaped names an OPERATOR may legitimately have exported (the offline
+#: secret scan needs MONDAY_REPORT_OFFLINE_KEYS_DIR). They must never leak into
+#: this guard's baseline probes: the session driver aborts on the boundary when
+#: it sees one, so an ambient value would make a mutation cycle's restored
+#: baseline abort too and report a false failure. Refusal is proven by setting
+#: these EXPLICITLY, never by inheriting them from the operator's shell.
+_AMBIENT_KEY_NAMES = (
+    "MONDAY_REPORT_OFFLINE_KEYS_DIR", "MONDAY_REPORT_LICENSE_PRIVATE_KEY",
+    "MONDAY_REPORT_SIGNING_PRIVATE_KEY", "MONDAY_REPORT_ISSUER_PRIVATE_KEY",
+    "OFFLINE_ISSUER_KEY", "MONDAY_REPORT_OPERATOR_KEY_FILE",
+)
+
+
 def _powershell(args: list[str], *, env: dict | None = None, timeout: int = 180):
-    child = dict(os.environ)
+    child = {k: v for k, v in os.environ.items() if k not in _AMBIENT_KEY_NAMES}
     if env:
         child.update(env)
     return subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass"] + args,
