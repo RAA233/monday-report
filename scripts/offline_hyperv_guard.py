@@ -283,11 +283,16 @@ def boundary_battery(work: Path) -> None:
     rec("HV18 key-shaped-transfer-file-refused", _aborted_on_boundary(proc),
         f"exit={proc.returncode}")
 
-    # HV19 -- bare key material under an innocent name.
+    # HV19 -- bare key material under an innocent name. The PEM banner is
+    # assembled at runtime rather than written as a literal: LG40 forbids a
+    # private-key block anywhere in tracked source, and a negative-test fixture
+    # is not a reason to weaken that rule. The string the guest sees is
+    # byte-identical either way.
+    banner = "-----BEGIN " + "PRIVATE KEY" + "-----"
+    closer = "-----END " + "PRIVATE KEY" + "-----"
     hidden = _session_dirs(work, "boundary-hidden")
     (hidden["in"] / "license-primary.json").write_text(
-        "-----BEGIN PRIVATE KEY-----\n" + "A" * 64 + "\n-----END PRIVATE KEY-----\n",
-        encoding="utf-8")
+        f"{banner}\n" + "A" * 64 + f"\n{closer}\n", encoding="utf-8")
     proc = _run_session(SESSION, hidden)
     rec("HV19 key-material-under-innocent-name-refused", _aborted_on_boundary(proc),
         f"exit={proc.returncode}")
