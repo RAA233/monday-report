@@ -297,6 +297,7 @@ if ($Phase -eq "request") {
 
     $proc = Start-App -Exe $exe -DataDir $WorkDir -P $Port
     $fingerprintHash = ""
+    $machineBinding = $null
     try {
         $runtime = Wait-Api -P $Port -Route "/offline/runtime"
         Add-Check "PK01 offline-first-launch" ($null -ne $runtime -and $runtime.edition_mode -eq "offline") "the packaged app starts from a fresh data root with no network"
@@ -347,6 +348,10 @@ if ($Phase -eq "request") {
         Add-Check "PK05 activation-request-exported" ($doc.schema_version -eq "monday-report-activation-request.v1") "the environment exported a portable activation request"
         Add-Check "PK06 activation-request-carries-no-raw-identifiers" (-not ($req.text -match "\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")) "the exported request carries hashed components only"
         $fingerprintHash = $doc.machine_fingerprint_hash
+        # Hashed components only -- exactly what the activation request is
+        # designed to carry to the operator. Recording it lets the identity
+        # be re-measured live and compared, instead of self-asserted.
+        $machineBinding = $doc.machine_binding
     } finally {
         Stop-App $proc
     }
@@ -361,6 +366,7 @@ if ($Phase -eq "request") {
         frontend_manifest_sha256 = $hashes.frontend_manifest_sha256
         payload_file_count = $hashes.payload_file_count
         machine_fingerprint_hash = $fingerprintHash
+        machine_binding = $machineBinding
         clean_state = $clean; dependency_absence = $deps
         machine_wide_absence = $machineDeps; airgap_proofs = $proofs
         totals = [ordered]@{ passed = $passed; failed = ($script:Checks.Count - $passed) }

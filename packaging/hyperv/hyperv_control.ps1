@@ -261,7 +261,10 @@ switch ($Action) {
                                  "NONE", "NA", "N/A", "SYSTEMSERIALNUMBER", "0",
                                  "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", "00000000000000000000000000000000")
                 function Norm { param([string]$v) if ($null -eq $v) { return "" } ; return ($v -replace '[\s:\-{}]', '').ToUpper() }
-                function H { param([string]$name, [string]$value)
+                # NOT named H: "h" is the built-in alias for Get-History, and
+                # PowerShell resolves the alias first, so the call bound to
+                # Get-History and the measurement came back empty.
+                function Get-ComponentHash { param([string]$name, [string]$value)
                     $sha = [System.Security.Cryptography.SHA256]::Create()
                     try { $b = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes("$VERSION|$name|$value")) }
                     finally { $sha.Dispose() }
@@ -277,7 +280,7 @@ switch ($Action) {
                     $n = Norm $facts[$k]
                     if (-not $n) { continue }
                     if ($PLACEHOLDER -contains $n) { continue }
-                    $out[$k] = H $k $n
+                    $out[$k] = Get-ComponentHash $k $n
                 }
                 return $out
             }

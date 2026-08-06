@@ -384,6 +384,9 @@ def phase_request(args, proofs: list[str]) -> dict:
         rec("PK06 activation-request-carries-no-raw-identifiers", mac_shape is None,
             "the exported request carries hashed components only")
         fingerprint_hash = document.get("machine_fingerprint_hash", "")
+        # Hashed components only -- exactly what the activation request is
+        # designed to carry to the operator.
+        machine_binding = document.get("machine_binding", {})
     finally:
         process.terminate()
         try:
@@ -402,6 +405,7 @@ def phase_request(args, proofs: list[str]) -> dict:
         "installer_sha256": args.installer_sha256,
         **hashes,
         "machine_fingerprint_hash": fingerprint_hash,
+        "machine_binding": machine_binding,
         "clean_state": clean,
         "dependency_absence": deps,
         "machine_wide_absence": machine_deps,
