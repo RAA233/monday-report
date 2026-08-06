@@ -88,6 +88,12 @@ function Assert-AirgapBoundary {
                 $text = ""
                 try { $text = Get-Content -Path $f.FullName -Raw -ErrorAction Stop } catch { $text = "" }
                 if ($text -match "BEGIN [A-Z ]*PRIVATE KEY") { Exit-Boundary "private key block present in a guest transfer file" }
+                # This project's operator key ships as BARE HEX, not PEM, so the
+                # banner test above would never have seen the format actually in
+                # use. A loose file whose entire content is 64 hex characters is
+                # exactly that shape; every legitimate transfer artifact is JSON,
+                # PowerShell or a binary archive.
+                if (($text.Trim()) -match "^[0-9a-fA-F]{64}$") { Exit-Boundary "bare key-shaped hex present in a guest transfer file" }
             }
         }
     }
@@ -255,7 +261,10 @@ $code = $LASTEXITCODE
 
 if ($Stage -eq "request") {
     $requestPath = Join-Path $OutDir "activation-request.json"
-    if ((Test-Path $requestPath) -and $code -ne 2) {
+    # Require a CLEAN exit, not merely "not a boundary abort": a runner exiting 1
+    # has failing checks, and reporting ACTIVATION_REQUEST_READY for it made the
+    # bounded state weaker than it reads.
+    if ((Test-Path $requestPath) -and $code -eq 0) {
         Write-Marker "ACTIVATION_REQUEST_READY.txt" "activation request exported"
         Write-Stage "ACTIVATION_REQUEST_READY" @{ runner_exit = $code; request = "activation-request.json" }
     }

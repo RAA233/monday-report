@@ -97,13 +97,20 @@ def _two_environment_matrix() -> tuple[dict, dict, dict]:
         "environment_count": record.get("environment_count"),
         "identical_package_bytes": record.get("identical_package_bytes"),
         "independent_identities": record.get("independent_identities"),
-        # Redacted per-environment facts only: the class, the identity digest
-        # (never the fingerprint hash), and the totals.
+        # Redacted per-environment facts only -- never the fingerprint hash --
+        # but enough that the validator can DERIVE independence and
+        # identical-package-bytes instead of trusting the summary booleans
+        # above. Without the package hashes and identity digests here, those
+        # booleans are unfalsifiable assertions.
         "environments": {
             label: {
                 "environment_class": env.get("environment_class"),
                 "fingerprint_identity_digest": env.get("fingerprint_identity_digest"),
                 "totals": env.get("totals", {}),
+                "installer_sha256": env.get("installer_sha256"),
+                "executable_sha256": env.get("executable_sha256"),
+                "payload_manifest_sha256": env.get("payload_manifest_sha256"),
+                "frontend_manifest_sha256": env.get("frontend_manifest_sha256"),
             }
             for label, env in sorted(environments.items())
         },

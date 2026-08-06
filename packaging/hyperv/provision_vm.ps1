@@ -42,7 +42,13 @@ param(
     [int64]$MemoryBytes = 8GB,
     [int64]$DiskBytes = 64GB,
     [int]$ReadyTimeoutSeconds = 1800,
-    [switch]$AllowTemporaryAdapter
+    [switch]$AllowTemporaryAdapter,
+
+    # Official Microsoft Evaluation Center fwlink for Windows 11 Enterprise
+    # Evaluation. media-verify RESOLVES this and records what it resolved to,
+    # so provenance is machine-derived rather than asserted.
+    [int]$SourceLinkId = 2334167,
+    [string]$MediaRecordPath = "C:\mr-hv\media\media-record.json"
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +58,14 @@ $script:Facts = [ordered]@{}
 $script:Checks = New-Object System.Collections.ArrayList
 $TemplatePath = Join-Path $PSScriptRoot "unattend.xml.template"
 $CredPath = Join-Path $StateRoot "e2-guest.cred"
+#: The unattend can only carry a password in Microsoft's obfuscated base64 form,
+#: which is a one-line decode -- so the account is created with a THROWAWAY
+#: bootstrap password that is used exactly once, to open the first PowerShell
+#: Direct session, and is immediately rotated to the real DPAPI-protected
+#: credential. The value written to the guest disk is therefore never the
+#: credential that is subsequently used, and the bootstrap file is deleted as
+#: soon as the rotation succeeds.
+$BootstrapCredPath = Join-Path $StateRoot "e2-bootstrap.cred"
 
 function Add-Check {
     param([string]$Id, [bool]$Ok, [string]$Detail = "")
@@ -116,14 +130,25 @@ function New-TaskPassword {
 
 function Save-ProtectedCredential {
     # DPAPI (CryptProtectData) bound to the CURRENT user, plus an ACL restricted
-    # to that user and SYSTEM. No plaintext is ever written to disk.
-    param([string]$Plain)
+    # to that user and SYSTEM. No plaintext is written to any host path.
+    param([string]$Plain, [string]$Path = $CredPath)
     if (-not (Test-Path $StateRoot)) { New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null }
     $secure = ConvertTo-SecureString -String $Plain -AsPlainText -Force
     $blob = ConvertFrom-SecureString -SecureString $secure   # no -Key => DPAPI CurrentUser
-    Set-Content -Path $CredPath -Value $blob -Encoding ASCII -NoNewline
-    icacls $CredPath /inheritance:r /grant:r "$($env:USERNAME):(F)" /grant:r "SYSTEM:(F)" | Out-Null
+    Set-Content -Path $Path -Value $blob -Encoding ASCII -NoNewline
+    icacls $Path /inheritance:r /grant:r "$($env:USERNAME):(F)" /grant:r "SYSTEM:(F)" | Out-Null
     $secure.Dispose()
+}
+
+function Get-CredentialFrom {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $null }
+    $raw = Get-Content -Path $Path -Raw -ErrorAction SilentlyContinue
+    if ($null -eq $raw) { return $null }
+    $blob = ([string]$raw).Trim()
+    if (-not $blob) { return $null }
+    try { $secure = ConvertTo-SecureString -String $blob -ErrorAction Stop } catch { return $null }
+    return New-Object System.Management.Automation.PSCredential(".\$AdminName", $secure)
 }
 
 function Get-ProtectedCredential {
@@ -217,6 +242,41 @@ function Invoke-MediaVerify {
     } finally {
         if ($mount) { Dismount-DiskImage -ImagePath $IsoPath | Out-Null }
     }
+
+    # ---- machine-derived provenance ----
+    # Resolve the official Microsoft Evaluation Center fwlink NOW and record what
+    # it actually resolves to, plus the length the CDN currently serves compared
+    # against the local file. Hand-writing a source domain into the record and
+    # checking it ends with "microsoft.com" proves nothing: the value and the
+    # test would both be authored by whoever wanted the claim to pass.
+    $resolvedHost = ""
+    $servedLength = 0
+    $resolveError = ""
+    try {
+        $head = & curl.exe -sS -I -L --max-redirs 8 --max-time 120 "https://go.microsoft.com/fwlink/?linkid=$SourceLinkId" 2>&1
+        foreach ($line in $head) {
+            if ($line -match '^[Ll]ocation:\s*(\S+)') { $resolvedHost = ([Uri]$Matches[1]).Host }
+            if ($line -match '^[Cc]ontent-[Ll]ength:\s*(\d+)') { $servedLength = [int64]$Matches[1] }
+        }
+    } catch { $resolveError = $_.Exception.Message }
+
+    $script:Facts["source_link"] = "go.microsoft.com/fwlink/?linkid=$SourceLinkId"
+    $script:Facts["resolved_delivery_host"] = $resolvedHost
+    $script:Facts["served_content_length"] = $servedLength
+    $script:Facts["local_size_matches_served"] = ($servedLength -gt 0 -and $servedLength -eq $item.Length)
+    if ($resolveError) { $script:Facts["source_resolution_error"] = $resolveError }
+
+    $officialHosts = @("software-static.download.prss.microsoft.com",
+                       "software.download.prss.microsoft.com",
+                       "download.microsoft.com")
+    Add-Check "HM08 official-delivery-host-resolved" ($officialHosts -contains $resolvedHost) ("the Microsoft fwlink resolves to '" + $resolvedHost + "'")
+    Add-Check "HM09 served-length-matches-local-media" ($servedLength -gt 0 -and $servedLength -eq $item.Length) ("Microsoft currently serves " + $servedLength + " bytes; the local media is " + $item.Length)
+
+    # Write the record from the script, so no field in it is hand-authored.
+    $recordDir = Split-Path -Parent $MediaRecordPath
+    if ($recordDir -and -not (Test-Path $recordDir)) { New-Item -ItemType Directory -Path $recordDir -Force | Out-Null }
+    ([ordered]@{ facts = $script:Facts; checks = $script:Checks }) |
+        ConvertTo-Json -Depth 8 | Set-Content -Path $MediaRecordPath -Encoding UTF8
 }
 
 # ---------------------------------------------------------------- provision
@@ -229,9 +289,15 @@ function Invoke-Provision {
     $vhdPath = Join-Path $VmRoot "$VmName.vhdx"
     if (Test-Path $vhdPath) { Stop-With "HYPERV_WINDOWS_SETUP_NOT_ACCEPTED" "a disk already exists at the task VHDX path; refusing to overwrite" }
 
+    # Two distinct secrets: the bootstrap one goes into the unattend (and so onto
+    # the guest disk in reversible form), the real one never leaves the host's
+    # DPAPI store. The bootstrap is rotated away on first contact.
     $plain = New-TaskPassword
-    Save-ProtectedCredential -Plain $plain
-    $pwB64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($plain + "Password"))
+    Save-ProtectedCredential -Plain $plain -Path $CredPath
+    $bootstrap = New-TaskPassword
+    Save-ProtectedCredential -Plain $bootstrap -Path $BootstrapCredPath
+    $pwB64 = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($bootstrap + "Password"))
+    $bootstrap = $null
 
     $mount = $null
     $vhd = $null
@@ -399,23 +465,45 @@ function Invoke-Posture {
 # ------------------------------------------------------- PowerShell Direct
 
 function Wait-GuestReady {
+    <#
+        Reach VM_READY, then guarantee the account password is the one that only
+        ever existed on the host. The unattend necessarily carried a reversible
+        copy onto the guest disk; that copy is the BOOTSTRAP secret, used once
+        here and immediately replaced. After rotation the bootstrap file is
+        deleted, so neither the host nor the guest retains the value that was
+        written into the unattend.
+    #>
     param([int]$TimeoutSeconds)
     $vm = Get-VM -Name $VmName
     if ($vm.State -ne "Running") { Start-VM -Name $VmName | Out-Null }
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        $cred = Get-ProtectedCredential
-        try {
-            $probe = Invoke-Command -VMName $VmName -Credential $cred -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME }
-            if ($probe) {
+        # Prefer the real credential: on every run after the first, rotation has
+        # already happened and the bootstrap no longer exists.
+        foreach ($path in @($CredPath, $BootstrapCredPath)) {
+            $cred = Get-CredentialFrom -Path $path
+            if ($null -eq $cred) { continue }
+            try {
+                $probe = Invoke-Command -VMName $VmName -Credential $cred -ErrorAction Stop -ScriptBlock { $env:COMPUTERNAME }
+                if (-not $probe) { continue }
+                if ($path -eq $BootstrapCredPath) {
+                    $real = Get-CredentialFrom -Path $CredPath
+                    if ($null -eq $real) { Stop-With "HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" "the protected guest credential is unreadable, so the bootstrap password cannot be rotated away" }
+                    Invoke-Command -VMName $VmName -Credential $cred -ArgumentList $AdminName, $real.Password -ScriptBlock {
+                        param($name, $secure)
+                        Set-LocalUser -Name $name -Password $secure -ErrorAction Stop
+                    }
+                    $real = $null
+                    Remove-Item -Path $BootstrapCredPath -Force -ErrorAction SilentlyContinue
+                    $script:Facts["bootstrap_password_rotated"] = $true
+                }
                 $script:Facts["powershell_direct_ready"] = $true
                 return $true
-            }
-        } catch {
-            Start-Sleep -Seconds 10
-        } finally {
-            $cred = $null
+            } catch {
+                # fall through and retry
+            } finally { $cred = $null }
         }
+        Start-Sleep -Seconds 10
     }
     $script:Facts["powershell_direct_ready"] = $false
     return $false
@@ -464,11 +552,35 @@ function Invoke-GuestVerify {
     }
     $cred = $null
 
+    # Copy only the measured booleans out of the deserialized objects: anything
+    # returned through Invoke-Command carries PSComputerName / RunspaceId, and
+    # these facts are written into guest-verify-raw.json.
+    $noise = @("PSComputerName", "RunspaceId", "PSShowComputerName")
+    function Copy-Booleans {
+        param($Source, $Noise)
+        $out = [ordered]@{}
+        if ($null -eq $Source) { return $out }
+        # PS remoting returns an OrderedDictionary for some shapes and a
+        # PSCustomObject for others; handle both rather than assuming one.
+        if ($Source -is [System.Collections.IDictionary]) {
+            foreach ($k in @($Source.Keys)) {
+                if ($Noise -contains $k) { continue }
+                $out[$k] = $Source[$k]
+            }
+        } else {
+            foreach ($p in $Source.PSObject.Properties) {
+                if ($Noise -contains $p.Name) { continue }
+                $out[$p.Name] = $p.Value
+            }
+        }
+        return $out
+    }
+
     $script:Facts["guest_os"] = "$($guest.os_caption) build $($guest.os_build)"
     $script:Facts["guest_secure_boot_uefi"] = "$($guest.secure_boot_uefi)"
     $script:Facts["guest_tpm"] = "$($guest.tpm.detail)"
-    $script:Facts["guest_clean_state"] = $guest.clean_state
-    $script:Facts["guest_dependency_absence"] = $guest.dependency_absence
+    $script:Facts["guest_clean_state"] = Copy-Booleans $guest.clean_state $noise
+    $script:Facts["guest_dependency_absence"] = Copy-Booleans $guest.dependency_absence $noise
 
     Add-Check "HG02 guest-secure-boot-confirmed" ("$($guest.secure_boot_uefi)" -eq "True") "Confirm-SecureBootUEFI=$($guest.secure_boot_uefi)"
     Add-Check "HG03 guest-tpm-present" ([bool]$guest.tpm.present) "$($guest.tpm.detail)"
@@ -494,19 +606,34 @@ function Invoke-Baseline {
     # The unattend carried the obfuscated account password into the guest.
     # Windows scrubs it after OOBE; remove the file outright regardless, and
     # prove no password element survives anywhere under Panther.
+    # Remove every surviving unattend copy, then prove no password element or
+    # unattend marker remains anywhere Windows stages them. Scoping the sweep to
+    # *.xml under Panther missed UnattendGC, the Sysprep panther directory and
+    # the setup logs.
     $scrub = Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock {
-        $targets = @("C:\Windows\Panther\unattend.xml", "C:\Windows\Panther\UnattendGC\unattend.xml")
-        foreach ($t in $targets) { if (Test-Path $t) { Remove-Item $t -Force -ErrorAction SilentlyContinue } }
-        $residue = @()
-        if (Test-Path "C:\Windows\Panther") {
-            $residue = @(Get-ChildItem "C:\Windows\Panther" -Recurse -File -Include *.xml -ErrorAction SilentlyContinue |
-                Where-Object { (Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue) -match "<Password>" } |
-                ForEach-Object { $_.Name })
+        $roots = @("C:\Windows\Panther", "C:\Windows\System32\Sysprep\Panther",
+                   "C:\Windows\System32\Sysprep")
+        foreach ($f in @("C:\Windows\Panther\unattend.xml",
+                         "C:\Windows\Panther\UnattendGC\unattend.xml",
+                         "C:\Windows\System32\Sysprep\unattend.xml",
+                         "C:\Windows\System32\Sysprep\Panther\unattend.xml")) {
+            if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue }
         }
-        [ordered]@{ removed = $true; residue_files = $residue }
+        $residue = @()
+        foreach ($root in $roots) {
+            if (-not (Test-Path $root)) { continue }
+            foreach ($file in @(Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue)) {
+                if ($file.Length -gt 8MB) { continue }
+                $text = ""
+                try { $text = Get-Content $file.FullName -Raw -ErrorAction Stop } catch { $text = "" }
+                if ($text -match "<Password>" -or $text -match "PlainText") { $residue += $file.Name }
+            }
+        }
+        [ordered]@{ removed = $true; residue_files = @($residue) }
     }
     $cred = $null
-    Add-Check "HB01 unattend-removed-from-guest" (@($scrub.residue_files).Count -eq 0) "no surviving unattend password element under C:\Windows\Panther"
+    Add-Check "HB01 unattend-removed-from-guest" (@($scrub.residue_files).Count -eq 0) ("no surviving password element or unattend marker under Panther or Sysprep (residue: " + (@($scrub.residue_files) -join ",") + ")")
+    Add-Check "HB01b bootstrap-password-rotated-away" ((-not (Test-Path $BootstrapCredPath)) -and (Test-Path $CredPath)) "the password written into the unattend was rotated away on first contact and its protected copy deleted; only the host-only credential remains"
 
     # Remove any temporary adapter BEFORE the baseline, then prove isolation.
     Get-VMNetworkAdapter -VMName $VmName | Remove-VMNetworkAdapter -ErrorAction SilentlyContinue
@@ -515,7 +642,7 @@ function Invoke-Baseline {
     Add-Check "HB02 zero-network-adapters" ($adapters.Count -eq 0) "adapter count=$($adapters.Count)"
 
     $cred = Get-ProtectedCredential
-    $net = Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock {
+    $netRaw = Invoke-Command -VMName $VmName -Credential $cred -ScriptBlock {
         $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue)
         $up = @($adapters | Where-Object { $_.Status -eq "Up" })
         $routes = @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue)
@@ -539,6 +666,16 @@ function Invoke-Baseline {
         }
     }
     $cred = $null
+    # Invoke-Command decorates the returned object with PSComputerName,
+    # RunspaceId and PSShowComputerName. Keep only the measured fields: this
+    # object is written into baseline-raw.json and must carry no VM or runspace
+    # identifier.
+    $net = [ordered]@{}
+    foreach ($k in @("adapters", "up_adapters", "default_routes",
+                     "dns_servers_non_default", "dns_loopback_defaults_only",
+                     "external_reachable")) {
+        if ($null -ne $netRaw.$k) { $net[$k] = $netRaw.$k }
+    }
     $script:Facts["guest_network"] = $net
     Add-Check "HB03 no-external-route" ([int]$net.default_routes -eq 0) "default routes=$($net.default_routes); adapters=$($net.adapters)"
     Add-Check "HB04 no-dns-dependency" ([int]$net.dns_servers_non_default -eq 0) "resolvers outside the Windows loopback defaults=$($net.dns_servers_non_default)"

@@ -227,6 +227,50 @@ def main() -> int:
             expect="same environment class twice",
             detail="the same environment class listed twice is one environment counted twice")
 
+    # ---- forgeries an independent review demonstrated against the artifact ----
+    # Each of these validated cleanly as OFFLINE_COMMERCIAL_PACKAGE_ACCEPTED
+    # while the record's summary booleans were trusted rather than derived.
+    rejects("OE25 shrunken-battery-depth-rejected",
+            lambda m: m["results"]["license_battery"].update(passed=1),
+            expect="below its required depth",
+            detail="recorded counts must mean something: a battery shrunk to a "
+                   "single check cannot stand in for the accepted minimum")
+    rejects("OE26 same-identity-digest-in-record-rejected",
+            lambda m: [e.update(fingerprint_identity_digest="a" * 32)
+                       for e in m["two_environment_record"]["environments"].values()],
+            expect="independent identities",
+            detail="one machine reported twice is exactly what the Part-O minimum forbids")
+    rejects("OE27 empty-environments-map-rejected",
+            lambda m: m["two_environment_record"].update(environments={}),
+            expect="no per-environment data")
+    rejects("OE28 same-environment-class-in-record-rejected",
+            lambda m: [e.update(environment_class="windows-11-host-isolated")
+                       for e in m["two_environment_record"]["environments"].values()],
+            expect="independent identities")
+    rejects("OE29 unbacked-environments-executed-rejected",
+            lambda m: m["results"]["package_matrix"].update(
+                environments_executed=["alpha", "beta"]),
+            expect="environments_executed disagrees",
+            detail="the executed labels are runner-supplied text; they must match "
+                   "the classes the record actually carries")
+    rejects("OE30 failing-per-environment-totals-rejected",
+            lambda m: list(m["two_environment_record"]["environments"].values())[0]
+                       .update(totals={"passed": 34, "failed": 99}),
+            expect="did not pass its matrix cleanly")
+    rejects("OE31 forged-independence-boolean-rejected",
+            lambda m: m["two_environment_record"].update(independent_identities=False),
+            expect="independent_identities disagrees")
+    rejects("OE32 forged-identical-bytes-boolean-rejected",
+            lambda m: m["two_environment_record"].update(identical_package_bytes=False),
+            expect="identical_package_bytes disagrees")
+    rejects("OE33 differing-per-environment-package-hash-rejected",
+            lambda m: list(m["two_environment_record"]["environments"].values())[0]
+                       .update(installer_sha256="9" * 64),
+            expect="did not run identical package bytes")
+    rejects("OE34 environment-count-disagreeing-with-record-rejected",
+            lambda m: m["two_environment_record"].update(environment_count=3),
+            expect="environment_count disagrees")
+
     # ---- the proofs that make the second environment meaningful ----
     for cid, section in (("OE22", "airgap_boundary"),
                          ("OE23", "hyperv_isolation"),

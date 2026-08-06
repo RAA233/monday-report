@@ -152,6 +152,17 @@ switch ($Action) {
             if ($leaf -like "*$m*") { Fail "refused to transfer a key-shaped file into the guest: $leaf" "AIRGAP_BOUNDARY_VIOLATION" }
         }
         if (-not (Test-Path $SourcePath)) { Fail "source file not found" }
+        # Name matching alone is defeated by an innocent filename. The operator
+        # key ships as BARE HEX, so also refuse any small file whose entire
+        # content is 64 hex characters -- exactly that shape, and nothing a
+        # legitimate transfer carries.
+        $srcItem = Get-Item $SourcePath
+        if ($srcItem.Length -le 4096) {
+            $body = ""
+            try { $body = (Get-Content -Path $SourcePath -Raw -ErrorAction Stop) } catch { $body = "" }
+            if ($body -match "BEGIN [A-Z ]*PRIVATE KEY") { Fail "refused to transfer a private key block into the guest" "AIRGAP_BOUNDARY_VIOLATION" }
+            if (($body.Trim()) -match "^[0-9a-fA-F]{64}$") { Fail "refused to transfer bare key-shaped hex into the guest" "AIRGAP_BOUNDARY_VIOLATION" }
+        }
         if (-not $GuestPath) { Fail "-GuestPath is required" }
         Assert-Vm | Out-Null
         Copy-VMFile -Name $VmName -SourcePath $SourcePath -DestinationPath $GuestPath -CreateFullPath -FileSource Host -Force

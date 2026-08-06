@@ -189,10 +189,23 @@ def spawn(exe: Path, env: dict, *args: str) -> subprocess.Popen:
 
 
 def loopback_only(pid: int) -> tuple[bool, int]:
-    completed = subprocess.run(["netstat", "-ano", "-p", "TCP"],
-                               capture_output=True, text=True, timeout=60)
-    rows = [line.split() for line in completed.stdout.splitlines()
-            if line.strip().startswith("TCP") and line.strip().endswith(str(pid))]
+    """Every TCP endpoint owned by the process must be loopback.
+
+    BOTH address families are enumerated. On Windows ``netstat -p TCP`` lists
+    IPv4 only; IPv6 needs ``-p TCPv6``. Querying one family made the ``[::1]``
+    branch below unreachable and left a process listening on ``[::]:<port>``
+    indistinguishable from one bound to 127.0.0.1 -- a wildcard IPv6 endpoint
+    would have passed the localhost-only check it is meant to fail. IPv6 rows
+    use the same ``TCP`` proto token with bracketed addresses, so one parser
+    covers both.
+    """
+
+    rows: list[list[str]] = []
+    for family in ("TCP", "TCPv6"):
+        completed = subprocess.run(["netstat", "-ano", "-p", family],
+                                   capture_output=True, text=True, timeout=60)
+        rows += [line.split() for line in completed.stdout.splitlines()
+                 if line.strip().startswith("TCP") and line.strip().endswith(str(pid))]
     non_local = [r for r in rows if not (r[1].startswith("127.") or r[1].startswith("[::1]"))]
     return (not non_local and len(rows) >= 1, len(rows))
 
@@ -252,13 +265,32 @@ def machine_wide_absence() -> dict[str, bool]:
 
 
 def clean_state(work_dir: Path) -> dict[str, bool]:
+    """Clean-state facts for THIS environment, before anything is installed.
+
+    ``no_application_process_running`` was previously hardcoded True, so it was
+    published as a measurement without ever being measured. It now enumerates
+    the real process table. The installation facts are checked against the
+    machine-wide per-user location as well as the isolated work root: checking
+    only a directory created seconds earlier by mkdtemp is true by construction
+    and proves nothing about the environment.
+    """
+
     install_root = work_dir / "install"
     profile_programs = work_dir / "profile" / "AppData" / "Local" / "Programs" / "MondayReportOffline"
+    local_app = Path(os.environ.get("LOCALAPPDATA", str(work_dir / "no-localappdata")))
+    machine_programs = local_app / "Programs" / "MondayReportOffline"
+    machine_data = local_app / "MondayReportOffline"
+
+    running = subprocess.run(["tasklist", "/FI", "IMAGENAME eq MondayReportOffline.exe"],
+                             capture_output=True, text=True, timeout=60)
+    no_process = "MondayReportOffline.exe" not in (running.stdout or "")
+
     return {
-        "no_prior_installation": not profile_programs.exists(),
-        "no_prior_application_data": not install_root.exists(),
-        "no_prior_license": not (install_root / "licenses").exists(),
-        "no_application_process_running": True,
+        "no_prior_installation": not profile_programs.exists() and not machine_programs.exists(),
+        "no_prior_application_data": not install_root.exists() and not machine_data.exists(),
+        "no_prior_license": (not (install_root / "licenses").exists()
+                             and not (machine_data / "licenses").exists()),
+        "no_application_process_running": no_process,
     }
 
 
@@ -515,9 +547,12 @@ def phase_resume(args, proofs: list[str]) -> dict:
             second.terminate(); second.wait(timeout=20)
         except Exception:  # noqa: BLE001
             second.kill()
-        rec("PK12 single-instance", True,
-            f"a second instance against the same data root does not corrupt state "
-            f"(second process exited cleanly: {not second_alive})")
+        still_serving = _http(port, "/offline/runtime")
+        rec("PK12 single-instance",
+            not second_alive and still_serving["status"] == 200,
+            f"a second instance against the same data root is refused by the runtime "
+            f"lock and exits (second still running: {second_alive}); the first "
+            f"instance keeps serving")
 
         # backup + validation + restore
         backup = _http(port, "/offline/backup", method="POST", body=b"{}")
@@ -528,13 +563,23 @@ def phase_resume(args, proofs: list[str]) -> dict:
         rec("PK14 backup-validation",
             listed["status"] == 200 and backup_name in listed["body"].get("backups", []),
             "the backup is listed and validates")
+        # A workspace created AFTER the backup must be gone once the backup is
+        # restored. Asserting only that the pre-backup workspace survives is
+        # satisfied by a restore that did nothing at all, so the discriminating
+        # fact is the disappearance of post-backup state.
+        post_backup = _http(port, "/workspaces", method="POST",
+                            body=json.dumps({"name": "Created After Backup"}).encode())
+        post_backup_id = post_backup["body"].get("id") if post_backup["status"] == 201 else None
         restored = _http(port, "/offline/restore", method="POST",
                          body=json.dumps({"backup": backup_name}).encode())
         after_restore = _http(port, "/workspaces")
+        ids = {w.get("id") for w in (after_restore["body"] or [])}
         rec("PK15 restore",
             restored["status"] == 200
-            and any(w.get("id") == workspace_id for w in after_restore["body"]),
-            "staged restore replaces data and preserves the workspace")
+            and workspace_id in ids
+            and post_backup_id is not None and post_backup_id not in ids,
+            "staged restore REPLACES data: the pre-backup workspace survives and a "
+            "workspace created after the backup is gone")
 
         # renewal + rollback rejection
         if renewal.exists():
@@ -567,7 +612,26 @@ def phase_resume(args, proofs: list[str]) -> dict:
                 ("MACHINE_MISMATCH", "WRONG_INSTALLATION"),
                 "a license issued for the OTHER environment is refused here")
 
-        rec("PK20 normal-shutdown", True, "the application terminates cleanly on request")
+        # Actually stop it and observe that it stopped, rather than asserting a
+        # constant: the process must exit and the port must stop answering.
+        process.terminate()
+        try:
+            process.wait(timeout=45)
+            exited = True
+        except Exception:  # noqa: BLE001
+            exited = False
+        time.sleep(2)
+        # _http does not catch URLError, and a refused connection is exactly what
+        # is expected here, so probe directly.
+        try:
+            with urllib.request.urlopen(  # noqa: S310
+                    f"http://127.0.0.1:{port}/offline/runtime", timeout=5):
+                gone = False
+        except Exception:  # noqa: BLE001
+            gone = True
+        rec("PK20 normal-shutdown", exited and gone,
+            f"a graceful stop terminates the application (exited={exited}) and the "
+            f"loopback port stops answering (unreachable={gone})")
     finally:
         try:
             process.terminate(); process.wait(timeout=30)
@@ -612,10 +676,20 @@ def phase_resume(args, proofs: list[str]) -> dict:
         "re-running the installer preserves customer data and the license")
 
     uninstall = powershell(installed_exe.parent / "uninstall.ps1")
-    time.sleep(5)
+    # uninstall.ps1 hands the final directory removal to a DETACHED process, so
+    # poll rather than sleeping a fixed interval. Asserting only that the data
+    # survived would pass for an uninstall that removed nothing at all.
+    binaries_removed = False
+    for _ in range(30):
+        if not installed_exe.exists():
+            binaries_removed = True
+            break
+        time.sleep(1)
     rec("PK28 uninstall-preserves-data",
-        uninstall.returncode == 0 and (data_marker / "monday_report_state.json").exists(),
-        "default uninstall removes binaries but preserves customer data")
+        uninstall.returncode == 0 and binaries_removed
+        and (data_marker / "monday_report_state.json").exists(),
+        f"default uninstall REMOVES the binaries (removed={binaries_removed}) and "
+        f"preserves customer data")
 
     reinstall = powershell(app_dir / "install.ps1")
     rec("PK29 reinstall-detects-preserved-data",

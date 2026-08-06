@@ -226,6 +226,35 @@ def source_battery() -> None:
         "HYPERV_WINDOWS_SETUP_NOT_ACCEPTED" in provision_src,
         "an unattainable supported setup stops with HYPERV_WINDOWS_SETUP_NOT_ACCEPTED")
 
+    # HV10b -- the bypass-scan exemption must stay auditable. Every line carrying
+    # the allow marker has to be a NEGATIVE assertion about the tokens, never
+    # code that could act on one; otherwise the marker becomes a way to hide the
+    # very thing the scan forbids.
+    tracked = subprocess.run(["git", "-C", str(ROOT), "ls-files"],
+                             capture_output=True, text=True, timeout=60).stdout.split()
+    marked_lines: list[str] = []
+    for rel in tracked:
+        path = ROOT / rel
+        if path.suffix.lower() not in (".ps1", ".py", ".template", ".xml") or not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if _ALLOW_MARKER in line:
+                marked_lines.append(f"{rel}: {line.strip()[:90]}")
+    assertion_shapes = ("-match", "-notmatch", "Add-Check", "Where-Object",
+                        "[regex]::Replace", "$bypassTokens", "$noBypass", "_ALLOW_MARKER")
+
+    def _is_comment(entry: str) -> bool:
+        body = entry.split(": ", 1)[1] if ": " in entry else entry
+        return body.lstrip().startswith("#")
+
+    unsafe = [entry for entry in marked_lines
+              if not _is_comment(entry)
+              and not any(shape in entry for shape in assertion_shapes)]
+    rec("HV10b bypass-scan-exemption-is-auditable",
+        not unsafe and len(marked_lines) <= 8,
+        f"{len(marked_lines)} marked line(s), all negative assertions about the "
+        f"token list; unsafe: {unsafe}")
+
 
 def sandbox_retirement_battery() -> None:
     """The supported Environment 2 route must be Hyper-V only."""
@@ -366,6 +395,7 @@ def _environment_body(label: str, *, fingerprint: str, installer: str,
         {"check_id": "PK15 restore", "ok": True},
         {"check_id": "PK18 wrong-machine-license-rejected", "ok": True},
         {"check_id": "PK19 other-environment-license-rejected", "ok": pk19_ok},
+        {"check_id": "PK21 short-license-operational", "ok": True},
         {"check_id": "PK22 expiry-to-read-only", "ok": True},
         {"check_id": "PK23 expired-data-readable", "ok": True},
         {"check_id": "PK24 expired-backup-available", "ok": True},
@@ -619,18 +649,35 @@ def vm_battery(vm_name: str, media_record: Path, xfer_root: Path) -> None:
     rec("HV40 clean-baseline-checkpoint", "clean-baseline" in checkpoints,
         f"checkpoints: {checkpoints}")
 
-    # HV41 -- approved clean media, from the recorded provenance.
+    # HV41 -- approved clean media. Every fact below is MACHINE-DERIVED by
+    # provision_vm.ps1 -Action media-verify: the edition/architecture come from
+    # Get-WindowsImage, the delivery host from actually resolving the official
+    # Microsoft fwlink, and the served length from that same response compared
+    # against the local file. A hand-written "source_domain" checked with
+    # endswith("microsoft.com") proved nothing, because the value and the test
+    # would both have been authored by whoever wanted the claim to pass.
+    official_hosts = {"software-static.download.prss.microsoft.com",
+                      "software.download.prss.microsoft.com",
+                      "download.microsoft.com"}
     if media_record.exists():
-        record = json.loads(media_record.read_text(encoding="utf-8"))
+        # Windows PowerShell's Set-Content -Encoding UTF8 emits a BOM.
+        record = json.loads(media_record.read_text(encoding="utf-8-sig"))
         facts = record.get("facts", {})
         sha = str(facts.get("media_sha256", ""))
         edition = str(facts.get("edition_class", ""))
         arch = str(facts.get("architecture", ""))
-        domain = str(facts.get("source_domain", ""))
-        ok = (len(sha) == 64 and "Evaluation" in edition and arch == "x64"
-              and domain.endswith("microsoft.com"))
+        resolved = str(facts.get("resolved_delivery_host", ""))
+        size_ok = bool(facts.get("local_size_matches_served"))
+        checks = {c.get("check_id", "").split()[0]: c.get("ok") for c in record.get("checks", [])}
+        ok = (bool(re.fullmatch(r"[0-9a-f]{64}", sha))
+              and "Evaluation" in edition and arch == "x64"
+              and resolved in official_hosts and size_ok
+              and checks.get("HM07") is True
+              and checks.get("HM08") is True and checks.get("HM09") is True)
         rec("HV41 approved-clean-media", ok,
-            f"edition={edition}; architecture={arch}; source_domain={domain}; sha256 recorded={len(sha) == 64}")
+            f"edition={edition}; architecture={arch}; official delivery host resolved="
+            f"{resolved in official_hosts}; served length matches local media={size_ok}; "
+            f"Microsoft signature posture={checks.get('HM07')}")
     else:
         rec("HV41 approved-clean-media", False, "no media provenance record")
 
@@ -697,16 +744,20 @@ def mutation_cycles(work: Path, vm_name: str) -> None:
     mutated = permeable != source
     mutant.write_text(permeable, encoding="utf-8")
 
+    # The payload is deliberately NOT 64 hex characters: the bare-hex content
+    # rule would otherwise refuse the mutant too, and this cycle is isolating the
+    # FILENAME rule. Content-shaped refusal has its own coverage in HV19.
+    key_shaped_body = "3f" * 80
     named = _session_dirs(work, "mut02-baseline")
-    (named["in"] / "issuer_private.hex").write_text("3f" * 32, encoding="utf-8")
+    (named["in"] / "issuer_private.hex").write_text(key_shaped_body, encoding="utf-8")
     base_refuses = _aborted_on_boundary(_run_session(SESSION, named))
 
     named2 = _session_dirs(work, "mut02-mutant")
-    (named2["in"] / "issuer_private.hex").write_text("3f" * 32, encoding="utf-8")
+    (named2["in"] / "issuer_private.hex").write_text(key_shaped_body, encoding="utf-8")
     mutant_permeable = not _aborted_on_boundary(_run_session(mutant, named2))
 
     named3 = _session_dirs(work, "mut02-restored")
-    (named3["in"] / "issuer_private.hex").write_text("3f" * 32, encoding="utf-8")
+    (named3["in"] / "issuer_private.hex").write_text(key_shaped_body, encoding="utf-8")
     restored_refuses = _aborted_on_boundary(_run_session(SESSION, named3))
     rec("MUT-HV02 key-shaped-transfer-refusal-is-load-bearing",
         mutated and base_refuses and mutant_permeable and restored_refuses,
@@ -735,6 +786,38 @@ def mutation_cycles(work: Path, vm_name: str) -> None:
     rec("MUT-HV03 different-package-hash-is-detected-in-guest",
         baseline_matched and mutated_rejected,
         f"baseline hash matched={baseline_matched}, mutated rejected={mutated_rejected}")
+
+    # MUT-HV06 -- the requirement-bypass detector is itself load-bearing. It was
+    # the only detector behind the increment's strongest claim with no mutation
+    # cycle, and it grants an exemption to any line carrying the allow marker,
+    # so both the detection AND the exemption need proving.
+    provision_src = PROVISION.read_text(encoding="utf-8")
+    base_clean = not [m for m in _BYPASS_MARKERS if m in _strip_ps_comments(provision_src)]
+
+    injected = provision_src.replace(
+        "    New-VM -Name $VmName -Generation 2",
+        "    reg add \"HKLM\\SYSTEM\\Setup\\LabConfig\" /v BypassTPMCheck /t REG_DWORD /d 1\n"
+        "    New-VM -Name $VmName -Generation 2", 1)
+    injected_detected = bool([m for m in _BYPASS_MARKERS if m in _strip_ps_comments(injected)])
+
+    # The same injection WITH the allow marker must still be detected as a
+    # bypass by a marker-blind read, so the exemption cannot launder real code.
+    marked = provision_src.replace(
+        "    New-VM -Name $VmName -Generation 2",
+        "    reg add \"HKLM\\SYSTEM\\Setup\\LabConfig\" /v BypassTPMCheck /t REG_DWORD /d 1"
+        "   # " + _ALLOW_MARKER + "\n"
+        "    New-VM -Name $VmName -Generation 2", 1)
+    marker_hides_it = not [m for m in _BYPASS_MARKERS if m in _strip_ps_comments(marked)]
+    raw_still_sees_it = bool([m for m in _BYPASS_MARKERS if m in marked.lower()])
+
+    restored_clean = not [m for m in _BYPASS_MARKERS
+                          if m in _strip_ps_comments(PROVISION.read_text(encoding="utf-8"))]
+    rec("MUT-HV06 requirement-bypass-detection-is-load-bearing",
+        base_clean and injected_detected and restored_clean and marker_hides_it and raw_still_sees_it,
+        f"baseline clean={base_clean}, injected bypass detected={injected_detected}, "
+        f"restored clean={restored_clean}; the allow marker suppresses the scan "
+        f"({marker_hides_it}) but a marker-blind read still sees the token "
+        f"({raw_still_sees_it}), so the exemption is visible rather than silent")
 
     # MUT-HV04 -- a duplicate environment result must be refused by the combiner.
     env1 = _environment_body("ENVIRONMENT_1", fingerprint="a" * 64, installer="1" * 64)

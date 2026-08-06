@@ -58,6 +58,22 @@ REQUIRED_RESULT_SECTIONS = (
 #: The two-environment record the package matrix is derived from.
 TWO_ENVIRONMENT_RECORD_SCHEMA = "offline-two-environment-record.v1"
 
+#: Contractual floors on how much each section must actually have executed.
+#: Requiring only ``passed > 0`` let every recorded count be shrunk to 1 while
+#: the artifact still validated as accepted -- the numbers carried no enforced
+#: meaning. The air-gap, license and runtime floors are the accepted minima for
+#: this tier; the rest are set well below current totals so an honest battery
+#: can grow, but far above a token single check.
+MINIMUM_SECTION_DEPTH = {
+    "license_battery": 49,
+    "runtime_battery": 24,
+    "airgap_boundary": 27,
+    "hyperv_isolation": 40,
+    "combiner_faults": 25,
+    "secret_scan": 5,
+    "package_matrix": 40,
+}
+
 #: Keys that legitimately differ between two independent generations at the same
 #: head. ``canonical_payload_hash`` binds the whole document INCLUDING the
 #: timestamp -- it is a tamper seal, not a reproducibility claim, and it uses the
@@ -142,6 +158,8 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
             continue
         if int(block.get("failed", 1)) != 0 or int(block.get("passed", 0)) <= 0:
             reasons.append(f"result section not fully passing: {section}")
+        elif int(block.get("passed", 0)) < MINIMUM_SECTION_DEPTH.get(section, 1):
+            reasons.append(f"result section below its required depth: {section}")
     matrix = results.get("package_matrix", {})
     if isinstance(matrix, dict):
         environments = matrix.get("environments_executed", [])
@@ -164,12 +182,67 @@ def validate(payload: dict, *, current_commit: str, current_tree: str) -> list[s
             reasons.append("the two-environment record was not accepted")
         if int(record.get("environment_count", 0)) != REQUIRED_ENVIRONMENT_MINIMUM:
             reasons.append("the two-environment record does not carry exactly two environments")
-        if record.get("identical_package_bytes") is not True:
-            reasons.append("the two environments did not run identical package bytes")
-        if record.get("independent_identities") is not True:
-            reasons.append("the two environments did not report independent identities")
         if not re.fullmatch(r"[0-9a-f]{64}", str(record.get("record_hash", ""))):
             reasons.append("two-environment record hash missing or malformed")
+
+        # DERIVE the independence and identical-bytes facts from the
+        # per-environment data the record carries, and require the stored
+        # summary booleans to agree. Accepting those booleans on trust made them
+        # unfalsifiable: one machine reported twice, an empty environments map,
+        # a single environment, two entries of the same class, or per-environment
+        # totals full of failures all validated as accepted.
+        environments = record.get("environments")
+        if not isinstance(environments, dict) or not environments:
+            reasons.append("the two-environment record carries no per-environment data")
+        else:
+            if len(environments) != REQUIRED_ENVIRONMENT_MINIMUM:
+                reasons.append("the two-environment record does not carry exactly two environments")
+            if int(record.get("environment_count", 0)) != len(environments):
+                reasons.append("environment_count disagrees with the recorded environments")
+
+            digests = [str(e.get("fingerprint_identity_digest", "")) for e in environments.values()]
+            classes = [str(e.get("environment_class", "")) for e in environments.values()]
+            derived_independent = (all(digests) and len(set(digests)) == len(digests)
+                                   and len(set(classes)) == len(classes) and all(classes))
+            if record.get("independent_identities") is not derived_independent:
+                reasons.append("independent_identities disagrees with the recorded "
+                               "per-environment identities")
+            if not derived_independent:
+                reasons.append("the two environments did not report independent identities")
+
+            hash_fields = ("installer_sha256", "executable_sha256",
+                           "payload_manifest_sha256", "frontend_manifest_sha256")
+            derived_identical = True
+            for field in hash_fields:
+                values = [str(e.get(field, "")) for e in environments.values()]
+                if not all(re.fullmatch(r"[0-9a-f]{64}", v or "") for v in values):
+                    derived_identical = False
+                elif len(set(values)) != 1:
+                    derived_identical = False
+            if record.get("identical_package_bytes") is not derived_identical:
+                reasons.append("identical_package_bytes disagrees with the recorded "
+                               "per-environment package hashes")
+            if not derived_identical:
+                reasons.append("the two environments did not run identical package bytes")
+
+            for label, env in environments.items():
+                totals = env.get("totals", {})
+                if int(totals.get("failed", 1)) != 0 or int(totals.get("passed", 0)) <= 0:
+                    reasons.append(f"environment {label} did not pass its matrix cleanly")
+
+            # The package matrix must be the sum of what the environments
+            # actually recorded, not an independent number.
+            recorded = sum(int(e.get("totals", {}).get("passed", 0)) for e in environments.values())
+            if int(matrix.get("passed", -1)) != recorded:
+                reasons.append("package matrix total disagrees with the per-environment totals")
+
+            # environments_executed is a free-text label supplied by the runner,
+            # so on its own "two environments" reduces to two different strings.
+            # Tie it to the classes the record actually carries.
+            executed = matrix.get("environments_executed", [])
+            if isinstance(executed, list) and set(executed) != set(classes):
+                reasons.append("environments_executed disagrees with the classes recorded "
+                               "in the two-environment record")
         # The bound record must come from the SAME head as the evidence. Without
         # this, a record produced at an earlier commit could be attached to
         # evidence claiming a later one: every per-environment field would still

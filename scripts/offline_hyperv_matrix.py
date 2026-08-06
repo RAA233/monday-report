@@ -34,6 +34,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -69,7 +70,10 @@ _KEY_NAME_MARKERS = ("private", "issuer_key", "signing_key", "secret")
 #: Environment names scrubbed from every child process.
 _SCRUB = ("MONDAY_REPORT_OFFLINE_KEYS_DIR", "MONDAY_REPORT_LICENSE_PRIVATE_KEY",
           "MONDAY_REPORT_SIGNING_PRIVATE_KEY", "MONDAY_REPORT_ISSUER_PRIVATE_KEY",
-          "OFFLINE_ISSUER_KEY")
+          "OFFLINE_ISSUER_KEY",
+          # Points at the operator key file; the transport has no use for it and
+          # the comment above promised no key-shaped variable reaches it.
+          "MONDAY_REPORT_OPERATOR_KEY_FILE")
 
 
 def _sha256(path: Path) -> str:
@@ -94,8 +98,15 @@ def control(action: str, *, vm: str, timeout: float = 900.0, **kwargs) -> dict:
             continue
         args += [f"-{key}", str(value)]
     child_env = {k: v for k, v in os.environ.items() if k not in _SCRUB}
-    proc = subprocess.run(args, capture_output=True, text=True,
-                          timeout=timeout + 120, env=child_env)
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout + 120, env=child_env)
+    except subprocess.TimeoutExpired:
+        # The docstring promises an honest stop on timeout. Letting
+        # TimeoutExpired escape produced a bare traceback instead: no
+        # MATRIX_FAILED envelope, no diagnostics, no shutdown, VM left running.
+        return {"control": action, "ok": False, "returncode": -1,
+                "detail": f"control action '{action}' exceeded its bounded timeout"}
     payload: dict = {}
     for line in (proc.stdout or "").splitlines():
         line = line.strip()
@@ -130,6 +141,13 @@ def assert_no_key_material(paths: list[Path]) -> str | None:
                     continue
                 if "PRIVATE KEY" in text.upper():
                     return f"private key block present in a staged file: {path.name}"
+                # The operator key ships as BARE HEX, not PEM, so the banner test
+                # above never covered the format actually in use. A loose file
+                # whose entire content is 64 hex characters is exactly that
+                # shape; every legitimate transfer artifact is JSON, PowerShell
+                # or a binary archive.
+                if re.fullmatch(r"[0-9a-fA-F]{64}", text.strip()):
+                    return f"bare key-shaped hex present in a staged file: {path.name}"
     return None
 
 

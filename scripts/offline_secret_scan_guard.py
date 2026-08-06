@@ -113,25 +113,45 @@ def main() -> int:
     private_hex = ""
     if (keys_dir / "issuer_private.hex").exists():
         private_hex = (keys_dir / "issuer_private.hex").read_text(encoding="utf-8").strip()
+
     app_dir = ROOT / "output" / "offline-package" / "stage" / "MondayReportOffline"
     package_findings: dict[str, int] = {}
     private_leak = False
+    # The frontend bundle SHIPS in the package, and log files are written beside
+    # it, so both belong in a scan that claims to cover the package. Restricting
+    # to .txt/.json/.ps1/.html silently excluded every .js and .css asset.
+    scanned_suffixes = (".txt", ".json", ".ps1", ".html", ".js", ".mjs", ".css",
+                        ".log", ".cfg", ".ini", ".xml", ".md")
     if app_dir.exists():
         for file_path in app_dir.rglob("*"):
-            if file_path.is_file() and file_path.suffix in (".txt", ".json", ".ps1", ".html"):
-                text = file_path.read_text(encoding="utf-8", errors="ignore")
-                files_scanned += 1
-                for name, count in scan_text(text, allow_definitions=True).items():
-                    if name == "windows_user_path":
-                        continue
-                    package_findings[name] = package_findings.get(name, 0) + count
-                if private_hex and private_hex in text:
-                    private_leak = True
-        rec("OS04 package-text-clean", not package_findings and not private_leak,
-            f"shipped package text files carry no leak shape and never the private key "
-            f"({package_findings or 'clean'})")
+            if not file_path.is_file() or file_path.suffix.lower() not in scanned_suffixes:
+                continue
+            # certifi ships the public CA bundle; its PEM CERTIFICATE blocks are
+            # not private keys and are not ours to police.
+            if file_path.name.lower() in ("cacert.pem",):
+                continue
+            text = file_path.read_text(encoding="utf-8", errors="ignore")
+            files_scanned += 1
+            for name, count in scan_text(text, allow_definitions=True).items():
+                if name == "windows_user_path":
+                    continue
+                package_findings[name] = package_findings.get(name, 0) + count
+            if private_hex and private_hex in text:
+                private_leak = True
+
+        # FAIL CLOSED when the operator keypair is unavailable. Previously the
+        # `if private_hex and ...` guard made the private-key comparison a silent
+        # no-op while OS04 still reported "never the private key" -- a statement
+        # it had not tested. The sibling package guard already fails closed here.
+        rec("OS04 package-text-clean",
+            bool(private_hex) and not package_findings and not private_leak,
+            f"shipped package files (including the frontend bundle and logs) carry no "
+            f"leak shape and never the private key ({package_findings or 'clean'}); "
+            f"operator keypair available for comparison: {bool(private_hex)}"
+            + ("" if private_hex else " -- set MONDAY_REPORT_OFFLINE_KEYS_DIR"))
     else:
-        rec("OS04 package-text-clean", True, "package not built yet")
+        rec("OS04 package-text-clean", False,
+            "package not built; the shipped-package scan could not run")
 
     if total or package_findings:
         pass  # already reflected in the failing checks above

@@ -165,12 +165,27 @@ function Wait-Api {
 }
 
 function Start-App {
+    <#
+        Launch the packaged application with the SAME restricted PATH that
+        Get-DependencyAbsence measures against, so EC02's claim -- "unresolvable
+        from the PATH the packaged application is launched with" -- is true of
+        this runner too. Start-Process has no per-process environment parameter
+        in Windows PowerShell, so the parent's PATH is narrowed for the duration
+        of the spawn and restored immediately; the child inherits the narrowed
+        value. Previously the child inherited the full PATH and the recorded
+        detail described a launch that never happened.
+    #>
     param([string]$Exe, [string]$DataDir, [int]$P)
     New-Item -ItemType Directory -Force (Join-Path $DataDir "tmp") | Out-Null
     $env:MONDAY_REPORT_OFFLINE_DATA_DIR = (Join-Path $DataDir "install")
     $env:MONDAY_REPORT_OFFLINE_PORT = "$P"
-    return Start-Process -FilePath $Exe -ArgumentList "--no-browser", "--port", "$P" `
-           -WorkingDirectory (Split-Path -Parent $Exe) -PassThru -WindowStyle Hidden
+    $systemRoot = $env:SystemRoot
+    $saved = $env:PATH
+    $env:PATH = "$systemRoot\System32;$systemRoot\System32\WindowsPowerShell\v1.0"
+    try {
+        return Start-Process -FilePath $Exe -ArgumentList "--no-browser", "--port", "$P" `
+               -WorkingDirectory (Split-Path -Parent $Exe) -PassThru -WindowStyle Hidden
+    } finally { $env:PATH = $saved }
 }
 
 function Stop-App {
@@ -262,10 +277,14 @@ $exe = Join-Path $PackageDir "MondayReportOffline.exe"
 
 if ($Phase -eq "request") {
     $installRoot = Join-Path $WorkDir "install"
+    # Check the machine-wide per-user locations as well as the isolated work
+    # root: a directory created seconds ago is absent by construction and proves
+    # nothing about the environment.
+    $machineData = Join-Path $env:LOCALAPPDATA "MondayReportOffline"
     $clean = [ordered]@{
         no_prior_installation     = -not (Test-Path (Join-Path $env:LOCALAPPDATA "Programs\MondayReportOffline"))
-        no_prior_application_data = -not (Test-Path $installRoot)
-        no_prior_license          = -not (Test-Path (Join-Path $installRoot "licenses"))
+        no_prior_application_data = ((-not (Test-Path $installRoot)) -and (-not (Test-Path $machineData)))
+        no_prior_license          = ((-not (Test-Path (Join-Path $installRoot "licenses"))) -and (-not (Test-Path (Join-Path $machineData "licenses"))))
         no_application_process_running = ($null -eq (Get-Process -Name "MondayReportOffline" -ErrorAction SilentlyContinue))
     }
     $deps = Get-DependencyAbsence
@@ -295,13 +314,23 @@ if ($Phase -eq "request") {
         # client socket mid-setup, not a published endpoint. netstat lists only
         # listening and connected sockets, so both environments must use it or
         # PK04 does not mean the same thing on each side of the combiner.
+        # BOTH address families. On Windows "netstat -p TCP" lists IPv4 only;
+        # IPv6 needs "-p TCPv6". Querying one family made the [::1] branch below
+        # unreachable and left a process listening on [::]:<port>
+        # indistinguishable from one bound to 127.0.0.1 -- a wildcard IPv6
+        # endpoint would have passed the localhost-only check it is meant to
+        # fail. IPv6 rows carry the same TCP proto token with bracketed
+        # addresses, so one parser covers both.
         # The unary comma keeps each row an ARRAY of columns; without it the
         # pipeline flattens every row into one long token list and $_[1] would
         # index a character rather than the local address.
         $splitter = [regex]"\s+"
-        $rows = @(netstat -ano -p TCP | Where-Object {
-            $_.Trim().StartsWith("TCP") -and $_.Trim().EndsWith([string]$proc.Id)
-        } | ForEach-Object { , @($splitter.Split($_.Trim())) })
+        $rows = @()
+        foreach ($family in @("TCP", "TCPv6")) {
+            $rows += @(netstat -ano -p $family | Where-Object {
+                $_.Trim().StartsWith("TCP") -and $_.Trim().EndsWith([string]$proc.Id)
+            } | ForEach-Object { , @($splitter.Split($_.Trim())) })
+        }
         $nonLocal = @($rows | Where-Object {
             -not ($_[1].StartsWith("127.") -or $_[1].StartsWith("[::1]"))
         })
@@ -384,7 +413,14 @@ else {
                     Add-Check "PK22 expiry-to-read-only" ($st.state -eq "expired_read_only" -and $blk.status -eq 423) "expiry transitions in real time to read-only"
                     Add-Check "PK23 expired-data-readable" ($rd.status -eq 200) "customer data remains readable after expiry"
                     Add-Check "PK24 expired-backup-available" ($bk.status -eq 200) "backup remains available after expiry"
-                    Add-Check "PK25 expired-mutations-blocked" ($blk.status -eq 423) "new reports, validation mutations and exports are blocked"
+                    # Probe the write-shaped GET as well, exactly as the Python
+                    # runner does. Repeating PK22's conjunct here would make the
+                    # check a duplicate that never touches the report-draft or
+                    # export path its own detail claims to cover.
+                    $expiryWorkspace = "unknown"
+                    if ($op.status -eq 201) { $expiryWorkspace = $op.body.id }
+                    $draft = Invoke-Api -P ($Port + 2) -Route ("/workspaces/" + $expiryWorkspace + "/report-draft")
+                    Add-Check "PK25 expired-mutations-blocked" ($blk.status -eq 423 -and $draft.status -in @(423, 404)) ("new reports, validation mutations and exports are blocked (mutation=" + $blk.status + ", report-draft=" + $draft.status + ")")
                 } else {
                     Add-Check "PK21 short-license-operational" $false "the seconds-scale license was refused"
                 }
@@ -416,19 +452,34 @@ else {
         $survived = Invoke-Api -P $Port -Route "/workspaces"
         Add-Check "PK11 crash-recovery" ($null -ne $recovered -and $survived.status -eq 200 -and @($survived.body | Where-Object { $_.id -eq $workspaceId }).Count -eq 1) "forced termination then restart recovers with data intact"
 
+        # Observe the outcome instead of asserting a constant: the runtime lock
+        # must refuse the second instance so it exits, and the first must keep
+        # serving.
         $second = Start-App -Exe $exe -DataDir $WorkDir -P ($Port + 1)
-        Start-Sleep -Seconds 8
+        Start-Sleep -Seconds 10
+        $secondAlive = $false
+        try { $secondAlive = -not (Get-Process -Id $second.Id -ErrorAction Stop).HasExited } catch { $secondAlive = $false }
         Stop-App $second
-        Add-Check "PK12 single-instance" $true "a second instance against the same data root does not corrupt state"
+        $stillServing = Invoke-Api -P $Port -Route "/offline/runtime"
+        Add-Check "PK12 single-instance" ((-not $secondAlive) -and $stillServing.status -eq 200) ("a second instance against the same data root is refused by the runtime lock and exits (second still running=" + $secondAlive + "); the first instance keeps serving")
 
         $backup = Invoke-Api -P $Port -Route "/offline/backup" -Method POST -Body '{}'
         $backupName = $backup.body.backup
         Add-Check "PK13 backup" ($backup.status -eq 200 -and $backupName) "the packaged app creates a validated local backup"
         $listed = Invoke-Api -P $Port -Route "/offline/backups"
         Add-Check "PK14 backup-validation" ($listed.status -eq 200 -and ($listed.body.backups -contains $backupName)) "the backup is listed and validates"
+        # A workspace created AFTER the backup must be gone once the backup is
+        # restored. Asserting only that the pre-backup workspace survives is
+        # satisfied by a restore that did nothing, so the discriminating fact is
+        # the disappearance of post-backup state.
+        $postBackup = Invoke-Api -P $Port -Route "/workspaces" -Method POST -Body '{"name":"Created After Backup"}'
+        $postBackupId = ""
+        if ($postBackup.status -eq 201) { $postBackupId = $postBackup.body.id }
         $restored = Invoke-Api -P $Port -Route "/offline/restore" -Method POST -Body ("{""backup"":""" + $backupName + """}")
         $afterRestore = Invoke-Api -P $Port -Route "/workspaces"
-        Add-Check "PK15 restore" ($restored.status -eq 200 -and @($afterRestore.body | Where-Object { $_.id -eq $workspaceId }).Count -eq 1) "staged restore replaces data and preserves the workspace"
+        $preSurvived = @($afterRestore.body | Where-Object { $_.id -eq $workspaceId }).Count -eq 1
+        $postGone = ($postBackupId -ne "") -and (@($afterRestore.body | Where-Object { $_.id -eq $postBackupId }).Count -eq 0)
+        Add-Check "PK15 restore" ($restored.status -eq 200 -and $preSurvived -and $postGone) "staged restore REPLACES data: the pre-backup workspace survives and a workspace created after the backup is gone"
 
         if (Test-Path $renewal) {
             $renewed = Invoke-Api -P $Port -Route "/offline/license/import" -Method POST -Body (Get-Content $renewal -Raw)
@@ -446,7 +497,14 @@ else {
             $other = Invoke-Api -P $Port -Route "/offline/license/import" -Method POST -Body (Get-Content $crossEnv -Raw)
             Add-Check "PK19 other-environment-license-rejected" ($other.status -eq 400 -and $other.body.reason_code -in @("MACHINE_MISMATCH", "WRONG_INSTALLATION")) "a license issued for the OTHER environment is refused here"
         }
-        Add-Check "PK20 normal-shutdown" $true "the application terminates cleanly on request"
+        # Actually stop it and observe that it stopped, rather than asserting a
+        # constant: the process must exit and the port must stop answering.
+        Stop-App $proc
+        Start-Sleep -Seconds 2
+        $exited = $true
+        try { $exited = (Get-Process -Id $proc.Id -ErrorAction Stop).HasExited } catch { $exited = $true }
+        $gone = (Invoke-Api -P $Port -Route "/offline/runtime").status -eq 0
+        Add-Check "PK20 normal-shutdown" ($exited -and $gone) ("a graceful stop terminates the application (exited=" + $exited + ") and the loopback port stops answering (unreachable=" + $gone + ")")
     } finally {
         Stop-App $proc
     }
@@ -477,7 +535,15 @@ else {
 
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Split-Path -Parent $installedExe) "uninstall.ps1") | Out-Null
         Start-Sleep -Seconds 6
-        Add-Check "PK28 uninstall-preserves-data" (Test-Path (Join-Path $dataMarker "monday_report_state.json")) "default uninstall removes binaries but preserves customer data"
+        # uninstall.ps1 hands the final directory removal to a DETACHED process,
+        # so poll rather than sleeping a fixed interval. Asserting only that the
+        # data survived would pass for an uninstall that removed nothing.
+        $binariesRemoved = $false
+        for ($i = 0; $i -lt 30; $i++) {
+            if (-not (Test-Path $installedExe)) { $binariesRemoved = $true; break }
+            Start-Sleep -Seconds 1
+        }
+        Add-Check "PK28 uninstall-preserves-data" ($binariesRemoved -and (Test-Path (Join-Path $dataMarker "monday_report_state.json"))) ("default uninstall REMOVES the binaries (removed=" + $binariesRemoved + ") and preserves customer data")
 
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
         Add-Check "PK29 reinstall-detects-preserved-data" ((Test-Path (Join-Path $dataMarker "monday_report_state.json")) -and (Test-Path $installedExe)) "reinstalling finds the preserved data directory in place"

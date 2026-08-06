@@ -46,7 +46,11 @@ _REQUIRED_CHECKS = {
     "cross_environment_license": ("PK19",),
     "backup": ("PK13", "PK14"),
     "restore": ("PK15",),
-    "expiry_read_only": ("PK22", "PK23", "PK24", "PK25"),
+    # PK21 is required alongside the read-only proofs: without it an environment
+    # that imported an ALREADY-expired licence and merely observed read-only
+    # would satisfy the gate. The claim is operate-then-expire, so the operating
+    # half must be proven too.
+    "expiry_read_only": ("PK21", "PK22", "PK23", "PK24", "PK25"),
     "upgrade": ("PK27",),
     "uninstall_reinstall": ("PK28", "PK29"),
     "crash_recovery": ("PK11",),
@@ -77,7 +81,13 @@ def redact(record: dict, request_record: dict) -> dict:
         # are distinct, never enough to identify a machine.
         "fingerprint_identity_digest": canonical_hash({"fp": fingerprint_hash})[:32],
         "clean_state": request_record.get("clean_state", {}),
+        # dependency_absence is scoped to the PATH the application is launched
+        # with; machine_wide_absence is the stronger environment-level fact.
+        # Carrying only the first made a developer host with Node, Python and
+        # Docker installed read as an unqualified absence claim, and a reader of
+        # the record could not recover the distinction. Both travel now.
         "dependency_absence": request_record.get("dependency_absence", {}),
+        "machine_wide_absence": request_record.get("machine_wide_absence", {}),
         "airgap_proofs": record.get("airgap_proofs", []),
         "results": {name: all(_passed(checks, p) for p in prefixes)
                     for name, prefixes in _REQUIRED_CHECKS.items()},
