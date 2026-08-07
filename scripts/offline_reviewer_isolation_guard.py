@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import time
 import subprocess
 import sys
 from pathlib import Path
@@ -181,11 +183,89 @@ def contract_battery() -> None:
         "is an open residual rather than a closed control")
 
 
+def non_elevated_capability() -> dict:
+    """What can the AUTHOR do with an ORDINARY, non-elevated token?
+
+    This is the question certification turns on, and it is NOT the same as "does
+    Administrators have power". Administrators is the one-time OPERATOR install
+    route. The AUTHOR is the process that builds the package and orchestrates
+    certification, and it must not be able to reach reviewer code or trust
+    material through its normal token.
+
+    Measuring it means actually dropping the elevated token, which
+    ``runas /trustlevel:0x20000`` does without a password. Booleans only: no
+    identity, no path, no credential ever leaves this function.
+    """
+
+    import json as _json
+    import tempfile
+
+    probe = "$ErrorActionPreference = 'SilentlyContinue'\n$paths = @{\n  'reviewer-src'     = 'C:\\mr-hv\\reviewer-src'\n  'reviewer-bin'     = 'C:\\mr-hv\\reviewer-bin'\n  'reviewer-state'   = 'C:\\mr-hv\\reviewer\\state'\n  'reviewer-results' = 'C:\\mr-hv\\reviewer\\out'\n  'trust-root-dir'   = 'C:\\mr-hv\\trust'\n}\n$r = [ordered]@{ elevated = (New-Object Security.Principal.WindowsPrincipal(\n    [Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(\n    [Security.Principal.WindowsBuiltInRole]::Administrator) }\nforeach ($k in $paths.Keys) {\n  $f = Join-Path $paths[$k] ('.ne-' + [Guid]::NewGuid().ToString('N') + '.tmp')\n  try { Set-Content -Path $f -Value 'x' -ErrorAction Stop\n        $r[$k] = $true; Remove-Item $f -Force -ErrorAction SilentlyContinue }\n  catch { $r[$k] = $false }\n}\n$r | ConvertTo-Json -Compress"
+    work = Path(tempfile.mkdtemp(prefix="mr-ne-"))
+    try:
+        ps1 = work / "probe.ps1"
+        out = work / "out.json"
+        ps1.write_text(probe, encoding="utf-8")
+        runner = work / "run.cmd"
+        runner.write_text(
+            "@echo off\r\n"
+            'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%s" > "%s" 2>nul\r\n'
+            % (ps1, out),
+            encoding="ascii")
+        subprocess.run(["runas.exe", "/trustlevel:0x20000", str(runner)],
+                       capture_output=True, text=True, timeout=180)
+        for _ in range(90):
+            if out.is_file() and out.read_text(encoding="utf-8", errors="ignore").strip():
+                break
+            time.sleep(1)
+        raw = out.read_text(encoding="utf-8", errors="ignore") if out.is_file() else ""
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                return _json.loads(line)
+        return {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def elevation_battery() -> None:
+    """The ordinary author token must not reach reviewer code or trust material.
+
+    Reported separately from the ACL checks because it answers a different
+    question: not "is there an ACE" but "can the process that performs
+    certification actually do it".
+    """
+
+    measured = non_elevated_capability()
+    if not measured:
+        rec("RI11 non-elevated-capability-measurable", False,
+            "the author's non-elevated capability could not be measured, so the "
+            "trust boundary is unproven rather than proven")
+        return
+    rec("RI11 non-elevated-capability-measurable", True,
+        "the author's ordinary token was dropped and measured directly")
+    rec("RI12 probe-token-really-non-elevated", measured.get("elevated") is False,
+        f"the measuring token carried no administrative rights "
+        f"(elevated={measured.get('elevated')})")
+
+    for key, label in (("reviewer-src", "reviewer source"),
+                       ("reviewer-bin", "reviewer entry-point directory"),
+                       ("reviewer-state", "reviewer key and trust state"),
+                       ("reviewer-results", "reviewer canonical results"),
+                       ("trust-root-dir", "pinned trust root")):
+        rec(f"RI13 non-elevated-author-cannot-write-{key}",
+            measured.get(key) is False,
+            f"an ordinary author token cannot write the {label}")
+
+
 def main() -> int:
     CHECKS.clear()
     acl_battery()
     secret_battery()
     contract_battery()
+    elevation_battery()
     failed = [c for c in CHECKS if not c["ok"]]
     print()
     print(json.dumps({
