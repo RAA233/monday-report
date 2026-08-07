@@ -417,8 +417,36 @@ def stage_environment(args, label: str, env_class: str) -> int:
                          env_class=env_class, work_dir=work / "app",
                          transfer_in=transfer_in, transfer_out=transfer_out,
                          frozen=frozen)
-    resume_record = transfer_out / "environment-resume-record.json"
+    # The runner writes environment-result.json on the normal resume path;
+    # environment-resume-record.json exists only on its exception path, so
+    # looking for that name reports a clean run as a failure.
+    resume_record = transfer_out / "environment-result.json"
     ok = resume.returncode == 0 and resume_record.exists()
+
+    # The runner recomputes all four package digests INSIDE the environment.
+    # Compare those against the frozen descriptor rather than re-deriving them
+    # here: what matters is what the environment saw, not what the driver did.
+    in_environment: dict = {}
+    package_disagreements: list = []
+    request_totals: dict = {}
+    resume_totals: dict = {}
+    if resume_record.exists():
+        observed = json.loads(resume_record.read_text(encoding="utf-8"))
+        resume_totals = observed.get("totals", {}) or {}
+        for field in ("package_version", "installer_sha256", "executable_sha256",
+                      "payload_manifest_sha256", "frontend_manifest_sha256"):
+            in_environment[field] = observed.get(field)
+            if frozen.get(field) and observed.get(field) != frozen.get(field):
+                package_disagreements.append(field)
+        ok = ok and not package_disagreements
+    if request_record.exists():
+        request_totals = json.loads(
+            request_record.read_text(encoding="utf-8")).get("totals", {}) or {}
+    totals = {
+        "passed": int(request_totals.get("passed", 0)) + int(resume_totals.get("passed", 0)),
+        "failed": int(request_totals.get("failed", 0)) + int(resume_totals.get("failed", 0)),
+    }
+    ok = ok and totals["failed"] == 0 and totals["passed"] > 0
 
     transcript = {
         "state": "COMPLETE" if ok else "FAILED",
@@ -428,6 +456,9 @@ def stage_environment(args, label: str, env_class: str) -> int:
         "issuance_witness": issued.get("witness"),
         "licences_received": issued.get("licences"),
         "recomputed_package": package["recomputed"],
+        "in_environment_package": in_environment,
+        "package_disagreements": package_disagreements,
+        "totals": totals,
         "frozen_package": frozen,
         "started_at": started,
         "completed_at": datetime.now(timezone.utc).isoformat(),
