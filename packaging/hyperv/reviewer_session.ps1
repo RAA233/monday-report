@@ -41,7 +41,8 @@ $StateRoot    = Join-Path $ReviewerRoot 'state'        # reviewer-owned secrets
 $OutRoot      = Join-Path $ReviewerRoot 'out'          # reviewer-owned results
 
 #: The complete set of things the authoring process may ask the reviewer to do.
-$AllowedStages = @('bootstrap', 'preflight', 'e1', 'e2', 'review', 'status')
+$AllowedStages = @('bootstrap', 'preflight', 'cms-identity', 'cred-rotate',
+                   'e1', 'e2', 'review', 'status')
 
 function New-Status {
     param([string]$Stage, [string]$State, [string]$Detail = '', $Extra = $null)
@@ -156,6 +157,30 @@ if ($stage -eq 'status') {
         trust_root_ready = (Test-Path 'C:\mr-hv\trust\offline-review-trust-root.v1.json')
     }
     exit 0
+}
+
+# Credential-migration stages run in PowerShell, not the Python driver: they
+# need the reviewer certificate store and PowerShell Direct, both PowerShell
+# native. They deliberately run BEFORE the Python driver is required, so a
+# missing interpreter cannot block credential ownership transfer.
+if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate') {
+    $migration = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_credential_migration.ps1'
+    if (-not (Test-Path $migration)) {
+        New-Status -Stage $stage -State 'FAILED' -Detail 'migration script missing from the install'
+        exit 4
+    }
+    $migAction = if ($stage -eq 'cms-identity') { 'reviewer-identity' } else { 'reviewer-rotate' }
+    New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $migration -Action $migAction 2>&1 | Out-String
+    $rc = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    # The migration script emits JSON only; it never prints a secret.
+    Set-Content -Path (Join-Path $OutRoot "$stage-result.json") -Value $out -Encoding utf8
+    if ($rc -eq 0) { New-Status -Stage $stage -State 'COMPLETE' -Detail "run_id=$runId" }
+    else { New-Status -Stage $stage -State 'FAILED' -Detail "migration exited $rc" }
+    exit $rc
 }
 
 $py = Get-ReviewerPython

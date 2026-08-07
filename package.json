@@ -160,7 +160,8 @@
     "offline:two-environment-matrix": "python scripts/offline_two_environment_matrix.py",
     "offline:provision-environment-2": "powershell -NoProfile -ExecutionPolicy Bypass -File packaging/hyperv/provision_vm.ps1",
     "audit:offline-evidence-contract": "python -I scripts/offline_evidence_contract_guard.py",
-    "audit:offline-audit-membership": "python scripts/offline_audit_membership_manifest.py"
+    "audit:offline-audit-membership": "python scripts/offline_audit_membership_manifest.py",
+    "audit:offline-credential-migration": "python scripts/offline_credential_migration_guard.py"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

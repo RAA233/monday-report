@@ -91,6 +91,10 @@ function Initialize-ReviewerPaths {
     # the author unable to create or update the entry point on any re-run.
     $authorOwned   = @("$Root\xchg", "$Root\xchg\licences", "$Root\reviewer-bin",
                    "$Root\reviewer-src", "$Root\reviewer-pkg")
+    # The credential handoff area is written by BOTH sides in turn: the
+    # reviewer publishes its public certificate and nonce, the author writes
+    # the envelope. Only public or CMS-encrypted material ever lands here.
+    $sharedHandoff = @("$Root\xchg\credential")
 
     foreach ($d in @($Root) + $authorOwned + $reviewerOwned) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
@@ -111,10 +115,23 @@ function Initialize-ReviewerPaths {
     & icacls.exe $Root /grant "${Account}:(NP)(X)" | Out-Null
     $ErrorActionPreference = $prev
 
+    foreach ($d in $sharedHandoff) {
+        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+        & icacls.exe $d /inheritance:r | Out-Null
+        & icacls.exe $d /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)F" | Out-Null
+    }
+
     if ($SessionSource -and (Test-Path $SessionSource)) {
         Copy-Item -Path $SessionSource -Destination (Get-InstalledSessionScript -Root $Root) -Force
+        # The migration script must sit beside the entry point, or the reviewer
+        # cannot read it: it holds no rights under the authoring worktree.
+        $migSource = Join-Path (Split-Path $SessionSource -Parent) 'reviewer_credential_migration.ps1'
+        if (Test-Path $migSource) {
+            Copy-Item -Path $migSource -Destination `
+                (Join-Path (Join-Path $Root 'reviewer-bin') 'reviewer_credential_migration.ps1') -Force
+        }
     }
-    return $reviewerOwned + $authorOwned
+    return $reviewerOwned + $authorOwned + $sharedHandoff
 }
 
 function Get-InstalledSessionScript {

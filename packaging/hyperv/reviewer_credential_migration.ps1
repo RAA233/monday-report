@@ -1,0 +1,325 @@
+<#
+.SYNOPSIS
+    One-time transfer of the Hyper-V guest credential from author ownership to
+    reviewer ownership, followed by rotation.
+
+.DESCRIPTION
+    Environment 2 cannot run under the reviewer while the guest credential is
+    DPAPI-sealed to the author: the reviewer simply cannot decrypt it, and
+    handing over the author's blob would prove nothing about ownership.
+
+    So the credential is migrated once, cryptographically, and then ROTATED so
+    the value the author briefly held stops working:
+
+      1. reviewer  creates a task-specific CMS certificate; its private key
+                   stays in the reviewer's own certificate store
+      2. reviewer  exports ONLY the public certificate to the handoff area
+      3. author    decrypts the retained old credential transiently through its
+                   existing authorized DPAPI mechanism, in memory only
+      4. author    CMS-encrypts it to the reviewer certificate and writes the
+                   envelope; the plaintext is never persisted
+      5. reviewer  decrypts the envelope in its own session
+      6. reviewer  opens ONE PowerShell Direct session with the old credential
+      7. reviewer  generates a NEW random guest password inside its own context
+      8. reviewer  rotates the guest account to that new password
+      9. reviewer  DPAPI-seals the new credential under the REVIEWER principal
+     10. reviewer  deletes the envelope and every temporary migration artifact
+     11. author    old credential state is retired from the supported workflow
+
+    WHAT IS CLAIMED
+    ---------------
+    After migration, the normal author process cannot authenticate the supported
+    E2 PowerShell Direct workflow: the credential it once held no longer works,
+    and the replacement is sealed to a principal whose password it never learned.
+
+    WHAT IS NOT CLAIMED
+    -------------------
+    Nothing here stops a machine administrator from taking ownership of local
+    resources. That is out of scope and must not be claimed anywhere.
+
+    Neither password is ever printed, logged, written in plaintext, passed in
+    argv, or placed in an environment variable. SecureString / PSCredential are
+    used only transiently where the Windows APIs require them.
+#>
+[CmdletBinding()]
+param(
+    [ValidateSet('reviewer-identity', 'author-envelope', 'reviewer-rotate', 'author-retire', 'verify')]
+    [string]$Action = 'verify',
+    [string]$VmName        = 'MR-OFFLINE-E2',
+    [string]$GuestAccount  = 'mrops',
+    [string]$AuthorState   = 'C:\mr-hv\state',
+    [string]$ReviewerState = 'C:\mr-hv\reviewer\state',
+    [string]$HandoffDir    = 'C:\mr-hv\xchg\credential',
+    [string]$Nonce         = ''
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+
+$CertSubject   = 'CN=MR-OFFLINE-REVIEWER-CMS'
+$PublicCert    = Join-Path $HandoffDir 'reviewer-cms.cer'
+$Envelope      = Join-Path $HandoffDir 'guest-credential.cms'
+$NonceFile     = Join-Path $HandoffDir 'migration-nonce.txt'
+$AuthorCred    = Join-Path $AuthorState 'e2-guest.cred'
+$AuthorRetired = Join-Path $AuthorState 'e2-guest.cred.retired'
+$ReviewerCred  = Join-Path $ReviewerState 'e2-guest.cred'
+
+function Emit { param($Payload, [int]$Code = 0)
+    $Payload | ConvertTo-Json -Depth 8
+    exit $Code
+}
+
+function New-GuestSecret {
+    # 32 CSPRNG bytes -> base64, returned as SecureString. The plaintext exists
+    # only inside this function and is zeroed on the way out.
+    $bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $plain = [Convert]::ToBase64String($bytes) + '!Aa9'
+    $secure = ConvertTo-SecureString $plain -AsPlainText -Force
+    [Array]::Clear($bytes, 0, $bytes.Length)
+    Remove-Variable plain
+    return $secure
+}
+
+function Get-ReviewerCmsCert {
+    Get-ChildItem Cert:\CurrentUser\My -ErrorAction SilentlyContinue |
+        Where-Object { $_.Subject -eq $CertSubject } |
+        Sort-Object NotAfter -Descending | Select-Object -First 1
+}
+
+switch ($Action) {
+
+    # ---------------------------------------------------------------- reviewer
+    'reviewer-identity' {
+        # RUNS AS THE REVIEWER. Creates the CMS identity and publishes only the
+        # public certificate. The private key never leaves this store.
+        New-Item -ItemType Directory -Force -Path $HandoffDir -ErrorAction SilentlyContinue | Out-Null
+        $cert = Get-ReviewerCmsCert
+        $created = $false
+        if (-not $cert) {
+            $cert = New-SelfSignedCertificate -Type DocumentEncryptionCert `
+                -Subject $CertSubject -CertStoreLocation Cert:\CurrentUser\My `
+                -KeyUsage KeyEncipherment, DataEncipherment `
+                -NotAfter (Get-Date).AddDays(30)
+            $created = $true
+        }
+        Export-Certificate -Cert $cert -FilePath $PublicCert -Force | Out-Null
+
+        # The reviewer mints the migration nonce, so the author cannot pre-build
+        # an envelope for a migration that has not been requested.
+        $nonceValue = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
+        Set-Content -Path $NonceFile -Value $nonceValue -Encoding ascii
+
+        Emit ([ordered]@{
+            action           = 'reviewer-identity'
+            ok               = $true
+            certificate      = $(if ($created) { 'created' } else { 'reused' })
+            thumbprint       = $cert.Thumbprint
+            has_private_key  = $cert.HasPrivateKey
+            public_exported  = (Test-Path $PublicCert)
+            nonce_published  = (Test-Path $NonceFile)
+        })
+    }
+
+    # ------------------------------------------------------------------ author
+    'author-envelope' {
+        # RUNS AS THE AUTHOR. Transiently decrypts the retained credential and
+        # re-encrypts it to the reviewer certificate. The plaintext is never
+        # written anywhere.
+        if (-not (Test-Path $PublicCert)) {
+            Emit ([ordered]@{ action='author-envelope'; ok=$false
+                              detail='reviewer CMS certificate has not been published' }) 2
+        }
+        if (-not (Test-Path $NonceFile)) {
+            Emit ([ordered]@{ action='author-envelope'; ok=$false
+                              detail='reviewer migration nonce is absent' }) 2
+        }
+        if (-not (Test-Path $AuthorCred)) {
+            Emit ([ordered]@{ action='author-envelope'; ok=$false
+                              detail='author guest credential is absent (already retired?)' }) 2
+        }
+        $nonceValue = (Get-Content $NonceFile -Raw).Trim()
+        if (-not $nonceValue) {
+            Emit ([ordered]@{ action='author-envelope'; ok=$false
+                              detail='migration nonce is empty' }) 2
+        }
+
+        $blob = (Get-Content -Path $AuthorCred -Raw).Trim()
+        $secure = ConvertTo-SecureString -String $blob   # author DPAPI, in memory
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try {
+            $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+            # Bind the nonce INTO the protected content, so an envelope cannot be
+            # replayed against a later migration that minted a different nonce.
+            $payload = @{ nonce = $nonceValue; account = $GuestAccount; secret = $plain } |
+                       ConvertTo-Json -Compress
+            Protect-CmsMessage -To $PublicCert -Content $payload -OutFile $Envelope
+            Remove-Variable plain, payload
+        } finally {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+        Emit ([ordered]@{
+            action        = 'author-envelope'
+            ok            = $true
+            envelope      = (Test-Path $Envelope)
+            plaintext_persisted = $false
+            bound_to_nonce = $true
+        })
+    }
+
+    # ---------------------------------------------------------------- reviewer
+    'reviewer-rotate' {
+        # RUNS AS THE REVIEWER. Uses the old credential exactly once, rotates the
+        # guest password to a value only this context ever sees, and seals it.
+        if (-not (Test-Path $Envelope)) {
+            Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
+                              detail='no CMS envelope to open' }) 2
+        }
+        $cert = Get-ReviewerCmsCert
+        if (-not $cert -or -not $cert.HasPrivateKey) {
+            Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
+                              detail='reviewer CMS private key is unavailable in this context' }) 2
+        }
+
+        try {
+            # No -To: Unprotect-CmsMessage resolves the recipient from the
+            # CURRENT USER's own store, which is exactly the property that makes
+            # this a real handoff. Passing a cert: path here is rejected with an
+            # ArgumentException, and passing the certificate object would only
+            # restate what the store already decides.
+            $opened = Unprotect-CmsMessage -Path $Envelope
+        } catch {
+            Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
+                              detail='CMS envelope could not be opened: ' + $_.Exception.GetType().Name }) 3
+        }
+        $doc = $opened | ConvertFrom-Json
+        Remove-Variable opened
+
+        $expected = ''
+        if (Test-Path $NonceFile) { $expected = (Get-Content $NonceFile -Raw).Trim() }
+        if (-not $expected -or $doc.nonce -ne $expected) {
+            Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
+                              detail='envelope nonce does not match the reviewer migration nonce' }) 3
+        }
+        if ($doc.account -ne $GuestAccount) {
+            Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
+                              detail='envelope names a different guest account' }) 3
+        }
+
+        $oldSecure = ConvertTo-SecureString $doc.secret -AsPlainText -Force
+        $doc.secret = $null
+        Remove-Variable doc
+        $oldCred = New-Object System.Management.Automation.PSCredential(".\$GuestAccount", $oldSecure)
+
+        $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
+        if (-not $vm) {
+            Emit ([ordered]@{ action='reviewer-rotate'; ok=$false; detail='task VM not found' }) 4
+        }
+        $started = $false
+        if ($vm.State -ne 'Running') { Start-VM -Name $VmName | Out-Null; $started = $true; Start-Sleep -Seconds 45 }
+
+        # Prove the OLD credential authenticates BEFORE rotating.
+        $before = $null
+        try {
+            $before = Invoke-Command -VMName $VmName -Credential $oldCred -ErrorAction Stop `
+                -ScriptBlock { $env:COMPUTERNAME }
+        } catch {
+            Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
+                              detail='old credential did not authenticate: ' + $_.Exception.GetType().Name }) 5
+        }
+
+        $newSecure = New-GuestSecret
+        $newCred = New-Object System.Management.Automation.PSCredential(".\$GuestAccount", $newSecure)
+        try {
+            Invoke-Command -VMName $VmName -Credential $oldCred -ErrorAction Stop `
+                -ArgumentList $GuestAccount, $newSecure `
+                -ScriptBlock {
+                    param($account, $secret)
+                    Set-LocalUser -Name $account -Password $secret
+                } | Out-Null
+        } catch {
+            Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
+                              detail='rotation inside the guest failed: ' + $_.Exception.GetType().Name }) 6
+        }
+
+        # Seal the NEW credential under the reviewer principal, restrictively.
+        New-Item -ItemType Directory -Force -Path $ReviewerState -ErrorAction SilentlyContinue | Out-Null
+        $protected = ConvertFrom-SecureString $newSecure      # reviewer DPAPI
+        Set-Content -Path $ReviewerCred -Value $protected -Encoding ascii
+        Remove-Variable protected
+        # Explicit ACEs, not inherited ones. The blob is already unreadable to
+        # the author because the parent directory is reviewer-owned, but relying
+        # on that leaves the protection incidental -- a later directory change
+        # would silently widen it. Grant only this principal and SYSTEM.
+        #
+        # icacls parses "user:(F)" as ONE argument; splitting the permission into
+        # a separate token makes it reject "(F)" as an unknown parameter and
+        # leave the file with no explicit ACE at all.
+        $me = "$env:USERDOMAIN\$env:USERNAME"
+        & icacls.exe $ReviewerCred /inheritance:r | Out-Null
+        & icacls.exe $ReviewerCred /grant:r "${me}:(F)" | Out-Null
+        & icacls.exe $ReviewerCred /grant:r 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
+
+        # The NEW credential must work.
+        $after = $null
+        try {
+            $after = Invoke-Command -VMName $VmName -Credential $newCred -ErrorAction Stop `
+                -ScriptBlock { $env:COMPUTERNAME }
+        } catch {
+            Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
+                              detail='new credential did not authenticate after rotation' }) 7
+        }
+        # The OLD credential must not.
+        $oldStillWorks = $true
+        try {
+            Invoke-Command -VMName $VmName -Credential $oldCred -ErrorAction Stop `
+                -ScriptBlock { 1 } | Out-Null
+        } catch { $oldStillWorks = $false }
+
+        # Destroy the one-time material.
+        Remove-Item $Envelope -Force -ErrorAction SilentlyContinue
+        Remove-Item $NonceFile -Force -ErrorAction SilentlyContinue
+        if ($started) { Stop-VM -Name $VmName -Confirm:$false -ErrorAction SilentlyContinue }
+
+        Emit ([ordered]@{
+            action                    = 'reviewer-rotate'
+            ok                        = (-not $oldStillWorks)
+            old_credential_worked_before = [bool]$before
+            new_credential_works      = [bool]$after
+            old_credential_still_works = $oldStillWorks
+            reviewer_credential_sealed = (Test-Path $ReviewerCred)
+            envelope_destroyed        = (-not (Test-Path $Envelope))
+            nonce_destroyed           = (-not (Test-Path $NonceFile))
+        }) $(if ($oldStillWorks) { 8 } else { 0 })
+    }
+
+    # ------------------------------------------------------------------ author
+    'author-retire' {
+        # RUNS AS THE AUTHOR. Retires its own copy from the supported workflow.
+        # Renamed rather than deleted so the migration remains auditable; it is
+        # dead either way, because the password it protects no longer works.
+        if (Test-Path $AuthorCred) {
+            Move-Item -Path $AuthorCred -Destination $AuthorRetired -Force
+        }
+        Emit ([ordered]@{
+            action                   = 'author-retire'
+            ok                       = (-not (Test-Path $AuthorCred))
+            author_credential_active = (Test-Path $AuthorCred)
+            retired_marker_present   = (Test-Path $AuthorRetired)
+        })
+    }
+
+    'verify' {
+        $cert = Get-ReviewerCmsCert
+        Emit ([ordered]@{
+            action                    = 'verify'
+            reviewer_cms_present      = [bool]$cert
+            reviewer_cms_has_private  = $(if ($cert) { $cert.HasPrivateKey } else { $false })
+            public_cert_published     = (Test-Path $PublicCert)
+            envelope_present          = (Test-Path $Envelope)
+            reviewer_credential_sealed = (Test-Path $ReviewerCred)
+            author_credential_active  = (Test-Path $AuthorCred)
+            author_credential_retired = (Test-Path $AuthorRetired)
+        })
+    }
+}
