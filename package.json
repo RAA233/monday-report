@@ -162,7 +162,8 @@
     "audit:offline-evidence-contract": "python -I scripts/offline_evidence_contract_guard.py",
     "audit:offline-audit-membership": "python scripts/offline_audit_membership_manifest.py",
     "audit:offline-credential-migration": "python scripts/offline_credential_migration_guard.py",
-    "audit:offline-broker-issuance": "python scripts/offline_broker_issuance_guard.py"
+    "audit:offline-broker-issuance": "python scripts/offline_broker_issuance_guard.py",
+    "audit:offline-e2-handshake": "python scripts/offline_e2_handshake_guard.py"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

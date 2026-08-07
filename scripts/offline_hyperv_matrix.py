@@ -160,7 +160,8 @@ def assert_no_key_material(paths: list[Path]) -> str | None:
     return None
 
 
-def stage_transfer_set(*, app_dir: Path, root: Path) -> tuple[Path, dict]:
+def stage_transfer_set(*, app_dir: Path, root: Path, source_commit: str = "",
+                       source_tree: str = "") -> tuple[Path, dict]:
     """Stage the exact package archive, the runner, the session driver, and the
     package metadata the guest needs to recompute hashes independently."""
 
@@ -178,10 +179,37 @@ def stage_transfer_set(*, app_dir: Path, root: Path) -> tuple[Path, dict]:
     shutil.copy2(PS_RUNNER, tool / PS_RUNNER.name)
     shutil.copy2(SESSION, tool / SESSION.name)
 
-    commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
-                            capture_output=True, text=True, timeout=30).stdout.strip()
-    tree = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD^{tree}"],
-                          capture_output=True, text=True, timeout=30).stdout.strip()
+    # The head binding is taken from the CALLER when supplied, and only falls
+    # back to git.
+    #
+    # Shelling out to git here silently produced EMPTY strings for the reviewer:
+    # the pristine export is created by the author, so git refuses to operate in
+    # a repository the running user does not own and writes nothing to stdout.
+    # The empty values then collapsed the guest runner's argument list --
+    # "Missing an argument for parameter 'SourceCommit'" -- which surfaced only
+    # as an empty phase log and an unexplained "the guest did not export an
+    # activation request".
+    #
+    # The reviewer already holds these values in the frozen package descriptor
+    # it verified, so it passes them explicitly and does not depend on git
+    # working in a directory it does not own.
+    commit = (source_commit or "").strip()
+    tree = (source_tree or "").strip()
+    if not commit or not tree:
+        commit = commit or subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        tree = tree or subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD^{tree}"],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+    # FAIL CLOSED. A guest run bound to an empty head is not evidence about any
+    # head, and writing the empty value defers the failure to a place where it
+    # cannot be diagnosed.
+    if not commit or not tree:
+        raise RuntimeError(
+            "source commit/tree could not be resolved; pass --source-commit and "
+            "--source-tree explicitly (git cannot run in a repository this user "
+            "does not own)")
     summary_path = app_dir.parents[1] / "build-summary.json"
     build_summary = json.loads(summary_path.read_text(encoding="utf-8"))
     meta = {
@@ -277,6 +305,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--review-nonce", default="",
                         help="reviewer-minted nonce; the issuance witness must answer it")
     parser.add_argument("--env-label", default="ENVIRONMENT_2")
+    parser.add_argument("--source-commit", default="",
+                        help="head binding supplied by the caller; the reviewer passes the "
+                             "value from the frozen package descriptor because git cannot "
+                             "run in a repository it does not own")
+    parser.add_argument("--source-tree", default="",
+                        help="tree binding supplied by the caller (see --source-commit)")
     parser.add_argument("--state-root", default="",
                         help="where the guest credential is sealed; the reviewer passes its "
                              "own state root because credential ownership was migrated")
@@ -361,7 +395,9 @@ def main(argv: list[str] | None = None) -> int:
                       "environment-result.json", "orchestrator-state.json"):
             (root / stale).unlink(missing_ok=True)
         try:
-            archive, meta = stage_transfer_set(app_dir=app_dir, root=root)
+            archive, meta = stage_transfer_set(
+                app_dir=app_dir, root=root,
+                source_commit=args.source_commit, source_tree=args.source_tree)
         except FileNotFoundError as exc:
             print(json.dumps({"guard": "offline_hyperv", "detail": str(exc),
                               "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))

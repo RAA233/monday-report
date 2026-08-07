@@ -546,6 +546,8 @@ def stage_e2(args) -> int:
            "--package-dir", str(PACKAGE_ROOT / "stage" / "MondayReportOffline"),
            "--transfer-root", str(transfer_root),
            "--state-root", str(state_root),
+           "--source-commit", str(frozen.get("source_commit", "")),
+           "--source-tree", str(frozen.get("source_tree", "")),
            "--out", str(transfer_root / "environment-2-result.json")]
 
     # Belt and braces: strip any issuer-key variable from the child environment.

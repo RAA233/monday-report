@@ -41,7 +41,7 @@ $StateRoot    = Join-Path $ReviewerRoot 'state'        # reviewer-owned secrets
 $OutRoot      = Join-Path $ReviewerRoot 'out'          # reviewer-owned results
 
 #: The complete set of things the authoring process may ask the reviewer to do.
-$AllowedStages = @('bootstrap', 'preflight', 'cms-identity', 'cred-rotate', 'cred-repair', 'cred-seal', 'diagnostics',
+$AllowedStages = @('bootstrap', 'preflight', 'cms-identity', 'cred-rotate', 'cred-repair', 'cred-seal', 'diagnostics', 'diagnostics-deep',
                    'e1', 'e2', 'review', 'status')
 
 function New-Status {
@@ -167,7 +167,7 @@ if ($stage -eq 'status') {
 # more, so it cannot see why the guest failed; this returns normalized, redacted
 # facts to the author-readable result area. Troubleshooting only -- never
 # acceptance evidence.
-if ($stage -eq 'diagnostics') {
+if ($stage -eq 'diagnostics' -or $stage -eq 'diagnostics-deep') {
     $diagScript = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_diagnostics.ps1'
     if (-not (Test-Path $diagScript)) {
         New-Status -Stage $stage -State 'FAILED' -Detail 'diagnostics script missing from the install'
@@ -176,10 +176,12 @@ if ($stage -eq 'diagnostics') {
     New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    # The author may ask for the deeper probe, which actually runs the request
-    # stage in the guest. Bounded, and still non-authoritative.
-    $deep = ($command.PSObject.Properties.Name -contains 'deep') -and $command.deep
-    if ($deep) {
+    # A distinct STAGE, not a flag on the command document. A boolean property
+    # has to survive JSON round-tripping and strict-mode property access to be
+    # read correctly, and when it silently did not, the deep probe was skipped
+    # while the run still reported success -- the failure mode this diagnostic
+    # exists to eliminate. The stage name is already validated by the allowlist.
+    if ($stage -eq 'diagnostics-deep') {
         $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $diagScript `
                -RunRequestProbe 2>&1 | Out-String
     } else {

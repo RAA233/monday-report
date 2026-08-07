@@ -176,7 +176,7 @@ if ($RunRequestProbe) {
     $run = Invoke-Command -VMName $VmName -Credential $cred -ErrorAction Stop `
         -ArgumentList $RequestProbeSeconds -ScriptBlock {
         param($budget)
-        $tool = 'C:	ool'; $out = 'C:\out'; $work = 'C:\env2'
+        $tool = 'C:\tool'; $out = 'C:\out'; $work = 'C:\env2'
         $runner = Join-Path $tool 'offline_env_runner.ps1'
         $meta = Get-Content (Join-Path $tool 'package-meta.json') -Raw | ConvertFrom-Json
         $appDir = Join-Path $work 'pkg'
