@@ -44,7 +44,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('reviewer-identity', 'author-envelope', 'reviewer-rotate', 'author-retire',
-                 'reviewer-repair-acl', 'verify')]
+                 'reviewer-seal-baseline', 'author-destroy', 'reviewer-repair-acl', 'verify')]
     [string]$Action = 'verify',
     [string]$VmName        = 'MR-OFFLINE-E2',
     [string]$GuestAccount  = 'mrops',
@@ -319,6 +319,118 @@ switch ($Action) {
             ok                       = (-not (Test-Path $AuthorCred))
             author_credential_active = (Test-Path $AuthorCred)
             retired_marker_present   = (Test-Path $AuthorRetired)
+        })
+    }
+
+    'reviewer-seal-baseline' {
+        # RUNS AS THE REVIEWER. Seals the BASELINE credential -- the one valid
+        # inside the clean-baseline checkpoint -- under reviewer DPAPI.
+        #
+        # WHY THIS REPLACES IN-GUEST ROTATION ON THE RELEASE PATH
+        # ------------------------------------------------------
+        # Rotating the guest password inside a running VM works, and it was
+        # verified working: the old credential stopped authenticating. But every
+        # certification run begins by RESTORING the clean-baseline checkpoint,
+        # and a checkpoint restore reverts the guest filesystem and SAM along
+        # with everything else. The rotated password does not survive it, so the
+        # reviewer arrives at a guest that only accepts the baseline credential
+        # and the run stops at "guest did not reach PowerShell Direct readiness".
+        #
+        # Ownership therefore has to be established over the credential the
+        # checkpoint actually contains, not over a value that exists only in a
+        # VM state the certification discards. The reviewer seals that
+        # credential here; the author then destroys its own copy, which is what
+        # makes the ownership exclusive.
+        if (-not (Test-Path $Envelope)) {
+            Emit ([ordered]@{ action='reviewer-seal-baseline'; ok=$false
+                              detail='no CMS envelope to open' }) 2
+        }
+        $cert = Get-ReviewerCmsCert
+        if (-not $cert -or -not $cert.HasPrivateKey) {
+            Emit ([ordered]@{ action='reviewer-seal-baseline'; ok=$false
+                              detail='reviewer CMS private key is unavailable in this context' }) 2
+        }
+        try {
+            $opened = Unprotect-CmsMessage -Path $Envelope
+        } catch {
+            Emit ([ordered]@{ action='reviewer-seal-baseline'; ok=$false
+                              detail='CMS envelope could not be opened: ' + $_.Exception.GetType().Name }) 3
+        }
+        $doc = $opened | ConvertFrom-Json
+        Remove-Variable opened
+
+        $expected = ''
+        if (Test-Path $NonceFile) { $expected = (Get-Content $NonceFile -Raw).Trim() }
+        if (-not $expected -or $doc.nonce -ne $expected) {
+            Emit ([ordered]@{ action='reviewer-seal-baseline'; ok=$false
+                              detail='envelope nonce does not match the reviewer migration nonce' }) 3
+        }
+        if ($doc.account -ne $GuestAccount) {
+            Emit ([ordered]@{ action='reviewer-seal-baseline'; ok=$false
+                              detail='envelope names a different guest account' }) 3
+        }
+
+        $secure = ConvertTo-SecureString $doc.secret -AsPlainText -Force
+        $doc.secret = $null
+        Remove-Variable doc
+
+        New-Item -ItemType Directory -Force -Path $ReviewerState -ErrorAction SilentlyContinue | Out-Null
+        $protected = ConvertFrom-SecureString $secure          # reviewer DPAPI
+        Set-Content -Path $ReviewerCred -Value $protected -Encoding ascii
+        Remove-Variable protected
+        $me = "$env:USERDOMAIN\$env:USERNAME"
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        & icacls.exe $ReviewerCred /inheritance:r | Out-Null
+        & icacls.exe $ReviewerCred /grant "${me}:(F)" | Out-Null
+        & icacls.exe $ReviewerCred /grant 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
+        $ErrorActionPreference = $prev
+
+        $raw = Get-Content -Path $ReviewerCred -Raw -ErrorAction SilentlyContinue
+        $readable = ($null -ne $raw -and ([string]$raw).Trim().Length -gt 0)
+        $decrypts = $false
+        if ($readable) {
+            try { $null = ConvertTo-SecureString -String ([string]$raw).Trim() -ErrorAction Stop
+                  $decrypts = $true } catch { $decrypts = $false }
+        }
+
+        Remove-Item $Envelope -Force -ErrorAction SilentlyContinue
+        Remove-Item $NonceFile -Force -ErrorAction SilentlyContinue
+
+        Emit ([ordered]@{
+            action              = 'reviewer-seal-baseline'
+            ok                  = ($readable -and $decrypts)
+            sealed              = (Test-Path $ReviewerCred)
+            readable_by_reviewer = $readable
+            decrypts_for_reviewer = $decrypts
+            aces                = @((Get-Acl $ReviewerCred).Access).Count
+            envelope_destroyed  = (-not (Test-Path $Envelope))
+            nonce_destroyed     = (-not (Test-Path $NonceFile))
+        }) $(if ($readable -and $decrypts) { 0 } else { 4 })
+    }
+
+    'author-destroy' {
+        # RUNS AS THE AUTHOR. Destroys the author's own copy outright.
+        #
+        # Renaming it was not enough: the retired blob still holds the BASELINE
+        # credential sealed under author DPAPI, and a clean-baseline restore
+        # brings that credential back to life. While the file exists the author
+        # can rename it back and authenticate, so the exclusivity claim would be
+        # false. Overwrite then unlink.
+        $destroyed = @()
+        foreach ($path in @($AuthorCred, $AuthorRetired)) {
+            if (Test-Path $path) {
+                $len = (Get-Item $path).Length
+                [System.IO.File]::WriteAllBytes($path, (New-Object byte[] $len))
+                Remove-Item $path -Force
+                $destroyed += (Split-Path $path -Leaf)
+            }
+        }
+        Emit ([ordered]@{
+            action                   = 'author-destroy'
+            ok                       = (-not (Test-Path $AuthorCred)) -and (-not (Test-Path $AuthorRetired))
+            destroyed                = $destroyed
+            author_credential_active = (Test-Path $AuthorCred)
+            author_retired_present   = (Test-Path $AuthorRetired)
         })
     }
 
