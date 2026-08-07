@@ -297,8 +297,8 @@ if ($null -eq $mask) {
 } else {
     Add-Probe 'CH-01 author-can-start-task' (-not [bool]($mask -band 0x20)) `
         "starting the task is required for the protocol to be drivable without elevation (may_start=$([bool]($mask -band 0x20)))"
-    Add-Probe 'CH-02 author-may-not-modify-task' ([bool]($mask -band 0xC0116)) `
-        "rewriting the task action would point the reviewer's session at author code (may_modify=$([bool]($mask -band 0xC0116)))"
+    Add-Probe 'CH-02 author-may-not-modify-task' ([bool]($mask -band 0xD0116)) `
+        "rewriting the task action would point the reviewer's session at author code (may_modify=$([bool]($mask -band 0xD0116)))"
 }
 
 # ------------------------------------------------- reviewer state and results

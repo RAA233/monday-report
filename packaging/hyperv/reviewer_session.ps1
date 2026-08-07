@@ -218,7 +218,12 @@ function Assert-ReviewerCodeIntegrity {
         Get-ChildItem -Path $rootFull -Recurse -File -Force -ErrorAction SilentlyContinue |
             Sort-Object -Property FullName |
             ForEach-Object {
-                $rel = $_.FullName.Substring($rootFull.Length).TrimStart('').ToLowerInvariant()
+                # TrimStart with an EMPTY argument trims nothing, so every entry kept a
+                # leading separator. The digest stayed stable and stayed sensitive
+                # to mutation, so it passed its own four-step test while silently
+                # disagreeing with the Python implementation of the same algorithm.
+                # Cross-checked against that one now.
+                $rel = $_.FullName.Substring($rootFull.Length).TrimStart('\').ToLowerInvariant()
                 $lines.Add($rel + ':' + (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash)
             }
         $joined = [string]::Join("`n", $lines.ToArray())
@@ -303,10 +308,39 @@ $codeFiles = @(
     # through a path this gate has not already covered.
     (Join-Path $SourceRoot 'scripts\offline_env_runner.py'),
     (Join-Path $SourceRoot 'scripts\offline_env_runner.ps1'),
-    (Join-Path $SourceRoot 'backendpp\offline_review_attestation.py')
+    (Join-Path $SourceRoot 'backend\app\offline_review_attestation.py')
 )
-# The staged package the reviewer installs and executes.
-$packageRoot = 'C:\mr-hveviewer-pkg'
+# The staged package the reviewer installs and executes, and the dedicated
+# runtime it executes everything with. Both are whole trees of executed code.
+$packageRoot = 'C:\mr-hv\reviewer-pkg'
+$runtimeRoot = 'C:\mr-hv\reviewer-runtime'
+
+# A declared code path that does not exist must STOP the run.
+#
+# Two of the paths above were written with a mangled separator and so never
+# resolved. Assert-ReviewerCodeIntegrity hashes what it finds and silently
+# skips what it does not, so the manifest adopted without them and every run
+# reported VERIFIED -- the pin looked complete while covering less than it
+# claimed. Absence is a refusal now, so a typo, a deletion or a rename cannot
+# quietly shrink what is pinned.
+$missingCode = @($codeFiles | Where-Object { -not (Test-Path $_) })
+if ($missingCode.Count) {
+    Clear-StaleTranscripts -OutDir $OutRoot
+    New-Status -Stage 'integrity' -State 'REFUSED' `
+        -Detail ('declared reviewer code is missing: ' +
+                 (($missingCode | ForEach-Object { Split-Path $_ -Leaf }) -join ',')) `
+        -Extra @{ reason = 'REVIEWER_CODE_DECLARED_BUT_ABSENT' }
+    exit 7
+}
+foreach ($tree in @($packageRoot, $runtimeRoot)) {
+    if (-not (Test-Path $tree)) {
+        Clear-StaleTranscripts -OutDir $OutRoot
+        New-Status -Stage 'integrity' -State 'REFUSED' `
+            -Detail ('a pinned code tree is absent: ' + (Split-Path $tree -Leaf)) `
+            -Extra @{ reason = 'REVIEWER_CODE_TREE_ABSENT' }
+        exit 7
+    }
+}
 # The interpreter is executed code, so it is pinned like executed code, and
 # so are its load points: a sitecustomize.py or usercustomize.py dropped
 # into site-packages runs before anything this script controls.
@@ -322,7 +356,7 @@ if ($interpreterPath -and (Test-Path $interpreterPath)) {
     Get-ChildItem -Path $sitePackages -Filter '*.pth' -File -ErrorAction SilentlyContinue |
         ForEach-Object { $codeFiles += $_.FullName }
 }
-$integrity = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest -Paths $codeFiles -TreeRoots @($packageRoot)
+$integrity = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest -Paths $codeFiles -TreeRoots @($packageRoot, $runtimeRoot)
 if ($integrity.state -eq 'CHANGED') {
     # Remove stale environment transcripts before refusing. A refused run leaves
     # the PREVIOUS run's transcripts in place, and anything reading them sees a

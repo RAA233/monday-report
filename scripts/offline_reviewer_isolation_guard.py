@@ -323,7 +323,7 @@ def author_task_rights() -> dict:
           "  if ($a.SecurityIdentifier -eq $me -and $a.AceType -eq 'AccessAllowed')"
           "    { $mask = $mask -bor $a.AccessMask } };"
           "@{ present = ($mask -ne 0); may_start = [bool]($mask -band 0x20);"
-          "   may_modify = [bool]($mask -band 0xC0116) } | ConvertTo-Json -Compress")
+          "   may_modify = [bool]($mask -band 0xD0116) } | ConvertTo-Json -Compress")
     try:
         proc = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
@@ -476,11 +476,95 @@ def elevation_battery() -> None:
         "which would make every other check in this guard decorative")
 
 
+def source_integrity_battery() -> None:
+    """Reviewer scripts must not carry mangled paths or stray control bytes.
+
+    This is not stylistic. Generating PowerShell from Python repeatedly wrote a
+    BEL byte for a backslash-a and a CR byte for a backslash-r, so
+    `backend\\app\\...` and `C:\\mr-hv\\reviewer-pkg` became unresolvable
+    strings. The integrity gate hashes what it finds and skipped what it did
+    not, so the manifest adopted WITHOUT the module that verifies signatures and
+    WITHOUT the staged package tree -- and every run reported VERIFIED. The pin
+    looked complete and covered less than it claimed.
+
+    A stray CR is included because it is invisible in most diffs and splits a
+    line in any text-mode reader, which is how the damage stayed hidden.
+    """
+
+    targets = [
+        ROOT / "packaging" / "hyperv" / "reviewer_session.ps1",
+        ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1",
+        ROOT / "packaging" / "hyperv" / "reviewer_credential_migration.ps1",
+        ROOT / "packaging" / "hyperv" / "reviewer_diagnostics.ps1",
+        ROOT / "packaging" / "hyperv" / "verify_author_boundary.ps1",
+        ROOT / "scripts" / "offline_reviewer_execute.py",
+        ROOT / "scripts" / "offline_reviewer_runtime.py",
+        ROOT / "scripts" / "offline_issuance_broker.py",
+        ROOT / "scripts" / "offline_hyperv_matrix.py",
+    ]
+    damaged = []
+    for path in targets:
+        if not path.is_file():
+            damaged.append(f"{path.name} (absent)")
+            continue
+        raw = path.read_bytes()
+        control = sorted({b for b in raw if b < 32 and b not in (9, 10, 13)})
+        stray_cr = raw.count(b"\r") - raw.count(b"\r\n")
+        if control or stray_cr:
+            damaged.append(f"{path.name} (control={[hex(c) for c in control]}, "
+                           f"stray_cr={stray_cr})")
+    rec("RI19 reviewer-source-free-of-control-byte-damage", not damaged,
+        f"no reviewer script carries a stray control byte or bare CR that would "
+        f"turn a declared path into an unresolvable one ({damaged or 'clean'})")
+
+
+def runtime_battery() -> None:
+    """The reviewer must run a dedicated task-owned runtime, not a shared one."""
+
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from offline_reviewer_runtime import RUNTIME_ROOT, TASK_ROOT, verify
+    except ImportError as exc:
+        rec("RI20 runtime-contract-importable", False,
+            f"the runtime contract could not be loaded ({type(exc).__name__}), so "
+            f"the interpreter the reviewer runs is unverified")
+        return
+
+    pin = REVIEWER_STATE / "python-path.txt"
+    if not pin.is_file():
+        rec("RI20 reviewer-runtime-pinned", False,
+            "the reviewer has no interpreter pin, so the operator runtime step "
+            "has not run")
+        return
+    try:
+        pinned = Path(pin.read_text(encoding="utf-8").strip())
+    except OSError:
+        rec("RI20 reviewer-runtime-pinned", False, "the interpreter pin is unreadable")
+        return
+
+    inside = False
+    try:
+        pinned.resolve().relative_to(RUNTIME_ROOT.resolve())
+        inside = True
+    except (ValueError, OSError):
+        inside = False
+    rec("RI20 reviewer-runtime-is-task-owned", inside,
+        "the pinned interpreter resolves inside the task-owned runtime root "
+        "rather than a shared or per-user Python installation")
+
+    reasons = verify(pinned, task_root=TASK_ROOT, runtime_root=RUNTIME_ROOT)
+    rec("RI21 reviewer-runtime-accepted", not reasons,
+        f"the pinned runtime satisfies the dedicated-runtime contract "
+        f"(reasons={reasons or 'none'})")
+
+
 def main() -> int:
     CHECKS.clear()
     acl_battery()
     secret_battery()
     contract_battery()
+    source_integrity_battery()
+    runtime_battery()
     elevation_battery()
     failed = [c for c in CHECKS if not c["ok"]]
     print()

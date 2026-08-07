@@ -164,7 +164,8 @@
     "audit:offline-credential-migration": "python scripts/offline_credential_migration_guard.py",
     "audit:offline-broker-issuance": "python scripts/offline_broker_issuance_guard.py",
     "audit:offline-e2-handshake": "python scripts/offline_e2_handshake_guard.py",
-    "audit:offline-reviewer-isolation": "python scripts/offline_reviewer_isolation_guard.py"
+    "audit:offline-reviewer-isolation": "python scripts/offline_reviewer_isolation_guard.py",
+    "audit:offline-reviewer-runtime": "python scripts/offline_reviewer_runtime_guard.py"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

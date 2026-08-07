@@ -41,6 +41,14 @@ param(
     [switch]$ExportSource,
     [switch]$StagePackage,
     [switch]$HardenInterpreter,
+    [switch]$ProvisionReviewerRuntime,
+    # The interpreter used to BUILD and VERIFY the dedicated runtime. This is an
+    # operator-side, one-time resolution and it is a different thing from the
+    # runtime the reviewer executes: the reviewer never discovers an interpreter
+    # at run time, it reads a pin the operator wrote. Left empty, the operator's
+    # own Python is used as the source to copy from -- which is the only local
+    # approved source, and nothing is downloaded.
+    [string]$BuildPython = '',
     [switch]$RepinReviewerCode,
     [switch]$GrantAuthorTaskRun,
     [string]$InterpreterPath = '',
@@ -344,7 +352,12 @@ if ($GrantAuthorTaskRun) {
     $got = @($after.DiscretionaryAcl | Where-Object { $_.SecurityIdentifier -eq $author })
     $mask = if ($got.Count -eq 1) { $got[0].AccessMask } else { 0 }
     Write-Fact 'author may start the task' ([bool]($mask -band 0x20))
-    Write-Fact 'author may modify the task' ([bool]($mask -band 0xC0116))
+    # 0xD0116 -- write data (the action, principal, logon mode and arguments all
+    # live in the task definition), append, write EA, write attributes, DELETE,
+    # WRITE_DAC and WRITE_OWNER. An earlier mask omitted DELETE, so an author
+    # able to remove the task outright would have been reported as unable to
+    # modify it.
+    Write-Fact 'author may modify the task' ([bool]($mask -band 0xD0116))
     if ($mask -ne $READ_EXECUTE) {
         Write-Output '  STOP: the task grant did not apply as read+execute.'
         exit 2
@@ -393,6 +406,75 @@ eviewer-code-manifest.json'
     exit 0
 }
 
+function Resolve-BuildPython {
+    <#
+      The interpreter used to BUILD the dedicated runtime, resolved once, by the
+      operator, in an elevated window. Not the same question as which
+      interpreter the REVIEWER runs -- that one is never discovered, it is read
+      from a pin this script writes.
+    #>
+    param([string]$Supplied)
+    if ($Supplied) {
+        if (Test-Path $Supplied) { return $Supplied }
+        return $null
+    }
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
+if ($ProvisionReviewerRuntime) {
+    # OPERATOR step. Assemble a DEDICATED reviewer runtime under the task-owned
+    # root, from the interpreter already installed on this host.
+    #
+    # Nothing is downloaded. Nothing is removed from the source installation --
+    # files are copied out of it, and it is left exactly as found.
+    #
+    # The runtime carries a `._pth` file, which is the control that matters:
+    # CPython then bypasses its normal path calculation, ignores PYTHONPATH and
+    # does not import `site` at all. No site means no sitecustomize, no
+    # usercustomize and no .pth processing -- the injection route stops existing
+    # rather than being locked behind permissions. Measured both ways before
+    # this was written: with the file the planted hooks are inert, without it
+    # the same hooks fire.
+    $BuildPython = Resolve-BuildPython -Supplied $BuildPython
+    if (-not $BuildPython) {
+        Write-Output '  STOP: no interpreter available to build the runtime from.'
+        Write-Output '  reason: REVIEWER_RUNTIME_NO_SOURCE'
+        Write-Output '  remedy: re-run with -BuildPython pointing at an installed python.exe.'
+        exit 2
+    }
+    $builder = Join-Path $SourceRepo 'scripts\offline_reviewer_runtime.py'
+    if (-not (Test-Path $builder)) {
+        Write-Output '  STOP: the runtime builder is missing from the source repository.'
+        Write-Output '  reason: REVIEWER_RUNTIME_BUILDER_ABSENT'
+        exit 2
+    }
+    $runtimeRoot = Join-Path $HvRoot 'reviewer-runtime'
+
+    # Reclaim first: a previous run leaves the tree owned by Administrators with
+    # no author ACE, so replacing it in place would fail partway and leave a
+    # half-built runtime that still looks structurally plausible.
+    if (Test-Path $runtimeRoot) {
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        & takeown.exe /F $runtimeRoot /R /D Y | Out-Null
+        & icacls.exe $runtimeRoot /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
+        $ErrorActionPreference = $prev
+    }
+
+    & $BuildPython $builder --action build --source-interpreter $BuildPython `
+        --runtime-root $runtimeRoot
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "  STOP: the runtime build failed ($LASTEXITCODE)."
+        exit 2
+    }
+    Write-Fact 'dedicated runtime built' $true
+    Write-Fact 'source installation' 'copied from, never modified'
+    Write-Output ''
+    Write-Output '  Next: -HardenInterpreter verifies, locks and pins it.'
+    exit 0
+}
+
 if ($HardenInterpreter) {
     # OPERATOR step. Remove the author's ordinary write access to the Python
     # interpreter the reviewer executes, and pin it for the reviewer.
@@ -404,24 +486,74 @@ if ($HardenInterpreter) {
     # the Hyper-V root and no tracked source needed to be touched, so the code
     # manifest and the pristine-clone check both passed while arbitrary code ran
     # as the reviewer.
-    if (-not $InterpreterPath -or -not (Test-Path $InterpreterPath)) {
-        Write-Output '  STOP: -InterpreterPath must point at the python.exe the reviewer will run.'
+    # WHAT THIS NO LONGER DOES, AND WHY.
+    #
+    # It used to take the interpreter named in the pin and lock that tree in
+    # place. Classifying the pinned interpreter before touching it is the only
+    # reason that did not run: it was the author's own development Python --
+    # registered in the user's Python registry key, on the persistent PATH, 307
+    # installed distributions, 119 console-script shims, four dependent virtual
+    # environments, 73,711 files, 3.13 GiB. Taking ownership of that tree and
+    # stripping the author's access would have broken all of it, for a
+    # certification run, irreversibly enough to matter.
+    #
+    # So the runtime moves instead of the ACL. This action now LOCKS AND PINS a
+    # dedicated runtime that -ProvisionReviewerRuntime has already built under
+    # the task-owned root, and refuses anything else with a named reason. It
+    # never touches a shared installation, and it never deletes a Python file.
+    $runtimeRoot = Join-Path $HvRoot 'reviewer-runtime'
+    $candidate = if ($InterpreterPath) { $InterpreterPath }
+                 else { Join-Path $runtimeRoot 'python.exe' }
+
+    $verifier = Join-Path $SourceRepo 'scripts\offline_reviewer_runtime.py'
+    if (-not (Test-Path $verifier)) {
+        Write-Output '  STOP: the runtime verifier is missing from the source repository.'
+        Write-Output '  reason: REVIEWER_RUNTIME_VERIFIER_ABSENT'
         exit 2
     }
-    $root = Split-Path $InterpreterPath -Parent
+    if (-not (Test-Path $candidate)) {
+        Write-Output '  STOP: no dedicated reviewer runtime is present.'
+        Write-Output '  reason: REVIEWER_RUNTIME_ABSENT'
+        Write-Output '  remedy: run -ProvisionReviewerRuntime first.'
+        exit 2
+    }
+
+    # The verifier decides, not this script. Same code the guard drives through
+    # seventeen mutation cycles, so the refusal reasons are the tested ones.
+    $BuildPython = Resolve-BuildPython -Supplied $BuildPython
+    if (-not $BuildPython) {
+        Write-Output '  STOP: no interpreter available to run the verifier.'
+        Write-Output '  reason: REVIEWER_RUNTIME_NO_SOURCE'
+        exit 2
+    }
+    $probe = & $BuildPython $verifier --action verify --runtime-root $runtimeRoot 2>&1 | Out-String
+    $verdict = $null
+    try { $verdict = $probe | ConvertFrom-Json } catch { $verdict = $null }
+    if (-not $verdict -or -not $verdict.accepted) {
+        Write-Output '  STOP: the runtime was refused.'
+        if ($verdict) { foreach ($r in $verdict.reasons) { Write-Output "  reason: $r" } }
+        else { Write-Output '  reason: REVIEWER_RUNTIME_VERIFIER_UNREADABLE' }
+        Write-Output '  Nothing was changed. No file was removed.'
+        exit 2
+    }
+
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & icacls.exe $root /inheritance:r /T /C /Q | Out-Null
-    & icacls.exe $root /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
-    & icacls.exe $root /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
+    & icacls.exe $runtimeRoot /reset /T /C /Q | Out-Null
+    & icacls.exe $runtimeRoot /inheritance:r | Out-Null
+    & icacls.exe $runtimeRoot /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
+    & icacls.exe $runtimeRoot /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
 
     # Pin it where only the reviewer can rewrite the pin.
     $stateDir = Join-Path $HvRoot 'reviewer\state'
     if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
-    Set-Content -Path (Join-Path $stateDir 'python-path.txt') -Value $InterpreterPath -Encoding ascii
+    Set-Content -Path (Join-Path $stateDir 'python-path.txt') `
+        -Value (Join-Path $runtimeRoot 'python.exe') -Encoding ascii
 
-    Write-Fact 'interpreter pinned' $true
-    Write-Fact 'interpreter ACL' 'admins+SYSTEM write, reviewer read+execute, no author-user ACE'
+    Write-Fact 'runtime verified' 'accepted (0 refusal reasons)'
+    Write-Fact 'runtime pinned' $true
+    Write-Fact 'runtime ACL' 'admins+SYSTEM write, reviewer read+execute, no author-user ACE'
+    Write-Fact 'shared interpreters touched' 'none'
     exit 0
 }
 
