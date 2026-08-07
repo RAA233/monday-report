@@ -92,6 +92,11 @@ def binding_battery() -> None:
         "an unresolved head binding raises instead of being written as an empty "
         "string into the guest metadata")
 
+    rec("EH03b authoritative-mode-requires-head-binding",
+        "HEAD_BINDING_REQUIRED" in matrix,
+        "authoritative brokered mode refuses to run without an explicit head "
+        "binding, so the issuance witness always states which head it vouches for")
+
     rec("EH03 reviewer-passes-frozen-binding",
         '"--source-commit", str(frozen.get("source_commit"' in
         DRIVER.read_text(encoding="utf-8"),

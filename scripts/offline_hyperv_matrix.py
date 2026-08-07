@@ -363,6 +363,15 @@ def main(argv: list[str] | None = None) -> int:
                           f"(offered: {args.key_file and '--key-file'} {offered})",
                 "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
             return 1
+        if not args.source_commit or not args.source_tree:
+            print(json.dumps({
+                "guard": "offline_hyperv", "mode": "brokered",
+                "refused": "HEAD_BINDING_REQUIRED",
+                "detail": "authoritative brokered mode requires --source-commit and "
+                          "--source-tree; the issuance witness must state which head "
+                          "the run it vouches for was executed at",
+                "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
+            return 1
         if not args.review_nonce:
             print(json.dumps({
                 "guard": "offline_hyperv", "mode": "brokered",
@@ -535,9 +544,15 @@ def main(argv: list[str] | None = None) -> int:
 
             os.environ[broker.BROKER_FLAG] = "1"
             try:
+                # Pass the head binding: the reviewer-side check only enforces
+                # commit/tree when it is given them, so omitting it silently
+                # produced a witness that vouched for a run without saying which
+                # head it ran at.
                 issued = broker.request_bundle(
                     request=request_path, transfer_in=inbox, sequence=1,
-                    nonce=args.review_nonce, label=args.env_label)
+                    nonce=args.review_nonce, label=args.env_label,
+                    source_commit=args.source_commit,
+                    source_tree=args.source_tree)
             except (TimeoutError, ValueError, OSError) as exc:
                 return stop_honestly(vm=vm, state="ACTIVATION_REQUEST_READY",
                                      detail=f"brokered issuance failed: {exc}",
