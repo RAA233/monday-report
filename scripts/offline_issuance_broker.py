@@ -31,6 +31,7 @@ files already on disk.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -56,7 +57,8 @@ def brokered() -> bool:
 
 
 def request_bundle(*, request: Path, transfer_in: Path, sequence: int, nonce: str,
-                   label: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
+                   label: str, source_commit: str = "", source_tree: str = "",
+                   timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
     """REVIEWER SIDE. Publish an activation request and block for the licence set.
 
     Never signs, never holds a key, and accepts licences only from the
@@ -79,6 +81,8 @@ def request_bundle(*, request: Path, transfer_in: Path, sequence: int, nonce: st
         "sequence": sequence,
         "review_nonce": nonce,
         "environment_label": label,
+        "source_commit": source_commit,
+        "source_tree": source_tree,
         "activation_request": payload,
     }
     (REQUEST_DIR / f"{ticket}.json").write_text(
@@ -100,10 +104,27 @@ def request_bundle(*, request: Path, transfer_in: Path, sequence: int, nonce: st
         raise TimeoutError(f"the author did not issue licences for {ticket} in time")
 
     witness = json.loads(witness_path.read_text(encoding="utf-8"))
+    # Every binding is checked here, on the REVIEWER side, before a single
+    # licence is imported. A witness that answers a different run, a different
+    # environment, a different request, or a different head is not evidence
+    # about this run at all.
     if str(witness.get("review_nonce", "")) != nonce:
         raise ValueError("the issuance witness answers a different review nonce")
     if str(witness.get("activation_request_hash", "")) != _canonical_request_hash(payload):
         raise ValueError("the issuance witness binds a different activation request")
+    if str(witness.get("environment_label", "")) != label:
+        raise ValueError("the issuance witness answers a different environment")
+    if source_commit and str(witness.get("source_commit", "")) != source_commit:
+        raise ValueError("the issuance witness was minted at a different source commit")
+    if source_tree and str(witness.get("source_tree", "")) != source_tree:
+        raise ValueError("the issuance witness was minted at a different source tree")
+    # The licences must be the ones the witness covers: a witness signed over
+    # one licence set does not vouch for bytes swapped in afterwards.
+    licence_digests = {}
+    for licence in sorted(answer_dir.glob("license-*.json")):
+        licence_digests[licence.name] = hashlib.sha256(licence.read_bytes()).hexdigest()
+    if str(witness.get("licence_set_digest", "")) != _licence_set_digest(licence_digests):
+        raise ValueError("licence bytes changed after the issuance witness was generated")
 
     transfer_in.mkdir(parents=True, exist_ok=True)
     copied = []
@@ -111,6 +132,19 @@ def request_bundle(*, request: Path, transfer_in: Path, sequence: int, nonce: st
         (transfer_in / licence.name).write_bytes(licence.read_bytes())
         copied.append(licence.name)
     return {"ticket": ticket, "licences": copied, "witness": witness}
+
+
+#: Domain separator. A witness signed for issuance must never verify as
+#: anything else, even if some other document happens to share its fields.
+WITNESS_DOMAIN = "monday-report/offline-issuance-witness/v1"
+
+
+def _licence_set_digest(digests: dict) -> str:
+    """One digest over the whole licence set, so a swapped or added licence
+    breaks the witness rather than sliding in beside it."""
+
+    return hashlib.sha256(
+        json.dumps(digests, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _canonical_request_hash(request: dict) -> str:
@@ -138,6 +172,8 @@ def serve_once(*, key_file: Path, expiry_seconds: int) -> list[str]:
     LICENCE_DIR.mkdir(parents=True, exist_ok=True)
     private = Ed25519PrivateKey.from_private_bytes(
         bytes.fromhex(key_file.read_text(encoding="utf-8").strip()))
+    from backend.app.offline_review_attestation import key_fingerprint
+    issuer_fingerprint = key_fingerprint(private.public_key().public_bytes_raw())
 
     answered: list[str] = []
     for ticket_path in sorted(REQUEST_DIR.glob("*.json")):
@@ -167,10 +203,21 @@ def serve_once(*, key_file: Path, expiry_seconds: int) -> list[str]:
                 encoding="utf-8")
             continue
 
+        licence_digests = {}
+        for licence in sorted(answer_dir.glob("license-*.json")):
+            licence_digests[licence.name] = hashlib.sha256(licence.read_bytes()).hexdigest()
         witness = {
             "schema_version": WITNESS_SCHEMA,
+            "domain": WITNESS_DOMAIN,
             "review_nonce": str(envelope.get("review_nonce", "")),
+            "environment_label": str(envelope.get("environment_label", "")),
             "activation_request_hash": _canonical_request_hash(request),
+            "requested_fingerprint_digest": str(
+                request.get("machine_fingerprint_hash", ""))[:32],
+            "source_commit": str(envelope.get("source_commit", "")),
+            "source_tree": str(envelope.get("source_tree", "")),
+            "licence_set_digest": _licence_set_digest(licence_digests),
+            "issuer_key_fingerprint": issuer_fingerprint,
             "issued_at": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
             "expiry_seconds": int(expiry_seconds),
         }

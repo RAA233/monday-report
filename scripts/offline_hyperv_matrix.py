@@ -84,6 +84,13 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+#: Where the guest credential is sealed. Set once from --state-root, because
+#: credential ownership was migrated to the reviewer: the author's copy was
+#: rotated away and no longer authenticates, so a run that does not carry the
+#: right state root cannot open a guest session at all.
+_STATE_ROOT = ""
+
+
 def control(action: str, *, vm: str, timeout: float = 900.0, **kwargs) -> dict:
     """Invoke one host-side control action. Returns the parsed JSON envelope.
 
@@ -93,6 +100,8 @@ def control(action: str, *, vm: str, timeout: float = 900.0, **kwargs) -> dict:
 
     args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(CONTROL), "-Action", action, "-VmName", vm]
+    if _STATE_ROOT:
+        args += ["-StateRoot", _STATE_ROOT]
     for key, value in kwargs.items():
         if value is None or value == "":
             continue
@@ -256,7 +265,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--vm-name", default=DEFAULT_VM)
     parser.add_argument("--package-dir", default=str(DEFAULT_APP_DIR))
     parser.add_argument("--transfer-root", default=str(DEFAULT_TRANSFER_ROOT))
-    parser.add_argument("--key-file", help="operator private key (HOST side only, never transferred)")
+    parser.add_argument("--key-file",
+                        help="operator private key. NON-AUTHORITATIVE developer mode only: "
+                             "it signs in-process, so the principal running the matrix also "
+                             "issues its own licences and the result cannot support "
+                             "commercial acceptance. Refused outright in --brokered mode.")
+    parser.add_argument("--brokered", action="store_true",
+                        help="AUTHORITATIVE mode. Licences are obtained from the issuance "
+                             "broker instead of being signed here, so the issuer key never "
+                             "enters this process, this session, or the guest.")
+    parser.add_argument("--review-nonce", default="",
+                        help="reviewer-minted nonce; the issuance witness must answer it")
+    parser.add_argument("--env-label", default="ENVIRONMENT_2")
+    parser.add_argument("--state-root", default="",
+                        help="where the guest credential is sealed; the reviewer passes its "
+                             "own state root because credential ownership was migrated")
     parser.add_argument("--other-environment-license",
                         help="a license issued for the OTHER environment, so this one can "
                              "prove it rejects a copied license (PK19)")
@@ -282,13 +305,47 @@ def main(argv: list[str] | None = None) -> int:
                           "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
         return 1
 
-    key_file = Path(args.key_file or os.environ.get("MONDAY_REPORT_OPERATOR_KEY_FILE", ""))
-    if not key_file.is_file():
-        print(json.dumps({"guard": "offline_hyperv",
-                          "detail": "operator key must be supplied explicitly via --key-file or "
-                                    "MONDAY_REPORT_OPERATOR_KEY_FILE (host side only, never transferred)",
-                          "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
-        return 1
+    # ---- mode selection: authoritative brokered, or non-authoritative direct --
+    #
+    # In brokered mode this process never holds the issuer key. That is the whole
+    # point: while the matrix signs its own licences, the principal running it is
+    # also the principal issuing them, and its output cannot support commercial
+    # acceptance no matter how green it is.
+    global _STATE_ROOT
+    if args.state_root:
+        _STATE_ROOT = args.state_root
+
+    if args.brokered:
+        offered = [name for name in ("MONDAY_REPORT_OPERATOR_KEY_FILE",
+                                     "MONDAY_REPORT_OPERATOR_KEY",
+                                     "MONDAY_REPORT_OFFLINE_ISSUER_KEY")
+                   if os.environ.get(name)]
+        if args.key_file or offered:
+            print(json.dumps({
+                "guard": "offline_hyperv", "mode": "brokered",
+                "refused": "ISSUER_KEY_OFFERED_IN_AUTHORITATIVE_MODE",
+                "detail": "authoritative brokered mode refuses issuer key material; a matrix "
+                          "that can sign its own licences is not independently attested "
+                          f"(offered: {args.key_file and '--key-file'} {offered})",
+                "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
+            return 1
+        if not args.review_nonce:
+            print(json.dumps({
+                "guard": "offline_hyperv", "mode": "brokered",
+                "refused": "REVIEW_NONCE_REQUIRED",
+                "detail": "brokered mode requires the reviewer-minted nonce the issuance "
+                          "witness must answer",
+                "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
+            return 1
+        key_file = None
+    else:
+        key_file = Path(args.key_file or os.environ.get("MONDAY_REPORT_OPERATOR_KEY_FILE", ""))
+        if not key_file.is_file():
+            print(json.dumps({"guard": "offline_hyperv",
+                              "detail": "operator key must be supplied explicitly via --key-file or "
+                                        "MONDAY_REPORT_OPERATOR_KEY_FILE (host side only, never transferred)",
+                              "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
+            return 1
 
     state_path = root / "orchestrator-state.json"
 
@@ -432,12 +489,39 @@ def main(argv: list[str] | None = None) -> int:
         # ---- HOST-SIDE SIGNING: outside the product and outside the VM ----
         inbox = root / "in"
         inbox.mkdir(parents=True, exist_ok=True)
-        bundle = build_license_bundle(request_path=request_path, transfer_in=inbox,
-                                      key_file=key_file, expiry_seconds=args.expiry_seconds)
-        if not all(bundle.values()):
-            return stop_honestly(vm=vm, state="ACTIVATION_REQUEST_READY",
-                                 detail=f"operator issuance failed: {bundle}",
-                                 states=states, transitions=transitions)
+        if args.brokered:
+            # AUTHORITATIVE: ask the broker. The issuer key stays in the author's
+            # process, outside this session and outside the guest; only signed
+            # licences and an issuance witness come back, and this process cannot
+            # write the directory they arrive in.
+            sys.path.insert(0, str(ROOT / "scripts"))
+            import offline_issuance_broker as broker  # noqa: PLC0415
+
+            os.environ[broker.BROKER_FLAG] = "1"
+            try:
+                issued = broker.request_bundle(
+                    request=request_path, transfer_in=inbox, sequence=1,
+                    nonce=args.review_nonce, label=args.env_label)
+            except (TimeoutError, ValueError, OSError) as exc:
+                return stop_honestly(vm=vm, state="ACTIVATION_REQUEST_READY",
+                                     detail=f"brokered issuance failed: {exc}",
+                                     states=states, transitions=transitions)
+            witness_path = inbox.parent / "issuance-witness.json"
+            witness_path.write_text(
+                json.dumps(issued.get("witness", {}), indent=2, sort_keys=True),
+                encoding="utf-8")
+            bundle = {name: True for name in issued.get("licences", [])}
+            if not bundle:
+                return stop_honestly(vm=vm, state="ACTIVATION_REQUEST_READY",
+                                     detail="the broker returned no licences",
+                                     states=states, transitions=transitions)
+        else:
+            bundle = build_license_bundle(request_path=request_path, transfer_in=inbox,
+                                          key_file=key_file, expiry_seconds=args.expiry_seconds)
+            if not all(bundle.values()):
+                return stop_honestly(vm=vm, state="ACTIVATION_REQUEST_READY",
+                                     detail=f"operator issuance failed: {bundle}",
+                                     states=states, transitions=transitions)
 
         # A genuine license for the OTHER environment, so this one proves it
         # rejects a copied cross-environment license (PK19).

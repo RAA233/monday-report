@@ -419,7 +419,9 @@ def stage_environment(args, label: str, env_class: str) -> int:
     os.environ[broker.BROKER_FLAG] = "1"
     try:
         issued = broker.request_bundle(request=activation, transfer_in=transfer_in,
-                                       sequence=1, nonce=nonce, label=label)
+                                       sequence=1, nonce=nonce, label=label,
+                                       source_commit=str(frozen.get("source_commit", "")),
+                                       source_tree=str(frozen.get("source_tree", "")))
     except (TimeoutError, ValueError, OSError) as exc:
         return fail({"state": "FAILED", "phase": "issuance", "detail": str(exc)}, 6)
 
@@ -491,14 +493,116 @@ def stage_e1(args) -> int:
 
 
 def stage_e2(args) -> int:
-    # Environment 2 needs the guest credential re-protected under reviewer
-    # DPAPI. That handoff is not built, and the reviewer must not simply be
-    # handed the author blob, so this refuses rather than pretending.
-    print(json.dumps({
-        "stage": "e2", "state": "NOT_IMPLEMENTED",
-        "detail": "guest credential handoff to the reviewer principal is not built"},
-        indent=2))
-    return 8
+    """Execute the COMPLETE Environment 2 matrix under the reviewer principal.
+
+    The reviewer drives Hyper-V with the guest credential it now owns -- the
+    author's copy was rotated away and no longer authenticates -- and runs the
+    matrix in BROKERED mode, so the issuer key never enters this session or the
+    guest. Licences arrive only from a directory the reviewer cannot write.
+    """
+
+    source = Path(args.source_root)
+    out = Path(args.out_root)
+    out.mkdir(parents=True, exist_ok=True)
+    transcript_path = out / "ENVIRONMENT_2-transcript.json"
+    label = "ENVIRONMENT_2"
+
+    def fail(payload: dict, code: int) -> int:
+        transcript_path.write_text(json.dumps(payload, indent=2, sort_keys=True),
+                                   encoding="utf-8")
+        print(json.dumps({"stage": "e2", "state": "FAILED"}, indent=2))
+        return code
+
+    state_root = Path(args.state_root)
+    if not (state_root / "e2-guest.cred").is_file():
+        return fail({"state": "FAILED", "phase": "credential",
+                     "detail": "the reviewer does not hold a sealed guest credential; "
+                               "run the credential migration first"}, 4)
+
+    try:
+        package = _frozen_package()
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        return fail({"state": "FAILED", "phase": "package", "detail": str(exc)}, 4)
+    if package["disagreements"]:
+        return fail({"state": "FAILED", "phase": "package",
+                     "detail": "staged package disagrees with its descriptor",
+                     "fields": package["disagreements"]}, 4)
+    frozen = package["frozen"]
+
+    # Minted BEFORE the run so the author's witness cannot predate it.
+    nonce = secrets.token_hex(32)
+    started = datetime.now(timezone.utc).isoformat()
+
+    # The transfer root must be reviewer-owned: the author must not be able to
+    # edit bytes that later become reviewer-signed evidence.
+    transfer_root = Path(args.state_root).parent / "work" / label
+    if transfer_root.exists():
+        shutil.rmtree(transfer_root, ignore_errors=True)
+    transfer_root.mkdir(parents=True, exist_ok=True)
+
+    cmd = [sys.executable, str(source / "scripts" / "offline_hyperv_matrix.py"),
+           "--phase", "full", "--brokered", "--review-nonce", nonce,
+           "--env-label", label,
+           "--package-dir", str(PACKAGE_ROOT / "app"),
+           "--transfer-root", str(transfer_root),
+           "--state-root", str(state_root),
+           "--out", str(transfer_root / "environment-2-result.json")]
+
+    # Belt and braces: strip any issuer-key variable from the child environment.
+    child_env = {k: v for k, v in os.environ.items()
+                 if k not in ("MONDAY_REPORT_OPERATOR_KEY", "MONDAY_REPORT_OPERATOR_KEY_FILE",
+                              "MONDAY_REPORT_OFFLINE_ISSUER_KEY",
+                              "MONDAY_REPORT_LICENSE_PRIVATE_KEY")}
+    matrix = subprocess.run(cmd, capture_output=True, text=True, timeout=14400, env=child_env)
+
+    result_path = transfer_root / "environment-2-result.json"
+    ok = matrix.returncode == 0 and result_path.exists()
+
+    in_environment: dict = {}
+    package_disagreements: list = []
+    totals: dict = {}
+    if result_path.exists():
+        observed = json.loads(result_path.read_text(encoding="utf-8"))
+        totals = observed.get("totals", {}) or {}
+        for field in ("package_version", "installer_sha256", "executable_sha256",
+                      "payload_manifest_sha256", "frontend_manifest_sha256"):
+            in_environment[field] = observed.get(field)
+            if frozen.get(field) and observed.get(field) != frozen.get(field):
+                package_disagreements.append(field)
+        ok = ok and not package_disagreements
+        ok = ok and int(totals.get("failed", 1)) == 0 and int(totals.get("passed", 0)) > 0
+
+    witness = {}
+    witness_path = transfer_root / "issuance-witness.json"
+    if witness_path.exists():
+        witness = json.loads(witness_path.read_text(encoding="utf-8"))
+    ok = ok and bool(witness) and str(witness.get("review_nonce", "")) == nonce
+
+    transcript = {
+        "state": "COMPLETE" if ok else "FAILED",
+        "environment_label": label,
+        "environment_class": "windows-11-hyperv",
+        "review_nonce": nonce,
+        "issuance_witness": witness,
+        "brokered": True,
+        "issuer_key_present_in_session": False,
+        "in_environment_package": in_environment,
+        "package_disagreements": package_disagreements,
+        "totals": totals,
+        "frozen_package": frozen,
+        "recomputed_package": package["recomputed"],
+        "started_at": started,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "matrix_rc": matrix.returncode,
+        "raw_result_sha256": sha256_file(result_path) if result_path.exists() else "",
+    }
+    if not ok:
+        transcript["stdout_tail"] = matrix.stdout[-2000:]
+        transcript["stderr_tail"] = matrix.stderr[-800:]
+    transcript_path.write_text(json.dumps(transcript, indent=2, sort_keys=True),
+                               encoding="utf-8")
+    print(json.dumps({"stage": "e2", "state": transcript["state"]}, indent=2))
+    return 0 if ok else 7
 
 
 def stage_review(args: argparse.Namespace) -> int:
