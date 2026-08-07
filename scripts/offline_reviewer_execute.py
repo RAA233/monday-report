@@ -37,6 +37,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 from ctypes import wintypes
@@ -375,7 +376,16 @@ def stage_environment(args, label: str, env_class: str) -> int:
         print(json.dumps({"stage": label, "state": "FAILED"}, indent=2))
         return code
 
+    # FRESH ISOLATED STATE, wiped by the reviewer itself.
+    #
+    # The matrix must start from a clean machine or PK01 fresh-install proves
+    # nothing. The AUTHOR cannot do this wipe: reviewer\work is reviewer-owned
+    # and author-read-only, so an author-side cleanup fails with access denied --
+    # which is the isolation working, not a bug. The reviewer owns the directory,
+    # so the reviewer clears it.
     work = Path(args.state_root).parent / "work" / label
+    if work.exists():
+        shutil.rmtree(work, ignore_errors=False)
     transfer_in = work / "in"
     transfer_out = work / "out"
     for d in (work, transfer_in, transfer_out):
