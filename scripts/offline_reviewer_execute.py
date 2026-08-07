@@ -543,7 +543,7 @@ def stage_e2(args) -> int:
     cmd = [sys.executable, str(source / "scripts" / "offline_hyperv_matrix.py"),
            "--phase", "full", "--brokered", "--review-nonce", nonce,
            "--env-label", label,
-           "--package-dir", str(PACKAGE_ROOT / "app"),
+           "--package-dir", str(PACKAGE_ROOT / "stage" / "MondayReportOffline"),
            "--transfer-root", str(transfer_root),
            "--state-root", str(state_root),
            "--out", str(transfer_root / "environment-2-result.json")]
