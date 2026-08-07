@@ -191,7 +191,7 @@ function Assert-ReviewerCodeIntegrity {
       reviewer-owned manifest defeats it. That requires acting as the reviewer,
       which is the boundary the whole protocol rests on -- not a bypass of it.
     #>
-    param([string]$ManifestPath, [string[]]$Paths)
+    param([string]$ManifestPath, [string[]]$Paths, [string[]]$TreeRoots = @())
 
     # Keyed by full path, not leaf name. Leaf keying silently collapsed two
     # different files that happen to share a name into one entry, so swapping
@@ -202,6 +202,32 @@ function Assert-ReviewerCodeIntegrity {
         if (Test-Path $f) {
             $current[$f.ToLowerInvariant()] = (Get-FileHash -Path $f -Algorithm SHA256).Hash
         }
+    }
+
+    # Whole trees, not enumerated files.
+    #
+    # The staged package is executed code -- the reviewer runs install.ps1 and
+    # the packaged executable out of it -- and naming individual files inside it
+    # would pin the entry points while leaving the interpreter and libraries the
+    # executable actually loads unpinned. A recursive digest covers the closure
+    # instead of a hand-written sample of it, so ANY byte that changes shows up.
+    foreach ($root in $TreeRoots) {
+        if (-not (Test-Path $root)) { continue }
+        $rootFull = (Resolve-Path $root).Path
+        $lines = New-Object System.Collections.Generic.List[string]
+        Get-ChildItem -Path $rootFull -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Sort-Object -Property FullName |
+            ForEach-Object {
+                $rel = $_.FullName.Substring($rootFull.Length).TrimStart('').ToLowerInvariant()
+                $lines.Add($rel + ':' + (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash)
+            }
+        $joined = [string]::Join("`n", $lines.ToArray())
+        $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join ''
+        } finally { $sha.Dispose() }
+        $current['tree:' + $rootFull.ToLowerInvariant()] = $digest.ToUpperInvariant()
     }
 
     if (-not (Test-Path $ManifestPath)) {
@@ -268,8 +294,19 @@ $codeFiles = @(
     (Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_diagnostics.ps1'),
     (Join-Path $SourceRoot 'scripts\offline_reviewer_execute.py'),
     (Join-Path $SourceRoot 'scripts\offline_issuance_broker.py'),
-    (Join-Path $SourceRoot 'scripts\offline_hyperv_matrix.py')
+    (Join-Path $SourceRoot 'scripts\offline_hyperv_matrix.py'),
+    # The runners that execute the matrices, and the module that generates and
+    # verifies the attestation and the issuance witness. The pristine-clone
+    # check covers the whole export by tree hash, but it runs inside the Python
+    # driver -- after this gate, and only for stages that reach the driver. The
+    # code that decides whether a signature is valid should not be reachable
+    # through a path this gate has not already covered.
+    (Join-Path $SourceRoot 'scripts\offline_env_runner.py'),
+    (Join-Path $SourceRoot 'scripts\offline_env_runner.ps1'),
+    (Join-Path $SourceRoot 'backendpp\offline_review_attestation.py')
 )
+# The staged package the reviewer installs and executes.
+$packageRoot = 'C:\mr-hveviewer-pkg'
 # The interpreter is executed code, so it is pinned like executed code, and
 # so are its load points: a sitecustomize.py or usercustomize.py dropped
 # into site-packages runs before anything this script controls.
@@ -285,7 +322,7 @@ if ($interpreterPath -and (Test-Path $interpreterPath)) {
     Get-ChildItem -Path $sitePackages -Filter '*.pth' -File -ErrorAction SilentlyContinue |
         ForEach-Object { $codeFiles += $_.FullName }
 }
-$integrity = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest -Paths $codeFiles
+$integrity = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest -Paths $codeFiles -TreeRoots @($packageRoot)
 if ($integrity.state -eq 'CHANGED') {
     # Remove stale environment transcripts before refusing. A refused run leaves
     # the PREVIOUS run's transcripts in place, and anything reading them sees a
