@@ -93,11 +93,13 @@ function Get-RequestedStage {
         $raw = Get-Content $CommandFile -Raw -Encoding UTF8
         $doc = $raw | ConvertFrom-Json
     } catch {
+        Clear-StaleTranscripts -OutDir $OutRoot
         New-Status -Stage 'unknown' -State 'REFUSED' -Detail 'command file is not valid JSON'
         exit 3
     }
     $stage = [string]$doc.stage
     if ($AllowedStages -notcontains $stage) {
+        Clear-StaleTranscripts -OutDir $OutRoot
         New-Status -Stage 'unknown' -State 'REFUSED' `
             -Detail 'requested stage is not in the reviewer allowlist'
         exit 3
@@ -123,6 +125,23 @@ function Get-ReviewerPython {
     return $null
 }
 
+function Clear-StaleTranscripts {
+    <#
+      Results must not outlive the run that produced them.
+
+      Any refusal that leaves the previous run's transcripts in place lets a
+      reader see a COMPLETE result for a run that never happened -- which
+      already fooled the author's own harness once. This was fixed on the
+      integrity path only, which made the other five refusal paths look handled.
+      Every exit that does not produce a result now calls this first.
+    #>
+    param([string]$OutDir)
+    foreach ($stale in @('ENVIRONMENT_1-transcript.json', 'ENVIRONMENT_2-transcript.json')) {
+        $path = Join-Path $OutDir $stale
+        if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Protect-Transcript {
     <#
       Last-resort redactor for text captured from a child process.
@@ -138,6 +157,11 @@ function Protect-Transcript {
     $t = $t -replace '\\\\[^\s"'']+', '<path>'
     $t = $t -replace '\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b', '<mac>'
     $t = $t -replace 'S-1-\d+(-\d+)+', '<sid>'
+    # GUIDs: this text is unhandled Hyper-V / PowerShell Direct error output,
+    # which routinely names VM identifiers. Its sibling redactor already
+    # stripped them; omitting the rule here leaked the one identifier class most
+    # likely to appear in the failures this exists to capture.
+    $t = $t -replace '\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b', '<guid>'
     $t = $t -replace '(?i)(password|secret|token|credential|passphrase)\s*[:=]\s*\S+', '$1=<redacted>'
     $t = $t -replace '\b[A-Za-z0-9+/]{40,}={0,2}\b', '<opaque>'
     $t = $t -replace '\b[0-9a-fA-F]{64,}\b', '<opaque>'
@@ -184,10 +208,13 @@ function Assert-ReviewerCodeIntegrity {
 
     $pinned = Get-Content $ManifestPath -Raw | ConvertFrom-Json
     $changed = @()
+    $pinnedNames = @($pinned.PSObject.Properties.Name)
     foreach ($name in $current.Keys) {
-        $was = $pinned.$name
-        if (-not $was) { $changed += "$name (not pinned)" }
-        elseif ($was -ne $current[$name]) { $changed += $name }
+        # Property access on a missing member THROWS under StrictMode 2.0, which
+        # would kill the session with no status artifact -- the worst failure
+        # mode this file warns about -- instead of reporting "not pinned".
+        if ($pinnedNames -notcontains $name) { $changed += "$name (not pinned)"; continue }
+        if ($pinned.$name -ne $current[$name]) { $changed += $name }
     }
     foreach ($prop in $pinned.PSObject.Properties.Name) {
         if (-not $current.ContainsKey($prop)) { $changed += "$prop (missing)" }
@@ -221,6 +248,7 @@ if ($missing.Count -gt 0) {
                   "not writable: $names")
     Write-Output ("[reviewer] remedy: run reviewer_bootstrap.ps1 -ProvisionPaths " +
                   "(administrative, no credential prompt)")
+    Clear-StaleTranscripts -OutDir $OutRoot
     exit 6
 }
 
@@ -340,16 +368,19 @@ if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate' -or $stage -eq 'cred-
 
 $py = Get-ReviewerPython
 if (-not $py) {
+    Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail 'no python interpreter reachable by the reviewer'
     exit 4
 }
 if (-not (Test-Path $SourceRoot)) {
+    Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail 'pristine source export is absent'
     exit 4
 }
 
 $driver = Join-Path $SourceRoot 'scripts\offline_reviewer_execute.py'
 if (-not (Test-Path $driver)) {
+    Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail 'reviewer driver missing from the export'
     exit 4
 }

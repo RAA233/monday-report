@@ -286,6 +286,17 @@ if ($ExportSource) {
     $head = (& git.exe -C $SourceRepo rev-parse HEAD).Trim()
     $tree = (& git.exe -C $SourceRepo rev-parse 'HEAD^{tree}').Trim()
     Write-Fact 'exporting head' $head
+    # Reclaim before replacing. A previous export leaves the tree owned by the
+    # reviewer with no author-user rights, so even an administrator cannot
+    # delete it until ownership and a DACL entry are restored. Doing this here
+    # keeps the export self-contained instead of failing halfway and leaving a
+    # half-permissioned clone behind.
+    if (Test-Path $dest) {
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        & takeown.exe /f $dest /r /d y | Out-Null
+        & icacls.exe $dest /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
+        $ErrorActionPreference = $prev
+    }
     if (Test-Path "$dest\.git") { Remove-Item $dest -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -301,10 +312,20 @@ if ($ExportSource) {
         throw 'the pristine export does not match the source head'
     }
 
-    $me = "$env:USERDOMAIN\$env:USERNAME"
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    # NO ACE for the author's ordinary user identity.
+    #
+    # This line previously granted "${me}:(OI)(CI)F" and, because -ExportSource
+    # is the LAST writer of this ACL, it silently undid the lock applied to
+    # reviewer-bin: the author could rewrite offline_env_runner.py -- which the
+    # reviewer executes for the whole Environment 1 matrix -- and every module
+    # the driver imports, none of which a six-file manifest covered. The comment
+    # that used to sit here claimed the opposite of the line above it, which is
+    # how that survived a review.
+    & icacls.exe $dest /reset /T /C /Q | Out-Null
     & icacls.exe $dest /inheritance:r | Out-Null
-    & icacls.exe $dest /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" | Out-Null
+    & icacls.exe $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" | Out-Null
+    & icacls.exe $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
     # The REVIEWER must own this directory, or it cannot use git in it at all:
     # git refuses to operate in a repository owned by another user, and returns
@@ -317,7 +338,7 @@ if ($ExportSource) {
     # and VERIFY its source without letting the author's user identity change it.
     & icacls.exe $dest /setowner "$User" /T /C /Q | Out-Null
     Write-Fact 'export owner' 'reviewer (so it can verify the head first hand)'
-    Write-Fact 'export ACL' 'admins+SYSTEM write, reviewer read+execute'
+    Write-Fact 'export ACL' 'admins+SYSTEM write, reviewer read+execute, no author-user ACE'
     Write-Fact 'reviewer driver present' (Test-Path "$dest\scripts\offline_reviewer_execute.py")
     exit 0
 }

@@ -883,11 +883,16 @@ def vm_battery(vm_name: str, media_record: Path, xfer_root: Path,
             path = out_dir / f"{label}-transcript.json"
             if path.is_file():
                 try:
-                    digests[label] = str(json.loads(
-                        path.read_text(encoding="utf-8-sig")
-                    ).get("fingerprint_identity_digest", ""))
+                    doc = json.loads(path.read_text(encoding="utf-8-sig"))
                 except (OSError, json.JSONDecodeError):
-                    digests[label] = ""
+                    continue
+                # A digest from a FAILED run is not evidence that two machines
+                # ran. The digest was written on the non-failure path regardless
+                # of the outcome, so a run that failed its own totals still
+                # published one -- and this check accepted it.
+                if str(doc.get("state", "")) != "COMPLETE":
+                    continue
+                digests[label] = str(doc.get("fingerprint_identity_digest", ""))
         both = [d for d in digests.values() if re.fullmatch(r"[0-9a-f]{32}", d or "")]
         rec("HV42 vm-independent-from-environment-1",
             len(both) == 2 and len(set(both)) == 2,

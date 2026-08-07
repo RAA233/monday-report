@@ -384,6 +384,20 @@ def _head_binding_reasons(source: Path, frozen: dict) -> list:
     if own_tree != tree:
         return ["the frozen descriptor names a different tree than the reviewer's "
                 "own source export"]
+
+    # The commit id says nothing about the BYTES that are about to run: a
+    # modified working tree leaves rev-parse unchanged. Requiring the clone to
+    # be pristine is what makes the head binding cover the whole executed
+    # closure -- every tracked file, not a handful of named ones.
+    try:
+        dirty = subprocess.run(["git", "-C", str(source), "status", "--porcelain"],
+                               capture_output=True, text=True, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"the reviewer could not check its own source tree: {exc}"]
+    modified = [line[3:].strip() for line in dirty.splitlines() if line.strip()]
+    if modified:
+        return [f"the reviewer's source export is not pristine "
+                f"({len(modified)} changed path(s), first: {modified[0]})"]
     return []
 
 
@@ -523,6 +537,8 @@ def stage_environment(args, label: str, env_class: str) -> int:
         "failed": int(request_totals.get("failed", 0)) + int(resume_totals.get("failed", 0)),
     }
     ok = ok and totals["failed"] == 0 and totals["passed"] > 0
+    # E2 gated on this and E1 did not, so E1 could be COMPLETE with no identity.
+    ok = ok and bool(_identity_digest(source, request_record))
 
     transcript = {
         "state": "COMPLETE" if ok else "FAILED",

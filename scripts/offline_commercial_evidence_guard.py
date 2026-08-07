@@ -533,6 +533,11 @@ def main() -> int:
                         transcript_path.read_text(encoding="utf-8-sig"))
                 except (OSError, json.JSONDecodeError):
                     reviewer_transcript = {}
+                # Only a COMPLETE run counts. The digest is written whether or
+                # not the run passed, so accepting any transcript let a failed
+                # run satisfy a check about a live guest.
+                if str(reviewer_transcript.get("state", "")) != "COMPLETE":
+                    reviewer_transcript = {}
                 published = str(reviewer_transcript.get("fingerprint_identity_digest", ""))
                 binding = e2_raw.get("machine_binding") or {}
                 derived = canonical_hash(binding)[:32] if binding else ""
