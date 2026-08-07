@@ -64,7 +64,14 @@ def request_bundle(*, request: Path, transfer_in: Path, sequence: int, nonce: st
     """
 
     REQUEST_DIR.mkdir(parents=True, exist_ok=True)
-    ticket = f"{label}-seq{sequence}"
+    # The ticket carries the reviewer nonce, so each run gets its own rendezvous.
+    #
+    # With a name of the form "<label>-seq<n>" a second run reuses the first
+    # run's ticket, the author skips it as already answered, and the reviewer is
+    # handed the PREVIOUS run's witness. The nonce check caught that -- the run
+    # failed with "the issuance witness answers a different review nonce" -- but
+    # detection after the fact is weaker than making the collision impossible.
+    ticket = f"{label}-seq{sequence}-{nonce[:16]}"
     payload = json.loads(request.read_text(encoding="utf-8"))
     envelope = {
         "schema_version": "offline-issuance-ticket.v1",
