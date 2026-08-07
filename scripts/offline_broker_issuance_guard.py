@@ -86,10 +86,19 @@ def refusal_battery() -> None:
             doc.get("refused") == "ISSUER_KEY_OFFERED_IN_AUTHORITATIVE_MODE",
             f"{name} in authoritative mode is refused")
 
-    doc = run_matrix(["--brokered", "--phase", "request"])
+    # Supply the head binding so this isolates the NONCE requirement. Omitting
+    # both would trip whichever refusal is checked first and prove nothing about
+    # the one this check names.
+    doc = run_matrix(["--brokered", "--phase", "request",
+                      "--source-commit", "c" * 40, "--source-tree", "t" * 40])
     rec("BI03 brokered-requires-review-nonce",
         doc.get("refused") == "REVIEW_NONCE_REQUIRED",
         "authoritative mode refuses to run without a reviewer-minted nonce")
+
+    doc = run_matrix(["--brokered", "--phase", "request", "--review-nonce", "n" * 64])
+    rec("BI03b brokered-requires-head-binding",
+        doc.get("refused") == "HEAD_BINDING_REQUIRED",
+        "authoritative mode refuses to run without an explicit head binding")
 
     # The direct mode must be documented as NON-AUTHORITATIVE in the source that
     # offers it, so nobody can read a --key-file run as commercial evidence.

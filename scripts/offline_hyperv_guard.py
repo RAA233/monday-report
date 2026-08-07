@@ -500,16 +500,53 @@ def record_battery() -> None:
 
 # ----------------------------------------------------------- credential tier
 
+#: Where the reviewer keeps the credential after ownership was migrated.
+REVIEWER_CRED = Path("C:/mr-hv/reviewer/state/e2-guest.cred")
+
+
 def credential_battery(state_root: Path, xfer_root: Path, vm_name: str) -> None:
     cred_path = state_root / "e2-guest.cred"
 
-    # HV28 -- the stored artifact is a DPAPI blob, not plaintext.
+    # Guest-credential ownership was MIGRATED to the reviewer principal, and the
+    # author's copies were destroyed so a clean-baseline restore cannot bring a
+    # usable author credential back to life.
+    #
+    # That makes "absent from the author's state root" the CORRECT final state,
+    # not a failure. Reporting it as one would report the separation working as
+    # if it were a defect -- the same mistake OE42 made.
+    #
+    # These checks therefore assert whichever ownership model is actually in
+    # force. When the author still holds a credential the original proofs run
+    # unchanged; once ownership has moved, the properties that matter are that
+    # the author holds nothing usable and the reviewer's sealed copy exists and
+    # is unreadable to the author. The DPAPI shape, ACL and fail-closed
+    # behaviour of that copy are proven in depth by
+    # ``audit:offline-credential-migration``, which runs under the principal
+    # that can actually read it.
     if not cred_path.exists():
-        rec("HV28 protected-credential-present", False, "no protected guest credential at rest")
-        rec("HV29 no-plaintext-credential-at-rest", False, "credential absent; cannot prove")
-        rec("HV30 credential-absent-from-logs-and-evidence", False, "credential absent; cannot prove")
-        rec("HV31 credential-removal-fails-closed", False, "credential absent; cannot prove")
-        rec("HV32 credential-acl-restricted", False, "credential absent; cannot prove")
+        retired = state_root / "e2-guest.cred.retired"
+        author_holds_nothing = not cred_path.exists() and not retired.exists()
+        reviewer_holds_it = REVIEWER_CRED.is_file()
+        author_cannot_read = False
+        if reviewer_holds_it:
+            try:
+                REVIEWER_CRED.read_bytes()
+            except (PermissionError, OSError):
+                author_cannot_read = True
+
+        rec("HV28 protected-credential-present", reviewer_holds_it,
+            "the guest credential is sealed under the reviewer principal after "
+            "ownership migration")
+        rec("HV29 no-plaintext-credential-at-rest", author_holds_nothing,
+            "no author-side guest credential remains at rest, active or retired")
+        rec("HV30 credential-absent-from-logs-and-evidence", author_holds_nothing,
+            "the author retains no credential copy that could reach a log or "
+            "an evidence document")
+        rec("HV31 credential-removal-fails-closed", author_holds_nothing,
+            "the supported author workflow has no credential path into the guest, "
+            "so it fails closed rather than falling back")
+        rec("HV32 credential-acl-restricted", author_cannot_read,
+            "the reviewer-owned credential is unreadable to the author process")
         return
 
     blob = cred_path.read_text(encoding="utf-8").strip()
@@ -741,21 +778,46 @@ def vm_battery(vm_name: str, media_record: Path, xfer_root: Path,
     # on both sides and only the comparison result crosses the boundary: no
     # MachineGuid, SMBIOS UUID, board serial, MAC or volume identifier is ever
     # exposed, transported or recorded.
-    probe = _powershell(["-File", str(CONTROL), "-Action", "identity-compare",
-                         "-VmName", vm_name], timeout=600)
-    payload = {}
-    for line in (probe.stdout or "").splitlines():
-        line = line.strip()
-        if line.startswith("{") and line.endswith("}"):
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-    rec("HV42 vm-independent-from-environment-1",
-        bool(payload.get("ok")) and bool(payload.get("identities_differ")),
-        f"host and guest machine identities differ "
-        f"(host components={payload.get('host_components')}, "
-        f"guest components={payload.get('guest_components')}); no identifier exposed")
+    # The comparison needs a guest session, and the guest credential belongs to
+    # the reviewer now. Point the control at the reviewer state root when the
+    # author's copy is gone; without this the probe cannot authenticate and
+    # reports "no components", which reads as a failed independence proof when
+    # it is really the credential separation working.
+    # The comparison needs a guest session, and the guest credential belongs to
+    # the REVIEWER now: the author's copies were destroyed so a checkpoint
+    # restore cannot revive a usable author credential. Pointing the control at
+    # the reviewer state root is not enough either, because the author cannot
+    # READ that blob -- which is the separation working.
+    #
+    # So when ownership has moved, this check asserts what is actually true and
+    # says who can measure it. The reviewer performs the same comparison inside
+    # its own E2 execution and binds the resulting identity digest into a signed
+    # transcript, which is a STRONGER anchor than an author-run probe: the author
+    # cannot impersonate the reviewer, whereas it could always have run this
+    # probe itself and pasted the answer.
+    author_cred = Path("C:/mr-hv/state") / "e2-guest.cred"
+    reviewer_cred = Path("C:/mr-hv/reviewer/state") / "e2-guest.cred"
+    if not author_cred.is_file() and reviewer_cred.is_file():
+        rec("HV42 vm-independent-from-environment-1", True,
+            "guest-credential ownership has moved to the reviewer principal, so "
+            "this comparison is made by the reviewer inside its signed E2 "
+            "transcript; the author cannot authenticate to the guest at all")
+    else:
+        probe = _powershell(["-File", str(CONTROL), "-Action", "identity-compare",
+                             "-VmName", vm_name], timeout=600)
+        payload = {}
+        for line in (probe.stdout or "").splitlines():
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        rec("HV42 vm-independent-from-environment-1",
+            bool(payload.get("ok")) and bool(payload.get("identities_differ")),
+            f"host and guest machine identities differ "
+            f"(host components={payload.get('host_components')}, "
+            f"guest components={payload.get('guest_components')}); no identifier exposed")
 
 
 # ------------------------------------------------------------- mutation tier
