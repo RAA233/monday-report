@@ -138,17 +138,25 @@ def request_bundle(*, request: Path, transfer_in: Path, sequence: int, nonce: st
         raise ValueError("the issuance witness was minted at a different source tree")
     # The licences must be the ones the witness covers: a witness signed over
     # one licence set does not vouch for bytes swapped in afterwards.
-    licence_digests = {}
+    # READ ONCE, then verify and use THOSE bytes.
+    #
+    # Hashing the files and then re-reading them to copy left a window in which
+    # the bytes could differ between the two passes, so the digest check
+    # certified one set of bytes while a different set was imported. Reading
+    # once removes the window entirely rather than narrowing it.
+    licence_bytes = {}
     for licence in sorted(answer_dir.glob("license-*.json")):
-        licence_digests[licence.name] = hashlib.sha256(licence.read_bytes()).hexdigest()
+        licence_bytes[licence.name] = licence.read_bytes()
+    licence_digests = {name: hashlib.sha256(data).hexdigest()
+                       for name, data in licence_bytes.items()}
     if str(witness.get("licence_set_digest", "")) != _licence_set_digest(licence_digests):
         raise ValueError("licence bytes changed after the issuance witness was generated")
 
     transfer_in.mkdir(parents=True, exist_ok=True)
     copied = []
-    for licence in sorted(answer_dir.glob("license-*.json")):
-        (transfer_in / licence.name).write_bytes(licence.read_bytes())
-        copied.append(licence.name)
+    for name, data in sorted(licence_bytes.items()):
+        (transfer_in / name).write_bytes(data)   # the bytes that were verified
+        copied.append(name)
     return {"ticket": ticket, "licences": copied, "witness": witness}
 
 
@@ -217,7 +225,12 @@ def serve_once(*, key_file: Path, expiry_seconds: int) -> list[str]:
     for ticket_path in sorted(REQUEST_DIR.glob("*.json")):
         ticket = ticket_path.stem
         answer_dir = LICENCE_DIR / ticket
-        if (answer_dir / ".complete").exists():
+        # Idempotent: a ticket that is complete, OR already has a witness, is
+        # never answered twice. Two issuer processes racing the same ticket
+        # would otherwise rewrite the licences after the first had signed a
+        # digest over them, and the reviewer would correctly reject the result
+        # as "licence bytes changed after the issuance witness was generated".
+        if (answer_dir / ".complete").exists() or (LICENCE_DIR / f"{ticket}.witness.json").exists():
             continue
         envelope = json.loads(ticket_path.read_text(encoding="utf-8"))
         request = envelope["activation_request"]
@@ -241,6 +254,8 @@ def serve_once(*, key_file: Path, expiry_seconds: int) -> list[str]:
                 encoding="utf-8")
             continue
 
+        # Hash what is on disk AFTER the bundle is complete, once, in a stable
+        # order. The reviewer hashes the same set the same way.
         licence_digests = {}
         for licence in sorted(answer_dir.glob("license-*.json")):
             licence_digests[licence.name] = hashlib.sha256(licence.read_bytes()).hexdigest()
