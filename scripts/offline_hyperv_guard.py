@@ -551,9 +551,16 @@ def credential_battery(state_root: Path, xfer_root: Path, vm_name: str) -> None:
         # material. The reviewer-owned blob is deliberately unreadable here, so
         # this scans what an author-visible leak would actually land in:
         # transfer files, results, logs and evidence.
+        # RUN ARTIFACTS only, and never the package payload.
+        #
+        # A runtime credential leak lands in a log, a runner record, a transfer
+        # file or an evidence document. Scanning source and docs instead finds
+        # "password:" inside ordinary product code and shipped dependencies --
+        # noise that trains its reader to ignore the check.
         leaks = []
         for base in (xfer_root, Path("C:/mr-hv/results"), Path("C:/mr-hv/xchg"),
-                     ROOT / "output"):
+                     Path("C:/mr-hv/reviewer/out"),
+                     ROOT / "output" / "offline-commercial"):
             if not base.exists():
                 continue
             # TEXT artifacts only. Reading binaries as text finds "secret=" and
@@ -563,8 +570,7 @@ def credential_battery(state_root: Path, xfer_root: Path, vm_name: str) -> None:
             for candidate in base.rglob("*"):
                 if (not candidate.is_file()
                         or candidate.suffix.lower() not in (".json", ".log", ".txt",
-                                                            ".md", ".ps1", ".py",
-                                                            ".cred", ".xml")):
+                                                            ".cred")):
                     continue
                 try:
                     text = candidate.read_text(encoding="utf-8", errors="ignore")
