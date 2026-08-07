@@ -306,7 +306,18 @@ if ($ExportSource) {
     & icacls.exe $dest /inheritance:r | Out-Null
     & icacls.exe $dest /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" | Out-Null
     $ErrorActionPreference = $prev
-    Write-Fact 'export ACL' 'author full, reviewer read+execute, SYSTEM full'
+    # The REVIEWER must own this directory, or it cannot use git in it at all:
+    # git refuses to operate in a repository owned by another user, and returns
+    # an empty stdout when it does. That is the same rule that silently produced
+    # an empty head binding earlier, and it defeats the reviewer's own
+    # first-hand head check unless ownership is set here.
+    #
+    # Ownership is not write access. The ACL above still restricts writes to
+    # Administrators and SYSTEM, so owning the directory lets the reviewer READ
+    # and VERIFY its source without letting the author's user identity change it.
+    & icacls.exe $dest /setowner "$User" /T /C /Q | Out-Null
+    Write-Fact 'export owner' 'reviewer (so it can verify the head first hand)'
+    Write-Fact 'export ACL' 'admins+SYSTEM write, reviewer read+execute'
     Write-Fact 'reviewer driver present' (Test-Path "$dest\scripts\offline_reviewer_execute.py")
     exit 0
 }

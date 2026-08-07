@@ -236,6 +236,15 @@ $codeFiles = @(
 )
 $integrity = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest -Paths $codeFiles
 if ($integrity.state -eq 'CHANGED') {
+    # Remove stale environment transcripts before refusing. A refused run leaves
+    # the PREVIOUS run's transcripts in place, and anything reading them sees a
+    # COMPLETE result for a run that never happened -- which briefly fooled the
+    # author's own harness. Results must never outlive the run that produced
+    # them.
+    foreach ($stale in @('ENVIRONMENT_1-transcript.json', 'ENVIRONMENT_2-transcript.json')) {
+        $path = Join-Path $OutRoot $stale
+        if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+    }
     New-Status -Stage 'integrity' -State 'REFUSED' `
         -Detail ("reviewer code changed since it was pinned: " + ($integrity.changed -join ',')) `
         -Extra @{ remedy = 'an operator must re-pin deliberately by removing the reviewer-owned manifest' }
