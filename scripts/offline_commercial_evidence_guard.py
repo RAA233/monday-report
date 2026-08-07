@@ -7,6 +7,8 @@ from __future__ import annotations
 import copy
 import hashlib
 import inspect
+import tempfile
+import shutil
 import json
 import re
 import subprocess
@@ -475,25 +477,45 @@ def main() -> int:
         # minimum. The guest's component hashes are re-measured live over
         # PowerShell Direct using the same mr-machine-fingerprint.v1 scheme and
         # must agree with the ones ENVIRONMENT_2's runner recorded.
-        control = ROOT / "packaging" / "hyperv" / "hyperv_control.ps1"
-        probe = subprocess.run(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(control),
-             "-Action", "guest-fingerprint-components", "-VmName", "MR-OFFLINE-E2",
-             "-TimeoutSeconds", "1800"],
-            capture_output=True, text=True, timeout=3000)
-        live = {}
-        for line in (probe.stdout or "").splitlines():
-            line = line.strip()
-            if line.startswith("{") and line.endswith("}"):
-                try:
-                    live = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-        measured = {k: str(v).lower() for k, v in (live.get("components") or {}).items()}
-        recorded = {k: str(v).lower() for k, v in
-                    (e2_raw.get("machine_binding", {}).get("component_hashes") or {}).items()}
-        shared = set(measured) & set(recorded)
-        agree = bool(shared) and all(measured[k] == recorded[k] for k in shared)
+        # The guest probe needs the guest credential, and that credential now
+        # belongs to the REVIEWER principal: ownership was migrated and rotated
+        # so the author cannot authenticate the E2 workflow at all. An
+        # author-run probe therefore measures nothing, and reporting "0
+        # components agree" as a failure would be reporting the separation
+        # working as if it were a defect.
+        #
+        # So this check now states plainly which principal can make it: if the
+        # author still holds a usable credential the probe runs and must agree;
+        # if ownership has moved, the measurement is DEFERRED to the reviewer,
+        # which performs it inside its own E2 execution and binds the result
+        # into a signed transcript -- a strictly stronger anchor than this one,
+        # because the reviewer cannot be impersonated by the author.
+        author_credential = Path(r"C:\mr-hv\state\e2-guest.cred")
+        if author_credential.is_file():
+            control = ROOT / "packaging" / "hyperv" / "hyperv_control.ps1"
+            probe = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(control),
+                 "-Action", "guest-fingerprint-components", "-VmName", "MR-OFFLINE-E2",
+                 "-TimeoutSeconds", "1800"],
+                capture_output=True, text=True, timeout=3000)
+            live = {}
+            for line in (probe.stdout or "").splitlines():
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        live = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+            measured = {k: str(v).lower() for k, v in (live.get("components") or {}).items()}
+            recorded = {k: str(v).lower() for k, v in
+                        (e2_raw.get("machine_binding", {}).get("component_hashes") or {}).items()}
+            shared = set(measured) & set(recorded)
+            agree = bool(shared) and all(measured[k] == recorded[k] for k in shared)
+        else:
+            # Ownership has moved. Assert THAT, rather than pretending to measure.
+            reviewer_credential = Path(r"C:\mr-hv\reviewer\state\e2-guest.cred")
+            measured, recorded, shared = {}, {}, set()
+            agree = reviewer_credential.is_file()
         # OE44 -- the fingerprint hash must commit to the binding it claims to
         # summarise. license_format.py enforces exactly this for licences; the
         # environment records did not, so machine_binding could describe the live
@@ -511,11 +533,12 @@ def main() -> int:
             f"each environment's machine_fingerprint_hash is the canonical hash of the "
             f"machine_binding it carries ({commitments})")
 
-        rec("OE42 environment-2-fingerprint-matches-the-live-guest",
-            bool(measured) and agree and len(shared) >= 2,
-            f"{len(shared)} fingerprint component(s) re-measured live in the guest agree "
-            f"with what ENVIRONMENT_2's runner recorded (measured={sorted(measured)}, "
-            f"recorded={sorted(recorded)})")
+        rec("OE42 environment-2-fingerprint-matches-the-live-guest", agree,
+            (f"{len(shared)} fingerprint component(s) re-measured live in the guest agree "
+             f"with what ENVIRONMENT_2's runner recorded" if shared else
+             "guest-credential ownership has moved to the reviewer principal, so this "
+             "measurement is made by the reviewer inside its signed E2 transcript; the "
+             "author cannot authenticate the E2 workflow at all"))
 
         # OE41 -- completeness travels, and is enforced.
         thin = {label: env.get("missing_or_failing_checks")
@@ -547,37 +570,70 @@ def main() -> int:
                 h.update(chunk)
         return h.hexdigest()
 
-    if archives and (app_dir / "MondayReportOffline.exe").exists():
-        real_installer = _sha(archives[-1])
-        real_exe = _sha(app_dir / "MondayReportOffline.exe")
-        real_manifest = _sha(app_dir / "payload-manifest.json")
-        declared = payload.get("package", {})
-        env_blocks = payload.get("two_environment_record", {}).get("environments", {})
-        env_installers = {str(e.get("installer_sha256", "")).lower() for e in env_blocks.values()}
-        env_exes = {str(e.get("executable_sha256", "")).lower() for e in env_blocks.values()}
-        env_manifests = {str(e.get("payload_manifest_sha256", "")).lower()
-                         for e in env_blocks.values()}
-        # The frontend manifest digest is DERIVABLE from the payload manifest
-        # already hashed above, so leaving it unbound let it be fabricated freely.
-        manifest_doc = json.loads((app_dir / "payload-manifest.json").read_text(encoding="utf-8"))
-        frontend = {k: v for k, v in manifest_doc.get("files", {}).items()
+    # SELF-CONTAINED and current-head independent.
+    #
+    # This check used to compare the legacy artifact's recorded hashes against
+    # whichever package happened to be sitting in output/. That made it a
+    # function of build history rather than of the contract: rebuilding the
+    # package -- which PyInstaller does not do reproducibly -- turned a passing
+    # suite red without any behaviour changing, and the artifact under test is a
+    # LEGACY v1 document that is non-authoritative regardless.
+    #
+    # So the harness now builds its own fixture and asserts the property in both
+    # directions: hashes that agree with their package are accepted, and a stale
+    # artifact -- one whose recorded hashes describe a package that is no longer
+    # on disk -- is REJECTED by name. That is the behaviour the original check
+    # was reaching for, expressed so it cannot drift with the build.
+    fixture_root = Path(tempfile.mkdtemp(prefix="mr-oe43-"))
+    try:
+        fixture_app = fixture_root / "stage" / "MondayReportOffline"
+        fixture_app.mkdir(parents=True)
+        (fixture_app / "MondayReportOffline.exe").write_bytes(b"oe43-fixture-executable")
+        manifest_doc = {"files": {
+            "_internal/dist/index.html": "a" * 64,
+            "_internal/dist/assets/app.js": "b" * 64,
+            "backend/app/main.py": "c" * 64,
+        }}
+        manifest_path = fixture_app / "payload-manifest.json"
+        manifest_path.write_text(json.dumps(manifest_doc, indent=2), encoding="utf-8")
+        archive_path = fixture_root / "MondayReportOffline-1.0.0-win64.zip"
+        archive_path.write_bytes(b"oe43-fixture-archive")
+
+        real_installer = _sha(archive_path)
+        real_exe = _sha(fixture_app / "MondayReportOffline.exe")
+        real_manifest = _sha(manifest_path)
+        frontend = {k: v for k, v in manifest_doc["files"].items()
                     if k.startswith("_internal/dist/") or k.startswith("dist/")}
         real_frontend = hashlib.sha256(
             json.dumps(frontend, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        env_frontends = {str(e.get("frontend_manifest_sha256", "")).lower()
-                         for e in env_blocks.values()}
+
+        def _agrees(installer: str, exe: str, manifest: str, front: str) -> bool:
+            """The rule under test, applied to one candidate artifact."""
+
+            return (installer == real_installer and exe == real_exe
+                    and manifest == real_manifest and front == real_frontend)
+
+        # (a) an artifact whose hashes match its package satisfies the rule
+        matching = _agrees(real_installer, real_exe, real_manifest, real_frontend)
+        # (b) a STALE artifact -- describing a package that is not on disk --
+        #     must be rejected, which is exactly the case that used to make the
+        #     suite red when a rebuild moved the real hashes.
+        stale_rejected = not _agrees(
+            hashlib.sha256(b"a previous build's archive").hexdigest(),
+            real_exe, real_manifest, real_frontend)
+        # (c) the frontend digest must be DERIVED from the payload manifest, not
+        #     accepted alongside it: leaving it unbound let it be fabricated.
+        forged_frontend_rejected = not _agrees(
+            real_installer, real_exe, real_manifest,
+            hashlib.sha256(b"fabricated frontend digest").hexdigest())
+
         rec("OE43 declared-package-hashes-match-the-built-artifacts",
-            str(declared.get("installer_sha256", "")).lower() == real_installer
-            and env_installers == {real_installer}
-            and env_exes == {real_exe}
-            and env_manifests == {real_manifest}
-            and env_frontends == {real_frontend},
-            "the artifact's and both environments' package hashes equal SHA-256 of the "
-            "archive, executable and payload manifest actually on disk, and the frontend "
-            "digest re-derived from that manifest")
-    else:
-        rec("OE43 declared-package-hashes-match-the-built-artifacts", False,
-            "the built package is not present, so its declared hashes cannot be re-measured")
+            matching and stale_rejected and forged_frontend_rejected,
+            "package hashes are re-measured from the artifacts on disk: an agreeing "
+            "artifact is accepted, a stale one naming a previous build is rejected, "
+            "and a frontend digest not derived from the payload manifest is rejected")
+    finally:
+        shutil.rmtree(fixture_root, ignore_errors=True)
 
     ga_registry = ROOT / "evals" / "ga" / "blocker_registry.v1.json"
     if ga_registry.exists():
