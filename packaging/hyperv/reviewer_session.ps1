@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Reviewer-side entry point. Launched ONLY by the scheduled task registered by
     packaging/hyperv/reviewer_bootstrap.ps1, which runs it as the reviewer
@@ -41,7 +41,7 @@ $StateRoot    = Join-Path $ReviewerRoot 'state'        # reviewer-owned secrets
 $OutRoot      = Join-Path $ReviewerRoot 'out'          # reviewer-owned results
 
 #: The complete set of things the authoring process may ask the reviewer to do.
-$AllowedStages = @('bootstrap', 'preflight', 'cms-identity', 'cred-rotate',
+$AllowedStages = @('bootstrap', 'preflight', 'cms-identity', 'cred-rotate', 'cred-repair',
                    'e1', 'e2', 'review', 'status')
 
 function New-Status {
@@ -163,13 +163,13 @@ if ($stage -eq 'status') {
 # need the reviewer certificate store and PowerShell Direct, both PowerShell
 # native. They deliberately run BEFORE the Python driver is required, so a
 # missing interpreter cannot block credential ownership transfer.
-if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate') {
+if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate' -or $stage -eq 'cred-repair') {
     $migration = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_credential_migration.ps1'
     if (-not (Test-Path $migration)) {
         New-Status -Stage $stage -State 'FAILED' -Detail 'migration script missing from the install'
         exit 4
     }
-    $migAction = if ($stage -eq 'cms-identity') { 'reviewer-identity' } else { 'reviewer-rotate' }
+    $migAction = switch ($stage) { 'cms-identity' { 'reviewer-identity' } 'cred-repair' { 'reviewer-repair-acl' } default { 'reviewer-rotate' } }
     New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -215,3 +215,4 @@ if ($rc -eq 0) {
     New-Status -Stage $stage -State 'FAILED' -Detail "driver exited $rc (run_id=$runId)"
 }
 exit $rc
+

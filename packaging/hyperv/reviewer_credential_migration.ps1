@@ -43,7 +43,8 @@
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('reviewer-identity', 'author-envelope', 'reviewer-rotate', 'author-retire', 'verify')]
+    [ValidateSet('reviewer-identity', 'author-envelope', 'reviewer-rotate', 'author-retire',
+                 'reviewer-repair-acl', 'verify')]
     [string]$Action = 'verify',
     [string]$VmName        = 'MR-OFFLINE-E2',
     [string]$GuestAccount  = 'mrops',
@@ -259,6 +260,18 @@ switch ($Action) {
         & icacls.exe $ReviewerCred /inheritance:r | Out-Null
         & icacls.exe $ReviewerCred /grant:r "${me}:(F)" | Out-Null
         & icacls.exe $ReviewerCred /grant:r 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
+        # VERIFY, do not assume. /inheritance:r strips the inherited ACEs first,
+        # so if the grant then fails the file is left readable by NOBODY -- not
+        # even this principal -- and the next run reports the credential as
+        # "empty" because Get-Content -SilentlyContinue returns null. Repair it
+        # here while this context still owns the file.
+        if (@((Get-Acl $ReviewerCred).Access).Count -eq 0) {
+            # Re-grant with icacls rather than Set-Acl: Set-Acl writes back a
+            # descriptor including the SACL and needs SeSecurityPrivilege, which
+            # this non-administrative principal does not hold.
+            & icacls.exe $ReviewerCred /grant "${me}:(F)" | Out-Null
+            & icacls.exe $ReviewerCred /grant 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
+        }
 
         # The NEW credential must work.
         $after = $null
@@ -307,6 +320,43 @@ switch ($Action) {
             author_credential_active = (Test-Path $AuthorCred)
             retired_marker_present   = (Test-Path $AuthorRetired)
         })
+    }
+
+    'reviewer-repair-acl' {
+        # RUNS AS THE REVIEWER. Restores this principal's access to its own
+        # sealed credential after a failed grant left the file with no ACEs.
+        # The owner always retains the right to rewrite the DACL, and DPAPI
+        # decryption is per-user and unaffected by file permissions, so the
+        # sealed value stays usable once access is restored.
+        if (-not (Test-Path $ReviewerCred)) {
+            Emit ([ordered]@{ action='reviewer-repair-acl'; ok=$false
+                              detail='no reviewer credential to repair' }) 2
+        }
+        $me = "$env:USERDOMAIN\$env:USERNAME"
+        $before = @((Get-Acl $ReviewerCred).Access).Count
+        # icacls, not Set-Acl. Get-Acl returns a descriptor that includes the
+        # SACL, so writing it back demands SeSecurityPrivilege -- which this
+        # deliberately non-administrative principal does not hold. icacls edits
+        # only the DACL, which the file's OWNER may always do.
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        & icacls.exe $ReviewerCred /grant "${me}:(F)" | Out-Null
+        & icacls.exe $ReviewerCred /grant 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
+        $ErrorActionPreference = $prev
+        $raw = Get-Content -Path $ReviewerCred -Raw -ErrorAction SilentlyContinue
+        $readable = ($null -ne $raw -and ([string]$raw).Trim().Length -gt 0)
+        $decrypts = $false
+        if ($readable) {
+            try { $null = ConvertTo-SecureString -String ([string]$raw).Trim() -ErrorAction Stop
+                  $decrypts = $true } catch { $decrypts = $false }
+        }
+        Emit ([ordered]@{
+            action        = 'reviewer-repair-acl'
+            ok            = ($readable -and $decrypts)
+            aces_before   = $before
+            aces_after    = @((Get-Acl $ReviewerCred).Access).Count
+            readable      = $readable
+            decrypts      = $decrypts
+        }) $(if ($readable -and $decrypts) { 0 } else { 3 })
     }
 
     'verify' {
