@@ -115,13 +115,14 @@ function Get-ReviewerPython {
         $p = (Get-Content $pin -Raw).Trim()
         if ($p -and (Test-Path $p)) { return $p }
     }
-    $candidates = @(
-        'C:\Users\ralba\AppData\Local\Programs\Python\Python310\python.exe',
-        "$env:LOCALAPPDATA\Programs\Python\Python310\python.exe"
-    )
-    foreach ($c in $candidates) { if (Test-Path $c) { return $c } }
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
+    # NO run-time discovery.
+    #
+    # The previous candidates resolved into the AUTHOR's own profile, which
+    # the author can write -- and since -I does not disable sitecustomize,
+    # that is arbitrary code execution inside this session. Discovery is
+    # removed: the pin is written by the operator bootstrap, and its absence
+    # fails closed rather than silently selecting an author-controlled
+    # interpreter.
     return $null
 }
 
@@ -192,10 +193,14 @@ function Assert-ReviewerCodeIntegrity {
     #>
     param([string]$ManifestPath, [string[]]$Paths)
 
+    # Keyed by full path, not leaf name. Leaf keying silently collapsed two
+    # different files that happen to share a name into one entry, so swapping
+    # one for the other would have gone unnoticed by the very check meant to
+    # catch it.
     $current = @{}
     foreach ($f in $Paths) {
         if (Test-Path $f) {
-            $current[(Split-Path $f -Leaf)] = (Get-FileHash -Path $f -Algorithm SHA256).Hash
+            $current[$f.ToLowerInvariant()] = (Get-FileHash -Path $f -Algorithm SHA256).Hash
         }
     }
 
@@ -254,6 +259,9 @@ if ($missing.Count -gt 0) {
 
 # Verify the code THIS session is about to run before honouring any command.
 $codeManifest = Join-Path $StateRoot 'reviewer-code-manifest.json'
+$interpreterPin = Join-Path $StateRoot 'python-path.txt'
+$interpreterPath = ''
+if (Test-Path $interpreterPin) { $interpreterPath = (Get-Content $interpreterPin -Raw).Trim() }
 $codeFiles = @(
     $PSCommandPath,
     (Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_credential_migration.ps1'),
@@ -262,6 +270,21 @@ $codeFiles = @(
     (Join-Path $SourceRoot 'scripts\offline_issuance_broker.py'),
     (Join-Path $SourceRoot 'scripts\offline_hyperv_matrix.py')
 )
+# The interpreter is executed code, so it is pinned like executed code, and
+# so are its load points: a sitecustomize.py or usercustomize.py dropped
+# into site-packages runs before anything this script controls.
+if ($interpreterPath -and (Test-Path $interpreterPath)) {
+    $codeFiles += $interpreterPath
+    $sitePackages = Join-Path (Split-Path $interpreterPath -Parent) 'Lib\site-packages'
+    foreach ($hook in @('sitecustomize.py', 'usercustomize.py')) {
+        $hookPath = Join-Path $sitePackages $hook
+        if (Test-Path $hookPath) { $codeFiles += $hookPath }
+    }
+    # .pth files execute any line beginning with `import`, so they are a load
+    # point in exactly the same sense as sitecustomize.py.
+    Get-ChildItem -Path $sitePackages -Filter '*.pth' -File -ErrorAction SilentlyContinue |
+        ForEach-Object { $codeFiles += $_.FullName }
+}
 $integrity = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest -Paths $codeFiles
 if ($integrity.state -eq 'CHANGED') {
     # Remove stale environment transcripts before refusing. A refused run leaves
@@ -387,7 +410,13 @@ if (-not (Test-Path $driver)) {
 
 New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"
 
-# -I isolates the interpreter: no PYTHONPATH, no user site, no sitecustomize.
+# -I ignores environment variables and the USER site directory. It does NOT
+# imply -S, so site.py still runs and sitecustomize.py in the interpreter's
+# own site-packages is STILL imported -- verified empirically, not assumed.
+# That makes the interpreter part of the reviewer's trust surface: anyone
+# who can write its site-packages executes code in THIS session, where
+# DPAPI will decrypt the review key for them. The interpreter is therefore
+# pinned, and its load points are hashed alongside the reviewer's own code.
 $prev = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 & $py -I $driver --stage $stage --run-id $runId --source-root $SourceRoot `

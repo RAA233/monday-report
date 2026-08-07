@@ -225,7 +225,38 @@ def stage_bootstrap(args: argparse.Namespace) -> int:
                     f"{author_name}:(R)"],
                    capture_output=True, text=True, timeout=60)
 
-    (state / "python-path.txt").write_text(sys.executable, encoding="utf-8")
+    # The interpreter is executed code, and `-I` does not disable site.py, so a
+    # sitecustomize.py or .pth in its site-packages runs in the reviewer session
+    # where DPAPI will decrypt the review key. The pin is therefore reconciled
+    # rather than overwritten: silently re-pinning would let a later bootstrap
+    # move the reviewer onto a different interpreter without anyone noticing.
+    pin_path = state / "python-path.txt"
+    if pin_path.is_file():
+        pinned = pin_path.read_text(encoding="utf-8").strip()
+        if pinned and os.path.normcase(pinned) != os.path.normcase(sys.executable):
+            raise SystemExit(
+                "reviewer interpreter pin does not match the running interpreter; "
+                "re-run the operator interpreter-hardening step instead of re-pinning")
+    else:
+        pin_path.write_text(sys.executable, encoding="utf-8")
+
+    # Publish the pin where the AUTHOR can read it but not write it, so the
+    # author-side isolation guard probes the interpreter the reviewer actually
+    # runs instead of one it picked for itself.
+    interpreter = Path(sys.executable)
+    site_packages = interpreter.parent / "Lib" / "site-packages"
+    published = TRUST_DIR / "reviewer-interpreter-pin.v1.json"
+    published.write_text(json.dumps({
+        "schema_version": "reviewer-interpreter-pin.v1",
+        "interpreter_path": str(interpreter),
+        "interpreter_sha256": sha256_file(interpreter),
+        "site_packages_path": str(site_packages),
+    }, indent=2), encoding="utf-8")
+    subprocess.run(["icacls", str(published), "/inheritance:r"],
+                   capture_output=True, text=True, timeout=60)
+    subprocess.run(["icacls", str(published), "/grant:r",
+                    f"{reviewer_name}:(F)", "*S-1-5-18:(F)", f"{author_name}:(R)"],
+                   capture_output=True, text=True, timeout=60)
 
     # PUBLIC output only. The private half never leaves this process.
     Path(args.out_root).mkdir(parents=True, exist_ok=True)

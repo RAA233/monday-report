@@ -24,10 +24,20 @@ Claimed: the author's ORDINARY, non-elevated user identity cannot modify the
 code the reviewer runs, cannot read the reviewer's sealed key material, and
 cannot reach the reviewer's results.
 
-NOT claimed: that an ELEVATED author is excluded. This author process runs as a
-member of Administrators, and Administrators is granted write over the reviewer's
-code so that an operator can install it. That is a real, unclosed residual and
-it is reported as one -- not disclaimed away.
+Also claimed, and newly enforced: that the authoring process performing
+certification is itself unprivileged (RI16).
+
+A third review made clear why that has to be a gate rather than a footnote.
+Everything else here constrains an unprivileged author and nothing else: an
+elevated one takes ownership back, rewrites the reviewer entry point, and
+obtains a genuinely signed transcript of fabricated facts. Calling that residual
+"the malicious administrator non-goal" conflates an attacker who gains
+administrative rights with the ordinary release process holding them by default.
+The second is in scope, so it fails the guard.
+
+Administrators keeps write access over the reviewer's code because an operator
+has to install it. The gate is therefore not "no principal may be elevated" but
+"the process that builds the package and drives certification must not be".
 """
 from __future__ import annotations
 
@@ -176,11 +186,67 @@ def contract_battery() -> None:
 
     # The residual is reported, not hidden.
     admins_write = "*S-1-5-32-544:(OI)(CI)F" in bootstrap
-    rec("RI10 elevated-author-residual-disclosed",
-        admins_write and "not claimed" in bootstrap.lower() or admins_write,
-        "Administrators retains write over the reviewer's code so an operator "
-        "can install it; an ELEVATED author is therefore NOT excluded, and this "
-        "is an open residual rather than a closed control")
+    # RI10 used to "disclose the residual": its predicate reduced to
+    # `admins_write`, so it PASSED precisely because the hole was open, and
+    # passed harder the wider the hole got. Disclosure is not a control, and a
+    # check that rewards the defect it describes is worse than no check.
+    #
+    # The residual is real and stays: an operator must be able to install the
+    # reviewer's code. What makes it bounded is that the process which builds
+    # the package and drives certification is unprivileged -- measured by RI16,
+    # which fails rather than narrates.
+    rec("RI10 operator-install-route-is-the-only-elevated-write",
+        admins_write,
+        "Administrators retains write over the reviewer's code for the operator "
+        "install route; RI16 gates whether the certifying author holds it")
+
+
+def _published_interpreter_pin() -> dict:
+    """Where the reviewer's interpreter lives, as the REVIEWER published it.
+
+    Deliberately not `sys.executable`: that is the author's own interpreter, and
+    probing it would answer "can the author write its own tools" rather than
+    "can the author write the code the reviewer runs". The reviewer writes this
+    file into the trust directory, which the author can read and cannot write.
+    """
+
+    pin = HV / "trust" / "reviewer-interpreter-pin.v1.json"
+    if not pin.is_file():
+        return {}
+    try:
+        return json.loads(pin.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _probe_paths() -> str:
+    """The PowerShell hashtable of write targets, built from real paths.
+
+    Assembled from ``HV`` rather than written out as literals: hand-escaped
+    Windows paths in generated PowerShell silently mangled ``\\r`` and ``\\t``
+    once already, which would have made the probe report "not writable" for
+    directories that simply did not exist under the mangled name -- a passing
+    check measuring nothing.
+    """
+
+    targets = {
+        "reviewer-src": HV / "reviewer-src",
+        "reviewer-bin": HV / "reviewer-bin",
+        "reviewer-pkg": HV / "reviewer-pkg",
+        "reviewer-state": HV / "reviewer" / "state",
+        "reviewer-results": HV / "reviewer" / "out",
+        "trust-root-dir": HV / "trust",
+    }
+    pin = _published_interpreter_pin()
+    if pin.get("site_packages_path"):
+        targets["interpreter-site-packages"] = Path(pin["site_packages_path"])
+    if pin.get("interpreter_path"):
+        targets["interpreter-binary"] = Path(pin["interpreter_path"])
+    # Single-quoted PowerShell strings take backslashes literally; only the
+    # quote character itself needs doubling.
+    body = "; ".join("'%s' = '%s'" % (k, str(v).replace("'", "''"))
+                     for k, v in targets.items())
+    return "@{ " + body + " }"
 
 
 def non_elevated_capability() -> dict:
@@ -200,7 +266,7 @@ def non_elevated_capability() -> dict:
     import json as _json
     import tempfile
 
-    probe = "$ErrorActionPreference = 'SilentlyContinue'\n$paths = @{\n  'reviewer-src'     = 'C:\\mr-hv\\reviewer-src'\n  'reviewer-bin'     = 'C:\\mr-hv\\reviewer-bin'\n  'reviewer-state'   = 'C:\\mr-hv\\reviewer\\state'\n  'reviewer-results' = 'C:\\mr-hv\\reviewer\\out'\n  'trust-root-dir'   = 'C:\\mr-hv\\trust'\n}\n$r = [ordered]@{ elevated = (New-Object Security.Principal.WindowsPrincipal(\n    [Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(\n    [Security.Principal.WindowsBuiltInRole]::Administrator) }\nforeach ($k in $paths.Keys) {\n  $f = Join-Path $paths[$k] ('.ne-' + [Guid]::NewGuid().ToString('N') + '.tmp')\n  try { Set-Content -Path $f -Value 'x' -ErrorAction Stop\n        $r[$k] = $true; Remove-Item $f -Force -ErrorAction SilentlyContinue }\n  catch { $r[$k] = $false }\n}\n$r | ConvertTo-Json -Compress"
+    probe = "$ErrorActionPreference = 'SilentlyContinue'\n$paths = __PATHS__\n$r = [ordered]@{ elevated = (New-Object Security.Principal.WindowsPrincipal(\n    [Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(\n    [Security.Principal.WindowsBuiltInRole]::Administrator) }\nforeach ($k in $paths.Keys) {\n  $p = $paths[$k]\n  if (-not (Test-Path $p)) { $r[$k] = 'absent'; continue }\n  if ((Get-Item $p -Force).PSIsContainer) {\n    $f = Join-Path $p ('.ne-' + [Guid]::NewGuid().ToString('N') + '.tmp')\n    try { Set-Content -Path $f -Value 'x' -ErrorAction Stop\n          $r[$k] = $true; Remove-Item $f -Force -ErrorAction SilentlyContinue }\n    catch { $r[$k] = $false }\n  } else {\n    try { $fs = [System.IO.File]::Open($p, 'Open', 'Write', 'None')\n          $fs.Close(); $r[$k] = $true }\n    catch { $r[$k] = $false }\n  }\n}\n$r | ConvertTo-Json -Compress".replace("__PATHS__", _probe_paths())
     work = Path(tempfile.mkdtemp(prefix="mr-ne-"))
     try:
         ps1 = work / "probe.ps1"
@@ -230,6 +296,46 @@ def non_elevated_capability() -> dict:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def author_process_elevated() -> dict:
+    """Is the process that performs certification itself elevated?
+
+    Every protection this file measures -- ACLs, ownership, the pinned
+    interpreter, the code manifest -- binds a NON-elevated author and nothing
+    else. An elevated author simply takes ownership back, rewrites the reviewer
+    entry point, and produces a genuinely signed transcript of fabricated facts.
+    So the separation claim is only meaningful if the authoring process is
+    measured to be unprivileged at the moment certification runs, and that
+    measurement belongs in the gate rather than in a one-off observation that
+    was true on the day someone looked.
+
+    This is NOT the declared "malicious administrator takeover" non-goal. That
+    non-goal covers an attacker who gains administrative rights. This covers the
+    ordinary, intended release process running with them by default.
+    """
+
+    ps = ("$id = [Security.Principal.WindowsIdentity]::GetCurrent();"
+          "$p = New-Object Security.Principal.WindowsPrincipal($id);"
+          "$admin = $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator);"
+          "$probe = Join-Path $env:SystemRoot ('el-' + [Guid]::NewGuid().ToString('N') + '.tmp');"
+          "try { Set-Content -Path $probe -Value 'x' -ErrorAction Stop; $w = $true;"
+          "      Remove-Item $probe -Force -ErrorAction SilentlyContinue } catch { $w = $false };"
+          "$lvl = ($id.Groups | Where-Object { $_.Value -like 'S-1-16-*' } |"
+          "        Select-Object -First 1).Value;"
+          "@{ in_admin_role = $admin; can_write_system_root = $w;"
+          "   integrity_sid = $lvl } | ConvertTo-Json -Compress")
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=120)
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                return json.loads(line)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    return {}
+
+
 def elevation_battery() -> None:
     """The ordinary author token must not reach reviewer code or trust material.
 
@@ -252,12 +358,49 @@ def elevation_battery() -> None:
 
     for key, label in (("reviewer-src", "reviewer source"),
                        ("reviewer-bin", "reviewer entry-point directory"),
+                       ("reviewer-pkg", "package the reviewer installs and executes"),
                        ("reviewer-state", "reviewer key and trust state"),
                        ("reviewer-results", "reviewer canonical results"),
                        ("trust-root-dir", "pinned trust root")):
         rec(f"RI13 non-elevated-author-cannot-write-{key}",
             measured.get(key) is False,
             f"an ordinary author token cannot write the {label}")
+
+    # The interpreter is the route that bypassed every other control: `-I` does
+    # not disable site.py, so a sitecustomize.py or .pth in site-packages runs
+    # inside the reviewer session with DPAPI available. Nothing under the
+    # Hyper-V root and no tracked file needs to change, so the code manifest and
+    # the pristine-clone check both stay green while arbitrary code runs as the
+    # reviewer. It is measured here, not argued.
+    pin = _published_interpreter_pin()
+    rec("RI14 reviewer-interpreter-pin-published", bool(pin.get("interpreter_path")),
+        "the reviewer published which interpreter it runs, in a location the "
+        "author can read and cannot write")
+    for key, label in (("interpreter-site-packages",
+                        "site-packages of the interpreter the reviewer runs"),
+                       ("interpreter-binary",
+                        "interpreter binary the reviewer runs")):
+        observed = measured.get(key)
+        rec(f"RI15 non-elevated-author-cannot-write-{key}",
+            observed is False,
+            f"an ordinary author token cannot write the {label} "
+            f"(observed={observed!r})")
+
+    # The gate itself. Everything above describes what an UNPRIVILEGED author
+    # cannot do; none of it constrains a privileged one.
+    author = author_process_elevated()
+    if not author:
+        rec("RI16 author-process-elevation-measurable", False,
+            "the authoring process's own privilege level could not be measured, "
+            "so separation is unproven rather than proven")
+        return
+    elevated = bool(author.get("in_admin_role")) or bool(author.get("can_write_system_root"))
+    rec("RI16 author-process-not-elevated", not elevated,
+        "the process performing certification holds no administrative rights "
+        f"(in_admin_role={author.get('in_admin_role')}, "
+        f"can_write_system_root={author.get('can_write_system_root')}); "
+        "an elevated author can take ownership back and rewrite reviewer code, "
+        "which would make every other check in this guard decorative")
 
 
 def main() -> int:
@@ -271,8 +414,9 @@ def main() -> int:
     print(json.dumps({
         "guard": "offline-reviewer-isolation",
         "claim_scope": "the author's ordinary user identity cannot modify reviewer code, "
-                       "read reviewer secrets, or reach reviewer results; an ELEVATED "
-                       "author is explicitly NOT excluded",
+                       "read reviewer secrets, or reach reviewer results, AND the "
+                       "process performing certification is itself unprivileged; "
+                       "elevation remains available to the operator install route only",
         "summary": {"passed": len(CHECKS) - len(failed), "failed": len(failed),
                     "total": len(CHECKS)},
     }, indent=2))

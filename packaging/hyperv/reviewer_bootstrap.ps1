@@ -39,6 +39,10 @@ param(
     [switch]$Verify,
     [switch]$ProvisionPaths,
     [switch]$ExportSource,
+    [switch]$StagePackage,
+    [switch]$HardenInterpreter,
+    [string]$InterpreterPath = '',
+    [string]$PackageSource = '',
     [string]$SourceRepo = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
     [string]$User      = 'MR-OFFLINE-REVIEWER',
     [string]$TaskName  = 'MR-OFFLINE-REVIEWER-RUN',
@@ -89,7 +93,7 @@ function Initialize-ReviewerPaths {
     # It is a SIBLING of reviewer\, not a child, because reviewer\ is locked to
     # reviewer-Full/author-Read: nesting the install directory inside it leaves
     # the author unable to create or update the entry point on any re-run.
-    $authorOwned   = @("$Root\xchg", "$Root\xchg\licences", "$Root\reviewer-pkg")
+    $authorOwned   = @("$Root\xchg", "$Root\xchg\licences")
 
     # CODE the reviewer executes. This is NOT author-writable.
     #
@@ -106,7 +110,22 @@ function Initialize-ReviewerPaths {
     # Installing now requires ADMINISTRATIVE rights -- an operator step, like
     # setting the password -- and the reviewer additionally verifies these
     # files at run time against a manifest only it can write.
-    $reviewerCode  = @("$Root\reviewer-bin", "$Root\reviewer-src")
+    # reviewer-pkg joins the reviewer CODE set, and reviewer-src leaves it.
+    #
+    # The reviewer does not merely READ reviewer-pkg: it runs install.ps1
+    # and MondayReportOffline.exe out of it, several times per matrix, with
+    # its own environment. Leaving it author-writable was the same grant
+    # that caused two prior blocks, moved rather than removed -- the author
+    # could replace the installer or swap the executable for a stub that
+    # answers every probe correctly, and the reviewer would then produce a
+    # GENUINE measurement of fabricated facts. The frozen descriptor does
+    # not help: it and the bytes it describes are both author-writable, so
+    # it is a self-consistency check, not an anchor.
+    #
+    # reviewer-src is handled by -ExportSource, which deletes and re-clones
+    # it and must leave the REVIEWER as owner so git will operate there.
+    # Re-permissioning it here too would fight that on every provision.
+    $reviewerCode  = @("$Root\reviewer-bin", "$Root\reviewer-pkg")
     # The credential handoff area is written by BOTH sides in turn: the
     # reviewer publishes its public certificate and nonce, the author writes
     # the envelope. Only public or CMS-encrypted material ever lands here.
@@ -141,6 +160,9 @@ function Initialize-ReviewerPaths {
         & icacls.exe $d /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)RX" | Out-Null
         # Propagate the new explicit ACL down to existing files.
         & icacls.exe $d /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)RX" /T /C /Q | Out-Null
+        # The owner keeps implicit WRITE_DAC, so removing the ACE alone would
+        # leave the author able to grant itself back in.
+        & icacls.exe $d /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     }
     # The reviewer must traverse the root to reach its own directories, but must
     # not gain read over sibling author material (state\, results\, xfer\).
@@ -271,6 +293,68 @@ if (-not (Test-Elevated)) {
 }
 
 $existing = Get-LocalUser -Name $User -ErrorAction SilentlyContinue
+
+if ($HardenInterpreter) {
+    # OPERATOR step. Remove the author's ordinary write access to the Python
+    # interpreter the reviewer executes, and pin it for the reviewer.
+    #
+    # This closes a route that bypassed every other control: `python -I` does
+    # NOT disable site.py, so a sitecustomize.py written into the interpreter's
+    # site-packages runs inside the reviewer's session -- and the interpreter
+    # lives in the author's own profile, which the author owns. No file under
+    # the Hyper-V root and no tracked source needed to be touched, so the code
+    # manifest and the pristine-clone check both passed while arbitrary code ran
+    # as the reviewer.
+    if (-not $InterpreterPath -or -not (Test-Path $InterpreterPath)) {
+        Write-Output '  STOP: -InterpreterPath must point at the python.exe the reviewer will run.'
+        exit 2
+    }
+    $root = Split-Path $InterpreterPath -Parent
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & icacls.exe $root /inheritance:r /T /C /Q | Out-Null
+    & icacls.exe $root /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
+    & icacls.exe $root /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
+    $ErrorActionPreference = $prev
+
+    # Pin it where only the reviewer can rewrite the pin.
+    $stateDir = Join-Path $HvRoot 'reviewer\state'
+    if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
+    Set-Content -Path (Join-Path $stateDir 'python-path.txt') -Value $InterpreterPath -Encoding ascii
+
+    Write-Fact 'interpreter pinned' $true
+    Write-Fact 'interpreter ACL' 'admins+SYSTEM write, reviewer read+execute, no author-user ACE'
+    exit 0
+}
+
+if ($StagePackage) {
+    # OPERATOR step. The non-elevated author BUILDS the package; publishing it
+    # where the reviewer EXECUTES it needs administrative rights, because that
+    # directory is part of the reviewer's code surface.
+    if (-not $PackageSource -or -not (Test-Path $PackageSource)) {
+        Write-Output '  STOP: -PackageSource must point at the built package staging directory.'
+        exit 2
+    }
+    $dest = Join-Path $HvRoot 'reviewer-pkg'
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & icacls.exe $dest /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
+    $ErrorActionPreference = $prev
+    if (Test-Path $dest) {
+        Get-ChildItem $dest -Force -ErrorAction SilentlyContinue |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    }
+    Copy-Item -Path (Join-Path $PackageSource '*') -Destination $dest -Recurse -Force
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & icacls.exe $dest /reset /T /C /Q | Out-Null
+    & icacls.exe $dest /inheritance:r | Out-Null
+    & icacls.exe $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
+    & icacls.exe $dest /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
+    $ErrorActionPreference = $prev
+    Write-Fact 'package staged' $true
+    Write-Fact 'package ACL' 'admins+SYSTEM write, reviewer read+execute, no author-user ACE'
+    exit 0
+}
 
 if ($ExportSource) {
     # Publish a PRISTINE, REVIEWER-READABLE checkout at the exact current head.
