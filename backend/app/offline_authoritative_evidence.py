@@ -73,6 +73,7 @@ from .offline_review_attestation import (
     transcript_hash,
     validate_transcript_shape,
     verify_attestation,
+    verify_witness,
 )
 
 SCHEMA_VERSION = "offline-commercial-package-evidence.v2"
@@ -540,7 +541,8 @@ def _check_attestation_bindings(result: _Result, payload: dict, attestation: dic
 
 
 def _check_issuance_witness(result: _Result, transcripts: dict[str, dict],
-                            attestation: dict) -> None:
+                            attestation: dict, package_fingerprint: str = "",
+                            issuer_public_key: bytes | None = None) -> None:
     """Each environment must carry an author-signed witness binding the
     reviewer's nonce to the activation request it actually produced.
 
@@ -557,6 +559,35 @@ def _check_issuance_witness(result: _Result, transcripts: dict[str, dict],
     if not HEX64.fullmatch(nonce):
         result.fail("issuance_witness", "the attestation carries no usable review nonce")
         return
+    # The witness is only evidence if its SIGNATURE verifies. Comparing its
+    # fields proves that a document says the right things; it took a signature
+    # check to prove the author actually issued it, and without that this
+    # "anti-replay anchor" was an unsigned blob.
+    # ``issuer_public_key`` exists ONLY so the hermetic contract guard can
+    # drive this real code with a throwaway key. The public entry never
+    # passes it, so the production path always resolves the licence key from
+    # the package under test.
+    issuer_public = issuer_public_key
+    fingerprint = str(package_fingerprint or "")
+    for candidate in () if issuer_public else (
+                      ROOT / "output" / "offline-package" / "stage" / "MondayReportOffline"
+                      / "_internal" / "licensing_public_key.txt",
+                      Path("C:/mr-hv/reviewer-pkg/app/_internal/licensing_public_key.txt"),
+                      Path("C:/mr-hv/state/keys/issuer_public.hex")):
+        try:
+            if candidate.is_file():
+                raw = candidate.read_text(encoding="utf-8", errors="ignore").strip().lower()
+                if re.fullmatch(r"[0-9a-f]{64}", raw):
+                    issuer_public = bytes.fromhex(raw)
+                    break
+        except OSError:
+            continue
+    if issuer_public is None:
+        result.fail("issuance_witness",
+                    "no licence-verification public key is available to verify the "
+                    "issuance witnesses against")
+        return
+
     ok = True
     for label, transcript in sorted(transcripts.items()):
         witness = transcript.get("issuance_witness")
@@ -564,6 +595,23 @@ def _check_issuance_witness(result: _Result, transcripts: dict[str, dict],
             result.fail("issuance_witness", f"{label}: no issuance witness recorded")
             ok = False
             continue
+        for reason in verify_witness(witness, issuer_public):
+            result.fail("issuance_witness", f"{label}: {reason}")
+            ok = False
+        # The witness must name the key that signed it, and that key must be the
+        # one the package verifies licences with.
+        if fingerprint and str(witness.get("issuer_key_fingerprint", "")) != fingerprint:
+            result.fail("issuance_witness",
+                        f"{label}: the witness names a different issuer key than the package")
+            ok = False
+        if str(witness.get("environment_label", "")) != label:
+            result.fail("issuance_witness",
+                        f"{label}: the witness answers a different environment")
+            ok = False
+        if str(witness.get("source_commit", "")) != str(transcript.get("source_commit", "")):
+            result.fail("issuance_witness",
+                        f"{label}: the witness was minted at a different source commit")
+            ok = False
         if str(witness.get("review_nonce", "")) != nonce:
             result.fail("issuance_witness",
                         f"{label}: the witness was issued for a different review nonce")
@@ -600,7 +648,8 @@ def _evaluate(payload: dict, raw: bytes, *, current_commit: str, current_tree: s
               pinned_fingerprint: str = PINNED_REVIEW_KEY_FINGERPRINT,
               worktree_status=_worktree_untracked_or_dirty,
               sid_resolver=_lookup_account_sid,
-              current_sid=_current_process_sid) -> _Result:
+              current_sid=_current_process_sid,
+              issuer_public_key: bytes | None = None) -> _Result:
     """The whole rule set. Private on purpose: nothing outside this module may
     obtain a partial validation and treat it as a verdict."""
 
@@ -708,7 +757,10 @@ def _evaluate(payload: dict, raw: bytes, *, current_commit: str, current_tree: s
                                         sid_resolver, current_sid)
 
         _check_attestation_bindings(result, payload, attestation, transcripts)
-        _check_issuance_witness(result, transcripts, attestation)
+        _check_issuance_witness(
+            result, transcripts, attestation,
+            str(payload.get("package", {}).get("public_key_fingerprint", "")),
+            issuer_public_key)
         _check_freshness(result, attestation)
 
         if attestation.get("review_verdict") != REVIEW_VERDICT_ACCEPT:

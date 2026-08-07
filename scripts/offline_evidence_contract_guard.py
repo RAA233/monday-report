@@ -108,6 +108,19 @@ def digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+#: The throwaway issuer key the fixture signs its witnesses with. The validator
+#: resolves the licence-verification key from the package, so the fixture must
+#: sign with a key whose fingerprint the fixture's package block also names.
+_FIXTURE_ISSUER = Ed25519PrivateKey.generate()
+
+
+def _sign_witness(witness: dict) -> dict:
+    from backend.app.offline_review_attestation import witness_signing_payload
+    signed = {k: v for k, v in witness.items() if k != "signature"}
+    signed["signature"] = _FIXTURE_ISSUER.sign(witness_signing_payload(signed)).hex()
+    return signed
+
+
 def build_transcript(label: str, seed: str, nonce: str, package: dict) -> dict:
     """A synthetic but internally COHERENT transcript: identity derives from the
     binding, and the completion challenge derives from the ordered check chain."""
@@ -141,14 +154,24 @@ def build_transcript(label: str, seed: str, nonce: str, package: dict) -> dict:
         "machine_binding": binding,
         "machine_fingerprint_hash": fingerprint,
         "fingerprint_identity_digest": fingerprint[:32],
-        "issuance_witness": {
+        # A GENUINELY SIGNED witness. A placeholder signature was enough while
+        # nothing verified it; now that the validator does, the fixture has to
+        # produce a real one or the baseline fails and every rejection below it
+        # becomes vacuous.
+        "issuance_witness": _sign_witness({
             "schema_version": WITNESS_SCHEMA,
+            "domain": "monday-report/offline-issuance-witness/v1",
             "review_nonce": nonce,
+            "environment_label": label,
             "activation_request_hash": request_hash,
+            "requested_fingerprint_digest": fingerprint[:32],
+            "source_commit": digest(COMMIT),
+            "source_tree": digest(TREE),
+            "licence_set_digest": digest(seed + "licences"),
+            "issuer_key_fingerprint": package["public_key_fingerprint"],
             "issued_at": datetime.now(timezone.utc).isoformat(),
             "expiry_seconds": 240,
-            "signature": "c" * 128,
-        },
+        }),
         "offline": True,
         "localhost_only": True,
         "dependency_absence": True,
@@ -170,7 +193,8 @@ def build_artifact(private_key: Ed25519PrivateKey) -> dict:
         "executable_sha256": digest("executable"),
         "payload_manifest_sha256": digest("payload"),
         "frontend_manifest_sha256": digest("frontend"),
-        "public_key_fingerprint": digest("pubkey")[:16],
+        "public_key_fingerprint": key_fingerprint(
+            _FIXTURE_ISSUER.public_key().public_bytes_raw()),
         "private_key_absent": True,
     }
     nonce = digest("review-nonce")
@@ -265,7 +289,8 @@ def evaluate(artifact: dict, trust_root: Path, pinned: str,
                          else digest(TREE),
                          trust_root_path=trust_root, pinned_fingerprint=pinned,
                          worktree_status=clean_worktree, sid_resolver=sid_resolver,
-                         current_sid=lambda: AUTHOR_SID)
+                         current_sid=lambda: AUTHOR_SID,
+                         issuer_public_key=_FIXTURE_ISSUER.public_key().public_bytes_raw())
     reasons = list(result.reasons)
     unobserved = A.REQUIRED_CHECKS - result.checked
     if unobserved:
@@ -485,6 +510,28 @@ def main() -> int:
             return legacy
         mutation("CT15 v1-relabelled-as-v2", "legacy body wearing the v2 schema label",
                  v1_relabelled, "unknown keys")
+
+        # The witness signature must be LOAD-BEARING. It was verified nowhere in
+        # the production path, so the "anti-replay anchor" was an unsigned blob
+        # every field check happily accepted.
+        def break_witness_signature(doc):
+            doc["environment_transcripts"]["ENVIRONMENT_1"]["issuance_witness"]["signature"] = "0" * 128
+            return reseal_and_resign(doc, key)
+        mutation("CT22 witness-signature-load-bearing",
+                 "issuance witness signature replaced",
+                 break_witness_signature, "signature does not verify")
+
+        def foreign_witness_key(doc):
+            other = Ed25519PrivateKey.generate()
+            from backend.app.offline_review_attestation import witness_signing_payload
+            w = doc["environment_transcripts"]["ENVIRONMENT_2"]["issuance_witness"]
+            body = {k: v for k, v in w.items() if k != "signature"}
+            body["signature"] = other.sign(witness_signing_payload(body)).hex()
+            doc["environment_transcripts"]["ENVIRONMENT_2"]["issuance_witness"] = body
+            return reseal_and_resign(doc, key)
+        mutation("CT23 witness-signed-by-another-key",
+                 "witness signed by a key the package does not verify with",
+                 foreign_witness_key, "signature does not verify")
 
         # ---- structural: the legacy tier cannot emit acceptance -------------
         legacy_source = inspect.getsource(LEGACY)

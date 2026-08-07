@@ -517,12 +517,19 @@ def credential_battery(state_root: Path, xfer_root: Path, vm_name: str) -> None:
     #
     # These checks therefore assert whichever ownership model is actually in
     # force. When the author still holds a credential the original proofs run
-    # unchanged; once ownership has moved, the properties that matter are that
-    # the author holds nothing usable and the reviewer's sealed copy exists and
-    # is unreadable to the author. The DPAPI shape, ACL and fail-closed
-    # behaviour of that copy are proven in depth by
-    # ``audit:offline-credential-migration``, which runs under the principal
-    # that can actually read it.
+    # unchanged; once ownership has moved, HV28/HV32 assert what this principal
+    # can actually establish -- the author holds nothing usable, the reviewer's
+    # sealed copy exists, and the author cannot read it -- while HV30 and HV31
+    # keep testing the leak surfaces and the control surface DIRECTLY, because
+    # those are behavioural properties that do not depend on who owns the real
+    # credential.
+    #
+    # An earlier version of this branch collapsed HV29, HV30 and HV31 into one
+    # file-absence boolean and justified it by deferring to
+    # ``audit:offline-credential-migration``. That deferral was false: that
+    # guard runs as the AUTHOR and exists to prove the author CANNOT read the
+    # blob, so it never verifies DPAPI shape and contains no fail-closed test
+    # of the control surface at all.
     if not cred_path.exists():
         retired = state_root / "e2-guest.cred.retired"
         author_holds_nothing = not cred_path.exists() and not retired.exists()
@@ -539,12 +546,70 @@ def credential_battery(state_root: Path, xfer_root: Path, vm_name: str) -> None:
             "ownership migration")
         rec("HV29 no-plaintext-credential-at-rest", author_holds_nothing,
             "no author-side guest credential remains at rest, active or retired")
-        rec("HV30 credential-absent-from-logs-and-evidence", author_holds_nothing,
-            "the author retains no credential copy that could reach a log or "
-            "an evidence document")
-        rec("HV31 credential-removal-fails-closed", author_holds_nothing,
-            "the supported author workflow has no credential path into the guest, "
-            "so it fails closed rather than falling back")
+
+        # HV30 -- scan the surfaces that CAN be read for credential-shaped
+        # material. The reviewer-owned blob is deliberately unreadable here, so
+        # this scans what an author-visible leak would actually land in:
+        # transfer files, results, logs and evidence.
+        leaks = []
+        for base in (xfer_root, Path("C:/mr-hv/results"), Path("C:/mr-hv/xchg"),
+                     ROOT / "output"):
+            if not base.exists():
+                continue
+            # TEXT artifacts only. Reading binaries as text finds "secret=" and
+            # "password=" byte sequences inside shipped DLLs and minified
+            # bundles, which is noise, not a credential leak -- a scan that
+            # cries wolf on libssl teaches its reader to ignore it.
+            for candidate in base.rglob("*"):
+                if (not candidate.is_file()
+                        or candidate.suffix.lower() not in (".json", ".log", ".txt",
+                                                            ".md", ".ps1", ".py",
+                                                            ".cred", ".xml")):
+                    continue
+                try:
+                    text = candidate.read_text(encoding="utf-8", errors="ignore")
+                except (OSError, PermissionError):
+                    continue
+                if re.search(r"(?i)\b(password|secret)\b\s*[:=]\s*\S", text):
+                    leaks.append(candidate.name)
+        rec("HV30 credential-absent-from-logs-and-evidence", not leaks,
+            f"credential-shaped material in: {leaks[:5]}" if leaks
+            else "no credential-shaped material in transfer files, results, logs "
+                 "or evidence")
+
+        # HV31 -- the CONTROL SURFACE must fail closed, and that is a behavioural
+        # property of hyperv_control.ps1, not of who owns the real credential.
+        # Driving it with disposable fixture state roots tests it directly and
+        # works under either ownership model. Replacing it with a file-absence
+        # boolean deleted the only test that would notice a blank, default or
+        # prompted fallback appearing in that script.
+        with tempfile.TemporaryDirectory(prefix="hv-cred-") as tmp:
+            corrupt_state = Path(tmp) / "corrupt"
+            corrupt_state.mkdir()
+            (corrupt_state / "e2-guest.cred").write_text("not-a-dpapi-blob", encoding="utf-8")
+            proc = _powershell(["-File", str(CONTROL), "-Action", "list-out",
+                                "-VmName", vm_name, "-StateRoot", str(corrupt_state)])
+            failed_closed = ("HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" in (proc.stdout or "")
+                             and proc.returncode != 0)
+
+            empty_state = Path(tmp) / "empty"
+            empty_state.mkdir()
+            proc2 = _powershell(["-File", str(CONTROL), "-Action", "list-out",
+                                 "-VmName", vm_name, "-StateRoot", str(empty_state)])
+            absent_closed = ("HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" in (proc2.stdout or "")
+                             and proc2.returncode != 0)
+
+            blank_state = Path(tmp) / "blank"
+            blank_state.mkdir()
+            (blank_state / "e2-guest.cred").write_text("", encoding="utf-8")
+            proc3 = _powershell(["-File", str(CONTROL), "-Action", "list-out",
+                                 "-VmName", vm_name, "-StateRoot", str(blank_state)])
+            blank_closed = ("HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" in (proc3.stdout or "")
+                            and proc3.returncode != 0)
+        rec("HV31 credential-removal-fails-closed",
+            failed_closed and absent_closed and blank_closed,
+            f"corrupted={failed_closed}, absent={absent_closed}, blank={blank_closed}; "
+            "each stops the control surface with no blank, default or prompted fallback")
         rec("HV32 credential-acl-restricted", author_cannot_read,
             "the reviewer-owned credential is unreadable to the author process")
         return
@@ -798,10 +863,31 @@ def vm_battery(vm_name: str, media_record: Path, xfer_root: Path,
     author_cred = Path("C:/mr-hv/state") / "e2-guest.cred"
     reviewer_cred = Path("C:/mr-hv/reviewer/state") / "e2-guest.cred"
     if not author_cred.is_file() and reviewer_cred.is_file():
-        rec("HV42 vm-independent-from-environment-1", True,
-            "guest-credential ownership has moved to the reviewer principal, so "
-            "this comparison is made by the reviewer inside its signed E2 "
-            "transcript; the author cannot authenticate to the guest at all")
+        # Compare the two environments' PUBLISHED identity digests. The previous
+        # version of this branch returned a literal True under a condition the
+        # author controls -- deleting its own credential file made a
+        # VM-independence proof pass with no VM and no comparison at all.
+        #
+        # The digests are derived by the reviewer from each environment's own
+        # machine binding, so this is a comparison of measurements. Only digests
+        # are read: no machine identifier is exposed here either.
+        out_dir = Path("C:/mr-hv/reviewer/out")
+        digests = {}
+        for label in ("ENVIRONMENT_1", "ENVIRONMENT_2"):
+            path = out_dir / f"{label}-transcript.json"
+            if path.is_file():
+                try:
+                    digests[label] = str(json.loads(
+                        path.read_text(encoding="utf-8-sig")
+                    ).get("fingerprint_identity_digest", ""))
+                except (OSError, json.JSONDecodeError):
+                    digests[label] = ""
+        both = [d for d in digests.values() if re.fullmatch(r"[0-9a-f]{32}", d or "")]
+        rec("HV42 vm-independent-from-environment-1",
+            len(both) == 2 and len(set(both)) == 2,
+            f"the reviewer published a distinct machine identity for each "
+            f"environment ({len(both)} digest(s) present, "
+            f"{len(set(both))} distinct); no identifier exposed")
     else:
         probe = _powershell(["-File", str(CONTROL), "-Action", "identity-compare",
                              "-VmName", vm_name], timeout=600)

@@ -512,10 +512,32 @@ def main() -> int:
             shared = set(measured) & set(recorded)
             agree = bool(shared) and all(measured[k] == recorded[k] for k in shared)
         else:
-            # Ownership has moved. Assert THAT, rather than pretending to measure.
-            reviewer_credential = Path(r"C:\mr-hv\reviewer\state\e2-guest.cred")
+            # Ownership has moved, so this principal cannot open a guest session.
+            # COMPARE THE REVIEWER'S MEASUREMENT instead of asserting a file
+            # exists: the previous version of this branch returned
+            # ``Path.is_file()`` for a check named
+            # "environment-2-fingerprint-matches-the-live-guest", which reopened
+            # the exact defect the check was created to close -- one machine's
+            # records relabelled with an invented fingerprint.
+            #
+            # The reviewer derives the digest from the binding the GUEST itself
+            # produced and publishes it in its transcript. Here that digest is
+            # re-derived from the same raw record and required to match, so the
+            # comparison is against a measurement, not against a claim.
             measured, recorded, shared = {}, {}, set()
-            agree = reviewer_credential.is_file()
+            transcript_path = Path(r"C:\mr-hv\reviewer\out\ENVIRONMENT_2-transcript.json")
+            agree = False
+            if transcript_path.is_file():
+                try:
+                    reviewer_transcript = json.loads(
+                        transcript_path.read_text(encoding="utf-8-sig"))
+                except (OSError, json.JSONDecodeError):
+                    reviewer_transcript = {}
+                published = str(reviewer_transcript.get("fingerprint_identity_digest", ""))
+                binding = e2_raw.get("machine_binding") or {}
+                derived = canonical_hash(binding)[:32] if binding else ""
+                agree = bool(derived) and published == derived
+                shared = set((binding.get("component_hashes") or {}).keys())
         # OE44 -- the fingerprint hash must commit to the binding it claims to
         # summarise. license_format.py enforces exactly this for licences; the
         # environment records did not, so machine_binding could describe the live
@@ -535,10 +557,10 @@ def main() -> int:
 
         rec("OE42 environment-2-fingerprint-matches-the-live-guest", agree,
             (f"{len(shared)} fingerprint component(s) re-measured live in the guest agree "
-             f"with what ENVIRONMENT_2's runner recorded" if shared else
-             "guest-credential ownership has moved to the reviewer principal, so this "
-             "measurement is made by the reviewer inside its signed E2 transcript; the "
-             "author cannot authenticate the E2 workflow at all"))
+             f"with what ENVIRONMENT_2's runner recorded" if measured else
+             f"the reviewer's published identity digest re-derives from ENVIRONMENT_2's "
+             f"own machine binding ({len(shared)} component(s)); the author cannot open a "
+             f"guest session at all, so the measurement is the reviewer's"))
 
         # OE41 -- completeness travels, and is enforced.
         thin = {label: env.get("missing_or_failing_checks")

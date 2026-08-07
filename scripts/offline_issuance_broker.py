@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import os
 import sys
 import time
@@ -46,6 +47,8 @@ REQUEST_DIR = XCHG_ROOT / "requests"
 LICENCE_DIR = XCHG_ROOT / "licences"
 
 #: Set in the reviewer's environment. Its presence means "you may not sign; ask".
+from backend.app.offline_review_attestation import verify_witness  # noqa: E402
+
 BROKER_FLAG = "MONDAY_REPORT_OFFLINE_ISSUER_BROKER"
 
 DEFAULT_TIMEOUT_SECONDS = 900
@@ -104,6 +107,21 @@ def request_bundle(*, request: Path, transfer_in: Path, sequence: int, nonce: st
         raise TimeoutError(f"the author did not issue licences for {ticket} in time")
 
     witness = json.loads(witness_path.read_text(encoding="utf-8"))
+
+    # VERIFY THE SIGNATURE FIRST.
+    #
+    # Comparing the witness's fields proves only that a JSON document says the
+    # right things -- and the reviewer cannot write this directory, but nothing
+    # else stopped an unsigned or forged document from satisfying every field
+    # check. Without this call the "anti-replay anchor" was an unsigned blob
+    # whose one cryptographic property nobody checked.
+    issuer_public = _issuer_public_key()
+    if issuer_public is None:
+        raise ValueError("no issuer public key is available to verify the issuance witness")
+    signature_reasons = verify_witness(witness, issuer_public)
+    if signature_reasons:
+        raise ValueError(f"issuance witness signature is not valid: {signature_reasons[0]}")
+
     # Every binding is checked here, on the REVIEWER side, before a single
     # licence is imported. A witness that answers a different run, a different
     # environment, a different request, or a different head is not evidence
@@ -145,6 +163,26 @@ def _licence_set_digest(digests: dict) -> str:
 
     return hashlib.sha256(
         json.dumps(digests, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _issuer_public_key() -> bytes | None:
+    """The licence-verification public key the package itself ships.
+
+    Taken from the PACKAGE, not from the witness: a witness that names its own
+    issuer proves nothing. The reviewer already re-hashes this package, so the
+    key it verifies against is the one the environment under test will accept.
+    """
+
+    for candidate in (
+        Path(r"C:\mr-hv\reviewer-pkg\app\_internal\licensing_public_key.txt"),
+        Path(r"C:\mr-hv\reviewer-pkg\app\licensing_public_key.txt"),
+        Path(r"C:\mr-hv\state\keys\issuer_public.hex"),
+    ):
+        if candidate.is_file():
+            raw = candidate.read_text(encoding="utf-8", errors="ignore").strip().lower()
+            if re.fullmatch(r"[0-9a-f]{64}", raw):
+                return bytes.fromhex(raw)
+    return None
 
 
 def _canonical_request_hash(request: dict) -> str:

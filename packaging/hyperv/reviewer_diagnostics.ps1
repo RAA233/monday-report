@@ -44,13 +44,42 @@ function Redact {
     param([string]$Text)
     if (-not $Text) { return '' }
     $t = $Text
+    # Drive-letter AND UNC paths. Matching only 'C:\...' left \\host\share
+    # untouched.
     $t = $t -replace '[A-Za-z]:\\[^\s"'']*', '<path>'
+    $t = $t -replace '\\\\[^\s"'']+', '<path>'
     $t = $t -replace '\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b', '<mac>'
-    $t = $t -replace 'S-1-5-21-[0-9\-]+', '<sid>'
+    # ANY SID, not just S-1-5-21-: service (S-1-5-80-) and AzureAD (S-1-12-1-)
+    # SIDs are identity too.
+    $t = $t -replace 'S-1-\d+(-\d+)+', '<sid>'
     $t = $t -replace '\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b', '<guid>'
-    $t = $t -replace '(?i)(password|secret|token)\s*[:=]\s*\S+', '$1=<redacted>'
+    $t = $t -replace '(?i)(password|secret|token|credential|passphrase)\s*[:=]\s*\S+', '$1=<redacted>'
+    # Long base64/hex runs are what a credential or key actually looks like when
+    # it is NOT helpfully labelled.
+    $t = $t -replace '\b[A-Za-z0-9+/]{40,}={0,2}\b', '<opaque>'
+    $t = $t -replace '\b[0-9a-fA-F]{64,}\b', '<opaque>'
     if ($t.Length -gt 4000) { $t = $t.Substring(0, 4000) + ' <truncated>' }
     return $t
+}
+
+function Redact-Any {
+    <#
+      Redact recursively. The previous version only redacted values that were
+      [string], so arrays -- out_files among them -- and every future non-scalar
+      field passed through verbatim.
+    #>
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string]) { return Redact $Value }
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [System.Collections.IDictionary])) {
+        return @($Value | ForEach-Object { Redact-Any $_ })
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $out = [ordered]@{}
+        foreach ($k in $Value.Keys) { $out[$k] = Redact-Any $Value[$k] }
+        return $out
+    }
+    return $Value
 }
 
 function Get-GuestCredential {
@@ -225,14 +254,12 @@ if ($RunRequestProbe) {
         return $r
     }
     foreach ($k in $run.Keys) {
-        $v = $run[$k]
-        if ($v -is [string]) { $diag["probe_$k"] = Redact $v } else { $diag["probe_$k"] = $v }
+        $diag["probe_$k"] = Redact-Any $run[$k]
     }
 }
 
 foreach ($key in $probe.Keys) {
-    $value = $probe[$key]
-    if ($value -is [string]) { $diag[$key] = Redact $value } else { $diag[$key] = $value }
+    $diag[$key] = Redact-Any $probe[$key]
 }
 
 # Classify, rather than leaving the caller to guess from an empty log.

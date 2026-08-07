@@ -89,8 +89,24 @@ function Initialize-ReviewerPaths {
     # It is a SIBLING of reviewer\, not a child, because reviewer\ is locked to
     # reviewer-Full/author-Read: nesting the install directory inside it leaves
     # the author unable to create or update the entry point on any re-run.
-    $authorOwned   = @("$Root\xchg", "$Root\xchg\licences", "$Root\reviewer-bin",
-                   "$Root\reviewer-src", "$Root\reviewer-pkg")
+    $authorOwned   = @("$Root\xchg", "$Root\xchg\licences", "$Root\reviewer-pkg")
+
+    # CODE the reviewer executes. This is NOT author-writable.
+    #
+    # It was, and that broke the entire design: the scheduled task's action
+    # target is reviewer-bin\reviewer_session.ps1, and the author's supported
+    # control channel is `schtasks /Run`. An author able to write that file
+    # could put arbitrary code inside the reviewer's own profile-loaded
+    # session and have DPAPI decrypt the review key and the guest credential
+    # for it -- no ownership taken, no password reset, no elevation. That is
+    # NOT the declared malicious-administrator non-goal; it was silent forgery
+    # at zero privilege, and it made the stage allowlist meaningless, because
+    # the allowlist lives in the very file the author could rewrite.
+    #
+    # Installing now requires ADMINISTRATIVE rights -- an operator step, like
+    # setting the password -- and the reviewer additionally verifies these
+    # files at run time against a manifest only it can write.
+    $reviewerCode  = @("$Root\reviewer-bin", "$Root\reviewer-src")
     # The credential handoff area is written by BOTH sides in turn: the
     # reviewer publishes its public certificate and nonce, the author writes
     # the envelope. Only public or CMS-encrypted material ever lands here.
@@ -109,6 +125,22 @@ function Initialize-ReviewerPaths {
     foreach ($d in $authorOwned) {
         & icacls.exe $d /inheritance:r | Out-Null
         & icacls.exe $d /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)R" | Out-Null
+    }
+    # Administrators + SYSTEM may write the reviewer's code; the reviewer may
+    # read and execute it; the author's USER identity gets nothing. Granting by
+    # user SID is exactly what made this writable without elevation.
+    foreach ($d in $reviewerCode) {
+        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+        # ORDER MATTERS. Reset first so files installed earlier lose their own
+        # explicit author ACE; then break inheritance; then grant. Doing the
+        # reset LAST re-inherited the parent's permissions and handed
+        # Authenticated Users Modify on the very code the reviewer executes --
+        # strictly worse than the state it was meant to repair.
+        & icacls.exe $d /reset /T /C /Q | Out-Null
+        & icacls.exe $d /inheritance:r | Out-Null
+        & icacls.exe $d /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)RX" | Out-Null
+        # Propagate the new explicit ACL down to existing files.
+        & icacls.exe $d /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)RX" /T /C /Q | Out-Null
     }
     # The reviewer must traverse the root to reach its own directories, but must
     # not gain read over sibling author material (state\, results\, xfer\).
@@ -133,7 +165,7 @@ function Initialize-ReviewerPaths {
             }
         }
     }
-    return $reviewerOwned + $authorOwned + $sharedHandoff
+    return $reviewerOwned + $authorOwned + $sharedHandoff + $reviewerCode
 }
 
 function Get-InstalledSessionScript {

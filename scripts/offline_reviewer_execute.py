@@ -36,6 +36,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -353,6 +354,60 @@ def _run_runner(source: Path, python_exe: str, *, phase: str, label: str,
     return subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
 
 
+def _head_binding_reasons(source: Path, frozen: dict) -> list:
+    """Every reason the frozen head binding may not be trusted.
+
+    The reviewer owns a clone of the source at the head under test. Reconciling
+    the author-supplied descriptor against `git rev-parse` in THAT clone is what
+    turns the binding from a string the author handed over into a fact this
+    principal established.
+    """
+
+    commit = str(frozen.get("source_commit", ""))
+    tree = str(frozen.get("source_tree", ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        return ["the frozen descriptor carries no well-formed source commit"]
+    if not re.fullmatch(r"[0-9a-f]{40}", tree):
+        return ["the frozen descriptor carries no well-formed source tree"]
+    try:
+        own_commit = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD"],
+                                    capture_output=True, text=True, timeout=60).stdout.strip()
+        own_tree = subprocess.run(["git", "-C", str(source), "rev-parse", "HEAD^{tree}"],
+                                  capture_output=True, text=True, timeout=60).stdout.strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [f"the reviewer could not resolve its own source head: {exc}"]
+    if not own_commit or not own_tree:
+        return ["the reviewer could not resolve its own source head"]
+    if own_commit != commit:
+        return ["the frozen descriptor names a different commit than the reviewer's "
+                "own source export"]
+    if own_tree != tree:
+        return ["the frozen descriptor names a different tree than the reviewer's "
+                "own source export"]
+    return []
+
+
+def _identity_digest(source: Path, request_record: Path) -> str:
+    """Derived machine identity for a completed environment.
+
+    Only the digest is published. The raw components stay in the environment
+    that produced them, which is what lets two environments be compared without
+    either one exposing a machine identifier.
+    """
+
+    if not request_record.exists():
+        return ""
+    try:
+        binding = json.loads(request_record.read_text(encoding="utf-8")).get("machine_binding")
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not binding:
+        return ""
+    sys.path.insert(0, str(source))
+    from backend.app.licensing.canonical import canonical_hash  # noqa: PLC0415
+    return canonical_hash(binding)[:32]
+
+
 def stage_environment(args, label: str, env_class: str) -> int:
     """Execute one COMPLETE environment matrix under the reviewer principal.
 
@@ -400,6 +455,15 @@ def stage_environment(args, label: str, env_class: str) -> int:
                      "detail": "staged package disagrees with its descriptor",
                      "fields": package["disagreements"]}, 4)
     frozen = package["frozen"]
+
+    # RECONCILE the head binding against this principal's OWN clone.
+    #
+    # frozen-package.json is author-writable, so taking source_commit from it and
+    # passing it on made the reviewer vouch for whichever head the author named.
+    # The pristine export exists precisely so the reviewer can establish the head
+    # first hand; until this check existed, nothing did that.
+    for reason in _head_binding_reasons(source, frozen):
+        return fail({"state": "FAILED", "phase": "head-binding", "detail": reason}, 4)
 
     # Minted BEFORE the run, so the author witness cannot predate it.
     nonce = secrets.token_hex(32)
@@ -470,6 +534,9 @@ def stage_environment(args, label: str, env_class: str) -> int:
         "recomputed_package": package["recomputed"],
         "in_environment_package": in_environment,
         "package_disagreements": package_disagreements,
+        # Published so the two environments can be compared without either one
+        # exposing a machine identifier: only the derived digest crosses.
+        "fingerprint_identity_digest": _identity_digest(source, request_record),
         "totals": totals,
         "frozen_package": frozen,
         "started_at": started,
@@ -529,6 +596,9 @@ def stage_e2(args) -> int:
                      "fields": package["disagreements"]}, 4)
     frozen = package["frozen"]
 
+    for reason in _head_binding_reasons(source, frozen):
+        return fail({"state": "FAILED", "phase": "head-binding", "detail": reason}, 4)
+
     # Minted BEFORE the run so the author's witness cannot predate it.
     nonce = secrets.token_hex(32)
     started = datetime.now(timezone.utc).isoformat()
@@ -580,6 +650,14 @@ def stage_e2(args) -> int:
         witness = json.loads(witness_path.read_text(encoding="utf-8"))
     ok = ok and bool(witness) and str(witness.get("review_nonce", "")) == nonce
 
+    # CAPTURE THE GUEST MACHINE IDENTITY. Without it the transcript said nothing
+    # about which machine ran, so the checks meant to prove Environment 2 is a
+    # DIFFERENT machine had nothing to compare against and degenerated into
+    # asserting that a file exists.
+    identity_digest = _identity_digest(
+        source, transfer_root / "environment-request-record.json")
+    ok = ok and bool(identity_digest)
+
     transcript = {
         "state": "COMPLETE" if ok else "FAILED",
         "environment_label": label,
@@ -590,6 +668,7 @@ def stage_e2(args) -> int:
         "issuer_key_present_in_session": False,
         "in_environment_package": in_environment,
         "package_disagreements": package_disagreements,
+        "fingerprint_identity_digest": identity_digest,
         "totals": totals,
         "frozen_package": frozen,
         "recomputed_package": package["recomputed"],
