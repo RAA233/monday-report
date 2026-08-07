@@ -385,6 +385,21 @@ def elevation_battery() -> None:
     certification actually do it".
     """
 
+    # Is this measurement authoritative, or only indicative?
+    #
+    # When the guard is already unprivileged it probes with its own token and
+    # the answer is the real one. When it is elevated it has to drop a token
+    # with `runas /trustlevel:0x20000`, and that token is NOT a faithful stand-in:
+    # it removes administrative privilege but keeps a HIGH integrity label, so
+    # any protection resting on the mandatory label rather than on the DACL
+    # would be measured as absent when it is present. Measured directly rather
+    # than assumed -- the two tokens were compared against the same paths.
+    author = author_process_elevated()
+    self_elevated = bool(author.get("in_admin_role")) or bool(author.get("can_write_system_root"))
+    qualifier = ("" if not self_elevated else
+                 " [INDICATIVE ONLY: measured through a dropped token that keeps a "
+                 "High integrity label, because this guard is running elevated]")
+
     measured = non_elevated_capability()
     if not measured:
         rec("RI11 non-elevated-capability-measurable", False,
@@ -405,7 +420,7 @@ def elevation_battery() -> None:
                        ("trust-root-dir", "pinned trust root")):
         rec(f"RI13 non-elevated-author-cannot-write-{key}",
             measured.get(key) is False,
-            f"an ordinary author token cannot write the {label}")
+            f"an ordinary author token cannot write the {label}{qualifier}")
 
     # The interpreter is the route that bypassed every other control: `-I` does
     # not disable site.py, so a sitecustomize.py or .pth in site-packages runs
@@ -425,11 +440,10 @@ def elevation_battery() -> None:
         rec(f"RI15 non-elevated-author-cannot-write-{key}",
             observed is False,
             f"an ordinary author token cannot write the {label} "
-            f"(observed={observed!r})")
+            f"(observed={observed!r}){qualifier}")
 
     # The gate itself. Everything above describes what an UNPRIVILEGED author
     # cannot do; none of it constrains a privileged one.
-    author = author_process_elevated()
     if not author:
         rec("RI16 author-process-elevation-measurable", False,
             "the authoring process's own privilege level could not be measured, "
