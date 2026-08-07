@@ -296,6 +296,47 @@ def non_elevated_capability() -> dict:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def author_task_rights() -> dict:
+    """What the author's ordinary identity may do to the reviewer's task object.
+
+    `schtasks /Run` is the entire author-to-reviewer control channel, so two
+    opposite things both have to be true: the author must be able to START the
+    task without elevation, and must not be able to MODIFY it. An author that
+    can rewrite the task action points the reviewer's own profile-loaded session
+    at code of its choosing -- the same defect as an author-writable entry
+    point, one level up.
+
+    The live descriptor is read rather than the capability being exercised:
+    attempting the write would risk destroying the registration that the whole
+    protocol depends on, and the descriptor is what decides the answer anyway.
+    """
+
+    ps = ("$svc = New-Object -ComObject Schedule.Service; $svc.Connect();"
+          "$t = $svc.GetFolder('').GetTask('MR-OFFLINE-REVIEWER-RUN');"
+          "$sd = New-Object Security.AccessControl.RawSecurityDescriptor("
+          "  $t.GetSecurityDescriptor(4));"
+          "$me = ([Security.Principal.NTAccount]("
+          "  \"$env:USERDOMAIN\$env:USERNAME\")).Translate("
+          "  [Security.Principal.SecurityIdentifier]);"
+          "$mask = 0;"
+          "foreach ($a in $sd.DiscretionaryAcl) {"
+          "  if ($a.SecurityIdentifier -eq $me -and $a.AceType -eq 'AccessAllowed')"
+          "    { $mask = $mask -bor $a.AccessMask } };"
+          "@{ present = ($mask -ne 0); may_start = [bool]($mask -band 0x20);"
+          "   may_modify = [bool]($mask -band 0xC0116) } | ConvertTo-Json -Compress")
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=120)
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                return json.loads(line)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    return {}
+
+
 def author_process_elevated() -> dict:
     """Is the process that performs certification itself elevated?
 
@@ -395,6 +436,24 @@ def elevation_battery() -> None:
             "so separation is unproven rather than proven")
         return
     elevated = bool(author.get("in_admin_role")) or bool(author.get("can_write_system_root"))
+    # The control channel, from both sides.
+    rights = author_task_rights()
+    if not rights:
+        rec("RI17 author-task-rights-measurable", False,
+            "the reviewer task's live security descriptor could not be read, so "
+            "the control channel's boundary is unproven")
+    else:
+        rec("RI17 author-may-start-the-reviewer-task",
+            rights.get("may_start") is True,
+            "the author's ordinary identity can start the reviewer task, so the "
+            "protocol is drivable without elevation "
+            f"(may_start={rights.get('may_start')})")
+        rec("RI18 author-may-not-modify-the-reviewer-task",
+            rights.get("may_modify") is False,
+            "the author's ordinary identity cannot rewrite the task action, so it "
+            "cannot point the reviewer's session at code of its own choosing "
+            f"(may_modify={rights.get('may_modify')})")
+
     rec("RI16 author-process-not-elevated", not elevated,
         "the process performing certification holds no administrative rights "
         f"(in_admin_role={author.get('in_admin_role')}, "

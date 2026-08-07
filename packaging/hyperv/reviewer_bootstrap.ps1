@@ -41,6 +41,8 @@ param(
     [switch]$ExportSource,
     [switch]$StagePackage,
     [switch]$HardenInterpreter,
+    [switch]$RepinReviewerCode,
+    [switch]$GrantAuthorTaskRun,
     [string]$InterpreterPath = '',
     [string]$PackageSource = '',
     [string]$SourceRepo = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
@@ -294,6 +296,103 @@ if (-not (Test-Elevated)) {
 
 $existing = Get-LocalUser -Name $User -ErrorAction SilentlyContinue
 
+if ($GrantAuthorTaskRun) {
+    # OPERATOR step. Let the author's ORDINARY user identity start the reviewer
+    # task -- and do nothing else to it.
+    #
+    # `schtasks /Run` is the whole author-to-reviewer control channel, and it
+    # only worked because the author process was elevated: the task's DACL
+    # carries Administrators, SYSTEM and the reviewer, and no ACE for the author
+    # at all. So requiring a non-elevated author would have made the protocol
+    # undrivable -- discovered by reading the live descriptor rather than after
+    # the operator had closed their elevated window.
+    #
+    # Read and execute ONLY. Write, append, delete, WRITE_DAC and WRITE_OWNER
+    # are all withheld, because an author able to rewrite the task action could
+    # point it at its own code and have the reviewer session run that instead --
+    # the same class of defect as an author-writable entry point.
+    $READ_EXECUTE = 0x1200A9
+    $svc = New-Object -ComObject Schedule.Service
+    $svc.Connect()
+    $task = $svc.GetFolder('').GetTask($TaskName)
+    $sd = New-Object Security.AccessControl.RawSecurityDescriptor($task.GetSecurityDescriptor(4))
+    $author = ([Security.Principal.NTAccount]("$env:USERDOMAIN\$env:USERNAME")).Translate(
+        [Security.Principal.SecurityIdentifier])
+    $already = @($sd.DiscretionaryAcl | Where-Object { $_.SecurityIdentifier -eq $author })
+    if ($already.Count -eq 1 -and $already[0].AccessMask -eq $READ_EXECUTE) {
+        Write-Fact 'author task rights' 'already read+execute; nothing to change'
+        exit 0
+    }
+    # RawAcl exposes RemoveAce(index) but no IndexOf, so walk backwards by index
+    # -- removing forwards would renumber the entries still to be examined.
+    for ($i = $sd.DiscretionaryAcl.Count - 1; $i -ge 0; $i--) {
+        if ($sd.DiscretionaryAcl[$i].SecurityIdentifier -eq $author) {
+            $sd.DiscretionaryAcl.RemoveAce($i)
+        }
+    }
+    $ace = New-Object Security.AccessControl.CommonAce(
+        [Security.AccessControl.AceFlags]::None,
+        [Security.AccessControl.AceQualifier]::AccessAllowed,
+        $READ_EXECUTE, $author, $false, $null)
+    $sd.DiscretionaryAcl.InsertAce($sd.DiscretionaryAcl.Count, $ace)
+    $task.SetSecurityDescriptor(
+        $sd.GetSddlForm([Security.AccessControl.AccessControlSections]::Access), 0)
+
+    # Read it back. A grant that is not verified is a claim.
+    $after = New-Object Security.AccessControl.RawSecurityDescriptor(
+        $svc.GetFolder('').GetTask($TaskName).GetSecurityDescriptor(4))
+    $got = @($after.DiscretionaryAcl | Where-Object { $_.SecurityIdentifier -eq $author })
+    $mask = if ($got.Count -eq 1) { $got[0].AccessMask } else { 0 }
+    Write-Fact 'author may start the task' ([bool]($mask -band 0x20))
+    Write-Fact 'author may modify the task' ([bool]($mask -band 0xC0116))
+    if ($mask -ne $READ_EXECUTE) {
+        Write-Output '  STOP: the task grant did not apply as read+execute.'
+        exit 2
+    }
+    exit 0
+}
+
+if ($RepinReviewerCode) {
+    # OPERATOR step. Retire the reviewer's code pin so the next reviewer run
+    # adopts the current code deliberately.
+    #
+    # The reviewer refuses to run when what it executes no longer matches its
+    # manifest, and it names the operator as the only party who may re-pin. That
+    # refusal has no supported remedy without this action: reviewer\state grants
+    # the reviewer, SYSTEM and the author's READ -- Administrators holds no ACE
+    # at all, by design, so an elevated shell cannot simply delete the file.
+    #
+    # Ownership is taken of the MANIFEST ONLY and the file is then removed, so
+    # the ownership change disappears with the object it was taken on and the
+    # directory's ACL is never touched.
+    #
+    # ORDER MATTERS: harden and stage FIRST, re-pin LAST. Adoption pins whatever
+    # is on disk at that moment, so re-pinning before the author has lost write
+    # access would pin bytes the author could still have chosen.
+    $manifest = Join-Path $HvRoot 'reviewer\state
+eviewer-code-manifest.json'
+    if (-not (Test-Path $manifest)) {
+        Write-Fact 'code pin' 'already absent; the next reviewer run will adopt'
+        exit 0
+    }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & takeown.exe /F $manifest | Out-Null
+    & icacls.exe $manifest /grant "*S-1-5-32-544:(F)" /C /Q | Out-Null
+    $ErrorActionPreference = $prev
+    [System.IO.File]::Delete($manifest)
+    $gone = -not (Test-Path $manifest)
+    Write-Fact 'code pin retired' $gone
+    Write-Fact 'reviewer state ACL' 'untouched (ownership was taken on the manifest only)'
+    if (-not $gone) {
+        Write-Output '  STOP: the code pin could not be retired.'
+        exit 2
+    }
+    Write-Output ''
+    Write-Output '  The next reviewer run will ADOPT the code now on disk.'
+    Write-Output '  Harden and stage BEFORE this step, never after.'
+    exit 0
+}
+
 if ($HardenInterpreter) {
     # OPERATOR step. Remove the author's ordinary write access to the Python
     # interpreter the reviewer executes, and pin it for the reviewer.
@@ -352,6 +451,8 @@ if ($StagePackage) {
     & icacls.exe $dest /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
     Write-Fact 'package staged' $true
+    Write-Output '  NOTE: the staged package is part of the reviewer code pin.'
+    Write-Output '        Run -RepinReviewerCode after this, or the reviewer will refuse.'
     Write-Fact 'package ACL' 'admins+SYSTEM write, reviewer read+execute, no author-user ACE'
     exit 0
 }
