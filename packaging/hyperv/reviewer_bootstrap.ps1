@@ -125,10 +125,12 @@ function Initialize-ReviewerPaths {
         Copy-Item -Path $SessionSource -Destination (Get-InstalledSessionScript -Root $Root) -Force
         # The migration script must sit beside the entry point, or the reviewer
         # cannot read it: it holds no rights under the authoring worktree.
-        $migSource = Join-Path (Split-Path $SessionSource -Parent) 'reviewer_credential_migration.ps1'
-        if (Test-Path $migSource) {
-            Copy-Item -Path $migSource -Destination `
-                (Join-Path (Join-Path $Root 'reviewer-bin') 'reviewer_credential_migration.ps1') -Force
+        foreach ($helper in @('reviewer_credential_migration.ps1', 'reviewer_diagnostics.ps1')) {
+            $src = Join-Path (Split-Path $SessionSource -Parent) $helper
+            if (Test-Path $src) {
+                Copy-Item -Path $src -Destination `
+                    (Join-Path (Join-Path $Root 'reviewer-bin') $helper) -Force
+            }
         }
     }
     return $reviewerOwned + $authorOwned + $sharedHandoff

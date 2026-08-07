@@ -41,7 +41,7 @@ $StateRoot    = Join-Path $ReviewerRoot 'state'        # reviewer-owned secrets
 $OutRoot      = Join-Path $ReviewerRoot 'out'          # reviewer-owned results
 
 #: The complete set of things the authoring process may ask the reviewer to do.
-$AllowedStages = @('bootstrap', 'preflight', 'cms-identity', 'cred-rotate', 'cred-repair', 'cred-seal',
+$AllowedStages = @('bootstrap', 'preflight', 'cms-identity', 'cred-rotate', 'cred-repair', 'cred-seal', 'diagnostics',
                    'e1', 'e2', 'review', 'status')
 
 function New-Status {
@@ -163,6 +163,36 @@ if ($stage -eq 'status') {
 # need the reviewer certificate store and PowerShell Direct, both PowerShell
 # native. They deliberately run BEFORE the Python driver is required, so a
 # missing interpreter cannot block credential ownership transfer.
+# Reviewer-only E2 diagnostics. The author cannot drive PowerShell Direct any
+# more, so it cannot see why the guest failed; this returns normalized, redacted
+# facts to the author-readable result area. Troubleshooting only -- never
+# acceptance evidence.
+if ($stage -eq 'diagnostics') {
+    $diagScript = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_diagnostics.ps1'
+    if (-not (Test-Path $diagScript)) {
+        New-Status -Stage $stage -State 'FAILED' -Detail 'diagnostics script missing from the install'
+        exit 4
+    }
+    New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    # The author may ask for the deeper probe, which actually runs the request
+    # stage in the guest. Bounded, and still non-authoritative.
+    $deep = ($command.PSObject.Properties.Name -contains 'deep') -and $command.deep
+    if ($deep) {
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $diagScript `
+               -RunRequestProbe 2>&1 | Out-String
+    } else {
+        $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $diagScript 2>&1 | Out-String
+    }
+    $rc = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    Set-Content -Path (Join-Path $OutRoot 'diagnostics-result.json') -Value $out -Encoding utf8
+    if ($rc -eq 0) { New-Status -Stage $stage -State 'COMPLETE' -Detail "run_id=$runId" }
+    else { New-Status -Stage $stage -State 'FAILED' -Detail "diagnostics exited $rc" }
+    exit $rc
+}
+
 if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate' -or $stage -eq 'cred-repair' -or $stage -eq 'cred-seal') {
     $migration = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_credential_migration.ps1'
     if (-not (Test-Path $migration)) {
