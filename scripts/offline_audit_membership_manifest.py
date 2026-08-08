@@ -43,6 +43,7 @@ CONTRACT_COMMAND = "audit:offline-evidence-contract"
 CONTRACT_SCRIPT = "python -I scripts/offline_evidence_contract_guard.py"
 MAX_POSITION = 2
 
+
 #: Guards that must independently assert this membership. Listing them here is
 #: what makes a silent single-file removal impossible to hide.
 REDUNDANT_ASSERTERS = (
@@ -54,6 +55,36 @@ REDUNDANT_ASSERTERS = (
 #: is the LESS likely regression; hollowing is likelier -- the step stays, most
 #: rejection cases are deleted, and it still exits 0.
 MIN_CONTRACT_CHECKS = 20
+
+#: EVERY offline battery that must be in the chain, not just the first one.
+#:
+#: The operator-principal battery decides the acceptance predicate itself -- no
+#: principal that can write the release tree may hold Administrator -- and it was
+#: registered in package.json and referenced by nothing. A command no chain runs
+#: is a command whose deletion costs one line and breaks no build, which is the
+#: same unpinned-membership finding this manifest exists to answer, one level up.
+#:
+#: ``min_checks`` and ``pattern`` guard against the likelier regression: the step
+#: survives, most of its cases are deleted, and it still exits 0.
+PINNED_MEMBERS = (
+    {
+        "command": CONTRACT_COMMAND,
+        "script": CONTRACT_SCRIPT,
+        "guard": "scripts/offline_evidence_contract_guard.py",
+        "min_checks": MIN_CONTRACT_CHECKS,
+        "pattern": r'battery\.record\(\s*"|mutation\(\s*"',
+    },
+    {
+        "command": "audit:offline-operator-principal",
+        "script": "python scripts/offline_operator_principal_guard.py",
+        "guard": "scripts/offline_operator_principal_guard.py",
+        "min_checks": 35,
+        # Check IDs, not call sites: several cases are recorded from a shared
+        # mutation helper, so counting `rec(` undercounted the battery by a
+        # third and would have pinned a floor it already sat below.
+        "pattern": r'"OP\d+[a-z]?\s',
+    },
+)
 
 
 def expand_audit_all() -> list[str]:
@@ -90,9 +121,6 @@ def verify_membership() -> list[str]:
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     scripts = package.get("scripts", {})
 
-    if scripts.get(CONTRACT_COMMAND) != CONTRACT_SCRIPT:
-        reasons.append(f"{CONTRACT_COMMAND} is missing or does not run {CONTRACT_SCRIPT}")
-
     audit_all = scripts.get("audit:all", "")
     if not audit_all:
         reasons.append("audit:all is absent")
@@ -102,33 +130,37 @@ def verify_membership() -> list[str]:
         reasons.append("audit:all is not a strict && chain")
 
     steps = expand_audit_all()
-    if CONTRACT_SCRIPT not in steps:
-        reasons.append("audit:all does not contain the offline evidence contract step")
-    else:
-        position = steps.index(CONTRACT_SCRIPT)
-        if position > MAX_POSITION:
-            reasons.append(
-                f"the offline evidence contract runs at position {position}, after a step "
-                f"that can fail; it must run within the first {MAX_POSITION + 1}")
-
+    asserter_text = {}
     for relative in REDUNDANT_ASSERTERS:
         path = ROOT / relative
         if not path.exists():
             reasons.append(f"redundant asserter missing: {relative}")
             continue
-        text = path.read_text(encoding="utf-8")
-        if CONTRACT_SCRIPT not in text and CONTRACT_COMMAND not in text:
-            reasons.append(f"{relative} no longer asserts the contract membership")
+        asserter_text[relative] = path.read_text(encoding="utf-8")
 
-    guard = ROOT / "scripts" / "offline_evidence_contract_guard.py"
-    if guard.exists():
-        # Hollowing check: the battery must still execute a real number of cases.
-        recorded = len(re.findall(r'battery\.record\(\s*"|mutation\(\s*"',
-                                  guard.read_text(encoding="utf-8")))
-        if recorded < MIN_CONTRACT_CHECKS:
-            reasons.append(
-                f"the contract battery declares only {recorded} checks, below the pinned "
-                f"minimum of {MIN_CONTRACT_CHECKS}")
+    for member in PINNED_MEMBERS:
+        command, script = member["command"], member["script"]
+        if scripts.get(command) != script:
+            reasons.append(f"{command} is missing or does not run {script}")
+        if script not in steps:
+            reasons.append(f"audit:all does not contain {command}")
+        else:
+            position = steps.index(script)
+            if position > MAX_POSITION:
+                reasons.append(
+                    f"{command} runs at position {position}, after a step that can "
+                    f"fail; it must run within the first {MAX_POSITION + 1}")
+        for relative, text in asserter_text.items():
+            if script not in text and command not in text:
+                reasons.append(f"{relative} no longer asserts {command}")
+        guard = ROOT / member["guard"]
+        if guard.exists():
+            # Hollowing check: the battery must still execute a real number of cases.
+            recorded = len(re.findall(member["pattern"], guard.read_text(encoding="utf-8")))
+            if recorded < member["min_checks"]:
+                reasons.append(
+                    f"{command} declares only {recorded} checks, below the pinned "
+                    f"minimum of {member['min_checks']}")
     return reasons
 
 

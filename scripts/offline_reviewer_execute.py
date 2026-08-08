@@ -142,11 +142,24 @@ def current_sid() -> str:
 
 
 def account_sid(name: str) -> str:
+    """Resolve an account name to a SID, without letting the name be code.
+
+    The name arrives from a file on disk. Interpolating it into a PowerShell
+    command meant a single quote in it became PowerShell -- running in the
+    reviewer's own session, where DPAPI decrypts the review key. The ACL that
+    keeps that file operator-only is exactly the kind this codebase has already
+    watched fail to apply silently, so the name is bound through the
+    environment and the command contains no interpolation at all.
+    """
+
+    child_env = {k: v for k, v in os.environ.items()
+                 if not k.upper().startswith("PYTHON")}
+    child_env["MR_RESOLVE_ACCOUNT"] = name
     completed = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
          "$ErrorActionPreference='Stop';"
-         f"try {{ (Get-LocalUser -Name '{name}').SID.Value }} catch {{ '' }}"],
-        capture_output=True, text=True, timeout=60)
+         "try { (Get-LocalUser -Name $env:MR_RESOLVE_ACCOUNT).SID.Value } catch { '' }"],
+        capture_output=True, text=True, timeout=60, env=child_env)
     value = completed.stdout.strip()
     return value if value.startswith("S-1-") else ""
 

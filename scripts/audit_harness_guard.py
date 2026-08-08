@@ -182,10 +182,15 @@ print(json.dumps({"environment": os.environ.get("MONDAY_REPORT_API_BASE"), "runt
         "monday_report_offline_audit_membership",
         ROOT / "scripts" / "offline_audit_membership_manifest.py")
     membership_reasons = membership.verify_membership()
+    # Both offline batteries are named here on purpose. verify_membership()
+    # would still cover them if this said nothing, but then hiding a removal
+    # would take one edit rather than three.
     checks.append(assert_check(
         "audit:all pins the offline evidence contract",
         not membership_reasons,
-        membership_reasons or "python -I scripts/offline_evidence_contract_guard.py pinned"))
+        membership_reasons or "python -I scripts/offline_evidence_contract_guard.py "
+                              "and audit:offline-operator-principal "
+                              "(python scripts/offline_operator_principal_guard.py) pinned"))
 
     failed = [check for check in checks if not check["ok"]]
     for check in checks:

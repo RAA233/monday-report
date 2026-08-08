@@ -78,6 +78,69 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# THE SOURCE IS CHECKED BEFORE IT IS LOADED.
+#
+# This dot-source used to sit here unguarded, 500 lines above Test-Elevated and
+# above every other gate. The documented invocation runs this script out of the
+# author's own worktree, so an author who edited principal_contract.ps1 and then
+# waited for the operator obtained arbitrary code at High integrity -- enough to
+# add itself to Administrators or to make the contract return no violations.
+# Every check downstream was inside the file being checked.
+#
+# Written with built-ins only, because nothing may be imported yet. It asks one
+# question: does any principal outside Administrators/SYSTEM/TrustedInstaller
+# hold write on the code about to run? Account resolution is not available here
+# and is not needed -- a privileged tree simply has no such ACE.
+function Assert-SelfSourceTrusted {
+    param([string[]]$Paths)
+
+    $trusted = @('S-1-5-32-544', 'S-1-5-18', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $bad = @()
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path)) { $bad += "missing:$(Split-Path $path -Leaf)"; continue }
+        $item = Get-Item -LiteralPath $path -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            $bad += "reparse:$(Split-Path $path -Leaf)"; continue
+        }
+        $acl = $null
+        try { $acl = Get-Acl -LiteralPath $path } catch { $bad += "unreadable:$(Split-Path $path -Leaf)"; continue }
+        $ownerSid = ''
+        try { $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
+        if ($ownerSid -and ($trusted -notcontains $ownerSid)) {
+            $bad += "owner:$(Split-Path $path -Leaf)"
+        }
+        foreach ($ace in $acl.Access) {
+            if ($ace.AccessControlType -ne 'Allow') { continue }
+            $sid = ''
+            try {
+                $sid = $ace.IdentityReference.Translate(
+                    [Security.Principal.SecurityIdentifier]).Value
+            } catch { $bad += "unresolvable-ace:$(Split-Path $path -Leaf)"; continue }
+            if ($trusted -contains $sid) { continue }
+            $mask = [int]$ace.FileSystemRights
+            # Generic bits expanded: a non-canonical mask renders as a number and
+            # matches no name, which is how GENERIC_ALL slips past a string test.
+            if ($mask -band 0x10000000) { $mask = $mask -bor 0x1F01FF }
+            if ($mask -band 0x40000000) { $mask = $mask -bor 0x0116 }
+            if ($mask -band 0xD0116) { $bad += "writable:$(Split-Path $path -Leaf)" }
+        }
+    }
+    if ($bad.Count) {
+        Write-Output ''
+        Write-Output '  STOP: the code this script is about to load is not privileged-only.'
+        Write-Output '  reason: OFFLINE_OPERATOR_SOURCE_NOT_TRUSTED'
+        foreach ($entry in ($bad | Select-Object -Unique)) { Write-Output "    $entry" }
+        Write-Output '  Run the elevated steps from the admin-only source copy, not from the'
+        Write-Output '  author-writable working tree.'
+        exit 2
+    }
+}
+
+Assert-SelfSourceTrusted -Paths @(
+    $PSCommandPath,
+    (Join-Path $PSScriptRoot 'principal_contract.ps1')
+)
+
 . (Join-Path $PSScriptRoot 'principal_contract.ps1')
 
 # Native binaries by absolute path, resolved once. An elevated session inherits
@@ -88,7 +151,10 @@ $icacls   = Get-TrustedNativeCommand -Name 'icacls.exe'
 $takeown  = Get-TrustedNativeCommand -Name 'takeown.exe'
 $schtasks = Get-TrustedNativeCommand -Name 'schtasks.exe'
 $secedit  = Get-TrustedNativeCommand -Name 'secedit.exe'
-$gitExe   = Resolve-TrustedGit -Explicit $TrustedGit
+# -Author is passed so the author-writability check the function documents
+# actually runs; without it the check was skipped and the value was then never
+# used anyway, because six call sites invoked `git.exe` by name.
+$gitExe   = Resolve-TrustedGit -Explicit $TrustedGit -Author $AuthorIdentity
 # THE THREE PRINCIPALS, RESOLVED ONCE AND NEVER RE-DERIVED.
 #
 # OPERATOR is the process performing the administrative action -- the one place
@@ -172,7 +238,14 @@ function Test-AuthorWritable {
     # operator is about to lock something the author can still rewrite; keying
     # it to $env:USERNAME made it answer about the operator instead.
     Assert-AuthorNamed
-    $me = $AuthorIdentity.Name
+    # Delegated to the SID-aware helper. Comparing IdentityReference display
+    # strings missed every group ACE -- on this host the author's write to the
+    # task root arrives through an inherited Authenticated Users: Modify -- and
+    # missed generic bits entirely. It also depended on the spelling of the
+    # supplied account: `-AuthorAccount .\name` resolves correctly but renders
+    # unqualified, so it matched no ACL identity and reported "not writable"
+    # for a directory the author owns outright.
+    return (Test-AccountCanWritePath -Identity $AuthorIdentity -Path $Path)
     try { $acl = Get-Acl -LiteralPath $Path } catch { return $true }
     if ($acl.Owner -eq $me) { return $true }
     foreach ($ace in $acl.Access) {
@@ -205,20 +278,17 @@ function Assert-AclApplied {
         exit 2
     }
     Assert-AuthorNamed
-    $me = $AuthorIdentity.Name
+    # Same delegation as Test-AuthorWritable: the read-back that PRINTS
+    # "no author ACE" was itself blind to group ACEs and generic bits, so it
+    # asserted a clean result over trees the author could still write.
     $bad = @()
     $items = @(Get-Item -LiteralPath $Path -Force) +
              @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue)
     foreach ($item in $items) {
         $acl = $null
         try { $acl = Get-Acl -LiteralPath $item.FullName } catch { $bad += "unreadable:$($item.FullName)" ; continue }
-        if ($acl.Owner -eq $me) { $bad += "author-owns:$($item.FullName)" }
-        foreach ($ace in $acl.Access) {
-            if ($ace.IdentityReference.Value -ne $me) { continue }
-            if ($ace.AccessControlType -ne 'Allow') { continue }
-            if ($ace.FileSystemRights.ToString() -match 'Write|Modify|FullControl|CreateFiles') {
-                $bad += "author-writes:$($item.FullName)"
-            }
+        if (Test-AccountCanWritePath -Identity $AuthorIdentity -Path $item.FullName) {
+            $bad += "author-writes:$($item.FullName)"
         }
         if ($bad.Count -ge 5) { break }
     }
@@ -270,7 +340,70 @@ function Assert-TaskRootProtected {
     }
 }
 
+function Write-PrincipalCapabilityFacts {
+    <#
+      EVERY CAPABILITY QUESTION, ANSWERED ON THE LIVE HOST, THROUGH THE FUNCTIONS
+      THE FIXTURES EXERCISE.
+
+      Six predicates and two ACL evaluators were written, documented and covered
+      by the guard, and then called by nothing outside it. The operator's
+      transcript was assembled from separate inline computations, so the guard
+      was proving that unreached code behaved correctly while production ran
+      code no fixture had ever seen -- which is exactly how the earlier
+      display-name and stale-exit-code defects survived a green battery. These
+      are now the only implementations in play.
+    #>
+    param($Operator, $Author, $Reviewer, [string]$Root, [string]$TaskName)
+
+    $releaseTree   = $SourceRepo
+    $reviewerCode  = @("$Root\reviewer-bin", "$Root\reviewer-pkg")
+    $results       = "$Root\reviewer\results"
+
+    # THE SALT IN FORCE, so these digests are the ones the reviewer publishes.
+    # Printed rather than the SIDs they stand for, and directly comparable with
+    # review-key-public.json: the operator can confirm the reviewer bound the
+    # account the operator declared without either side handling a raw SID. That
+    # comparison was impossible while this file salted differently and truncated.
+    $salt = Get-ContractPrincipalSalt -StatePath (Join-Path $Root 'reviewer\state')
+    if ($Author.Sid) {
+        Write-Fact 'author principal digest' (Get-PrincipalDigest -Sid $Author.Sid -Salt $salt)
+    }
+    if ($Reviewer -and $Reviewer.Sid) {
+        Write-Fact 'reviewer principal digest' (Get-PrincipalDigest -Sid $Reviewer.Sid -Salt $salt)
+    }
+
+    Write-Fact 'operator holds Administrator' `
+        (Test-OperatorIsAdministrator -Operator $Operator)
+    Write-Fact 'operator is the author' (Test-OperatorIsAuthor -Operator $Operator -Author $Author)
+    Write-Fact 'author can write the release tree' `
+        (Test-CanAuthorWriteReleaseTree -Author $Author -ReleaseTree $releaseTree)
+    Write-Fact 'author can write reviewer code (want False)' `
+        (Test-CanAuthorWriteReviewerCode -Author $Author -ReviewerCodePaths $reviewerCode)
+    Write-Fact 'operator can write the release tree' `
+        (Test-CanOperatorWriteReleaseTree -Operator $Operator -ReleaseTree $releaseTree)
+    if ($Reviewer -and $Reviewer.Exists) {
+        Write-Fact 'reviewer can write canonical results' `
+            (Test-CanReviewerWriteCanonicalResults -Reviewer $Reviewer -ResultsPath $results)
+        Write-Fact 'author can modify the reviewer task (want False)' `
+            (Test-CanAuthorModifyReviewerTask -Author $Author -TaskName $TaskName)
+    }
+
+    # The two evaluators the fixtures drive, on the real objects.
+    $aceReasons = @(Get-TaskAceViolations -Author $Author -TaskName $TaskName)
+    Write-Fact 'task ACE violations' ($(if ($aceReasons.Count) { $aceReasons -join ', ' } else { 'none' }))
+    $rootReasons = @(Get-TaskRootAclViolations -Root $Root -Author $Author)
+    Write-Fact 'task root ACL violations' ($(if ($rootReasons.Count) { $rootReasons -join ', ' } else { 'none' }))
+    return @($aceReasons) + @($rootReasons)
+}
+
 function Assert-OperatorIsNotAuthor {
+    # -AllowAbsentReviewer exists for the ONE route that creates the reviewer.
+    #
+    # The gate resolved the reviewer up front and refused on
+    # OFFLINE_REVIEWER_ACCOUNT_UNRESOLVED, at top level, before Test-Elevated --
+    # so on a host where the reviewer had never been created, the script that
+    # creates it could never run. The membership clauses still apply; only the
+    # existence clause is relaxed, and only here.
     <#
       OPERATOR and AUTHOR must be different Windows principals.
 
@@ -297,11 +430,18 @@ function Assert-OperatorIsNotAuthor {
       by BUILTIN\Administrators as proof of separation, which is the hazard
       being read as the evidence.
     #>
-    param($Operator, $Author)
+    param($Operator, $Author, [switch]$AllowAbsentReviewer)
 
-    $violations = Get-PrincipalContractViolations -Operator $Operator -Author $Author `
-        -Reviewer $ReviewerIdentity
-    if (-not $violations -or $violations.Count -eq 0) { return }
+    $violations = @(Get-PrincipalContractViolations -Operator $Operator -Author $Author `
+        -Reviewer $ReviewerIdentity -AllowAbsentReviewer:$AllowAbsentReviewer)
+    # @() around the call. PowerShell unrolls a one-element List to a bare
+    # String, and $string.Count throws under StrictMode 2.0 -- so exactly one
+    # violation (the headline case: a distinct operator with an author still in
+    # Administrators) crashed the gate instead of naming it. Two violations
+    # worked, zero worked. The fixtures could not see it because the probe wraps
+    # the result in @() itself, which is precisely what this caller lacked.
+    $violations = @($violations)
+    if ($violations.Count -eq 0) { return }
     Write-Output ''
     Write-Output '  STOP: the principal contract is not satisfied.'
     foreach ($reason in $violations) { Write-Output "  reason: $reason" }
@@ -327,7 +467,12 @@ function Assert-TrustedOperatorSource {
 
     $reasons = Assert-TrustedSourceRoot -Root $Root -Author $Author `
         -ExpectedCommit $Commit -ExpectedTree $Tree -GitPath $Git
-    if (-not $reasons -or $reasons.Count -eq 0) { return }
+    # Same unroll as the principal gate. Assert-TrustedSourceRoot returns a
+    # List, one element of which arrives as a bare String; `-not $reasons` is
+    # then $false and $reasons.Count throws under StrictMode instead of naming
+    # the single reason. Exactly one reason is the common case here.
+    $reasons = @($reasons)
+    if ($reasons.Count -eq 0) { return }
 
     Write-Output ''
     Write-Output '  The elevated source copy is not trusted.'
@@ -452,7 +597,7 @@ function Initialize-ReviewerPaths {
     # was handed.
     $stateDir = Join-Path $Root 'reviewer\state'
     if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
-    Set-Content -Path (Join-Path $stateDir 'author-account.txt') -Value $AuthorName -Encoding ascii
+    $authorFile = Join-Path $stateDir 'author-account.txt'
 
     # Both principals must TRAVERSE the root to reach their own directories, and
     # neither should inherit anything from it: (NP) keeps these to this object,
@@ -486,7 +631,40 @@ function Initialize-ReviewerPaths {
         # leave the author able to grant itself back in.
         & $icacls $d /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     }
+    # WRITTEN AFTER THE ACLS, AND READ BACK.
+    #
+    # This ran BEFORE the grants above, under ErrorActionPreference = Continue,
+    # with nothing checking it. Directory grants do reach an existing child --
+    # measured, not assumed -- so the ordering was survivable; the absence of a
+    # read-back was not. Set-Content failing here is silent, and a stale file
+    # from an earlier provision naming a DIFFERENT account survives it. The
+    # operator sees a successful run and the reviewer binds the wrong author,
+    # which is the one fact in this file that nothing downstream can re-derive.
+    Set-Content -Path $authorFile -Value $AuthorName -Encoding ascii
+    # The file is the reviewer's, not the author's: the author may read the
+    # declaration it is bound by, and may not edit it.
+    & $icacls $authorFile /inheritance:r | Out-Null
+    & $icacls $authorFile /grant:r "${Account}:(F)" "*S-1-5-18:(F)" `
+        "*S-1-5-32-544:(F)" "${me}:(R)" | Out-Null
     $ErrorActionPreference = $prev
+
+    $written = ''
+    try { $written = (Get-Content -LiteralPath $authorFile -Raw -ErrorAction Stop).Trim() }
+    catch { $written = '' }
+    if ($written -ne $AuthorName) {
+        Write-Output ''
+        Write-Output '  STOP: the declared author identity was not written.'
+        Write-Output '  reason: OFFLINE_AUTHOR_DECLARATION_NOT_WRITTEN'
+        Write-Output "  the reviewer would bind '$written' instead of the declared account."
+        exit 2
+    }
+    if (Test-AccountCanWritePath -Identity $AuthorIdentity -Path $authorFile) {
+        Write-Output ''
+        Write-Output '  STOP: the author can rewrite the file that names the author.'
+        Write-Output '  reason: OFFLINE_AUTHOR_DECLARATION_AUTHOR_WRITABLE'
+        exit 2
+    }
+    Write-Fact 'declared author (read back)' 'written, author-readable, author-unwritable'
 
     foreach ($d in $sharedHandoff) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
@@ -646,7 +824,11 @@ if ($GrantAuthorTaskRun) {
     Assert-AuthorNamed
     $author = [Security.Principal.SecurityIdentifier]::new($AuthorIdentity.Sid)
     $already = @($sd.DiscretionaryAcl | Where-Object { $_.SecurityIdentifier -eq $author })
-    if ($already.Count -eq 1 -and $already[0].AccessMask -eq $READ_EXECUTE) {
+    # AceType matters. Matching on SID and mask alone meant a single
+    # AccessDenied ACE carrying the same mask satisfied "already read+execute;
+    # nothing to change", and the grant was skipped.
+    if ($already.Count -eq 1 -and $already[0].AccessMask -eq $READ_EXECUTE -and
+        $already[0].AceType -eq 'AccessAllowed') {
         Write-Fact 'author task rights' 'already read+execute; nothing to change'
         exit 0
     }
@@ -676,7 +858,14 @@ if ($GrantAuthorTaskRun) {
     # WRITE_DAC and WRITE_OWNER. An earlier mask omitted DELETE, so an author
     # able to remove the task outright would have been reported as unable to
     # modify it.
-    Write-Fact 'author may modify the task' ([bool]($mask -band 0xD0116))
+    # Evaluated through the contract, which unions the author's group SIDs and
+    # accounts for ownership. The local computation matched the author's own SID
+    # only, so "author may modify: False" could be printed while the author held
+    # modify through BUILTIN\Users -- an ACE this repository has already
+    # observed on this host.
+    $authorTaskRights = Get-TaskRightsForAccount -Identity $AuthorIdentity -TaskName $TaskName
+    Write-Fact 'author may start the task' $authorTaskRights.may_start
+    Write-Fact 'author may modify the task' ($authorTaskRights.may_modify -or $authorTaskRights.owns_task)
     if ($mask -ne $READ_EXECUTE) {
         Write-Output '  STOP: the task grant did not apply as read+execute.'
         exit 2
@@ -924,8 +1113,8 @@ if ($ExportSource) {
     #
     # Administrative only: no credential is involved and none is prompted for.
     $dest = "$HvRoot\reviewer-src"
-    $head = (& git.exe -C $SourceRepo rev-parse HEAD).Trim()
-    $tree = (& git.exe -C $SourceRepo rev-parse 'HEAD^{tree}').Trim()
+    $head = (& $gitExe -C $SourceRepo rev-parse HEAD).Trim()
+    $tree = (& $gitExe -C $SourceRepo rev-parse 'HEAD^{tree}').Trim()
     Write-Fact 'exporting head' $head
     # Reclaim before replacing. A previous export leaves the tree owned by the
     # reviewer with no author-user rights, so even an administrator cannot
@@ -941,12 +1130,12 @@ if ($ExportSource) {
     if (Test-Path "$dest\.git") { Remove-Item $dest -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & git.exe clone --local --no-hardlinks --quiet $SourceRepo $dest | Out-Null
-    & git.exe -C $dest checkout --quiet --detach $head | Out-Null
+    & $gitExe clone --local --no-hardlinks --quiet $SourceRepo $dest | Out-Null
+    & $gitExe -C $dest checkout --quiet --detach $head | Out-Null
     $ErrorActionPreference = $prev
 
-    $exportedHead = (& git.exe -C $dest rev-parse HEAD).Trim()
-    $exportedTree = (& git.exe -C $dest rev-parse 'HEAD^{tree}').Trim()
+    $exportedHead = (& $gitExe -C $dest rev-parse HEAD).Trim()
+    $exportedTree = (& $gitExe -C $dest rev-parse 'HEAD^{tree}').Trim()
     Write-Fact 'exported head matches' ($exportedHead -eq $head)
     Write-Fact 'exported tree matches' ($exportedTree -eq $tree)
     if ($exportedHead -ne $head -or $exportedTree -ne $tree) {
@@ -1001,6 +1190,10 @@ if ($ProvisionPaths) {
     Write-Fact 'entry point installed' (Test-Path $installed)
     Write-Fact 'credential' 'untouched (no prompt, no reset)'
     Write-Output ''
+    Write-Output '  capabilities, measured through the contract:'
+    [void](Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
+        -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName)
+    Write-Output ''
     Write-Output '  Paths provisioned. The registered scheduled task is unchanged.'
     Write-Output '  If the task action still targets the authoring worktree, repoint it with:'
     Write-Output "    schtasks /Change /TN <task> /TR ..."
@@ -1008,6 +1201,8 @@ if ($ProvisionPaths) {
 }
 
 if ($Verify) {
+    [void](Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
+        -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName)
     Write-Fact 'account exists' ([bool]$existing)
     if ($existing) {
         Write-Fact 'enabled' $existing.Enabled

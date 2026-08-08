@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -56,7 +57,7 @@ def identity(name: str, sid: str, *, exists: bool = True, resolved: bool = True)
     return {"name": name, "sid": sid, "exists": exists, "resolved": resolved}
 
 
-def probe(case: dict, work: Path) -> dict:
+def probe(case: dict, work: Path, env: dict | None = None) -> dict:
     """Run one case through the shared contract and return its named reasons."""
 
     case_file = work / "case.json"
@@ -65,7 +66,7 @@ def probe(case: dict, work: Path) -> dict:
         completed = subprocess.run(
             [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
              "-File", str(PROBE), "-CaseFile", str(case_file)],
-            capture_output=True, text=True, timeout=180)
+            capture_output=True, text=True, timeout=180, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         return {"reasons": [f"PROBE_FAILED:{type(exc).__name__}"], "value": None}
     for line in (completed.stdout or "").splitlines():
@@ -111,6 +112,23 @@ def cycle(case_id: str, label: str, mutate: dict, expected: str, work: Path) -> 
 
 def main() -> int:
     CHECKS.clear()
+    if os.name != "nt":
+        # THE SUBJECT MATTER DOES NOT EXIST HERE.
+        #
+        # Windows SIDs, local group membership, DACLs and scheduled-task
+        # security descriptors are what this battery reasons about, and the
+        # certifying host is Windows by construction. Stated as a skip with a
+        # named reason rather than as 39 passes, and rather than a red audit:all
+        # on a platform where the question is meaningless. It is NOT an
+        # environment switch: os.name is not settable from outside the process.
+        print(json.dumps({
+            "guard": "offline-operator-principal",
+            "skipped": "not-windows",
+            "detail": "the principal contract is a statement about Windows "
+                      "accounts and ACLs; nothing was measured and nothing is "
+                      "claimed",
+        }, indent=2))
+        return 0
     if not PROBE.is_file():
         rec("OP00 probe-present", False, "the contract probe is missing")
         return 1
@@ -179,11 +197,61 @@ def main() -> int:
         empty = probe({"action": "digest", "sid": ""}, work)["value"]
         rec("OP13 digest-deterministic-across-processes",
             bool(first) and first == second and first != other
-            and len(str(first)) == 32 and not empty,
+            and len(str(first)) == 64 and not empty,
             f"the same principal digests identically in two fresh processes, a "
-            f"different principal digests differently, the width is fixed at 32, "
-            f"and an unresolved principal yields no digest "
+            f"different principal digests differently, the width is the full "
+            f"sha256, and an unresolved principal yields no digest "
             f"(same={first == second}, differs={first != other}, empty={empty!r})")
+
+        # THE DIGEST UNDER TEST MUST BE THE DIGEST THAT IS BOUND.
+        #
+        # OP13 above proved a PowerShell function deterministic. The digests
+        # that are actually written -- into the trust root and into
+        # review-key-public.json -- come from principal_digest() on the Python
+        # side, which hashed a DIFFERENT salt at a DIFFERENT width. Same
+        # principal, two incomparable values, and a fixture attesting to the one
+        # nothing reads. Both implementations are driven here from one input and
+        # required to produce one string.
+        shared_salt = "9f2c7b1ad4e60381c5aa10be77304912"
+        sys.path.insert(0, str(ROOT))
+        from backend.app.offline_review_attestation import principal_digest
+        ps_side = probe({"action": "digest", "sid": SID_AUTHOR, "salt": shared_salt},
+                        work)["value"]
+        py_side = principal_digest(SID_AUTHOR, shared_salt)
+        cross_other = probe({"action": "digest", "sid": SID_REVIEWER, "salt": shared_salt},
+                            work)["value"]
+        rec("OP13a digest-agrees-with-the-implementation-that-binds-it",
+            bool(ps_side) and ps_side == py_side and cross_other != py_side,
+            "the PowerShell contract and the Python attestation module produce "
+            "the same digest for one principal under one salt, so an "
+            "operator-side transcript and a reviewer-published digest refer to "
+            "the same account "
+            f"(agree={ps_side == py_side}, distinct-principal-differs="
+            f"{cross_other != py_side})")
+
+        # And the salt genuinely participates: two salts, one SID, two values.
+        other_salt = probe({"action": "digest", "sid": SID_AUTHOR,
+                            "salt": "0" * 32}, work)["value"]
+        rec("OP13b digest-is-salted",
+            bool(other_salt) and other_salt != ps_side,
+            f"the same principal under a different salt digests differently, so "
+            f"the salt is not decorative (differs={other_salt != ps_side})")
+
+        # An ORDINARY provider, returning @() without the comma operator that
+        # every other fixture here remembers to write. "Nobody is an
+        # administrator" must not read as "the question could not be answered":
+        # the first accepts, the second refuses, and they were the same value.
+        empty_bare = probe(baseline_case(membership_empty_bare=True), work)["reasons"]
+        unresolvable = probe(baseline_case(membership_resolvable=False), work)["reasons"]
+        rec("OP13c empty-membership-is-not-unresolvable-membership",
+            "OFFLINE_OPERATOR_ACCOUNT_NOT_ADMINISTRATOR" in empty_bare
+            and "OFFLINE_AUTHOR_ACCOUNT_IS_ADMINISTRATOR" not in empty_bare
+            and "OFFLINE_ADMINISTRATORS_MEMBERSHIP_UNRESOLVED" in unresolvable,
+            f"a bare empty collection is read as an established empty group -- the "
+            f"operator is reported as not an administrator, the author is not "
+            f"accused of being one -- while a provider that cannot answer is "
+            f"reported as unresolved "
+            f"(empty={empty_bare}, unresolvable={unresolvable})")
 
         alias_a = probe({"action": "resolve-account", "name": os.environ.get("USERNAME", "")},
                         work)["value"]
@@ -255,30 +323,72 @@ def main() -> int:
         shadowed["PATH"] = str(fake_dir) + os.pathsep + shadowed.get("PATH", "")
         shadowed["PATHEXT"] = ".EXE;.CMD;.BAT"
 
+        # THE SHADOW MUST BE EFFECTIVE BEFORE ITS DEFEAT MEANS ANYTHING.
+        #
+        # Establish first that an ordinary PATH lookup in this environment DOES
+        # pick the planted binary. Without that, "the trusted resolution did not
+        # return the fake" is satisfied by a fixture that never worked.
+        shadow_wins = []
+        for name in ("icacls.exe", "takeown.exe", "schtasks.exe", "secedit.exe", "git.exe"):
+            try:
+                found = subprocess.run(["where.exe", name], capture_output=True, text=True,
+                                       timeout=60, env=shadowed)
+                first = (found.stdout or "").strip().splitlines()
+                shadow_wins.append(bool(first) and Path(first[0].strip()).parent == fake_dir)
+            except (OSError, subprocess.SubprocessError):
+                shadow_wins.append(False)
+        rec("OP22 planted-binaries-do-win-an-ordinary-PATH-lookup",
+            all(shadow_wins) and len(shadow_wins) == 5,
+            f"every planted binary is what a name-based lookup selects in this "
+            f"environment, so the resolutions below are defeating a shadow that "
+            f"is genuinely in force ({sum(shadow_wins)}/5)")
+
         native_ok = True
         details = []
         for name in ("icacls.exe", "takeown.exe", "schtasks.exe", "secedit.exe"):
-            case_file = work / "case.json"
-            case_file.write_text(json.dumps({"action": "native-command", "name": name}),
-                                 encoding="utf-8")
-            try:
-                completed = subprocess.run(
-                    [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
-                     "Bypass", "-File", str(PROBE), "-CaseFile", str(case_file)],
-                    capture_output=True, text=True, timeout=180, env=shadowed)
-                payload = {}
-                for line in (completed.stdout or "").splitlines():
-                    if line.strip().startswith("{"):
-                        payload = json.loads(line.strip())
-                value = payload.get("value") or {}
-                good = value.get("resolved") is True and value.get("under_system32") is True
-            except (OSError, subprocess.SubprocessError, ValueError):
-                good = False
+            # `under_system32` alone was a tautology: Get-TrustedNativeCommand
+            # BUILDS its answer by joining System32 to the name, so the property
+            # was true whenever resolution succeeded and could not fail for any
+            # input. The verdict is now the comparison that can: the returned
+            # path is a real file and is NOT the planted one.
+            value = probe({"action": "native-command", "name": name,
+                           "shadow": str(fake_dir / name)}, work, env=shadowed)["value"] or {}
+            good = (value.get("resolved") is True and value.get("exists") is True
+                    and value.get("equals_shadow") is False
+                    and value.get("under_system32") is True)
             native_ok = native_ok and good
             details.append(f"{name}={'System32' if good else 'SHADOWED'}")
-        rec("OP22 native-commands-ignore-a-shadowed-PATH", native_ok,
-            f"a fake binary placed first on PATH is not selected; every system "
-            f"command still resolves under System32 ({', '.join(details)})")
+        rec("OP22a native-commands-ignore-a-shadowed-PATH", native_ok,
+            f"a fake binary that wins an ordinary lookup is not what the trusted "
+            f"resolution returns; every system command still resolves to a real "
+            f"file under System32 ({', '.join(details)})")
+
+        # git takes the OTHER resolution path, and the battery planted a fake
+        # git.exe on PATH and then never asked about it.
+        git_shadowed = probe({"action": "trusted-git", "shadow": str(fake_dir / "git.exe")},
+                             work, env=shadowed)["value"] or {}
+        rec("OP22b git-is-not-taken-from-a-shadowed-PATH",
+            git_shadowed.get("equals_shadow") is False
+            and (git_shadowed.get("resolved") is False
+                 or git_shadowed.get("exists") is True),
+            f"git resolves to a machine-wide install or to nothing at all, never "
+            f"to the planted binary that an ordinary lookup would have selected "
+            f"({git_shadowed})")
+
+        # And an explicit git inside a directory the author can write is refused
+        # -- the property Resolve-TrustedGit documents and the reason it takes
+        # an author identity at all.
+        planted_git = work / "author-writable" / "git.exe"
+        planted_git.parent.mkdir(exist_ok=True)
+        planted_git.write_text("not a real program", encoding="ascii")
+        git_author = probe({"action": "trusted-git", "explicit": str(planted_git),
+                            "shadow": str(planted_git),
+                            "author": {"name": os.environ.get("USERNAME", ""), "sid": "",
+                                       "exists": True, "resolved": True}}, work)["value"] or {}
+        rec("OP22c author-writable-git-is-refused",
+            git_author.get("equals_shadow") is False,
+            f"an explicitly supplied git inside a directory the author genuinely "
+            f"owns is skipped rather than trusted ({git_author})")
 
         bogus = probe({"action": "native-command", "name": "definitely-not-real.exe"},
                       work)["value"]
@@ -344,14 +454,95 @@ def main() -> int:
             f"(admin_account={medium_token_admin_account}, clean={clean_account or 'none'})")
 
         # The boundary harness must carry BOTH gates, not one standing in for two.
+        #
+        # READ FROM THE PARSE TREE. Three substring searches were satisfied by a
+        # comment quoting the identifiers -- and, more to the point, by a
+        # TOKEN02 whose verdict was a hard-coded $false. The structure that
+        # matters is that both are Add-Probe INVOCATIONS and that TOKEN02's
+        # verdict is a measured expression.
         boundary = (ROOT / "packaging" / "hyperv" / "verify_author_boundary.ps1")
-        text = boundary.read_text(encoding="utf-8") if boundary.is_file() else ""
+        gates = probe({"action": "harness-gates", "path": str(boundary)}, work)["value"] or {}
         rec("OP28 boundary-harness-carries-both-gates",
-            "TOKEN01 author-process-not-elevated" in text
-            and "TOKEN02 author-account-not-administrator" in text
-            and "Test-AccountInAdministrators" in text,
-            "the boundary harness measures the process token AND the account's "
-            "Administrators membership as separate probes")
+            gates.get("parses") is True and gates.get("token01_probe") is True
+            and gates.get("token02_probe") is True
+            and gates.get("token02_measured") is True
+            and gates.get("membership_call") is True,
+            f"the harness parses, and carries the process-token gate and the "
+            f"account-membership gate as two separate Add-Probe invocations "
+            f"whose second verdict is measured rather than constant ({gates})")
+
+        # THE MUTATIONS. Without these the check above is another assertion that
+        # the current file happens to be right.
+        mutated = work / "harness-mutations"
+        mutated.mkdir(exist_ok=True)
+        original = boundary.read_text(encoding="utf-8") if boundary.is_file() else ""
+
+        hollow = mutated / "hollow.ps1"
+        hollow.write_text(original.replace(
+            "Add-Probe 'TOKEN02 author-account-not-administrator' $accountIsAdmin",
+            "Add-Probe 'TOKEN02 author-account-not-administrator' $false"),
+            encoding="utf-8")
+        hollow_gates = probe({"action": "harness-gates", "path": str(hollow)}, work)["value"] or {}
+        rec("OP28a a-hard-coded-account-verdict-is-detected",
+            hollow_gates.get("token02_probe") is True
+            and hollow_gates.get("token02_measured") is False,
+            f"a copy whose account gate answers with a constant is still found "
+            f"to CARRY the gate, and is reported as not measuring it -- the "
+            f"exact shape three earlier checks in this repository shipped in "
+            f"({hollow_gates})")
+
+        # The likelier regression is not a literal in the call -- it is the
+        # MEASUREMENT being replaced one line above while the call still reads
+        # correctly. Detecting only the literal would have missed it.
+        stubbed = mutated / "stubbed.ps1"
+        stubbed.write_text(original.replace(
+            "$accountIsAdmin = Test-AccountInAdministrators -Identity $authorIdentity",
+            "$accountIsAdmin = $false"), encoding="utf-8")
+        stubbed_gates = probe({"action": "harness-gates", "path": str(stubbed)}, work)["value"] or {}
+        rec("OP28c a-stubbed-measurement-is-detected",
+            stubbed_gates.get("token02_probe") is True
+            and stubbed_gates.get("token02_measured") is False,
+            f"a copy that still calls the gate but assigns its verdict a constant "
+            f"instead of measuring it is reported as not measuring "
+            f"({stubbed_gates})")
+
+        removed = mutated / "removed.ps1"
+        removed.write_text("\n".join(
+            line for line in original.splitlines()
+            if "TOKEN02 author-account-not-administrator" not in line), encoding="utf-8")
+        removed_gates = probe({"action": "harness-gates", "path": str(removed)}, work)["value"] or {}
+        rec("OP28b a-deleted-account-gate-is-detected",
+            removed_gates.get("token01_probe") is True
+            and removed_gates.get("token02_probe") is False,
+            f"a copy with the account gate deleted fails while the process gate "
+            f"still passes, so one gate cannot stand in for two ({removed_gates})")
+
+        # ------------------------------------------- the guard must not be hollow
+        # EVERY CONTRACT FUNCTION MUST HAVE A PRODUCTION CALLER.
+        #
+        # Six predicates and two ACL evaluators were written, documented, and
+        # exercised only from this file: the battery proved that unreached code
+        # behaved correctly while the operator's transcript was assembled from
+        # separate inline computations no fixture had ever seen. That is how the
+        # display-name comparison and the stale-exit-code signal survived a green
+        # run. A function this guard tests and production does not call is not a
+        # covered function; it is a decoy.
+        hyperv = ROOT / "packaging" / "hyperv"
+        contract_text = (hyperv / "principal_contract.ps1").read_text(encoding="utf-8")
+        declared = re.findall(r"^function ([A-Za-z][A-Za-z\-]*)", contract_text, re.M)
+        production = [p for p in sorted(hyperv.glob("*.ps1"))
+                      if p.name not in ("principal_contract.ps1", "principal_contract_probe.ps1")]
+        prod_text = "\n".join(p.read_text(encoding="utf-8") for p in production)
+        unreached = []
+        for name in declared:
+            call = re.compile(rf"(?<!function ){re.escape(name)}\b")
+            if not call.search(prod_text) and not call.search(contract_text):
+                unreached.append(name)
+        rec("OP30 every-contract-function-has-a-production-caller",
+            not unreached and len(declared) >= 20,
+            f"all {len(declared)} functions in the shared contract are reached by "
+            f"the scripts that run in production, not only by this battery "
+            f"(unreached={unreached or 'none'})")
 
         print()
     finally:

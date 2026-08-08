@@ -311,10 +311,21 @@ if (-not $py -or -not (Test-Path $py)) {
     # $false and made the inverted C1-09 pass on an empty string -- so pointing
     # $py at a text file scored all four probes as fully hardened. Three of them
     # had been fail-closed before this round; the fix flipped them open.
-    $siteOut = (& $py -c "import sys; print('site' in sys.modules)" 2>&1 | Out-String)
-    $siteRc = $LASTEXITCODE
-    $interpreterRuns = ($siteRc -eq 0)
-    $siteLive = ($interpreterRuns -and ($siteOut.Trim() -eq 'True'))
+    # A POSITIVE SENTINEL, not an exit code.
+    #
+    # $LASTEXITCODE is stale state: a PowerShell-level failure to launch (a
+    # pinned path that is not an executable) never updates it, so the previous
+    # run's 0 -- set by whoami at the top of this file -- was read as "the
+    # interpreter ran". Measured: Test-Path True, $siteRc 0, interpreterRuns
+    # True, and $siteOut $null. All four -I probes then scored as hardened.
+    # This is the same regression the comment above describes as fixed, in its
+    # replacement.
+    $sentinel = 'MR-INTERPRETER-ALIVE'
+    $siteOut = (& $py -c "import sys; print('$sentinel'); print('site' in sys.modules)" 2>&1 |
+                Out-String)
+    $interpreterRuns = ($null -ne $siteOut -and $siteOut.Contains($sentinel))
+    $siteLive = ($interpreterRuns -and
+                 (($siteOut -split "`n" | Where-Object { $_.Trim() -eq 'True' }).Count -gt 0))
     if (-not $interpreterRuns) {
         foreach ($id in @('C1-06 minus-I-ignores-PYTHONPATH',
                           'C1-07 minus-I-disables-user-site',
@@ -347,8 +358,13 @@ if (-not $py -or -not (Test-Path $py)) {
     $env:PYTHONHOME = $work
     $prefixWithHome = (& $py -I -c "import sys; print(sys.prefix)" 2>&1 | Out-String).Trim()
     Remove-Item -Path Env:\PYTHONHOME -ErrorAction SilentlyContinue
+    if ($interpreterRuns) {
+    # Recorded INSIDE the guard. It sat outside, so the INCONCLUSIVE written for
+    # an unrunnable interpreter was overwritten by a later PASS under the same
+    # key.
     Add-Probe 'C1-08 minus-I-ignores-PYTHONHOME' ($prefixWithHome -ne $prefixPlain) `
         "sys.prefix was unchanged by PYTHONHOME under -I = $($prefixWithHome -eq $prefixPlain)"
+    }
     # The one -I does NOT cover. Recorded as a measured fact, because it is the
     # reason the interpreter has to be ACL-hardened and pinned rather than
     # merely launched with a flag.

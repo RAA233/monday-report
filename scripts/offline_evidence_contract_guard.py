@@ -66,6 +66,12 @@ from backend.app.offline_review_attestation import (  # noqa: E402
 
 CONTRACT_COMMAND = "audit:offline-evidence-contract"
 CONTRACT_SCRIPT = "python -I scripts/offline_evidence_contract_guard.py"
+#: The second pinned member, named here so that dropping it from audit:all
+#: requires editing this file too. It decides the acceptance predicate itself --
+#: no principal that can write the release tree may hold Administrator -- and it
+#: was registered in package.json and run by no chain at all.
+PRINCIPAL_COMMAND = "audit:offline-operator-principal"
+PRINCIPAL_SCRIPT = "python scripts/offline_operator_principal_guard.py"
 
 #: Synthetic principals. Resolved through the injected resolver, never live.
 AUTHOR_ACCOUNT = "SYNTHETIC-AUTHOR"

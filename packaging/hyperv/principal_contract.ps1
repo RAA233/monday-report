@@ -91,9 +91,43 @@ function Resolve-TrustedGit {
         if (-not $candidate) { continue }
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
         if ($Author) {
-            if (Test-AccountCanWritePath -Identity $Author -Path $candidate) { continue }
-            $dir = Split-Path $candidate -Parent
-            if (Test-AccountCanWritePath -Identity $Author -Path $dir) { continue }
+            # The whole parent chain, and the real binary behind the shim.
+            # ...\Git\cmd\git.exe is a small forwarder; the executable that
+            # actually runs lives under mingw64\bin and was never checked, and
+            # checking one parent left every directory above it unexamined.
+            $targets = @($candidate)
+            $real = Join-Path (Split-Path (Split-Path $candidate -Parent) -Parent) 'mingw64\bin\git.exe'
+            if (Test-Path -LiteralPath $real -PathType Leaf) { $targets += $real }
+            $probe = Split-Path $candidate -Parent
+            while ($probe) {
+                $targets += $probe
+                $parent = Split-Path $probe -Parent
+                if ($parent -eq $probe) { break }
+                $probe = $parent
+            }
+            # THE ANCESTOR QUESTION IS NARROWER THAN THE FILE QUESTION.
+            #
+            # WRITE_DATA | DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER: what
+            # it takes to put a different binary in place, or to replace a
+            # directory on the way to it. APPEND_DATA is deliberately absent --
+            # on a container it means "create a subdirectory", which C:\ grants
+            # every authenticated account and which does not let anyone touch an
+            # existing subtree. Including it made every path on the system
+            # author-writable and left git unresolvable.
+            $ancestorMask = 0xD0042
+            $writable = $false
+            if (Test-AccountCanWritePath -Identity $Author -Path $candidate) { $writable = $true }
+            if (-not $writable -and $real -and (Test-Path -LiteralPath $real -PathType Leaf)) {
+                if (Test-AccountCanWritePath -Identity $Author -Path $real) { $writable = $true }
+            }
+            if (-not $writable) {
+                foreach ($target in $targets) {
+                    if ($target -eq $candidate -or $target -eq $real) { continue }
+                    if (Test-AccountCanWritePath -Identity $Author -Path $target `
+                            -Mask $ancestorMask) { $writable = $true; break }
+                }
+            }
+            if ($writable) { continue }
         }
         return $candidate
     }
@@ -104,17 +138,66 @@ function Get-PrincipalDigest {
     <#
       A stable, non-reversible handle for an account. Raw SIDs identify a machine
       and a user, so they are never returned or printed; comparisons and evidence
-      use this instead. Deterministic by construction: the same resolved SID
-      always yields the same digest, in any process.
+      use this instead.
+
+      ONE CONSTRUCTION, SHARED WITH THE PYTHON SIDE.
+      ------------------------------------------------------------------------
+      This function used to hash a fixed module salt and truncate to 32 hex
+      characters. The digests that are actually WRITTEN -- into the trust root
+      and into review-key-public.json -- come from principal_digest() in
+      backend/app/offline_review_attestation.py, which hashes the reviewer's
+      persisted per-install salt at full width. Two different salts, two
+      different widths, two different values for one principal: the digest a
+      reader compares against could never have been produced here, and the
+      fixture proving this function deterministic was proving it about a value
+      no consumer reads.
+
+      The construction is now byte-identical to the Python one -- sha256 over
+      "<salt>|<sid>", lowercase hex, untruncated -- and the salt is an argument
+      rather than a hidden module constant, so the caller decides which salt is
+      in force. Guard check OP13 executes both implementations on the same input
+      and requires the same string out; if they ever diverge again it fails
+      rather than passing on a value nothing consumes.
     #>
-    param([Parameter(Mandatory = $true)][string]$Sid)
+    param([Parameter(Mandatory = $true)][string]$Sid,
+          [string]$Salt = $script:PrincipalSalt)
 
     if (-not $Sid) { return '' }
+    if (-not $Salt) { return '' }
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes("$($script:PrincipalSalt)|$Sid")
-        return (($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 32)
+        $bytes = [Text.Encoding]::UTF8.GetBytes("$Salt|$Sid")
+        return (($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '')
     } finally { $sha.Dispose() }
+}
+
+function Get-ContractPrincipalSalt {
+    <#
+      The salt in force, resolved from the reviewer's own state when it exists.
+
+      The reviewer generates principal-salt.txt on first bootstrap and binds it
+      into the trust root; every digest that a later reader will compare against
+      is salted with that value. Reading it here -- rather than carrying a
+      second constant -- is what lets an operator-side digest and a
+      reviewer-side digest refer to the same principal.
+
+      Falls back to the fixed public domain separator when no reviewer state
+      exists yet, which is the case on the very first elevated run. That value
+      is public by design: the digest hides a raw SID from a transcript, and is
+      not asked to withstand an offline search.
+    #>
+    param([string]$StatePath = '')
+
+    if ($StatePath) {
+        $file = Join-Path $StatePath 'principal-salt.txt'
+        if (Test-Path -LiteralPath $file -PathType Leaf) {
+            $value = ''
+            try { $value = (Get-Content -LiteralPath $file -Raw -ErrorAction Stop).Trim() }
+            catch { $value = '' }
+            if ($value) { return $value }
+        }
+    }
+    return $script:PrincipalSalt
 }
 
 function Resolve-PrincipalIdentity {
@@ -202,10 +285,37 @@ function Get-LocalAdministratorMembers {
         # could not be established" -- so a host where nobody is an
         # administrator was indistinguishable from a host where the question
         # failed. The distinction is the whole point of this function.
-        $supplied = & $MembershipProvider
-        if ($null -eq $supplied) { return $null }
+        # @() AROUND THE INVOCATION. Without it, a provider that returns an
+        # empty collection unrolls to $null on the way out and lands in the
+        # branch below -- so "nobody is an administrator" was reported as "the
+        # question could not be answered", and the two are opposite verdicts.
+        # The distinction only survived if the provider itself remembered to
+        # write `,@()`, which is a requirement no caller can be held to.
+        #
+        # An explicit $null return still means unresolvable: it arrives here as
+        # a one-element array whose single element is $null, which an empty
+        # collection never produces.
+        $supplied = $null
+        try { $supplied = @(& $MembershipProvider) } catch { return $null }
+        if ($supplied.Count -eq 1 -and $null -eq $supplied[0]) { return $null }
+        # FLATTEN ONE LEVEL. A provider that returns `,$list` -- the shape every
+        # fixture here uses to stop PowerShell unrolling an empty result -- comes
+        # back as a single element that IS the list, and appending it directly
+        # added the string "System.Collections.Generic.List`1[System.String]" as
+        # if it were a SID. Membership then matched nobody, so four separate
+        # "this account is an administrator" cases silently reported the
+        # opposite. Strings are handled before IEnumerable, since a string
+        # enumerates to characters.
         $wrapped = New-Object System.Collections.Generic.List[string]
-        foreach ($sid in $supplied) { if ($sid) { [void]$wrapped.Add([string]$sid) } }
+        foreach ($item in $supplied) {
+            if ($null -eq $item) { continue }
+            if ($item -is [string]) { if ($item) { [void]$wrapped.Add($item) }; continue }
+            if ($item -is [System.Collections.IEnumerable]) {
+                foreach ($sid in $item) { if ($sid) { [void]$wrapped.Add([string]$sid) } }
+                continue
+            }
+            [void]$wrapped.Add([string]$item)
+        }
         return ,$wrapped
     }
 
@@ -308,7 +418,11 @@ function Test-AccountCanWritePath {
     #>
     param([Parameter(Mandatory = $true)]$Identity,
           [Parameter(Mandatory = $true)][string]$Path,
-          [scriptblock]$GroupProvider = $null)
+          [scriptblock]$GroupProvider = $null,
+          # WRITE_DATA | APPEND | WRITE_EA | WRITE_ATTRS | DELETE | WRITE_DAC |
+          # WRITE_OWNER. Callers asking about an ANCESTOR of something they care
+          # about want a narrower question -- see Resolve-TrustedGit.
+          [int]$Mask = 0xD0116)
 
     if (-not $Identity -or -not $Identity.Exists) { return $true }
     if (-not (Test-Path -LiteralPath $Path)) { return $true }   # absent -> creatable
@@ -322,6 +436,17 @@ function Test-AccountCanWritePath {
 
     $allow = 0; $deny = 0
     foreach ($ace in $acl.Access) {
+        # AN INHERIT-ONLY ACE APPLIES TO CHILDREN, NOT TO THIS OBJECT.
+        #
+        # C:\ carries `Authenticated Users: GENERIC_WRITE (OI)(CI)(IO)`, and
+        # counting it made the volume root -- and therefore every ancestor of
+        # everything -- writable by any authenticated account. Resolve-TrustedGit
+        # walks that chain, so git resolved to nothing on an ordinary Windows
+        # host and the elevated steps could not run at all. Callers that care
+        # about descendants enumerate them; this function answers about one path.
+        if ($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) {
+            continue
+        }
         $aceSid = ''
         try {
             $aceSid = $ace.IdentityReference.Translate(
@@ -335,8 +460,7 @@ function Test-AccountCanWritePath {
         else { $deny = $deny -bor $mask }
     }
     $effective = $allow -band (-bnot $deny)
-    # WRITE_DATA | APPEND | WRITE_EA | WRITE_ATTRS | DELETE | WRITE_DAC | WRITE_OWNER
-    return [bool]($effective -band 0xD0116)
+    return [bool]($effective -band $Mask)
 }
 
 # ---------------------------------------------------------------- predicates
@@ -476,12 +600,20 @@ function Get-PrincipalContractViolations {
       synthetic identities. A rule about account membership that can only be
       tested by creating accounts is a rule nobody tests.
     #>
-    param($Operator, $Author, $Reviewer, [scriptblock]$MembershipProvider = $null)
+    param($Operator, $Author, $Reviewer, [scriptblock]$MembershipProvider = $null,
+          [switch]$AllowAbsentReviewer)
 
     $reasons = New-Object System.Collections.Generic.List[string]
 
     foreach ($pair in @(@('AUTHOR', $Author), @('OPERATOR', $Operator), @('REVIEWER', $Reviewer))) {
         $label = $pair[0]; $identity = $pair[1]
+        if ($label -eq 'REVIEWER' -and $AllowAbsentReviewer -and
+            $identity -and $identity.Resolved -and -not $identity.Exists) {
+            # The one route that CREATES the reviewer cannot require it to
+            # already exist. A lookup that RAN and found nothing is different
+            # from a lookup that failed, and only the former is excused.
+            continue
+        }
         if (-not $identity -or -not $identity.Resolved) {
             $reasons.Add("OFFLINE_$($label)_ACCOUNT_UNRESOLVED"); continue
         }
@@ -493,18 +625,29 @@ function Get-PrincipalContractViolations {
     if (Test-OperatorIsAuthor -Operator $Operator -Author $Author) {
         $reasons.Add('OFFLINE_OPERATOR_AUTHOR_SAME_PRINCIPAL')
     }
-    if ($Operator.Sid -eq $Reviewer.Sid) { $reasons.Add('OFFLINE_OPERATOR_REVIEWER_SAME_PRINCIPAL') }
-    if ($Author.Sid -eq $Reviewer.Sid) { $reasons.Add('OFFLINE_AUTHOR_REVIEWER_SAME_PRINCIPAL') }
+    if ($Reviewer -and $Reviewer.Exists) {
+        if ($Operator.Sid -eq $Reviewer.Sid) { $reasons.Add('OFFLINE_OPERATOR_REVIEWER_SAME_PRINCIPAL') }
+        if ($Author.Sid -eq $Reviewer.Sid) { $reasons.Add('OFFLINE_AUTHOR_REVIEWER_SAME_PRINCIPAL') }
+    }
 
     # The capability predicate. Separate from the name comparison so neither can
     # be satisfied by the other.
     if (Test-AccountInAdministrators -Identity $Author -MembershipProvider $MembershipProvider) {
         $reasons.Add('OFFLINE_AUTHOR_ACCOUNT_IS_ADMINISTRATOR')
     }
-    if (Test-AccountInAdministrators -Identity $Reviewer -MembershipProvider $MembershipProvider) {
+    if ($Reviewer -and $Reviewer.Exists -and
+        (Test-AccountInAdministrators -Identity $Reviewer -MembershipProvider $MembershipProvider)) {
         $reasons.Add('OFFLINE_REVIEWER_ACCOUNT_IS_ADMINISTRATOR')
     }
-    if (-not (Test-AccountInAdministrators -Identity $Operator -MembershipProvider $MembershipProvider)) {
+    # Test-AccountInAdministrators returns $true when the answer CANNOT be
+    # established, which is right for "keep an administrator out" and exactly
+    # wrong for "confirm this one is an administrator" -- a failed measurement
+    # would have satisfied the operator clause. Membership is established
+    # positively here instead.
+    $adminSids = Get-LocalAdministratorMembers -MembershipProvider $MembershipProvider
+    if ($null -eq $adminSids) {
+        $reasons.Add('OFFLINE_ADMINISTRATORS_MEMBERSHIP_UNRESOLVED')
+    } elseif (-not ($adminSids -contains $Operator.Sid)) {
         $reasons.Add('OFFLINE_OPERATOR_ACCOUNT_NOT_ADMINISTRATOR')
     }
     return $reasons
@@ -615,16 +758,26 @@ function Get-TaskRootAclViolations {
     }
     $rootAcl = $null
     try { $rootAcl = Get-Acl -LiteralPath $Root } catch { }
-    if (-not $rootAcl -or -not $rootAcl.AreAccessRulesProtected) {
+    if (-not $rootAcl) {
+        # Reported and then dereferenced two lines later, which turned an
+        # ordinary negative into an unrelated PropertyNotFoundStrict. The same
+        # situation is handled correctly sixty lines above.
+        $reasons.Add('OFFLINE_TASK_ROOT_UNREADABLE'); return $reasons
+    }
+    if (-not $rootAcl.AreAccessRulesProtected) {
         $reasons.Add('OFFLINE_TASK_ROOT_INHERITS')
     }
     foreach ($ace in @($rootAcl.Access)) {
         if ($ace.AccessControlType -ne 'Allow') { continue }
         $who = $ace.IdentityReference.Value
         if ($who -match '(Authenticated Users|\\Users$|Everyone)') {
-            if ($ace.FileSystemRights.ToString() -match 'Write|Modify|FullControl') {
-                $reasons.Add('OFFLINE_TASK_ROOT_BROAD_MODIFY')
-            }
+            # By BIT, not by name. A non-canonical mask renders as a number --
+            # GENERIC_ALL prints as 268435456 -- and matches no name at all, so
+            # a broad generic grant passed a string test unnoticed.
+            $mask = [int]$ace.FileSystemRights
+            if ($mask -band 0x10000000) { $mask = $mask -bor 0x1F01FF }
+            if ($mask -band 0x40000000) { $mask = $mask -bor 0x0116 }
+            if ($mask -band 0xD0116) { $reasons.Add('OFFLINE_TASK_ROOT_BROAD_MODIFY') }
         }
     }
     foreach ($path in $SecuritySensitive) {

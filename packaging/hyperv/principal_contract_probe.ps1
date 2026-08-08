@@ -52,6 +52,14 @@ switch ($case.action) {
         if ($case.PSObject.Properties.Name -contains 'membership_resolvable' -and
             -not $case.membership_resolvable) {
             $provider = { return $null }
+        } elseif ($case.PSObject.Properties.Name -contains 'membership_empty_bare' -and
+                  $case.membership_empty_bare) {
+            # DELIBERATELY NOT COMMA-WRAPPED. This is the shape an ordinary
+            # provider writes, and it used to arrive as $null -- so "nobody is
+            # an administrator" was reported as "the question could not be
+            # answered". Every other fixture here comma-wraps, which is exactly
+            # why none of them could see it.
+            $provider = { return @() }
         } elseif ($case.PSObject.Properties.Name -contains 'admin_members') {
             # A typed List, and returned with the comma operator. A scriptblock
             # returning @() -- or an array holding only $null -- collapses to
@@ -81,7 +89,13 @@ switch ($case.action) {
     }
 
     'digest' {
-        $result.value = Get-PrincipalDigest -Sid $case.sid
+        # The salt travels with the case so the guard can drive this
+        # implementation and the Python one from one input and compare.
+        $result.value = if ($case.PSObject.Properties.Name -contains 'salt' -and $case.salt) {
+            Get-PrincipalDigest -Sid $case.sid -Salt $case.salt
+        } else {
+            Get-PrincipalDigest -Sid $case.sid
+        }
     }
 
     'task-ace' {
@@ -111,12 +125,118 @@ switch ($case.action) {
 
     'native-command' {
         # Resolution must ignore PATH, PATHEXT, aliases and functions entirely.
+        #
+        # `under_system32` used to be the whole verdict, and it could not fail:
+        # Get-TrustedNativeCommand BUILDS its answer by joining System32 to the
+        # name, so the property was true whenever the lookup succeeded at all.
+        # What the caller actually needs to know is whether the shadow won, so
+        # the shadow path travels in and the comparison is made here -- no
+        # absolute path leaves this probe.
         $resolved = Get-TrustedNativeCommand -Name $case.name
+        $shadow = ''
+        if ($case.PSObject.Properties.Name -contains 'shadow') { $shadow = [string]$case.shadow }
         $result.value = [ordered]@{
             resolved = [bool]$resolved
+            exists = [bool]($resolved -and (Test-Path -LiteralPath $resolved -PathType Leaf))
+            equals_shadow = [bool]($resolved -and $shadow -and
+                                   ($resolved -eq $shadow -or
+                                    $resolved.Equals($shadow, 'OrdinalIgnoreCase')))
             under_system32 = if ($resolved) {
                 $resolved.StartsWith((Join-Path $env:SystemRoot 'System32'), 'OrdinalIgnoreCase')
             } else { $false }
+        }
+    }
+
+    'harness-gates' {
+        # STRUCTURE, READ FROM THE PARSE TREE, not from a substring search.
+        #
+        # The caller used to satisfy itself that three literals appeared
+        # somewhere in the harness text -- a comment quoting them passed, and so
+        # would a probe whose verdict was hard-coded. What matters is that both
+        # gates are Add-Probe INVOCATIONS and that the second one's verdict is a
+        # measured expression rather than a constant.
+        $errs = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $case.path, [ref]$null, [ref]$errs)
+        $commands = @($ast.FindAll({
+            param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true))
+
+        function Get-ProbeCall {
+            param($Commands, [string]$Marker)
+            foreach ($command in $Commands) {
+                $elements = @($command.CommandElements)
+                if ($elements.Count -lt 3) { continue }
+                if ("$($elements[0])" -ne 'Add-Probe') { continue }
+                if ("$($elements[1])" -notmatch [regex]::Escape($Marker)) { continue }
+                return $command
+            }
+            return $null
+        }
+
+        $token01 = Get-ProbeCall -Commands $commands -Marker 'TOKEN01 author-process-not-elevated'
+        $token02 = Get-ProbeCall -Commands $commands -Marker 'TOKEN02 author-account-not-administrator'
+        # MEASURED MEANS: THE VERDICT CAME OUT OF A COMMAND.
+        #
+        # Testing for a ConstantExpressionAst does not catch `$false`, which
+        # PowerShell parses as a VARIABLE -- so a copy whose account gate was
+        # hard-coded to $false scored identically to the real harness, and the
+        # mutation written to prove this check fires proved the opposite. Nor
+        # would it catch `$accountIsAdmin = $false` one line above the probe.
+        # The verdict must be a variable that is ASSIGNED FROM A COMMAND
+        # somewhere in the file.
+        $measured = $false
+        if ($token02) {
+            $observed = @($token02.CommandElements)[2]
+            if ($observed -is [System.Management.Automation.Language.VariableExpressionAst]) {
+                $wanted = $observed.VariablePath.UserPath
+                if (@('true', 'false', 'null') -notcontains $wanted.ToLowerInvariant()) {
+                    $assignments = @($ast.FindAll({
+                        param($node) $node -is
+                            [System.Management.Automation.Language.AssignmentStatementAst] }, $true))
+                    foreach ($assignment in $assignments) {
+                        if ("$($assignment.Left)" -ne "`$$wanted") { continue }
+                        $calls = @($assignment.Right.FindAll({
+                            param($node) $node -is
+                                [System.Management.Automation.Language.CommandAst] }, $true))
+                        if ($calls.Count) { $measured = $true; break }
+                    }
+                }
+            }
+        }
+        $membership = $false
+        foreach ($command in $commands) {
+            if ("$(@($command.CommandElements)[0])" -eq 'Test-AccountInAdministrators') {
+                $membership = $true; break
+            }
+        }
+        $result.value = [ordered]@{
+            parses = [bool](-not @($errs).Count)
+            token01_probe = [bool]$token01
+            token02_probe = [bool]$token02
+            token02_measured = [bool]$measured
+            membership_call = [bool]$membership
+        }
+    }
+
+    'trusted-git' {
+        # git is the one native dependency that is NOT in System32, so it takes
+        # the separate resolution path -- the one no fixture drove, while the
+        # fake git.exe the battery planted sat on PATH untested.
+        $author = $null
+        if ($case.PSObject.Properties.Name -contains 'author' -and $case.author) {
+            $author = New-Identity -Spec $case.author
+        }
+        $explicit = ''
+        if ($case.PSObject.Properties.Name -contains 'explicit') { $explicit = [string]$case.explicit }
+        $shadow = ''
+        if ($case.PSObject.Properties.Name -contains 'shadow') { $shadow = [string]$case.shadow }
+        $resolved = ''
+        try { $resolved = Resolve-TrustedGit -Explicit $explicit -Author $author } catch { $resolved = '' }
+        $result.value = [ordered]@{
+            resolved = [bool]$resolved
+            exists = [bool]($resolved -and (Test-Path -LiteralPath $resolved -PathType Leaf))
+            equals_shadow = [bool]($resolved -and $shadow -and
+                                   $resolved.Equals($shadow, 'OrdinalIgnoreCase'))
         }
     }
 
