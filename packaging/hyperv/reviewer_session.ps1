@@ -97,6 +97,19 @@ function Get-RequestedStage {
         New-Status -Stage 'unknown' -State 'REFUSED' -Detail 'command file is not valid JSON'
         exit 3
     }
+    # Under StrictMode 2.0 reading a property that is not there THROWS, and this
+    # read sat outside the try above. A command file of `{"run_id":"x"}` killed
+    # the session here -- before the stale-result cleanup and before any status
+    # was written -- leaving the PREVIOUS run's transcripts in place for the
+    # author to present as the outcome of the run it had just triggered. The
+    # command file is author-writable by design, so this was reachable at zero
+    # privilege.
+    if ($doc.PSObject.Properties.Name -notcontains 'stage') {
+        Clear-StaleTranscripts -OutDir $OutRoot
+        New-Status -Stage 'unknown' -State 'REFUSED' `
+            -Detail 'command file declares no stage'
+        exit 3
+    }
     $stage = [string]$doc.stage
     if ($AllowedStages -notcontains $stage) {
         Clear-StaleTranscripts -OutDir $OutRoot
@@ -214,18 +227,28 @@ function Assert-ReviewerCodeIntegrity {
     foreach ($root in $TreeRoots) {
         if (-not (Test-Path $root)) { continue }
         $rootFull = (Resolve-Path $root).Path
+        # ORDINAL sort on the relative path, to match the Python implementation.
+        #
+        # `Sort-Object -Property FullName` is culture-aware, which orders '-',
+        # '_' and '.' differently from an ordinal comparison. A real CPython
+        # runtime ships both api-ms-win-*.dll and api_ms_*.dll, so the two
+        # implementations produced different digests for the same tree while the
+        # comment above claimed they were byte-identical -- and the cross-check
+        # only passed because its fixture had no such pair of names.
+        #
+        # TrimStart with an EMPTY argument trims nothing, so every entry also
+        # kept a leading separator. That stayed stable and stayed sensitive to
+        # mutation, so it too passed its own four-step test while disagreeing.
         $lines = New-Object System.Collections.Generic.List[string]
         Get-ChildItem -Path $rootFull -Recurse -File -Force -ErrorAction SilentlyContinue |
-            Sort-Object -Property FullName |
             ForEach-Object {
-                # TrimStart with an EMPTY argument trims nothing, so every entry kept a
-                # leading separator. The digest stayed stable and stayed sensitive
-                # to mutation, so it passed its own four-step test while silently
-                # disagreeing with the Python implementation of the same algorithm.
-                # Cross-checked against that one now.
                 $rel = $_.FullName.Substring($rootFull.Length).TrimStart('\').ToLowerInvariant()
                 $lines.Add($rel + ':' + (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash)
             }
+        $ordered = $lines.ToArray()
+        [Array]::Sort($ordered, [StringComparer]::Ordinal)
+        $lines = New-Object System.Collections.Generic.List[string]
+        foreach ($entry in $ordered) { $lines.Add($entry) }
         $joined = [string]::Join("`n", $lines.ToArray())
         $bytes = [Text.Encoding]::UTF8.GetBytes($joined)
         $sha = [Security.Cryptography.SHA256]::Create()
@@ -355,6 +378,25 @@ if ($interpreterPath -and (Test-Path $interpreterPath)) {
     # point in exactly the same sense as sitecustomize.py.
     Get-ChildItem -Path $sitePackages -Filter '*.pth' -File -ErrorAction SilentlyContinue |
         ForEach-Object { $codeFiles += $_.FullName }
+}
+# The pinned interpreter must BE the dedicated runtime.
+#
+# RI20 computed this and the session did not enforce it, so a pin left over
+# from before the runtime existed -- naming the author's own per-user Python --
+# would still have been executed. `-I` does not imply `-S`, and a five-file pin
+# over python.exe and its site hooks covers neither Lib\ nor DLLs\, so editing
+# Lib\encodings\__init__.py alone would have run author code inside this
+# session, where DPAPI decrypts the review key. Enforced here, where it bites.
+if ($interpreterPath) {
+    $resolvedPy = [IO.Path]::GetFullPath($interpreterPath)
+    $resolvedRt = [IO.Path]::GetFullPath($runtimeRoot).TrimEnd('\') + '\'
+    if (-not $resolvedPy.StartsWith($resolvedRt, [StringComparison]::OrdinalIgnoreCase)) {
+        Clear-StaleTranscripts -OutDir $OutRoot
+        New-Status -Stage 'integrity' -State 'REFUSED' `
+            -Detail 'the pinned interpreter is not the dedicated reviewer runtime' `
+            -Extra @{ reason = 'REVIEWER_RUNTIME_OUTSIDE_RUNTIME_ROOT' }
+        exit 7
+    }
 }
 $integrity = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest -Paths $codeFiles -TreeRoots @($packageRoot, $runtimeRoot)
 if ($integrity.state -eq 'CHANGED') {
@@ -488,6 +530,26 @@ New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"
 # who can write its site-packages executes code in THIS session, where
 # DPAPI will decrypt the review key for them. The interpreter is therefore
 # pinned, and its load points are hashed alongside the reviewer's own code.
+# Re-verify IMMEDIATELY before executing out of these trees.
+#
+# The pin was taken once at session start and the driver then installs and runs
+# the packaged executable minutes later. Between the two, the author knows
+# exactly when to act: it issued `schtasks /Run` and can read the status file
+# going RUNNING. Hash-then-execute over a directory someone else can write is
+# not a control, it is a timing puzzle. Cheap to close, so closed.
+$recheck = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest `
+    -Paths $codeFiles -TreeRoots @($packageRoot, $runtimeRoot)
+if ($recheck.state -ne 'VERIFIED') {
+    foreach ($stale in @('ENVIRONMENT_1-transcript.json', 'ENVIRONMENT_2-transcript.json')) {
+        $path = Join-Path $OutRoot $stale
+        if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+    }
+    New-Status -Stage $stage -State 'REFUSED' `
+        -Detail ("reviewer code changed between pinning and execution: " +
+                 ($recheck.changed -join ',')) `
+        -Extra @{ reason = 'REVIEWER_CODE_CHANGED_BEFORE_EXECUTION' }
+    exit 7
+}
 $prev = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 & $py -I $driver --stage $stage --run-id $runId --source-root $SourceRoot `

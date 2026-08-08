@@ -69,6 +69,11 @@ def build_fixture(task_root: Path) -> Path:
     (runtime / "vcruntime140.dll").write_bytes(b"fixture crt payload")
     (runtime / "DLLs" / "_socket.pyd").write_bytes(b"fixture extension payload")
     (runtime / "Lib" / "os.py").write_text("# fixture stdlib\n", encoding="utf-8")
+    # Names that a culture-aware sort and an ordinal sort order DIFFERENTLY.
+    # Without a pair like this the cross-implementation check passed while the
+    # two digests disagreed on any real CPython tree, which ships exactly these.
+    (runtime / "DLLs" / "api-ms-win-core-file-l1-1-0.dll").write_bytes(b"fixture api dash")
+    (runtime / "DLLs" / "api_ms_extra.dll").write_bytes(b"fixture api underscore")
     for dist in REQUIRED_DISTRIBUTIONS:
         stem = dist.lower().replace("-", "_")
         if stem.startswith("_"):
@@ -85,11 +90,11 @@ def build_fixture(task_root: Path) -> Path:
     return runtime
 
 
-def write_manifest(runtime: Path) -> None:
+def write_manifest(runtime: Path, path_file: str = "python310._pth") -> None:
     manifest = {
         "schema_version": MANIFEST_SCHEMA,
         "interpreter_version": "3.10.5",
-        "path_file": "python310._pth",
+        "path_file": path_file,
         "required_distributions": list(REQUIRED_DISTRIBUTIONS),
         "distribution_entries": [],
         "tree_digest": tree_digest(runtime, exclude=frozenset({MANIFEST_NAME})),
@@ -155,18 +160,27 @@ def main() -> int:
             f"a path that resolves inside after travelling outside is refused ({reasons})")
 
         # 3. junction escape -- the ACL would land on the target tree, not this one
+        #
+        # The earlier version pointed the junction at an EMPTY directory, so
+        # verify() short-circuited on REVIEWER_RUNTIME_ABSENT before the reparse
+        # check ever ran -- and the case accepted that reason as success. It
+        # proved nothing. The real attack puts a COMPLETE, passing runtime behind
+        # the junction, which is what is planted here.
         target = work / "junction-target"
-        target.mkdir()
+        shutil.copytree(runtime, target)
         link = task_root / "reviewer-runtime-link"
         made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
                               capture_output=True, text=True)
         if made.returncode == 0:
+            direct = verify(target / "python.exe", task_root=work,
+                            runtime_root=target, run_probe=False)
             reasons = verify(link / "python.exe", task_root=task_root,
                              runtime_root=link, run_probe=False)
             rec("RT03 junction-reparse-escape",
-                "REVIEWER_RUNTIME_REPARSE_ESCAPE" in reasons
-                or "REVIEWER_RUNTIME_ABSENT" in reasons,
-                f"a runtime reached through a junction is refused ({reasons})")
+                not direct and "REVIEWER_RUNTIME_REPARSE_ESCAPE" in reasons,
+                f"the same tree is accepted when reached directly ({direct or 'clean'}) "
+                f"and refused as a reparse escape when reached through a junction "
+                f"({reasons}), so the refusal is about the link and not about the tree")
         else:
             rec("RT03 junction-reparse-escape", False,
                 "a junction could not be created, so the escape is untested rather "
@@ -290,6 +304,30 @@ def main() -> int:
         cycle("RT14 path-file-unexpected-entries",
               "a ._pth naming a directory outside the runtime", runtime, task_root,
               widen_pth, restore_pth, "REVIEWER_RUNTIME_PATH_FILE_UNEXPECTED_ENTRIES")
+
+        # A ._pth CPython will ignore. Named for a different version, the file is
+        # present, correct in content, and completely dead -- site is imported,
+        # sitecustomize runs, PYTHONPATH is honoured. The verifier read the name
+        # out of the manifest and only checked the file existed, so it accepted
+        # the one arrangement that silently removes the control the whole design
+        # rests on.
+        wrong = runtime / "python39._pth"
+
+        def misname():
+            pth.rename(wrong)
+            # The manifest is rewritten to DECLARE the wrong name too, which is
+            # the state an attacker would leave behind: internally consistent,
+            # and inert as far as CPython is concerned.
+            write_manifest(runtime, path_file="python39._pth")
+
+        def rename_back():
+            wrong.rename(pth)
+            write_manifest(runtime)
+
+        cycle("RT17 path-file-version-mismatch",
+              "a ._pth named for an interpreter version that is not present",
+              runtime, task_root, misname, rename_back,
+              "REVIEWER_RUNTIME_PATH_FILE_VERSION_MISMATCH")
 
         # The verifier must never repair what it refuses.
         (site / "sitecustomize.py").write_text("import sys\n", encoding="ascii")

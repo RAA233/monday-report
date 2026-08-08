@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 import subprocess
 import sys
@@ -52,7 +53,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-HV = Path(os.environ.get("MONDAY_REPORT_OFFLINE_HV_ROOT", r"C:\mr-hv"))
+# FIXED, not configurable.
+#
+# This was env-overridable while reviewer_session.ps1, the boundary probe
+# and the reviewer driver all hardcode the same path. So the guard -- and
+# only the guard -- could be pointed at a decoy tree the author had built to
+# pass every check, without touching a single tracked file. An anchor that
+# the party it constrains can relocate is not an anchor.
+HV = Path(r"C:\mr-hv")
 REVIEWER_BIN = HV / "reviewer-bin"
 REVIEWER_SRC = HV / "reviewer-src"
 REVIEWER_STATE = HV / "reviewer" / "state"
@@ -98,17 +106,47 @@ def writable_rights(rights: list[str]) -> list[str]:
             if any(w in r for w in ("Write", "Modify", "FullControl", "CreateFiles"))]
 
 
+def author_owns(path: Path) -> bool:
+    """Does the author's ordinary identity OWN this object?
+
+    Ownership is a write right in everything but name: the owner always holds
+    READ_CONTROL and WRITE_DAC, so it can grant itself anything the DACL does
+    not currently allow. Reading only the ACE list therefore reported "no write
+    right" for objects the author could rewrite at will, and a decoy tree could
+    be made to pass every ACL check simply by removing the explicit ACE while
+    staying owner.
+    """
+
+    user = f"{os.environ.get('USERDOMAIN','')}\\{os.environ.get('USERNAME','')}"
+    script = ("$ErrorActionPreference='Stop';"
+              f"(Get-Acl -LiteralPath '{path}').Owner")
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return True          # unmeasurable -> assume the worst
+    return (completed.stdout or "").strip().lower() == user.lower()
+
+
 def acl_battery() -> None:
     """The author's user identity must not be able to change what runs."""
 
-    for label, path in (("reviewer-bin", REVIEWER_BIN), ("reviewer-src", REVIEWER_SRC)):
+    # reviewer-pkg and reviewer-runtime are executed code too. Measuring only
+    # bin and src left the two directories the reviewer actually launches
+    # binaries out of unmeasured by the ACL battery entirely.
+    for label, path in (("reviewer-bin", REVIEWER_BIN), ("reviewer-src", REVIEWER_SRC),
+                        ("reviewer-pkg", HV / "reviewer-pkg"),
+                        ("reviewer-runtime", HV / "reviewer-runtime")):
         if not path.exists():
             rec(f"RI01 {label}-present", False, f"{label} is absent; the reviewer has no code")
             continue
         rec(f"RI01 {label}-present", True, f"{label} exists")
         writable = writable_rights(author_user_aces(path))
-        rec(f"RI02 {label}-not-author-writable", not writable,
-            f"the author user identity holds {writable or 'no write right'} on {label}")
+        owned = author_owns(path)
+        rec(f"RI02 {label}-not-author-writable", not writable and not owned,
+            f"the author user identity holds {writable or 'no write right'} on {label} "
+            f"and does not own it (author_is_owner={owned})")
 
     # The executed entry point specifically, and the guest runner the reviewer
     # subprocesses for the whole Environment 1 matrix.
@@ -119,8 +157,10 @@ def acl_battery() -> None:
             rec(f"RI03 {label}-present", False, f"{label} is missing from the reviewer's code")
             continue
         writable = writable_rights(author_user_aces(path))
-        rec(f"RI03 {label}-not-author-writable", not writable,
-            f"the author user identity holds {writable or 'no write right'} on {label}")
+        owned = author_owns(path)
+        rec(f"RI03 {label}-not-author-writable", not writable and not owned,
+            f"the author user identity holds {writable or 'no write right'} on {label} "
+            f"and does not own it (author_is_owner={owned})")
 
 
 def secret_battery() -> None:
@@ -149,9 +189,118 @@ def secret_battery() -> None:
         rec("RI04 code-manifest-present", False, "the code manifest is absent")
     else:
         writable = writable_rights(author_user_aces(manifest))
-        rec("RI04 code-manifest-not-author-writable", not writable,
+        owned = author_owns(manifest)
+        rec("RI04 code-manifest-not-author-writable", not writable and not owned,
             f"the author user identity holds {writable or 'no write right'} on the "
-            f"code manifest, so it cannot re-pin changed code")
+            f"code manifest and does not own it (author_is_owner={owned}), so it "
+            f"cannot re-pin changed code")
+
+
+def _extract_ps_function(name: str) -> str:
+    """Pull one function out of the session script so it can be RUN, not read."""
+
+    text = SESSION.read_text(encoding="utf-8")
+    start = text.find(f"function {name} {{")
+    if start < 0:
+        return ""
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return ""
+
+
+def integrity_gate_detects_change() -> bool:
+    """Adopt a fixture, verify it, move one byte, require CHANGED, restore."""
+
+    body = _extract_ps_function("Assert-ReviewerCodeIntegrity")
+    if not body:
+        return False
+    work = Path(tempfile.mkdtemp(prefix="mr-gate-"))
+    try:
+        target = work / "pinned.txt"
+        harness = work / "gate.ps1"
+        harness.write_text("\n".join([
+            body,
+            f"$mf = '{work / 'manifest.json'}'",
+            f"$p = '{target}'",
+            # Seeded by the SAME writer that restores it. Creating the file from
+            # Python left the restore byte-different -- Set-Content -Encoding
+            # utf8 emits a BOM -- so the cycle reported CHANGED after restoring
+            # and the check failed for a reason with nothing to do with the gate
+            # it was testing.
+            "Set-Content -Path $p -Value 'original' -Encoding utf8",
+            "$a = Assert-ReviewerCodeIntegrity -ManifestPath $mf -Paths @($p)",
+            "$b = Assert-ReviewerCodeIntegrity -ManifestPath $mf -Paths @($p)",
+            f"Set-Content -Path $p -Value 'mutated' -Encoding utf8",
+            "$c = Assert-ReviewerCodeIntegrity -ManifestPath $mf -Paths @($p)",
+            f"Set-Content -Path $p -Value 'original' -Encoding utf8",
+            "$d = Assert-ReviewerCodeIntegrity -ManifestPath $mf -Paths @($p)",
+            "\"$($a.state),$($b.state),$($c.state),$($d.state)\"",
+        ]), encoding="utf-8")
+        shell = (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+                 / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+        proc = subprocess.run([str(shell), "-NoProfile", "-NonInteractive",
+                               "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+                              capture_output=True, text=True, timeout=300)
+        states = [ln.strip() for ln in (proc.stdout or "").splitlines() if "," in ln]
+        return bool(states) and states[-1] == "ADOPTED,VERIFIED,CHANGED,VERIFIED"
+    except (OSError, subprocess.SubprocessError):
+        return False
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def credential_stage_reachability() -> tuple:
+    """What the session's allowlist actually contains, in both credential states.
+
+    The allowlist is built by two lines of the session script; they are executed
+    here with the sealed-credential file present and absent, and the result is
+    read rather than asserted.
+    """
+
+    text = SESSION.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    try:
+        first = next(i for i, ln in enumerate(lines) if ln.startswith("$CredentialStages"))
+        last = next(i for i, ln in enumerate(lines[first:], first)
+                    if ln.strip() == "}") + 1
+    except StopIteration:
+        return (None, None)
+    snippet = "\n".join(lines[first:last])
+    work = Path(tempfile.mkdtemp(prefix="mr-stages-"))
+    try:
+        state = work / "state"
+        state.mkdir()
+        results = []
+        for present in (True, False):
+            cred = state / "e2-guest.cred"
+            if present:
+                cred.write_text("fixture", encoding="utf-8")
+            elif cred.exists():
+                cred.unlink()
+            harness = work / "stages.ps1"
+            harness.write_text("\n".join([
+                f"$StateRoot = '{state}'",
+                snippet,
+                "($AllowedStages -contains 'cred-seal').ToString()",
+            ]), encoding="utf-8")
+            shell = (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+                     / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+            proc = subprocess.run([str(shell), "-NoProfile", "-NonInteractive",
+                                   "-ExecutionPolicy", "Bypass", "-File", str(harness)],
+                                  capture_output=True, text=True, timeout=300)
+            out = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+            results.append(out[-1] == "True" if out else None)
+        return (results[0], results[1])
+    except (OSError, subprocess.SubprocessError):
+        return (None, None)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def contract_battery() -> None:
@@ -161,44 +310,60 @@ def contract_battery() -> None:
     bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
     driver = DRIVER.read_text(encoding="utf-8")
 
-    rec("RI05 code-integrity-gate-present",
-        "Assert-ReviewerCodeIntegrity" in session and "exit 7" in session,
-        "the reviewer verifies its own code before honouring any command")
+    # RI05 RUNS the gate instead of grepping for its name. A function that is
+    # present and does nothing satisfies a string search perfectly.
+    rec("RI05 code-integrity-gate-detects-change", integrity_gate_detects_change(),
+        "the reviewer's own integrity function, extracted from the session and "
+        "executed, adopts a fixture, verifies it unchanged, reports CHANGED when "
+        "one byte moves, and verifies again once it is put back")
 
-    rec("RI06 refusals-clear-stale-results",
-        session.count("Clear-StaleTranscripts") >= 6,
-        f"every refusal path clears stale transcripts "
-        f"({session.count('Clear-StaleTranscripts')} call sites)")
+    # Counting occurrences counted the function DEFINITION too, and said nothing
+    # about the exits that never call it. Every `exit` in the session must be
+    # preceded by a clear or by New-Status, which writes a fresh result.
+    exits = [n for n, line in enumerate(session.splitlines(), 1)
+             if line.strip().startswith("exit ")]
+    lines = session.splitlines()
+    unguarded = []
+    for n in exits:
+        window = "\n".join(lines[max(0, n - 12):n])
+        if ("Clear-StaleTranscripts" not in window) and ("New-Status" not in window):
+            unguarded.append(n)
+    rec("RI06 refusals-clear-stale-results", not unguarded,
+        f"every exit in the reviewer session either clears stale transcripts or "
+        f"writes a fresh status first (unguarded exits at lines {unguarded or 'none'})")
 
-    rec("RI07 export-grants-no-author-ace",
-        '"${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX"' not in bootstrap,
-        "the source export does not grant the author user identity FullControl")
+    # RI07 is GONE. Its predicate was the ABSENCE of one exact three-token
+    # literal from the bootstrap source, so reordering the arguments or
+    # writing ${Account} instead of ${User} defeated it without changing a
+    # single permission. The property it named -- the export leaves no author
+    # ACE on reviewer-src -- is measured directly by RI02 against the live
+    # filesystem, ownership included.
 
     rec("RI08 head-binding-requires-pristine-tree",
         "status" in driver and "is not pristine" in driver,
         "the reviewer requires its source export to be pristine, so the head "
         "binding covers the bytes that run rather than a commit id")
 
+    # RI09 EVALUATES the allowlist the session would build, for both states of
+    # the sealed-credential file. Asserting that the token "$CredentialStages"
+    # appears somewhere said nothing about whether those stages are reachable.
+    closed, opened = credential_stage_reachability()
     rec("RI09 credential-stages-close",
-        "$CredentialStages" in session,
-        "credential-establishing stages leave the allowlist once the reviewer "
-        "holds a sealed credential")
+        closed is not None and not closed and bool(opened),
+        f"the allowlist the session builds excludes cred-seal once a sealed "
+        f"credential exists (reachable={closed}) and includes it before one does "
+        f"(reachable={opened}), so the one-time stages genuinely close")
 
     # The residual is reported, not hidden.
     admins_write = "*S-1-5-32-544:(OI)(CI)F" in bootstrap
-    # RI10 used to "disclose the residual": its predicate reduced to
-    # `admins_write`, so it PASSED precisely because the hole was open, and
-    # passed harder the wider the hole got. Disclosure is not a control, and a
-    # check that rewards the defect it describes is worse than no check.
+    # RI10 is GONE, not rewritten.
     #
-    # The residual is real and stays: an operator must be able to install the
-    # reviewer's code. What makes it bounded is that the process which builds
-    # the package and drives certification is unprivileged -- measured by RI16,
-    # which fails rather than narrates.
-    rec("RI10 operator-install-route-is-the-only-elevated-write",
-        admins_write,
-        "Administrators retains write over the reviewer's code for the operator "
-        "install route; RI16 gates whether the certifying author holds it")
+    # Its replacement still reduced to `admins_write` -- a string-presence test
+    # that passes when the grant exists and would pass harder if more were
+    # added. It cannot establish "only", which is the word it claimed. The
+    # residual it described is real and is stated in this module's docstring;
+    # what BOUNDS it is RI16, which measures rather than narrates. A check that
+    # rewards the defect it describes is worse than no check, twice over.
 
 
 def _published_interpreter_pin() -> dict:
@@ -264,7 +429,6 @@ def non_elevated_capability() -> dict:
     """
 
     import json as _json
-    import tempfile
 
     probe = "$ErrorActionPreference = 'SilentlyContinue'\n$paths = __PATHS__\n$r = [ordered]@{ elevated = (New-Object Security.Principal.WindowsPrincipal(\n    [Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole(\n    [Security.Principal.WindowsBuiltInRole]::Administrator) }\nforeach ($k in $paths.Keys) {\n  $p = $paths[$k]\n  if (-not (Test-Path $p)) { $r[$k] = 'absent'; continue }\n  if ((Get-Item $p -Force).PSIsContainer) {\n    $f = Join-Path $p ('.ne-' + [Guid]::NewGuid().ToString('N') + '.tmp')\n    try { Set-Content -Path $f -Value 'x' -ErrorAction Stop\n          $r[$k] = $true; Remove-Item $f -Force -ErrorAction SilentlyContinue }\n    catch { $r[$k] = $false }\n  } else {\n    try { $fs = [System.IO.File]::Open($p, 'Open', 'Write', 'None')\n          $fs.Close(); $r[$k] = $true }\n    catch { $r[$k] = $false }\n  }\n}\n$r | ConvertTo-Json -Compress".replace("__PATHS__", _probe_paths())
     work = Path(tempfile.mkdtemp(prefix="mr-ne-"))
@@ -311,19 +475,21 @@ def author_task_rights() -> dict:
     protocol depends on, and the descriptor is what decides the answer anyway.
     """
 
-    ps = ("$svc = New-Object -ComObject Schedule.Service; $svc.Connect();"
-          "$t = $svc.GetFolder('').GetTask('MR-OFFLINE-REVIEWER-RUN');"
-          "$sd = New-Object Security.AccessControl.RawSecurityDescriptor("
-          "  $t.GetSecurityDescriptor(4));"
-          "$me = ([Security.Principal.NTAccount]("
-          "  \"$env:USERDOMAIN\$env:USERNAME\")).Translate("
-          "  [Security.Principal.SecurityIdentifier]);"
-          "$mask = 0;"
-          "foreach ($a in $sd.DiscretionaryAcl) {"
-          "  if ($a.SecurityIdentifier -eq $me -and $a.AceType -eq 'AccessAllowed')"
-          "    { $mask = $mask -bor $a.AccessMask } };"
-          "@{ present = ($mask -ne 0); may_start = [bool]($mask -band 0x20);"
-          "   may_modify = [bool]($mask -band 0xD0116) } | ConvertTo-Json -Compress")
+    # EFFECTIVE rights, not the rights on one ACE.
+    #
+    # This used to OR only the ACEs whose SID equalled the author's user SID.
+    # That missed three ways an author gets rights it was reported as not
+    # having: an ACE granted to a GROUP it belongs to (BUILTIN\Users carries
+    # task ACEs on this host for several unrelated tasks), OWNERSHIP (the owner
+    # always holds WRITE_DAC and can grant itself the rest), and GENERIC bits,
+    # which are stored verbatim in the ACE and only mapped at access-check
+    # time -- so GENERIC_ALL scored zero against a specific-rights mask.
+    #
+    # Deny ACEs are subtracted, and the descriptor is fetched with OWNER as
+    # well as DACL. Honest limit: this is still an ACL computation rather than
+    # a real AuthzAccessCheck, so it does not model privilege-based access
+    # (SeTakeOwnership and the like) -- which is why RI16 exists.
+    ps = '$svc = New-Object -ComObject Schedule.Service; $svc.Connect();\n$t = $svc.GetFolder(\'\\\\\').GetTask(\'MR-OFFLINE-REVIEWER-RUN\');\n$sd = New-Object Security.AccessControl.RawSecurityDescriptor($t.GetSecurityDescriptor(7));\n$me = ([Security.Principal.WindowsIdentity]::GetCurrent());\n$sids = @($me.User.Value);\nforeach ($g in $me.Groups) {\n  $rows = & \\"$env:SystemRoot\\System32\\whoami.exe\\" /groups /fo csv | ConvertFrom-Csv;\n  break };\nforeach ($r in $rows) { if ($r.Attributes -notlike \'*deny*\') { $sids += $r.SID } };\n$sids = $sids | Sort-Object -Unique;\n$allow = 0; $deny = 0;\nforeach ($a in $sd.DiscretionaryAcl) {\n  if ($sids -notcontains $a.SecurityIdentifier.Value) { continue };\n  $m = $a.AccessMask;\n  if ($m -band 0x10000000) { $m = $m -bor 0x1F01FF };\n  if ($m -band 0x40000000) { $m = $m -bor 0x0001-bor 0x0002-bor 0x0004-bor 0x0010-bor 0x0100 };\n  if ($m -band 0x20000000) { $m = $m -bor 0x0020 -bor 0x0080 -bor 0x20000 };\n  if ($a.AceType -eq \'AccessAllowed\') { $allow = $allow -bor $m } else { $deny = $deny -bor $m } };\n$effective = $allow -band (-bnot $deny);\n$owns = ($sd.Owner -and ($sids -contains $sd.Owner.Value));\nif ($owns) { $effective = $effective -bor 0x40000 };\n@{ present = ($effective -ne 0); may_start = [bool]($effective -band 0x20);\n   may_modify = [bool]($effective -band 0xD0116); owns_task = [bool]$owns\n} | ConvertTo-Json -Compress'
     try:
         proc = subprocess.run(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
@@ -396,9 +562,15 @@ def elevation_battery() -> None:
     # than assumed -- the two tokens were compared against the same paths.
     author = author_process_elevated()
     self_elevated = bool(author.get("in_admin_role")) or bool(author.get("can_write_system_root"))
+    # An earlier version appended "[INDICATIVE ONLY]" to the DETAIL and still
+    # recorded the check as PASS. That is worse than not measuring: the reader is
+    # told the boundary held, in a check named for exactly that, on the strength
+    # of a token the same paragraph calls unfaithful. When the measurement cannot
+    # be trusted the result is not a pass.
     qualifier = ("" if not self_elevated else
-                 " [INDICATIVE ONLY: measured through a dropped token that keeps a "
-                 "High integrity label, because this guard is running elevated]")
+                 " [UNPROVEN: measured through a dropped token that keeps a High "
+                 "integrity label, because this guard is running elevated]")
+    trustworthy = not self_elevated
 
     measured = non_elevated_capability()
     if not measured:
@@ -419,7 +591,7 @@ def elevation_battery() -> None:
                        ("reviewer-results", "reviewer canonical results"),
                        ("trust-root-dir", "pinned trust root")):
         rec(f"RI13 non-elevated-author-cannot-write-{key}",
-            measured.get(key) is False,
+            trustworthy and measured.get(key) is False,
             f"an ordinary author token cannot write the {label}{qualifier}")
 
     # The interpreter is the route that bypassed every other control: `-I` does
@@ -438,7 +610,7 @@ def elevation_battery() -> None:
                         "interpreter binary the reviewer runs")):
         observed = measured.get(key)
         rec(f"RI15 non-elevated-author-cannot-write-{key}",
-            observed is False,
+            trustworthy and observed is False,
             f"an ordinary author token cannot write the {label} "
             f"(observed={observed!r}){qualifier}")
 
@@ -463,10 +635,11 @@ def elevation_battery() -> None:
             "protocol is drivable without elevation "
             f"(may_start={rights.get('may_start')})")
         rec("RI18 author-may-not-modify-the-reviewer-task",
-            rights.get("may_modify") is False,
+            rights.get("may_modify") is False and rights.get("owns_task") is False,
             "the author's ordinary identity cannot rewrite the task action, so it "
             "cannot point the reviewer's session at code of its own choosing "
-            f"(may_modify={rights.get('may_modify')})")
+            f"(may_modify={rights.get('may_modify')}, "
+            f"owns_task={rights.get('owns_task')})")
 
     rec("RI16 author-process-not-elevated", not elevated,
         "the process performing certification holds no administrative rights "
@@ -474,6 +647,76 @@ def elevation_battery() -> None:
         f"can_write_system_root={author.get('can_write_system_root')}); "
         "an elevated author can take ownership back and rewrite reviewer code, "
         "which would make every other check in this guard decorative")
+
+
+def multiline_path_literals(paths: list) -> list:
+    """String literals that span more than one line and look like paths.
+
+    Asks the PowerShell parser rather than counting quotes: prose in comments is
+    full of apostrophes, and the quote-counting first attempt flagged the file
+    headers of every script while finding none of the real damage.
+
+    Selection is by EXTENT -- does the literal start and end on different lines
+    -- because that needs no pattern at all. The first AST version matched the
+    literal's VALUE against a newline character class, and the class did not
+    survive being written through Python into PowerShell, so it silently matched
+    nothing and the check reported clean against a deliberately broken fixture.
+    Filtering for path shape happens here, in one language.
+    """
+
+    if not paths:
+        return []
+    work = Path(tempfile.mkdtemp(prefix="mr-ast-"))
+    try:
+        script = work / "ast.ps1"
+        # No trailing comma: PowerShell rejects `@( 'x', )` outright, and the
+        # parser error went to stderr while the helper read only stdout -- so a
+        # syntactically dead script reported every file clean.
+        lines = ["$files = @("]
+        lines.append(",\n".join("  '%s'" % path for path in paths))
+        lines += [
+            ")",
+            "foreach ($f in $files) {",
+            "  $errs = $null",
+            "  $ast = [System.Management.Automation.Language.Parser]::ParseFile(",
+            "      $f, [ref]$null, [ref]$errs)",
+            "  if (-not $ast) { continue }",
+            "  $strings = $ast.FindAll({ param($n)",
+            "      $n -is [System.Management.Automation.Language.StringConstantExpressionAst] },",
+            "      $true)",
+            "  foreach ($s in $strings) {",
+            "    if ($s.Extent.StartLineNumber -ne $s.Extent.EndLineNumber) {",
+            "      $leaf = Split-Path $f -Leaf",
+            # Nothing is flattened and nothing is pattern-matched. The previous
+            # version called Value.Replace([char]13, '<CR>'), which binds the
+            # (char, char) overload and THROWS -- so the whole walk died, printed
+            # no rows, and the check reported every file clean against a
+            # deliberately broken fixture. A single boolean is emitted instead.
+            "      $hasSep = ($s.Value.IndexOf([char]92) -ge 0)",
+            "      Write-Output ($leaf + '|' + $s.Extent.StartLineNumber + '|' + $hasSep)",
+            "    } } }",
+        ]
+        script.write_text("\n".join(lines), encoding="utf-8")
+        shell = (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+                 / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+        proc = subprocess.run([str(shell), "-NoProfile", "-NonInteractive",
+                               "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                              capture_output=True, text=True, timeout=300)
+        found = []
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if line.count("|") != 2:
+                continue
+            name, number, has_separator = line.split("|", 2)
+            # A multi-line here-string is ordinary PowerShell; a multi-line PATH
+            # is the damage.
+            if has_separator.strip().lower() == "true":
+                found.append((name, f"line {number}: a path literal spans lines"))
+        return found
+    except (OSError, subprocess.SubprocessError):
+        return [("<unmeasurable>", "the PowerShell parser could not be run")]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def source_integrity_battery() -> None:
@@ -510,9 +753,51 @@ def source_integrity_battery() -> None:
         raw = path.read_bytes()
         control = sorted({b for b in raw if b < 32 and b not in (9, 10, 13)})
         stray_cr = raw.count(b"\r") - raw.count(b"\r\n")
+        # A stray CR does not survive to be found. Git and every text-mode write
+        # normalise it into a CRLF, after which the byte sweep sees nothing and
+        # the literal is still broken -- which is what happened to the re-pin
+        # action's manifest path, silently disabling the only supported remedy
+        # for a refused run. The damage that survives is a string literal with a
+        # line break inside it, so that is what is looked for.
+        #
+        # Counting quotes per line does NOT find it: prose in comments is full
+        # of apostrophes, and the first attempt flagged the file header. The
+        # PowerShell parser is asked instead, because it is the thing that
+        # decides what a literal is.
         if control or stray_cr:
             damaged.append(f"{path.name} (control={[hex(c) for c in control]}, "
                            f"stray_cr={stray_cr})")
+    multiline = multiline_path_literals(
+        [t for t in targets if t.is_file() and t.suffix.lower() == ".ps1"])
+    for name, value in multiline:
+        damaged.append(f"{name} (path literal spans lines: {value!r})")
+    # The detector proves itself on every run.
+    #
+    # Two earlier versions of this check reported every file clean while a
+    # deliberately broken fixture sat in front of them -- once because a
+    # String.Replace overload threw, once because the generated array had a
+    # trailing comma PowerShell rejects, and both times the error went to stderr
+    # while only stdout was read. A detector that has never been seen to fire is
+    # not evidence of anything.
+    probe = Path(tempfile.mkdtemp(prefix="mr-ri19-"))
+    try:
+        sep = bytes([92])          # a backslash, assembled rather than escaped
+        cr = bytes([13])
+        nl = bytes([10])
+        clean = probe / "clean.ps1"
+        clean.write_bytes(b"$m = Join-Path $R 'reviewer" + sep + b"state"
+                          + sep + b"manifest.json'" + nl)
+        broken = probe / "broken.ps1"
+        broken.write_bytes(b"$m = Join-Path $R 'reviewer" + sep + b"state" + cr + nl
+                           + b"eviewer-code-manifest.json'" + nl)
+        fires = bool(multiline_path_literals([broken]))
+        quiet = not multiline_path_literals([clean])
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    rec("RI19a damage-detector-actually-fires", fires and quiet,
+        f"the detector reports a deliberately mangled path literal (fired={fires}) "
+        f"and stays silent on an equivalent intact one (quiet={quiet})")
+
     rec("RI19 reviewer-source-free-of-control-byte-damage", not damaged,
         f"no reviewer script carries a stray control byte or bare CR that would "
         f"turn a declared path into an unresolvable one ({damaged or 'clean'})")

@@ -98,6 +98,9 @@ function Test-Unreachable {
 function Add-Probe {
     param([string]$Id, $Observed, [string]$Detail, [switch]$Inconclusive)
     if ($Inconclusive) { $ok = $false; $state = 'INCONCLUSIVE' }
+    elseif (-not ($Observed -is [bool]) -and ([string]$Observed -eq 'inconclusive')) {
+        $ok = $false; $state = 'INCONCLUSIVE'
+    }
     elseif (Test-Unreachable $Observed) { $ok = $true; $state = 'DENIED' }
     elseif ($Observed -is [bool]) {
         if ($Observed) { $ok = $false; $state = 'ALLOWED' }
@@ -122,25 +125,49 @@ function Test-CanWriteFileIn {
         $created = Test-Path $probe
         [System.IO.File]::Delete($probe)
         return $created
-    } catch { return $false }
+    } catch [System.UnauthorizedAccessException] {
+        return $false
+    } catch {
+        return 'inconclusive'
+    }
 }
 
 function Test-CanOverwriteFile {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return 'unreachable' }
     try {
-        $fs = [System.IO.File]::Open($Path, 'Open', 'Write', 'None')
+        # FileShare.ReadWrite, not None. Requesting EXCLUSIVE access made any
+        # other open handle raise a sharing violation, and `catch { $false }`
+        # turned that into "denied" -- so an author holding the file open in a
+        # second process could make every replace probe report the boundary
+        # intact for a file it was at that moment able to rewrite.
+        $fs = [System.IO.File]::Open($Path, 'Open', 'Write', 'ReadWrite')
         $fs.Close()
         return $true
-    } catch { return $false }
+    } catch [System.UnauthorizedAccessException] {
+        return $false
+    } catch {
+        # Anything else -- sharing violation, path error, locked by the OS --
+        # is not evidence either way, and must not be counted as a denial.
+        return 'inconclusive'
+    }
 }
 
 function Add-WriteProbe {
     param([string]$Id, [string]$Directory, [string]$Detail)
     $observed = Test-CanWriteFileIn $Directory
-    if (Test-Unreachable $observed) {
-        Add-Probe $Id $observed "$Detail (directory not reachable by this token)"
-    } else { Add-Probe $Id $observed $Detail }
+    if (-not (Test-Unreachable $observed)) { Add-Probe $Id $observed $Detail; return }
+    # The same rule the file probe follows, which this one did not: an
+    # unreachable directory counts as a denial ONLY when something outside this
+    # token's control proves it exists. Without that, a host where the
+    # directory was never created reported the boundary holding.
+    if (Test-ReviewerPinned $Directory) {
+        Add-Probe $Id $observed "$Detail (unreachable; the reviewer's manifest proves it exists)"
+    } else {
+        Add-Probe $Id $observed `
+            "$Detail (unreachable AND unproven -- the directory may simply not exist)" `
+            -Inconclusive
+    }
 }
 
 function Add-ReplaceProbe {
@@ -287,13 +314,15 @@ try {
     }
 } catch { $mask = $null }
 if ($null -eq $mask) {
-    # Not a pass and not a fail of the same question: this token cannot read the
-    # descriptor, which by itself proves it holds no rights on the task -- so it
-    # cannot start it either, and the protocol is undrivable without elevation.
+    # Reading the descriptor needs READ_CONTROL, which is a DIFFERENT right from
+    # writing the task. Concluding "no rights at all, so no modify rights" gave
+    # a PASS to an author granted write or delete WITHOUT read -- the one case
+    # the probe exists to catch. Unreadable is now inconclusive on both halves.
     Add-Probe 'CH-01 author-can-start-task' $true `
-        'FAIL here means the author CANNOT start the reviewer: the task descriptor is unreadable from this session, so this token holds no rights on it'
-    Add-Probe 'CH-02 author-may-not-modify-task' $false `
-        'no rights at all on the task, so no modify rights either'
+        'the task descriptor is unreadable from this session, so the author cannot start the reviewer'
+    Add-Probe 'CH-02 author-may-not-modify-task' $null `
+        'the task descriptor is unreadable, so this token holds no READ_CONTROL -- which says nothing about whether it holds write or delete' `
+        -Inconclusive
 } else {
     Add-Probe 'CH-01 author-can-start-task' (-not [bool]($mask -band 0x20)) `
         "starting the task is required for the protocol to be drivable without elevation (may_start=$([bool]($mask -band 0x20)))"

@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -90,19 +91,31 @@ def tree_digest(root: Path, *, exclude: frozenset[str] = frozenset()) -> str:
 
     Byte-identical to the PowerShell computation in reviewer_session.ps1, so the
     reviewer's own pin and this module cannot disagree about what is in the tree
-    while both look correct. Sorted, relative, lower-cased paths joined to their
-    upper-case hashes; LF separators; UTF-8; SHA-256.
+    while both look correct. Lower-cased relative paths joined to their
+    upper-case hashes, ORDINAL sort, LF separators, UTF-8, SHA-256.
+
+    The ordinal sort is load-bearing rather than tidy: PowerShell's default
+    Sort-Object is culture-aware and orders '-', '_' and '.' differently, and a
+    real CPython runtime ships both api-ms-win-*.dll and api_ms_*.dll. The claim
+    of byte-identity in this docstring was false until the two were made to sort
+    the same way, and the cross-check that was supposed to catch it used a
+    fixture with no such pair of names.
     """
 
     root = root.resolve()
     entries = []
-    for path in sorted(root.rglob("*"), key=lambda p: str(p).lower()):
+    for path in root.rglob("*"):
         if not path.is_file():
             continue
         rel = str(path.relative_to(root))
         if rel in exclude:
             continue
         entries.append(f"{rel.lower()}:{_sha256_file(path)}")
+    # Sort the ASSEMBLED entries, ordinally, exactly as the PowerShell side
+    # does. Sorting the source paths instead left the two implementations free
+    # to disagree on any name where a culture-aware comparison differs from an
+    # ordinal one -- which a real CPython tree contains, in api-ms-win-*.dll.
+    entries.sort()
     joined = "\n".join(entries)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest().upper()
 
@@ -298,25 +311,39 @@ def verify(candidate_exe: Path, *, task_root: Path = TASK_ROOT,
         reasons.append("REVIEWER_RUNTIME_ABSENT")
         return sorted(set(reasons))
 
-    resolved = candidate_exe.resolve()
-    root = resolved.parent
-
-    # A reparse point anywhere on the way in is an escape: the ACL is applied to
-    # the link's target, which can be any tree on the volume.
-    probe = root
+    # A reparse point anywhere on the way in is an escape, and it has to be
+    # looked for BEFORE resolution.
+    #
+    # The previous version called .resolve() first. On Windows that collapses a
+    # junction and hands back the TARGET, so the walk then inspected the
+    # target's ancestors -- which contain no reparse point -- and a runtime
+    # exposed through `mklink /J` was accepted. `stat()` follows the link too,
+    # so the reparse attribute was never visible either; only `lstat()` sees it.
+    #
+    # This is not academic. `icacls /T` does NOT traverse a junction, so the
+    # hardening step would report "no author-user ACE" while the real files
+    # stayed author-writable, and `takeown /R` DOES traverse, so the author
+    # could aim a recursive ownership seizure at any tree it chose.
+    probe = candidate_exe
     while True:
         try:
-            if probe.exists() and os.path.islink(str(probe)):
+            if os.lstat(str(probe)).st_file_attributes & 0x400:  # REPARSE_POINT
                 reasons.append("REVIEWER_RUNTIME_REPARSE_ESCAPE")
                 break
-            if probe.exists() and (probe.stat().st_file_attributes & 0x400):  # REPARSE_POINT
-                reasons.append("REVIEWER_RUNTIME_REPARSE_ESCAPE")
-                break
-        except (OSError, AttributeError):
+        except (OSError, AttributeError, ValueError):
             pass
         if probe.parent == probe:
             break
         probe = probe.parent
+
+    resolved = candidate_exe.resolve()
+    root = resolved.parent
+
+    # Belt and braces: the literal path must already BE its resolved form. Any
+    # link, 8.3 short name or drive substitution shows up as a difference here
+    # even if the attribute walk above misses the mechanism.
+    if os.path.normcase(str(candidate_exe)) != os.path.normcase(str(resolved)):
+        reasons.append("REVIEWER_RUNTIME_REPARSE_ESCAPE")
 
     try:
         resolved.relative_to(task_root.resolve())
@@ -341,10 +368,27 @@ def verify(candidate_exe: Path, *, task_root: Path = TASK_ROOT,
             reasons.append("REVIEWER_RUNTIME_MANIFEST_UNREADABLE")
             manifest = {}
 
-    # The path file, and what it declares.
+    # The path file, its NAME, and what it declares.
+    #
+    # CPython only honours a `._pth` named for the interpreter it is sitting
+    # beside. A file called python39._pth next to python310.dll is ignored
+    # completely -- site is imported, sitecustomize runs, PYTHONPATH is honoured
+    # -- and the previous check, which read the name out of the manifest and
+    # only confirmed the file existed, accepted exactly that. The one control
+    # the whole design rests on could be present, correct in content, and dead.
+    expected_pth = ""
+    cores = sorted(entry.name for entry in root.glob("python*.dll")
+                   if re.fullmatch(r"python\d{2,}\.dll", entry.name, re.IGNORECASE))
+    if len(cores) == 1:
+        expected_pth = "python" + cores[0][len("python"):-len(".dll")] + "._pth"
+    else:
+        reasons.append("REVIEWER_RUNTIME_CORE_DLL_AMBIGUOUS")
+
     declared = str(manifest.get("path_file", "") or "")
-    pth = root / declared if declared else None
-    if not declared or not pth or not pth.is_file():
+    if expected_pth and declared.lower() != expected_pth.lower():
+        reasons.append("REVIEWER_RUNTIME_PATH_FILE_VERSION_MISMATCH")
+    pth = root / expected_pth if expected_pth else (root / declared if declared else None)
+    if not pth or not pth.is_file():
         reasons.append("REVIEWER_RUNTIME_PATH_FILE_MISSING")
     else:
         lines = [ln.strip() for ln in pth.read_text(encoding="ascii", errors="ignore").splitlines()]

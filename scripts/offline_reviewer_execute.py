@@ -366,13 +366,32 @@ def _frozen_package() -> dict:
     return {"frozen": frozen, "recomputed": recomputed, "disagreements": disagreements}
 
 
+def _isolated_child_env() -> dict:
+    """The environment a child interpreter may inherit.
+
+    The session launches THIS driver with -I and argues at length that the
+    interpreter is trust surface. The driver then spawned the runners without
+    -I and with the environment passed straight through, so every PYTHON*
+    variable the parent happened to hold applied to them. A correctly named
+    ._pth makes most of that inert, but relying on it silently makes the two
+    launches disagree about their own threat model -- and the ._pth being wrong
+    is itself a live failure mode.
+    """
+
+    blocked = ("MONDAY_REPORT_OPERATOR_KEY", "MONDAY_REPORT_OPERATOR_KEY_FILE",
+               "MONDAY_REPORT_OFFLINE_ISSUER_KEY", "MONDAY_REPORT_LICENSE_PRIVATE_KEY")
+    return {k: v for k, v in os.environ.items()
+            if k not in blocked and not k.upper().startswith("PYTHON")}
+
+
 def _run_runner(source: Path, python_exe: str, *, phase: str, label: str,
                 env_class: str, work_dir: Path, transfer_in, transfer_out: Path,
                 frozen: dict):
     """Invoke the environment runner, which accepts NO key material by design --
     and this driver has none to offer."""
 
-    cmd = [python_exe, str(source / "scripts" / "offline_env_runner.py"),
+    # -I on the child too: same interpreter, same trust surface, same flag.
+    cmd = [python_exe, "-I", str(source / "scripts" / "offline_env_runner.py"),
            "--phase", phase, "--env-label", label, "--env-class", env_class,
            "--package-dir", str(PACKAGE_ROOT / "app"), "--work-dir", str(work_dir),
            "--transfer-out", str(transfer_out),
@@ -382,7 +401,8 @@ def _run_runner(source: Path, python_exe: str, *, phase: str, label: str,
            "--installer-sha256", str(frozen.get("installer_sha256", ""))]
     if transfer_in is not None:
         cmd += ["--transfer-in", str(transfer_in)]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=7200,
+                          env=_isolated_child_env())
 
 
 def _head_binding_reasons(source: Path, frozen: dict) -> list:
@@ -657,7 +677,7 @@ def stage_e2(args) -> int:
         shutil.rmtree(transfer_root, ignore_errors=True)
     transfer_root.mkdir(parents=True, exist_ok=True)
 
-    cmd = [sys.executable, str(source / "scripts" / "offline_hyperv_matrix.py"),
+    cmd = [sys.executable, "-I", str(source / "scripts" / "offline_hyperv_matrix.py"),
            "--phase", "full", "--brokered", "--review-nonce", nonce,
            "--env-label", label,
            "--package-dir", str(PACKAGE_ROOT / "stage" / "MondayReportOffline"),
@@ -667,11 +687,9 @@ def stage_e2(args) -> int:
            "--source-tree", str(frozen.get("source_tree", "")),
            "--out", str(transfer_root / "environment-2-result.json")]
 
-    # Belt and braces: strip any issuer-key variable from the child environment.
-    child_env = {k: v for k, v in os.environ.items()
-                 if k not in ("MONDAY_REPORT_OPERATOR_KEY", "MONDAY_REPORT_OPERATOR_KEY_FILE",
-                              "MONDAY_REPORT_OFFLINE_ISSUER_KEY",
-                              "MONDAY_REPORT_LICENSE_PRIVATE_KEY")}
+    # Issuer-key variables AND every PYTHON* variable: the second set was the
+    # gap, since it decides what the child interpreter imports.
+    child_env = _isolated_child_env()
     matrix = subprocess.run(cmd, capture_output=True, text=True, timeout=14400, env=child_env)
 
     result_path = transfer_root / "environment-2-result.json"

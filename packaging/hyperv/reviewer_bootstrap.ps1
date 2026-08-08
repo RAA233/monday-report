@@ -174,9 +174,24 @@ function Initialize-ReviewerPaths {
         # leave the author able to grant itself back in.
         & icacls.exe $d /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     }
-    # The reviewer must traverse the root to reach its own directories, but must
-    # not gain read over sibling author material (state\, results\, xfer\).
-    & icacls.exe $Root /grant "${Account}:(NP)(X)" | Out-Null
+    # PROTECT THE ROOT ITSELF, before anything under it is reset.
+    #
+    # C:\mr-hv inherited `Authenticated Users: (OI)(CI)(IO) Modify` from the
+    # volume root and nothing ever broke that chain. Every `icacls <dir> /reset
+    # /T` below therefore re-enabled inheritance and handed Authenticated Users
+    # DELETE and GENERIC_WRITE over the whole reviewer code tree for the window
+    # between the reset and the following grant -- long enough for a polling
+    # non-elevated process to plant a persistent ACE, since the later
+    # `/grant:r` only replaces the entries for the three SIDs it names.
+    #
+    # Breaking inheritance here removes the window rather than shortening it.
+    & icacls.exe $Root /inheritance:r | Out-Null
+    & icacls.exe $Root /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
+    # Both principals need to TRAVERSE the root to reach their own directories,
+    # and neither should inherit anything from it: (NP) keeps these to this
+    # object, so the per-directory grants below remain the only source of rights.
+    & icacls.exe $Root /grant "${Account}:(NP)(RX)" | Out-Null
+    & icacls.exe $Root /grant "${me}:(NP)(RX)" | Out-Null
     $ErrorActionPreference = $prev
 
     foreach ($d in $sharedHandoff) {
@@ -382,8 +397,7 @@ if ($RepinReviewerCode) {
     # ORDER MATTERS: harden and stage FIRST, re-pin LAST. Adoption pins whatever
     # is on disk at that moment, so re-pinning before the author has lost write
     # access would pin bytes the author could still have chosen.
-    $manifest = Join-Path $HvRoot 'reviewer\state
-eviewer-code-manifest.json'
+    $manifest = Join-Path $HvRoot 'reviewer\state\reviewer-code-manifest.json'
     if (-not (Test-Path $manifest)) {
         Write-Fact 'code pin' 'already absent; the next reviewer run will adopt'
         exit 0
