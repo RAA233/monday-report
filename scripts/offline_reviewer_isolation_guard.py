@@ -746,81 +746,72 @@ def elevation_battery() -> None:
 def multiline_path_literals(paths: list) -> list:
     """String literals that span more than one line and look like paths.
 
-    Asks the PowerShell parser rather than counting quotes: prose in comments is
-    full of apostrophes, and the quote-counting first attempt flagged the file
-    headers of every script while finding none of the real damage.
+    Scanned in Python rather than by shelling out to the PowerShell parser.
 
-    Selection is by EXTENT -- does the literal start and end on different lines
-    -- because that needs no pattern at all. The first AST version matched the
-    literal's VALUE against a newline character class, and the class did not
-    survive being written through Python into PowerShell, so it silently matched
-    nothing and the check reported clean against a deliberately broken fixture.
-    Filtering for path shape happens here, in one language.
+    The parser was the right ORACLE and the wrong MECHANISM. Asking it meant
+    writing a generated .ps1 to disk and executing it immediately, which races
+    on-access antivirus scanning -- and when that lost, the check reported
+    "unmeasurable" and failed for a reason that had nothing to do with the
+    source it was inspecting. Two earlier versions of this detector also died
+    inside that generated script, silently. Removing the subprocess removes the
+    whole class.
+
+    What is recognised: single- and double-quoted literals, with '' and backtick
+    escapes. Here-strings (@' '@ and @" "@) are SKIPPED -- they are legitimately
+    multi-line and are not how any path in these files is written. Comments are
+    skipped, which is what defeated the earlier quote-counting attempt: prose is
+    full of apostrophes.
     """
 
-    if not paths:
-        return []
-    work = Path(tempfile.mkdtemp(prefix="mr-ast-"))
-    try:
-        script = work / "ast.ps1"
-        # No trailing comma: PowerShell rejects `@( 'x', )` outright, and the
-        # parser error went to stderr while the helper read only stdout -- so a
-        # syntactically dead script reported every file clean.
-        lines = ["$files = @("]
-        lines.append(",\n".join("  '%s'" % path for path in paths))
-        lines += [
-            ")",
-            "foreach ($f in $files) {",
-            "  $errs = $null",
-            "  $ast = [System.Management.Automation.Language.Parser]::ParseFile(",
-            "      $f, [ref]$null, [ref]$errs)",
-            "  if (-not $ast) { continue }",
-            "  $strings = $ast.FindAll({ param($n)",
-            # Interpolating literals are a DIFFERENT AST type, and they are the
-            # shape most path construction in these scripts actually uses --
-            # "$Root\\reviewer-bin", "$HvRoot\\reviewer-src". Matching only the
-            # constant type meant the detector could not see the damage most
-            # likely to occur here, and its self-test passed because the fixture
-            # used the one shape it could see.
-            "      ($n -is [System.Management.Automation.Language.StringConstantExpressionAst])",
-            "      -or ($n -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) },",
-            "      $true)",
-            "  foreach ($s in $strings) {",
-            "    if ($s.Extent.StartLineNumber -ne $s.Extent.EndLineNumber) {",
-            "      $leaf = Split-Path $f -Leaf",
-            # Nothing is flattened and nothing is pattern-matched. The previous
-            # version called Value.Replace([char]13, '<CR>'), which binds the
-            # (char, char) overload and THROWS -- so the whole walk died, printed
-            # no rows, and the check reported every file clean against a
-            # deliberately broken fixture. A single boolean is emitted instead.
-            # Extent text, not Value: an interpolating literal's Value does not
-            # contain the $-reference, so a path built from one would not look
-            # like a path.
-            "      $hasSep = ($s.Extent.Text.IndexOf([char]92) -ge 0)",
-            "      Write-Output ($leaf + '|' + $s.Extent.StartLineNumber + '|' + $hasSep)",
-            "    } } }",
-        ]
-        script.write_text("\n".join(lines), encoding="utf-8")
-        shell = (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
-                 / "WindowsPowerShell" / "v1.0" / "powershell.exe")
-        proc = subprocess.run([str(shell), "-NoProfile", "-NonInteractive",
-                               "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                              capture_output=True, text=True, timeout=300)
-        found = []
-        for line in (proc.stdout or "").splitlines():
-            line = line.strip()
-            if line.count("|") != 2:
+    found = []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            found.append((path.name, "unreadable"))
+            continue
+        index = 0
+        length = len(text)
+        while index < length:
+            char = text[index]
+            # block comment
+            if char == "<" and text.startswith("<#", index):
+                end = text.find("#>", index + 2)
+                index = length if end < 0 else end + 2
                 continue
-            name, number, has_separator = line.split("|", 2)
-            # A multi-line here-string is ordinary PowerShell; a multi-line PATH
-            # is the damage.
-            if has_separator.strip().lower() == "true":
-                found.append((name, f"line {number}: a path literal spans lines"))
-        return found
-    except (OSError, subprocess.SubprocessError):
-        return [("<unmeasurable>", "the PowerShell parser could not be run")]
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+            # line comment
+            if char == "#":
+                end = text.find("\n", index)
+                index = length if end < 0 else end + 1
+                continue
+            # here-strings are legitimately multi-line
+            if char == "@" and index + 1 < length and text[index + 1] in "'\"":
+                terminator = text[index + 1] + "@"
+                end = text.find(terminator, index + 2)
+                index = length if end < 0 else end + 2
+                continue
+            if char in "'\"":
+                quote = char
+                start = index
+                index += 1
+                while index < length:
+                    if text[index] == "`" and quote == '"':
+                        index += 2
+                        continue
+                    if text[index] == quote:
+                        if index + 1 < length and text[index + 1] == quote:
+                            index += 2
+                            continue
+                        index += 1
+                        break
+                    index += 1
+                literal = text[start:index]
+                if ("\n" in literal or "\r" in literal) and "\\" in literal:
+                    line = text.count("\n", 0, start) + 1
+                    found.append((path.name, f"line {line}: a path literal spans lines"))
+                continue
+            index += 1
+    return found
 
 
 def source_integrity_battery() -> None:
@@ -894,13 +885,30 @@ def source_integrity_battery() -> None:
         broken = probe / "broken.ps1"
         broken.write_bytes(b"$m = Join-Path $R 'reviewer" + sep + b"state" + cr + nl
                            + b"eviewer-code-manifest.json'" + nl)
+        # BOTH shapes. The AST version matched only constant literals, so an
+        # INTERPOLATING path split across lines was invisible to it -- and that
+        # is how most paths in these scripts are written. Its self-test passed
+        # because the fixture used the one shape it could see.
+        interp = probe / "interp.ps1"
+        interp.write_bytes(b'$m = "$Root' + sep + b'reviewer' + cr + nl + b'bin"' + nl)
+        # And two shapes that must NOT fire: a here-string is legitimately
+        # multi-line, and an apostrophe in prose is not an unterminated quote.
+        heredoc = probe / "heredoc.ps1"
+        heredoc.write_bytes(b"$x = @'" + nl + b"C:" + sep + b"some" + sep + b"path"
+                            + nl + b"'@" + nl)
+        prose = probe / "prose.ps1"
+        prose.write_bytes(b"# the reviewer" + bytes([39]) + b"s own key" + nl
+                          + b"$p = " + bytes([39]) + b"C:" + sep + b"ok" + bytes([39]) + nl)
         fires = bool(multiline_path_literals([broken]))
-        quiet = not multiline_path_literals([clean])
+        fires_interp = bool(multiline_path_literals([interp]))
+        quiet = not multiline_path_literals([clean, heredoc, prose])
     finally:
         shutil.rmtree(probe, ignore_errors=True)
-    rec("RI19a damage-detector-actually-fires", fires and quiet,
-        f"the detector reports a deliberately mangled path literal (fired={fires}) "
-        f"and stays silent on an equivalent intact one (quiet={quiet})")
+    rec("RI19a damage-detector-actually-fires",
+        fires and fires_interp and quiet,
+        f"the detector reports a mangled quoted path (fired={fires}) and a "
+        f"mangled interpolating one (fired={fires_interp}), and stays silent on "
+        f"an intact path, a here-string and an apostrophe in prose (quiet={quiet})")
 
     rec("RI19 reviewer-source-free-of-control-byte-damage", not damaged,
         f"no reviewer script carries a stray control byte or bare CR that would "
