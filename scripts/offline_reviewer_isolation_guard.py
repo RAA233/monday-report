@@ -304,6 +304,80 @@ def credential_stage_reachability() -> tuple:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def unguarded_exits(session: str) -> list:
+    """Exits that neither clear stale transcripts nor produce their own result.
+
+    Factored out so the predicate can be aimed at a fixture as well as at the
+    real session -- see RI06a. Three versions of this rule shipped without
+    anyone ever watching it fire.
+    """
+
+    lines = session.splitlines()
+    starts = powershell_block_starts(session)
+    exits = [n for n, line in enumerate(lines, 1)
+             if re.search(r"(^|;)\s*exit\b", line, re.IGNORECASE)]
+    out = []
+    for n in exits:
+        nearest_status = None
+        cleared = False
+        for k in range(max(starts.get(n, 0), 1), n):
+            text = lines[k - 1]
+            if "Clear-StaleTranscripts" in text:
+                cleared = True
+            if "-State '" in text:
+                nearest_status = text
+        if cleared:
+            continue
+        if nearest_status and ("-State 'COMPLETE'" in nearest_status
+                               or "-State 'OK'" in nearest_status):
+            continue
+        out.append(n)
+    return out
+
+
+_RI06_FIXTURES = (
+    # A clear in the TAKEN branch must not excuse the exit in the other one.
+    # This is the shape that passed under both the fourteen- and thirty-line
+    # windows.
+    ("clear-in-the-other-branch", True, """
+if ($a) {
+    Clear-StaleTranscripts -OutDir $OutRoot
+    New-Status -Stage 'x' -State 'COMPLETE'
+    exit 0
+} else {
+    New-Status -Stage 'x' -State 'FAILED' -Detail 'nope'
+    exit 9
+}
+"""),
+    # A multi-line New-Status between the clear and the exit is the real shape
+    # of this file, and a three-line window flagged twelve of them.
+    ("multi-line-status-after-the-clear", False, """
+if ($a) {
+    Clear-StaleTranscripts -OutDir $OutRoot
+    New-Status -Stage 'integrity' -State 'REFUSED' `
+        -Detail ('a' +
+                 'b') `
+        -Extra @{ reason = 'R' }
+    exit 7
+}
+"""),
+    ("result-producing-exit-needs-no-clear", False, """
+if ($a) {
+    New-Status -Stage 'x' -State 'COMPLETE' -Detail 'done'
+    exit 0
+}
+"""),
+    # A brace in prose must not be read as opening a block.
+    ("brace-inside-a-string", False, """
+if ($a) {
+    Clear-StaleTranscripts -OutDir $OutRoot
+    New-Status -Stage 'x' -State 'REFUSED' -Detail 'a { brace in prose'
+    exit 3
+}
+"""),
+)
+
+
 def contract_battery() -> None:
     """The controls must exist in source, and be reachable."""
 
@@ -326,47 +400,24 @@ def contract_battery() -> None:
     exits = [n for n, line in enumerate(session.splitlines(), 1)
              if re.search(r"(^|;)\s*exit\b", line, re.IGNORECASE)]
     lines = session.splitlines()
-    # A fresh status is NOT a substitute for clearing.
+    block_starts = powershell_block_starts(session)
+    # RI06a first: a rule nobody has watched fire is not a rule.
     #
-    # Accepting either token let four exits through that write a status and then
-    # leave the previous run's ENVIRONMENT_1/2 transcripts in place -- the exact
-    # "COMPLETE result for a run that never happened" that Clear-StaleTranscripts
-    # exists to prevent. Only an exit that produces its own result may skip it,
-    # and those are the ones reporting COMPLETE or OK.
-    # The NEAREST preceding status decides, not "anything in a 14-line window".
-    #
-    # A window is proximity, not reachability: the credential branch's FAILED
-    # refusal was accepted because the DIAGNOSTICS branch's COMPLETE happened to
-    # sit ten lines above it, in a different block entirely. Three more exits
-    # passed the same way, each with a FAILED path that clears nothing.
-    unguarded = []
-    for n in exits:
-        nearest_status = None
-        cleared = False
-        # Collect BOTH facts; do not stop at the first one.
-        #
-        # Breaking on the status line meant the scan never reached the
-        # Clear-StaleTranscripts call sitting immediately above it, which is the
-        # order the code actually uses -- clear, then report, then exit. Ten
-        # correctly-guarded exits were reported as unguarded.
-        #
-        # THREE lines, not thirty. A thirty-line lookback is proximity dressed
-        # as reachability: a clear in one branch of an if/else excused an exit
-        # in the other, and the window was larger than the fourteen it replaced.
-        # Three is short enough that the statement has to belong to the same
-        # branch.
-        for k in range(n - 1, max(0, n - 3), -1):
-            text = lines[k - 1]
-            if "Clear-StaleTranscripts" in text:
-                cleared = True
-            if "-State '" in text and nearest_status is None:
-                nearest_status = text
-        if cleared:
-            continue
-        if nearest_status and ("-State 'COMPLETE'" in nearest_status
-                               or "-State 'OK'" in nearest_status):
-            continue
-        unguarded.append(n)
+    # Three versions of this predicate shipped. The first accepted a status as a
+    # substitute for clearing, the second could not see past that status, the
+    # third used a window so tight it flagged a dozen correct exits. Each was
+    # believed because the real file happened to agree with it.
+    fixture_results = []
+    for name, should_fire, body in _RI06_FIXTURES:
+        fired = bool(unguarded_exits(body))
+        fixture_results.append((name, fired == should_fire))
+    rec("RI06a exit-rule-fires-and-stays-quiet",
+        all(ok for _, ok in fixture_results),
+        f"the rule fires on an exit whose only clear is in the other branch and "
+        f"stays quiet on a multi-line status, a result-producing exit and a brace "
+        f"in prose ({fixture_results})")
+
+    unguarded = unguarded_exits(session)
     rec("RI06 refusals-clear-stale-results", not unguarded,
         f"every exit that does not produce its own result clears stale "
         f"transcripts first (unguarded exits at lines {unguarded or 'none'})")
@@ -843,6 +894,70 @@ def multiline_path_literals(paths: list) -> list:
                 continue
             index += 1
     return found
+
+
+def powershell_block_starts(text: str) -> dict:
+    """For each line number, the line on which its innermost block opened.
+
+    Braces inside strings and comments do not count, which is why this is a scan
+    rather than a `count("{")`. Same skipping rules as the literal detector:
+    block comments, line comments, here-strings, and quoted strings with their
+    escapes.
+    """
+
+    starts: dict = {}
+    stack: list = []
+    line = 1
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        starts.setdefault(line, stack[-1] if stack else 0)
+        if char == "\n":
+            line += 1
+            index += 1
+            starts.setdefault(line, stack[-1] if stack else 0)
+            continue
+        if char == "<" and text.startswith("<#", index):
+            end = text.find("#>", index + 2)
+            stop = length if end < 0 else end + 2
+            line += text.count("\n", index, stop)
+            index = stop
+            continue
+        if char == "#":
+            end = text.find("\n", index)
+            index = length if end < 0 else end
+            continue
+        if char == "@" and index + 1 < length and text[index + 1] in "'\"":
+            terminator = text[index + 1] + "@"
+            end = text.find(terminator, index + 2)
+            stop = length if end < 0 else end + 2
+            line += text.count("\n", index, stop)
+            index = stop
+            continue
+        if char in "'\"":
+            quote = char
+            index += 1
+            while index < length:
+                if text[index] == "`" and quote == '"':
+                    index += 2
+                    continue
+                if text[index] == "\n":
+                    line += 1
+                if text[index] == quote:
+                    if index + 1 < length and text[index + 1] == quote:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            continue
+        if char == "{":
+            stack.append(line)
+        elif char == "}" and stack:
+            stack.pop()
+        index += 1
+    return starts
 
 
 def source_integrity_battery() -> None:
