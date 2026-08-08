@@ -154,11 +154,27 @@ def account_sid(name: str) -> str:
 
     child_env = {k: v for k, v in os.environ.items()
                  if not k.upper().startswith("PYTHON")}
+    # `.\name` is a spelling Windows itself does not translate; everything else
+    # is passed through untouched.
+    if name.startswith(".\\"):
+        name = f"{os.environ.get('COMPUTERNAME', '')}\\{name[2:]}"
     child_env["MR_RESOLVE_ACCOUNT"] = name
+    # NTAccount.Translate, THE SAME MECHANISM THE POWERSHELL SIDE USES.
+    #
+    # Get-LocalUser accepts a bare `name` and rejects `MACHINE\name` -- and
+    # MACHINE\name is precisely what the operator writes, because
+    # Resolve-PrincipalIdentity qualifies a bare account and stores the
+    # qualified form, which Initialize-ReviewerPaths writes to
+    # author-account.txt and reviewer_session.ps1 passes through verbatim.
+    # Measured: Get-LocalUser on that spelling raises UserNotFoundException, so
+    # this returned "", stage_bootstrap refused with "principal SIDs
+    # unresolved", and the reviewer never generated its signing key. Only the
+    # bare spelling happened to work, and nothing documented that.
     completed = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
          "$ErrorActionPreference='Stop';"
-         "try { (Get-LocalUser -Name $env:MR_RESOLVE_ACCOUNT).SID.Value } catch { '' }"],
+         "try { ([Security.Principal.NTAccount]$env:MR_RESOLVE_ACCOUNT).Translate("
+         "[Security.Principal.SecurityIdentifier]).Value } catch { '' }"],
         capture_output=True, text=True, timeout=60, env=child_env)
     value = completed.stdout.strip()
     return value if value.startswith("S-1-") else ""

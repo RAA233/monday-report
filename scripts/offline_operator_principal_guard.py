@@ -80,6 +80,82 @@ def probe(case: dict, work: Path, env: dict | None = None) -> dict:
     return {"reasons": [f"PROBE_NO_OUTPUT:{detail[0] if detail else 'silent'}"], "value": None}
 
 
+def strip_powershell_comments(text: str) -> str:
+    """Block and line comments removed, line structure kept.
+
+    A name that appears only in a comment is not a call. OP30 used to search raw
+    text, so the sentence explaining that a gate exists satisfied the check that
+    the gate is reached.
+    """
+
+    text = re.sub(r"<#.*?#>", "", text, flags=re.S)
+    out = []
+    for line in text.splitlines():
+        blanked = re.sub(r"'[^']*'", "''", line)
+        blanked = re.sub(r'"[^"]*"', '""', blanked)
+        hash_at = blanked.find("#")
+        out.append(line[:hash_at] if hash_at >= 0 else line)
+    return "\n".join(out)
+
+
+def function_bodies(text: str) -> dict:
+    """Each function name mapped to its body, by brace counting."""
+
+    bodies = {}
+    for match in re.finditer(r"^function\s+([A-Za-z][A-Za-z0-9\-]*)", text, re.M):
+        opening = text.find("{", match.end())
+        if opening < 0:
+            continue
+        depth, cursor = 0, opening
+        while cursor < len(text):
+            if text[cursor] == "{":
+                depth += 1
+            elif text[cursor] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            cursor += 1
+        bodies[match.group(1)] = text[opening:cursor + 1]
+    return bodies
+
+
+def reachable_names(sources: list, declared: list) -> set:
+    """Names reached from LIVE top-level code, transitively through live bodies.
+
+    A call that exists only inside a function nobody invokes is not reachability.
+    Assert-TrustedSourceRoot's one production occurrence was inside
+    Assert-TrustedOperatorSource, which had no call site at all -- so the gate
+    was dead and the check that would have said so reported it reached.
+    """
+
+    bodies, top_level = {}, []
+    for text in sources:
+        stripped = strip_powershell_comments(text)
+        spans = function_bodies(stripped)
+        bodies.update(spans)
+        remainder = stripped
+        for body in spans.values():
+            remainder = remainder.replace(body, "", 1)
+        top_level.append(
+            re.sub(r"^function\s+[A-Za-z][A-Za-z0-9\-]*", "", remainder, flags=re.M))
+
+    known = set(bodies) | set(declared)
+
+    def calls_in(source: str) -> set:
+        return {n for n in known if re.search(rf"(?<![\w\-]){re.escape(n)}\b", source)}
+
+    seen: set = set()
+    queue = list(calls_in("\n".join(top_level)))
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        if name in bodies:
+            queue.extend(calls_in(bodies[name]) - seen)
+    return seen
+
+
 def baseline_case(**overrides) -> dict:
     """Three distinct principals, correct memberships: the contract is satisfied."""
 
@@ -381,14 +457,26 @@ def main() -> int:
         planted_git = work / "author-writable" / "git.exe"
         planted_git.parent.mkdir(exist_ok=True)
         planted_git.write_text("not a real program", encoding="ascii")
+        # A POSITIVE CONTROL FIRST. `equals_shadow is False` is satisfied by a
+        # resolution that produced NOTHING, for any reason -- and that is exactly
+        # what was happening: the ancestor mask was inert, every candidate scored
+        # author-writable, and the check recorded a pass over a function that
+        # could no longer resolve anything at all. The synthetic author is in no
+        # local group, so a machine-wide git must resolve for it.
+        git_control = probe({"action": "trusted-git",
+                             "author": identity("SYNTH", SID_AUTHOR)}, work)["value"] or {}
         git_author = probe({"action": "trusted-git", "explicit": str(planted_git),
                             "shadow": str(planted_git),
                             "author": {"name": os.environ.get("USERNAME", ""), "sid": "",
                                        "exists": True, "resolved": True}}, work)["value"] or {}
         rec("OP22c author-writable-git-is-refused",
-            git_author.get("equals_shadow") is False,
-            f"an explicitly supplied git inside a directory the author genuinely "
-            f"owns is skipped rather than trusted ({git_author})")
+            git_control.get("resolved") is True and git_control.get("exists") is True
+            and git_author.get("equals_shadow") is False,
+            f"resolution genuinely works for a non-administrative author, and the "
+            f"explicitly supplied git inside a directory the author owns is "
+            f"skipped rather than trusted -- so the refusal is a refusal and not "
+            f"a resolution that failed for its own reasons "
+            f"(control={git_control}, planted={git_author})")
 
         bogus = probe({"action": "native-command", "name": "definitely-not-real.exe"},
                       work)["value"]
@@ -506,6 +594,23 @@ def main() -> int:
             f"instead of measuring it is reported as not measuring "
             f"({stubbed_gates})")
 
+        # The cheapest hollowing of all: leave the real measurement in place and
+        # ADD a constant assignment below it. One command-derived assignment used
+        # to excuse every other one, so this scored as measured.
+        overridden = mutated / "overridden.ps1"
+        overridden.write_text(original.replace(
+            "Add-Probe 'TOKEN02 author-account-not-administrator' $accountIsAdmin",
+            "$accountIsAdmin = $false\n"
+            "Add-Probe 'TOKEN02 author-account-not-administrator' $accountIsAdmin"),
+            encoding="utf-8")
+        overridden_gates = probe({"action": "harness-gates", "path": str(overridden)},
+                                 work)["value"] or {}
+        rec("OP28d an-appended-overriding-constant-is-detected",
+            overridden_gates.get("token02_probe") is True
+            and overridden_gates.get("token02_measured") is False,
+            f"a copy that keeps the genuine measurement and adds a constant "
+            f"assignment beneath it is reported as not measuring ({overridden_gates})")
+
         removed = mutated / "removed.ps1"
         removed.write_text("\n".join(
             line for line in original.splitlines()
@@ -516,6 +621,49 @@ def main() -> int:
             and removed_gates.get("token02_probe") is False,
             f"a copy with the account gate deleted fails while the process gate "
             f"still passes, so one gate cannot stand in for two ({removed_gates})")
+
+        # ------------------------------------------ the write predicate itself
+        # THE ARITHMETIC, ON DACL SHAPES THIS HOST DOES NOT PROVIDE.
+        #
+        # Every author-writability gate in the protocol funnels through
+        # Test-AccountCanWritePath, and nothing drove it against a DACL carrying
+        # a Deny ACE. `$mask` inside its ACE loop WAS its own `[int]$Mask`
+        # parameter -- PowerShell variable names are case-insensitive -- so the
+        # loop overwrote the question with the last matching ACE's rights before
+        # the comparison could read it. A trailing Deny made a fully
+        # author-controlled tree report "cannot write", and a read-only ACE made
+        # a correctly locked one report "can write". The identity is synthetic
+        # and in no local group, so neither the ownership short-circuit nor
+        # Administrators membership can mask the arithmetic.
+        SYNTH = identity("SYNTH", SID_AUTHOR)
+        mask_cases = (
+            ("full-control-then-trailing-deny",
+             f"O:SYG:SYD:P(A;;FA;;;{SID_AUTHOR})(A;;FA;;;SY)(D;;0x10000;;;{SID_AUTHOR})",
+             0xD0116, True),
+            ("read-only-ace",
+             f"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x120089;;;{SID_AUTHOR})", 0xD0116, False),
+            ("append-only-under-the-ancestor-mask",
+             f"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x4;;;{SID_AUTHOR})", 0xD0042, False),
+            ("append-only-under-the-default-mask",
+             f"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x4;;;{SID_AUTHOR})", 0xD0116, True),
+            ("deny-write-over-allow-all-leaves-WRITE_DAC",
+             f"O:SYG:SYD:P(A;;FA;;;{SID_AUTHOR})(D;;0x116;;;{SID_AUTHOR})(A;;FA;;;SY)",
+             0xD0116, True),
+        )
+        wrong = []
+        for index, (name, sddl, mask, want) in enumerate(mask_cases):
+            target = work / f"mask-{index}"
+            target.mkdir(exist_ok=True)
+            got = probe({"action": "write-mask", "path": str(target), "sddl": sddl,
+                         "mask": mask, "author": SYNTH}, work)["value"]
+            if got is not want:
+                wrong.append(f"{name}: want={want} got={got}")
+        rec("OP31 the-write-predicate-answers-the-question-it-was-asked",
+            not wrong,
+            f"all {len(mask_cases)} DACL shapes score correctly -- a trailing Deny "
+            f"does not erase a full-control grant, a read-only ACE is not a write, "
+            f"and the narrowed ancestor mask actually narrows "
+            f"({'; '.join(wrong) if wrong else 'no disagreement'})")
 
         # ------------------------------------------- the guard must not be hollow
         # EVERY CONTRACT FUNCTION MUST HAVE A PRODUCTION CALLER.
@@ -529,20 +677,96 @@ def main() -> int:
         # covered function; it is a decoy.
         hyperv = ROOT / "packaging" / "hyperv"
         contract_text = (hyperv / "principal_contract.ps1").read_text(encoding="utf-8")
-        declared = re.findall(r"^function ([A-Za-z][A-Za-z\-]*)", contract_text, re.M)
+        declared = re.findall(r"^function ([A-Za-z][A-Za-z0-9\-]*)", contract_text, re.M)
         production = [p for p in sorted(hyperv.glob("*.ps1"))
                       if p.name not in ("principal_contract.ps1", "principal_contract_probe.ps1")]
-        prod_text = "\n".join(p.read_text(encoding="utf-8") for p in production)
-        unreached = []
-        for name in declared:
-            call = re.compile(rf"(?<!function ){re.escape(name)}\b")
-            if not call.search(prod_text) and not call.search(contract_text):
-                unreached.append(name)
-        rec("OP30 every-contract-function-has-a-production-caller",
+        prod_sources = [p.read_text(encoding="utf-8") for p in production]
+
+        def unreached_in(sources: list) -> list:
+            live = reachable_names(sources + [contract_text], declared)
+            return sorted(n for n in declared if n not in live)
+
+        unreached = unreached_in(prod_sources)
+        rec("OP30 every-contract-function-is-reached-from-live-code",
             not unreached and len(declared) >= 20,
-            f"all {len(declared)} functions in the shared contract are reached by "
-            f"the scripts that run in production, not only by this battery "
+            f"all {len(declared)} functions in the shared contract are reached "
+            f"transitively from top-level code, with comments stripped and calls "
+            f"inside uninvoked functions not counted "
             f"(unreached={unreached or 'none'})")
+
+        # THE MUTATION. The previous form searched raw text for the name and
+        # accepted a mention in a comment or a call inside dead code -- which is
+        # how it certified Assert-TrustedSourceRoot as reached while its only
+        # production occurrence sat inside Assert-TrustedOperatorSource, a
+        # function nothing invoked.
+        boot = hyperv / "reviewer_bootstrap.ps1"
+        boot_text = boot.read_text(encoding="utf-8")
+        severed = boot_text.replace(
+            "Assert-TrustedOperatorSource -Author $AuthorIdentity -Root $SourceRepo",
+            "# Assert-TrustedOperatorSource -Author $AuthorIdentity -Root $SourceRepo")
+        severed_sources = [severed if p.name == "reviewer_bootstrap.ps1" else text
+                           for p, text in zip(production, prod_sources)]
+        severed_unreached = unreached_in(severed_sources)
+        rec("OP30a a-gate-with-no-live-call-site-is-detected",
+            severed != boot_text and "Assert-TrustedSourceRoot" in severed_unreached,
+            f"commenting out the one live call to the source-boundary gate leaves "
+            f"the contract function it wraps unreached, and is reported "
+            f"({severed_unreached or 'none'})")
+
+        # ------------------------------------- the elevated script's own ordering
+        # A TOP-LEVEL READ BEFORE THE ASSIGNMENT IS A TERMINATING ERROR.
+        #
+        # StrictMode 2.0 arrives with the dot-source, so `$AuthorIdentity` read
+        # above its assignment killed every route -- -Verify, -ProvisionPaths,
+        # -ExportSource, -StagePackage, -HardenInterpreter,
+        # -ProvisionReviewerRuntime, -GrantAuthorTaskRun, -RepinReviewerCode and
+        # the no-switch bootstrap -- with a raw VariableIsUndefined and no named
+        # reason. Nothing caught it because Assert-SelfSourceTrusted passes first
+        # in the accepted configuration.
+        stripped_boot = strip_powershell_comments(boot_text)
+        bodies = function_bodies(stripped_boot)
+        top_only = stripped_boot
+        for body in bodies.values():
+            top_only = top_only.replace(body, "", 1)
+        early = []
+        for variable in ("$AuthorIdentity", "$OperatorIdentity", "$ReviewerIdentity", "$gitExe"):
+            # Aligned assignments (`$gitExe   = ...`) are still assignments;
+            # matching a single space reported the variable as never assigned.
+            found = re.search(rf"{re.escape(variable)}\s*=(?!=)", top_only)
+            if not found:
+                early.append(f"{variable}: never assigned at top level")
+                continue
+            assignment = found.start()
+            first_use = top_only.find(variable)
+            if first_use < assignment:
+                early.append(f"{variable}: read at {first_use}, assigned at {assignment}")
+        rec("OP32 top-level-state-is-assigned-before-it-is-read",
+            not early,
+            f"no top-level statement in the elevated script reads a resolved "
+            f"principal or a resolved binary above its own assignment "
+            f"({early or 'none'})")
+
+        # THE MUTATION: put the git resolution back above the identity it
+        # consumes, which is exactly the shape that shipped.
+        git_line = "$gitExe   = Resolve-TrustedGit -Explicit $TrustedGit -Author $AuthorIdentity"
+        anchor = "# THE THREE PRINCIPALS, RESOLVED ONCE AND NEVER RE-DERIVED."
+        newline = chr(10)
+        reordered = boot_text.replace(git_line + newline, "", 1).replace(
+            anchor, git_line + newline + anchor, 1)
+        stripped_bad = strip_powershell_comments(reordered)
+        top_bad = stripped_bad
+        for body in function_bodies(stripped_bad).values():
+            top_bad = top_bad.replace(body, "", 1)
+        found = re.search(r"\$gitExe\s*=(?!=)", top_bad)
+        caught = (reordered != boot_text and found is not None
+                  and top_bad.find("$AuthorIdentity") <
+                  re.search(r"\$AuthorIdentity\s*=(?!=)", top_bad).start())
+        rec("OP32a a-read-above-its-assignment-is-detected",
+            caught,
+            f"moving the git resolution back above the principal it consumes is "
+            f"reported as a read before assignment -- the shape that made every "
+            f"route die on a raw VariableIsUndefined under StrictMode "
+            f"(mutation-applied={reordered != boot_text}, detected={caught})")
 
         print()
     finally:

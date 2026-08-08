@@ -453,11 +453,21 @@ function Test-AccountCanWritePath {
                 [Security.Principal.SecurityIdentifier]).Value
         } catch { continue }
         if (-not $sids.Contains($aceSid)) { continue }
-        $mask = [int]$ace.FileSystemRights
-        if ($mask -band 0x10000000) { $mask = $mask -bor 0x1F01FF }
-        if ($mask -band 0x40000000) { $mask = $mask -bor 0x0116 }
-        if ($ace.AccessControlType -eq 'Allow') { $allow = $allow -bor $mask }
-        else { $deny = $deny -bor $mask }
+        # $aceMask, NOT $mask. POWERSHELL VARIABLE NAMES ARE CASE-INSENSITIVE,
+        # so `$mask` here WAS the `[int]$Mask` parameter above, and the loop
+        # overwrote the question with the last matching ACE's own rights before
+        # the comparison below could read it. Measured, all three wrong:
+        #   FullControl + a trailing Deny  -> "cannot write"  (deny mask ANDs to 0)
+        #   a read-only ACE                -> "can write"     (its own bits ANDed)
+        #   append-data under 0xD0042      -> "can write"     (narrowing ignored)
+        # The first hands a clean verdict over a tree the author fully controls,
+        # and adding that Deny ACE needs only WRITE_DAC, which the author holds
+        # as owner of its own tree.
+        $aceMask = [int]$ace.FileSystemRights
+        if ($aceMask -band 0x10000000) { $aceMask = $aceMask -bor 0x1F01FF }
+        if ($aceMask -band 0x40000000) { $aceMask = $aceMask -bor 0x0116 }
+        if ($ace.AccessControlType -eq 'Allow') { $allow = $allow -bor $aceMask }
+        else { $deny = $deny -bor $aceMask }
     }
     $effective = $allow -band (-bnot $deny)
     return [bool]($effective -band $Mask)

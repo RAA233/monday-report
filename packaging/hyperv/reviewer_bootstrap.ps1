@@ -151,10 +151,6 @@ $icacls   = Get-TrustedNativeCommand -Name 'icacls.exe'
 $takeown  = Get-TrustedNativeCommand -Name 'takeown.exe'
 $schtasks = Get-TrustedNativeCommand -Name 'schtasks.exe'
 $secedit  = Get-TrustedNativeCommand -Name 'secedit.exe'
-# -Author is passed so the author-writability check the function documents
-# actually runs; without it the check was skipped and the value was then never
-# used anyway, because six call sites invoked `git.exe` by name.
-$gitExe   = Resolve-TrustedGit -Explicit $TrustedGit -Author $AuthorIdentity
 # THE THREE PRINCIPALS, RESOLVED ONCE AND NEVER RE-DERIVED.
 #
 # OPERATOR is the process performing the administrative action -- the one place
@@ -164,6 +160,16 @@ $OperatorIdentity = Get-CurrentOperatorIdentity
 $AuthorIdentity = if ($AuthorAccount) { Resolve-PrincipalIdentity -Account $AuthorAccount }
                   else { $null }
 $ReviewerIdentity = Resolve-PrincipalIdentity -Account $User
+
+# AFTER the identities, because it consumes one. Placed above them, this read
+# $AuthorIdentity nine lines before its assignment -- and StrictMode 2.0, which
+# arrives with the dot-source above, makes that a TERMINATING error. Every
+# route died at top level with a raw VariableIsUndefined and no named reason:
+# -Verify, -ProvisionPaths, -ExportSource, -StagePackage, -HardenInterpreter,
+# -ProvisionReviewerRuntime, -GrantAuthorTaskRun, -RepinReviewerCode and the
+# no-switch bootstrap. -Author is passed so the author-writability check the
+# function documents actually runs.
+$gitExe   = Resolve-TrustedGit -Explicit $TrustedGit -Author $AuthorIdentity
 
 function Assert-AuthorNamed {
     <#
@@ -294,13 +300,28 @@ function Assert-AclApplied {
     }
     $rootAcl = Get-Acl -LiteralPath $Path
     if (-not $rootAcl.AreAccessRulesProtected) { $bad += "inherits:$Path" }
+    # OWNERSHIP IS REPORTED, NOT ASSERTED. The transcript line below used to say
+    # "admins-owned" without this function ever reading an owner -- and
+    # -ExportSource deliberately makes the reviewer the owner and then calls
+    # this, so the operator was told "admins-owned" about a reviewer-owned tree.
+    # That is the defect class this function's own docstring is written against.
+    $ownerSid = ''
+    try { $ownerSid = $rootAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value }
+    catch { $ownerSid = '' }
+    $ownerLabel = switch ($ownerSid) {
+        'S-1-5-32-544' { 'admins-owned' }
+        'S-1-5-18'     { 'SYSTEM-owned' }
+        ''             { 'owner-unreadable' }
+        default        { if ($ReviewerIdentity -and $ownerSid -eq $ReviewerIdentity.Sid) {
+                             'reviewer-owned' } else { 'other-owner' } }
+    }
     if ($bad.Count) {
         Write-Output '  STOP: the ACL did not apply as intended.'
         Write-Output '  reason: OFFLINE_ACL_NOT_APPLIED'
         foreach ($entry in ($bad | Select-Object -First 5)) { Write-Output "    $entry" }
         exit 2
     }
-    Write-Fact 'ACL verified by read-back' "$($items.Count) object(s): protected, admins-owned, no author ACE"
+    Write-Fact 'ACL verified by read-back' "$($items.Count) object(s): protected, $ownerLabel, no author ACE"
 }
 
 function Assert-TaskRootProtected {
@@ -394,6 +415,37 @@ function Write-PrincipalCapabilityFacts {
     $rootReasons = @(Get-TaskRootAclViolations -Root $Root -Author $Author)
     Write-Fact 'task root ACL violations' ($(if ($rootReasons.Count) { $rootReasons -join ', ' } else { 'none' }))
     return @($aceReasons) + @($rootReasons)
+}
+
+function Assert-CapabilitiesAcceptable {
+    <#
+      The violations Write-PrincipalCapabilityFacts returns are a verdict, not a
+      decoration.
+
+      Both call sites wrapped that call in [void](...), so
+      OFFLINE_TASK_AUTHOR_MAY_MODIFY, OFFLINE_TASK_AUTHOR_OWNS_TASK and
+      OFFLINE_TASK_ROOT_BROAD_MODIFY were printed into the transcript and gated
+      nothing -- while the battery's claim_scope states that the author's task
+      rights are read+execute only. Only -GrantAuthorTaskRun enforced a mask,
+      and only at the moment of granting.
+
+      OFFLINE_TASK_DESCRIPTOR_UNREADABLE is not a violation here: the routes
+      that call this run BEFORE the task is registered, and an absent task is
+      the expected state then. It is reported rather than swallowed.
+    #>
+    param([string[]]$Reasons)
+
+    $reasons = @($Reasons | Where-Object { $_ })
+    $absent = @($reasons | Where-Object { $_ -eq 'OFFLINE_TASK_DESCRIPTOR_UNREADABLE' })
+    $blocking = @($reasons | Where-Object { $_ -ne 'OFFLINE_TASK_DESCRIPTOR_UNREADABLE' })
+    if ($absent.Count) {
+        Write-Fact 'task descriptor' 'not readable yet (task not registered)'
+    }
+    if (-not $blocking.Count) { return }
+    Write-Output ''
+    Write-Output '  STOP: the measured capabilities violate the contract.'
+    foreach ($reason in $blocking) { Write-Output "  reason: $reason" }
+    exit 2
 }
 
 function Assert-OperatorIsNotAuthor {
@@ -788,6 +840,26 @@ Write-Output '=== independent reviewer principal — bootstrap ==='
 # reviewer principal -- and it was the one route not covered.
 Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
 
+# THE SECOND BOUNDARY, AND IT HAD NO CALL SITE AT ALL.
+#
+# Assert-TrustedOperatorSource was written, documented, and invoked by nothing:
+# grep found exactly one occurrence of the name in the whole tree, its own
+# definition. -ExpectedCommit, -ExpectedTree and -AcknowledgeSharedSourceRoot
+# were read by nothing else either. So reparse-escape, tracked-dirty, untracked
+# files, reviewer-writable and wrong-commit/wrong-tree were never evaluated on
+# any route, while the elevated session went on to copy reviewer_session.ps1,
+# reviewer_credential_migration.ps1 and reviewer_diagnostics.ps1 out of this
+# tree and into the directory the reviewer executes from.
+#
+# Called at TOP LEVEL, before Test-Elevated, so it covers every route including
+# -Verify: a verification harness loaded from author-writable code reports
+# author-chosen verdicts, which is the same argument that put
+# Assert-SelfSourceTrusted above the dot-source. Kept separate from the
+# principal gate because one acknowledgement must never waive two boundaries.
+Assert-TrustedOperatorSource -Author $AuthorIdentity -Root $SourceRepo `
+    -Commit $ExpectedCommit -Tree $ExpectedTree -Git $gitExe `
+    -Acknowledged:$AcknowledgeSharedSourceRoot
+
 if (-not (Test-Elevated)) {
     Write-Output '  STOP: run this in an ELEVATED PowerShell window.'
     Write-Output '  verdict: OFFLINE_INDEPENDENT_ATTESTOR_REQUIRED'
@@ -936,7 +1008,25 @@ if ($ProvisionReviewerRuntime) {
         Write-Output '  remedy: re-run with -BuildPython naming the python.exe to copy from.'
         exit 2
     }
-    if (Test-AuthorWritable -Path $BuildPython) {
+    # THE WHOLE SOURCE TREE, not just the executable. The builder copies
+    # DLLs\ and everything under Lib\ -- including site-packages and encodings
+    # -- so an author-writable Lib\ under an admin-owned python.exe put
+    # author-chosen bytes into the runtime that is then locked and pinned as
+    # trusted. That is the same route verify_author_boundary.ps1 exists to
+    # detect, arriving through the gate meant to stop it.
+    $buildRoot = Split-Path $BuildPython -Parent
+    $sourceWritable = @($BuildPython)
+    foreach ($sub in @('DLLs', 'Lib')) {
+        $dir = Join-Path $buildRoot $sub
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        $sourceWritable += $dir
+        $sourceWritable += @(Get-ChildItem -LiteralPath $dir -Recurse -Force `
+                             -ErrorAction SilentlyContinue |
+                             Select-Object -ExpandProperty FullName)
+    }
+    $writableSource = @($sourceWritable | Where-Object { Test-AuthorWritable -Path $_ } |
+                        Select-Object -First 1)
+    if ($writableSource.Count) {
         # A HARD stop, with its own reason.
         #
         # This was waived by the same flag that waived operator/author identity
@@ -1191,7 +1281,8 @@ if ($ProvisionPaths) {
     Write-Fact 'credential' 'untouched (no prompt, no reset)'
     Write-Output ''
     Write-Output '  capabilities, measured through the contract:'
-    [void](Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
+    Assert-CapabilitiesAcceptable -Reasons @(Write-PrincipalCapabilityFacts `
+        -Operator $OperatorIdentity -Author $AuthorIdentity `
         -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName)
     Write-Output ''
     Write-Output '  Paths provisioned. The registered scheduled task is unchanged.'
@@ -1201,7 +1292,8 @@ if ($ProvisionPaths) {
 }
 
 if ($Verify) {
-    [void](Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
+    Assert-CapabilitiesAcceptable -Reasons @(Write-PrincipalCapabilityFacts `
+        -Operator $OperatorIdentity -Author $AuthorIdentity `
         -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName)
     Write-Fact 'account exists' ([bool]$existing)
     if ($existing) {

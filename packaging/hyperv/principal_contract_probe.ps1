@@ -190,16 +190,28 @@ switch ($case.action) {
             if ($observed -is [System.Management.Automation.Language.VariableExpressionAst]) {
                 $wanted = $observed.VariablePath.UserPath
                 if (@('true', 'false', 'null') -notcontains $wanted.ToLowerInvariant()) {
+                    # EVERY assignment, not the first one that looks right.
+                    #
+                    # Stopping at the first command-derived assignment meant an
+                    # ADDED `$accountIsAdmin = $false`, placed immediately before
+                    # the probe and leaving the genuine measurement untouched
+                    # above it, scored as measured. The gate would then report
+                    # DENIED on a host where the author account is in
+                    # Administrators, and three fixtures would stay green.
                     $assignments = @($ast.FindAll({
                         param($node) $node -is
                             [System.Management.Automation.Language.AssignmentStatementAst] }, $true))
+                    $matching = 0
+                    $constant = 0
                     foreach ($assignment in $assignments) {
                         if ("$($assignment.Left)" -ne "`$$wanted") { continue }
+                        $matching += 1
                         $calls = @($assignment.Right.FindAll({
                             param($node) $node -is
                                 [System.Management.Automation.Language.CommandAst] }, $true))
-                        if ($calls.Count) { $measured = $true; break }
+                        if (-not $calls.Count) { $constant += 1 }
                     }
+                    $measured = ($matching -gt 0 -and $constant -eq 0)
                 }
             }
         }
@@ -222,9 +234,16 @@ switch ($case.action) {
         # git is the one native dependency that is NOT in System32, so it takes
         # the separate resolution path -- the one no fixture drove, while the
         # fake git.exe the battery planted sat on PATH untested.
+        # Resolve the NAME when the fixture supplies no SID, exactly as
+        # account-writable and trusted-source do. Without it the identity handed
+        # to the writability check matched no ACE, so "the author-writable
+        # candidate was refused" was answered about nobody.
         $author = $null
         if ($case.PSObject.Properties.Name -contains 'author' -and $case.author) {
             $author = New-Identity -Spec $case.author
+            if (-not $author.Sid -and $case.author.name) {
+                $author = Resolve-PrincipalIdentity -Account $case.author.name
+            }
         }
         $explicit = ''
         if ($case.PSObject.Properties.Name -contains 'explicit') { $explicit = [string]$case.explicit }
@@ -238,6 +257,24 @@ switch ($case.action) {
             equals_shadow = [bool]($resolved -and $shadow -and
                                    $resolved.Equals($shadow, 'OrdinalIgnoreCase'))
         }
+    }
+
+    'write-mask' {
+        # The DACL is supplied as SDDL and applied to a scratch directory the
+        # CALLER owns, so the fixture can pose shapes that do not occur on this
+        # host: a trailing Deny after a full-control grant, a read-only ACE, an
+        # append-only ancestor. The identity is synthetic and belongs to no local
+        # group, so neither ownership nor Administrators short-circuits the
+        # computation and the mask arithmetic is what is actually measured.
+        $sd = New-Object Security.AccessControl.DirectorySecurity
+        $sd.SetSecurityDescriptorSddlForm($case.sddl)
+        Set-Acl -LiteralPath $case.path -AclObject $sd
+        $identity = New-Identity -Spec $case.author
+        $mask = if ($case.PSObject.Properties.Name -contains 'mask' -and $case.mask) {
+            [int]$case.mask
+        } else { 0xD0116 }
+        $result.value = [bool](Test-AccountCanWritePath -Identity $identity -Path $case.path `
+            -GroupProvider { param($i) return @() } -Mask $mask)
     }
 
     'account-writable' {

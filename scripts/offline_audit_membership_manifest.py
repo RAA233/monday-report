@@ -25,6 +25,7 @@ impossible.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -72,17 +73,14 @@ PINNED_MEMBERS = (
         "script": CONTRACT_SCRIPT,
         "guard": "scripts/offline_evidence_contract_guard.py",
         "min_checks": MIN_CONTRACT_CHECKS,
-        "pattern": r'battery\.record\(\s*"|mutation\(\s*"',
+        "id_pattern": r"^[A-Z]{2,3}\d+[a-z]?\s",
     },
     {
         "command": "audit:offline-operator-principal",
         "script": "python scripts/offline_operator_principal_guard.py",
         "guard": "scripts/offline_operator_principal_guard.py",
         "min_checks": 35,
-        # Check IDs, not call sites: several cases are recorded from a shared
-        # mutation helper, so counting `rec(` undercounted the battery by a
-        # third and would have pinned a floor it already sat below.
-        "pattern": r'"OP\d+[a-z]?\s',
+        "id_pattern": r"^OP\d+[a-z]?\s",
     },
 )
 
@@ -104,6 +102,34 @@ def expand_audit_all() -> list[str]:
         return out
 
     return expand("audit:all", set())
+
+
+def count_recorded_checks(guard: Path, id_pattern: str) -> int:
+    """Distinct check ids PASSED TO A CALL, read from the parse tree.
+
+    Counting text let the battery's own documentation restore the floor:
+    renaming every recording call and adding a docstring of the same literals
+    scored identically to the intact guard. A docstring is an expression
+    statement, never a call argument, so it cannot contribute here. Ids rather
+    than call sites, because several cases are recorded from a shared mutation
+    helper and counting call sites undercounted the battery by a quarter.
+    """
+
+    try:
+        tree = ast.parse(guard.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return 0
+    matcher = re.compile(id_pattern)
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for argument in node.args:
+            if (isinstance(argument, ast.Constant)
+                    and isinstance(argument.value, str)
+                    and matcher.match(argument.value)):
+                found.add(argument.value.split()[0])
+    return len(found)
 
 
 def audit_all_step_digest() -> str:
@@ -155,8 +181,11 @@ def verify_membership() -> list[str]:
                 reasons.append(f"{relative} no longer asserts {command}")
         guard = ROOT / member["guard"]
         if guard.exists():
-            # Hollowing check: the battery must still execute a real number of cases.
-            recorded = len(re.findall(member["pattern"], guard.read_text(encoding="utf-8")))
+            # Hollowing check: the battery must still execute a real number of
+            # cases. COUNTED FROM THE PARSE TREE, because a text pattern counts
+            # its own documentation -- renaming every rec("OP call and adding a
+            # docstring full of the same literals restored the floor exactly.
+            recorded = count_recorded_checks(guard, member["id_pattern"])
             if recorded < member["min_checks"]:
                 reasons.append(
                     f"{command} declares only {recorded} checks, below the pinned "
