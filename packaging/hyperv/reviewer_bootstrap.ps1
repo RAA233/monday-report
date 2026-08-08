@@ -53,7 +53,20 @@ param(
     [switch]$GrantAuthorTaskRun,
     # Required on a host where the operator and the author are the same
     # Windows account. See Assert-OperatorIsNotAuthor.
-    [switch]$AcknowledgeSharedOperatorAccount,
+    # THE AUTHOR, NAMED. Never inferred from $env:USERNAME, the running
+    # operator, the repository owner, the source-directory owner, or the
+    # process token. Those are all the same value on a single-account host,
+    # which is exactly why the coupling was invisible until a distinct operator
+    # was proposed.
+    [string]$AuthorAccount = '',
+    # Supplied from OUTSIDE the copy being verified. Asking the checkout what
+    # commit it is answers with whatever was last written there.
+    [string]$ExpectedCommit = '',
+    [string]$ExpectedTree = '',
+    [string]$TrustedGit = '',
+    # Narrow, single-purpose declarations. One flag must never waive two
+    # independent boundaries.
+    [switch]$AcknowledgeSharedSourceRoot,
     [string]$InterpreterPath = '',
     [string]$PackageSource = '',
     [string]$SourceRepo = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
@@ -64,6 +77,55 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+. (Join-Path $PSScriptRoot 'principal_contract.ps1')
+
+# Native binaries by absolute path, resolved once. An elevated session inherits
+# the launching account's PATH, and HKCU\Environment is writable without
+# elevation -- so resolving by name let an ordinary author choose which binary
+# ran at high integrity by reordering its own PATH and waiting.
+$icacls   = Get-TrustedNativeCommand -Name 'icacls.exe'
+$takeown  = Get-TrustedNativeCommand -Name 'takeown.exe'
+$schtasks = Get-TrustedNativeCommand -Name 'schtasks.exe'
+$secedit  = Get-TrustedNativeCommand -Name 'secedit.exe'
+$gitExe   = Resolve-TrustedGit -Explicit $TrustedGit
+# THE THREE PRINCIPALS, RESOLVED ONCE AND NEVER RE-DERIVED.
+#
+# OPERATOR is the process performing the administrative action -- the one place
+# reading the environment is the right answer. AUTHOR is whatever -AuthorAccount
+# names, and nothing else. REVIEWER is the fixed reviewer principal.
+$OperatorIdentity = Get-CurrentOperatorIdentity
+$AuthorIdentity = if ($AuthorAccount) { Resolve-PrincipalIdentity -Account $AuthorAccount }
+                  else { $null }
+$ReviewerIdentity = Resolve-PrincipalIdentity -Account $User
+
+function Assert-AuthorNamed {
+    <#
+      Author-affecting actions must be told WHO the author is.
+
+      Falling back to the current user is what made every author grant land on
+      whoever ran the script. On a single-account host that was accidentally
+      right; under a distinct operator it silently retargets the ACLs, the
+      probes and the task ACE at the operator.
+    #>
+    if ($AuthorIdentity -and $AuthorIdentity.Exists) { return }
+    Write-Output '  STOP: this action changes author-facing state and needs -AuthorAccount.'
+    if ($AuthorAccount) {
+        Write-Output "  reason: OFFLINE_AUTHOR_ACCOUNT_UNRESOLVED"
+    } else {
+        Write-Output '  reason: OFFLINE_AUTHOR_ACCOUNT_REQUIRED'
+    }
+    exit 2
+}
+
+foreach ($pair in @(@('icacls', $icacls), @('takeown', $takeown),
+                    @('schtasks', $schtasks), @('secedit', $secedit))) {
+    if (-not $pair[1]) {
+        Write-Output "  STOP: $($pair[0]) could not be resolved from System32."
+        Write-Output '  reason: OFFLINE_TRUSTED_NATIVE_COMMAND_UNRESOLVED'
+        exit 2
+    }
+}
 
 function Write-Fact { param([string]$k, $v) Write-Output ("  {0,-38} {1}" -f $k, $v) }
 
@@ -106,7 +168,11 @@ function Test-AuthorWritable {
     #>
     param([string]$Path)
     if (-not (Test-Path $Path)) { return $true }
-    $me = "$env:USERDOMAIN\$env:USERNAME"
+    # The AUTHOR, not the caller. This function decides whether an elevated
+    # operator is about to lock something the author can still rewrite; keying
+    # it to $env:USERNAME made it answer about the operator instead.
+    Assert-AuthorNamed
+    $me = $AuthorIdentity.Name
     try { $acl = Get-Acl -LiteralPath $Path } catch { return $true }
     if ($acl.Owner -eq $me) { return $true }
     foreach ($ace in $acl.Access) {
@@ -138,7 +204,8 @@ function Assert-AclApplied {
         Write-Output '  reason: OFFLINE_ACL_TARGET_ABSENT'
         exit 2
     }
-    $me = "$env:USERDOMAIN\$env:USERNAME"
+    Assert-AuthorNamed
+    $me = $AuthorIdentity.Name
     $bad = @()
     $items = @(Get-Item -LiteralPath $Path -Force) +
              @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue)
@@ -205,85 +272,77 @@ function Assert-TaskRootProtected {
 
 function Assert-OperatorIsNotAuthor {
     <#
-      THE RESIDUAL THIS PROTOCOL CANNOT CLOSE IN CODE.
+      OPERATOR and AUTHOR must be different Windows principals.
 
-      The design has three roles -- OPERATOR, AUTHOR, REVIEWER -- and gets its
-      strength from the reviewer being a different Windows principal. The
-      OPERATOR is not: on a single-account host it is the same user, elevated.
+      This is not a preference and it is not waivable. The reviewer's signing
+      key is protected by the reviewer account's DPAPI, the reviewer is a LOCAL
+      account, and the scheduled task carries a stored password credential. An
+      account holding Administrator reaches SYSTEM, and SYSTEM reads the
+      credential the Task Scheduler stored -- or derives the reviewer's DPAPI
+      master key from the local SAM. Either yields a genuine reviewer logon that
+      decrypts the review key and signs anything. No script cooperation, no
+      author-writable byte, no password reset.
 
-      That is not a technicality. Every elevated action here executes code the
-      author can write: this script, the runtime builder, and the interpreter
-      that runs them. An author that edits those files and then waits for the
-      operator to run the documented step obtains arbitrary code at high
-      integrity -- and from there it can rewrite the task action, replace the
-      reviewer's code, or reset the reviewer's password. No amount of checking
-      inside these scripts fixes that, because the checks are in the files being
-      checked.
+      That falsifies the assumption this design was built on -- that
+      administrative abuse produces DENIAL, a broken DPAPI chain and no
+      attestation. It produces silent forgery instead.
 
-      So it stops by default and names the reason. Proceeding requires a
-      deliberate human act, and the acknowledgement is printed into the
-      operator's own transcript rather than assumed.
+      It also cannot be closed by process-level conditions. Closing an elevated
+      window does not un-enroll an account from Administrators, and a
+      Medium-integrity process is a fact about a process, not about what the
+      human at that console can do at the next consent prompt.
+
+      COMPARISON IS LIVE, ON RESOLVED PRINCIPALS. It is NOT inferred from who
+      owns the source repository: an earlier version treated a repository owned
+      by BUILTIN\Administrators as proof of separation, which is the hazard
+      being read as the evidence.
     #>
-    param([switch]$Acknowledged)
+    param($Operator, $Author)
 
-    # FAIL CLOSED when the answer cannot be established.
-    #
-    # The first version read author_account_name out of the trust root and
-    # returned silently when it was absent. The trust root is written by the
-    # reviewer's own bootstrap stage, which needs the pinned runtime -- the very
-    # thing the guarded actions exist to create. So on a first-time host the
-    # gate could not fire until after it had stopped mattering. Absence is now
-    # "cannot establish that the operator differs from the author", which is a
-    # stop, not a pass.
-    $trustRoot = Join-Path $HvRoot 'trust\offline-review-trust-root.v1.json'
-    $authorName = ''
-    if (Test-Path $trustRoot) {
-        try { $authorName = (Get-Content $trustRoot -Raw | ConvertFrom-Json).author_account_name }
-        catch { $authorName = '' }
-    }
-    $current = $env:USERNAME
-    # FIRE UNLESS DIFFERENCE IS POSITIVELY ESTABLISHED.
-    #
-    # The previous shape compared a recorded author name to the current user and
-    # returned silently on anything that did not match. So a source repository
-    # owned by BUILTIN\Administrators -- the default for anything created,
-    # takeown'd or restored in an elevated window -- made the gate conclude
-    # "different principals" and skip, on a host where the operator IS the
-    # author. Not attacker-driven, but naturally occurring, which is worse:
-    # nothing would ever have flagged it.
-    $establishedDifferent = $false
-    if ($authorName -and ($authorName -ne $current)) {
-        # A recorded author account that is genuinely somebody else.
-        $establishedDifferent = $true
-    }
-    if (-not $authorName) {
-        # Nothing recorded. The owner of the source repository is a hint, not a
-        # proof: a group owner establishes nothing at all.
-        $owner = ''
-        try { $owner = (Get-Acl -LiteralPath $SourceRepo).Owner } catch { $owner = '' }
-        $ownerUser = $owner -replace '^.*\\', ''
-        $ownerIsGroup = ($owner -match '^(BUILTIN|NT AUTHORITY|NT SERVICE)\\')
-        if ($ownerUser -and (-not $ownerIsGroup) -and ($ownerUser -ne $current)) {
-            $establishedDifferent = $true
-        }
-    }
-    if ($establishedDifferent) { return }
-
+    $violations = Get-PrincipalContractViolations -Operator $Operator -Author $Author `
+        -Reviewer $ReviewerIdentity
+    if (-not $violations -or $violations.Count -eq 0) { return }
     Write-Output ''
-    Write-Output '  RESIDUAL: the elevated operator and the author are the same Windows account.'
-    Write-Output '  reason: OFFLINE_OPERATOR_AUTHOR_SAME_PRINCIPAL'
-    Write-Output '  Every elevated step below executes code the author identity can write,'
-    Write-Output '  so the operator role provides no independent trust on this host.'
-    Write-Output '  The complete fix is a separate operator account; there is no code fix.'
-    if (-not $Acknowledged) {
-        Write-Output '  STOPPED. Re-run with -AcknowledgeSharedOperatorAccount to proceed anyway.'
-        exit 2
-    }
-    Write-Output '  ACKNOWLEDGED by the operator; proceeding with the residual recorded.'
-    Write-Output ''
+    Write-Output '  STOP: the principal contract is not satisfied.'
+    foreach ($reason in $violations) { Write-Output "  reason: $reason" }
+    Write-Output '  An account that can write the release tree must not hold Administrator'
+    Write-Output '  on the certifying host: it reaches SYSTEM, reads the stored task'
+    Write-Output '  credential and obtains a genuine reviewer logon. That is silent forgery,'
+    Write-Output '  not denial, and there is no acknowledgement for it.'
+    exit 2
 }
 
+function Assert-TrustedOperatorSource {
+    <#
+      The elevated session must execute code the AUTHOR cannot write, pinned to
+      a commit supplied from outside the copy being checked.
 
+      Separate from the principal gate on purpose. They are independent
+      boundaries: a distinct operator running author-writable code is still
+      compromised, and admin-owned code at the wrong commit is still not the
+      reviewed artifact. One acknowledgement must never cover both.
+    #>
+    param($Author, [string]$Root, [string]$Commit, [string]$Tree, [string]$Git,
+          [switch]$Acknowledged)
+
+    $reasons = Assert-TrustedSourceRoot -Root $Root -Author $Author `
+        -ExpectedCommit $Commit -ExpectedTree $Tree -GitPath $Git
+    if (-not $reasons -or $reasons.Count -eq 0) { return }
+
+    Write-Output ''
+    Write-Output '  The elevated source copy is not trusted.'
+    foreach ($reason in $reasons) { Write-Output "  reason: $reason" }
+    # An author-writable source root is a HARD stop; the acknowledgement covers
+    # only the narrow case of a copy that is admin-owned but whose expected
+    # identity was not supplied out of band.
+    $hard = @($reasons | Where-Object {
+        $_ -ne 'OFFLINE_SOURCE_ROOT_EXPECTED_IDENTITY_MISSING' })
+    if ($hard.Count -or -not $Acknowledged) {
+        Write-Output '  STOPPED.'
+        exit 2
+    }
+    Write-Output '  ACKNOWLEDGED: proceeding without an out-of-band expected identity.'
+}
 function Initialize-ReviewerPaths {
     <#
       Provision the directory tree the reviewer session entry point requires.
@@ -308,7 +367,8 @@ function Initialize-ReviewerPaths {
       vmms (SYSTEM) context, and a SYSTEM-denied path fails as an opaque
       transport error.
     #>
-    param([string]$Root, [string]$Account, [string]$SessionSource)
+    param([string]$Root, [string]$Account, [string]$SessionSource,
+          [Parameter(Mandatory = $true)][string]$AuthorName)
 
     $reviewerOwned = @("$Root\reviewer", "$Root\reviewer\state", "$Root\reviewer\out",
                        "$Root\trust", "$Root\xchg\requests")
@@ -365,7 +425,10 @@ function Initialize-ReviewerPaths {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
     }
 
-    $me = "$env:USERDOMAIN\$env:USERNAME"
+    # Directional ACLs name the AUTHOR explicitly. Every grant below used to
+    # target whoever ran the script, so a distinct operator would have received
+    # the author's rights merely by performing the installation.
+    $me = $AuthorName
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     # PROTECT THE ROOT FIRST. Not "before anything under it is reset" as a
     # sentiment -- literally first, above every loop below.
@@ -377,20 +440,32 @@ function Initialize-ReviewerPaths {
     # write -- including the reviewer runtime for the whole interval between
     # building it and locking it -- and every `icacls /reset /T` re-enabled that
     # inheritance over the reviewer's code until the following grant landed.
-    & icacls.exe $Root /inheritance:r | Out-Null
-    & icacls.exe $Root /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
+    & $icacls $Root /inheritance:r | Out-Null
+    & $icacls $Root /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
+    # THE AUTHOR IDENTITY IS DECLARED HERE, BY THE OPERATOR.
+    #
+    # The reviewer must not learn who the author is from the author. The command
+    # file is author-writable by design, so an identity asserted through it is
+    # an identity the author chose. The operator writes it into reviewer-owned
+    # state instead: reviewer-writable, author-readable, and the reviewer
+    # resolves the NAME to a principal itself rather than trusting a digest it
+    # was handed.
+    $stateDir = Join-Path $Root 'reviewer\state'
+    if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
+    Set-Content -Path (Join-Path $stateDir 'author-account.txt') -Value $AuthorName -Encoding ascii
+
     # Both principals must TRAVERSE the root to reach their own directories, and
     # neither should inherit anything from it: (NP) keeps these to this object,
     # so the per-directory grants below stay the only source of rights.
-    & icacls.exe $Root /grant "${Account}:(NP)(RX)" | Out-Null
-    & icacls.exe $Root /grant "${me}:(NP)(RX)" | Out-Null
+    & $icacls $Root /grant "${Account}:(NP)(RX)" | Out-Null
+    & $icacls $Root /grant "${me}:(NP)(RX)" | Out-Null
     foreach ($d in $reviewerOwned) {
-        & icacls.exe $d /inheritance:r | Out-Null
-        & icacls.exe $d /grant:r "${Account}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${me}:(OI)(CI)R" | Out-Null
+        & $icacls $d /inheritance:r | Out-Null
+        & $icacls $d /grant:r "${Account}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${me}:(OI)(CI)R" | Out-Null
     }
     foreach ($d in $authorOwned) {
-        & icacls.exe $d /inheritance:r | Out-Null
-        & icacls.exe $d /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)R" | Out-Null
+        & $icacls $d /inheritance:r | Out-Null
+        & $icacls $d /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)R" | Out-Null
     }
     # Administrators + SYSTEM may write the reviewer's code; the reviewer may
     # read and execute it; the author's USER identity gets nothing. Granting by
@@ -402,21 +477,21 @@ function Initialize-ReviewerPaths {
         # reset LAST re-inherited the parent's permissions and handed
         # Authenticated Users Modify on the very code the reviewer executes --
         # strictly worse than the state it was meant to repair.
-        & icacls.exe $d /reset /T /C /Q | Out-Null
-        & icacls.exe $d /inheritance:r | Out-Null
-        & icacls.exe $d /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)RX" | Out-Null
+        & $icacls $d /reset /T /C /Q | Out-Null
+        & $icacls $d /inheritance:r | Out-Null
+        & $icacls $d /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)RX" | Out-Null
         # Propagate the new explicit ACL down to existing files.
-        & icacls.exe $d /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)RX" /T /C /Q | Out-Null
+        & $icacls $d /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)RX" /T /C /Q | Out-Null
         # The owner keeps implicit WRITE_DAC, so removing the ACE alone would
         # leave the author able to grant itself back in.
-        & icacls.exe $d /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
+        & $icacls $d /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     }
     $ErrorActionPreference = $prev
 
     foreach ($d in $sharedHandoff) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
-        & icacls.exe $d /inheritance:r | Out-Null
-        & icacls.exe $d /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)F" | Out-Null
+        & $icacls $d /inheritance:r | Out-Null
+        & $icacls $d /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)F" | Out-Null
     }
 
     if ($SessionSource -and (Test-Path $SessionSource)) {
@@ -458,7 +533,7 @@ function Remove-TaskIfPresent {
 
     if (Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) {
         $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        & schtasks.exe /Delete /TN $Name /F | Out-Null
+        & $schtasks /Delete /TN $Name /F | Out-Null
         $ErrorActionPreference = $prev
         return $true
     }
@@ -476,7 +551,7 @@ function Get-BatchLogonHolders {
     New-Item -ItemType Directory -Force -Path $work | Out-Null
     $cfg = Join-Path $work 'export.inf'
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & secedit.exe /export /areas USER_RIGHTS /cfg $cfg /quiet | Out-Null
+    & $secedit /export /areas USER_RIGHTS /cfg $cfg /quiet | Out-Null
     $ErrorActionPreference = $prev
     $line = ''
     if (Test-Path $cfg) {
@@ -498,7 +573,7 @@ function Grant-BatchLogon {
     $exp = Join-Path $work 'export.inf'; $imp = Join-Path $work 'import.inf'
     $db  = Join-Path $work 'local.sdb'
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & secedit.exe /export /areas USER_RIGHTS /cfg $exp /quiet | Out-Null
+    & $secedit /export /areas USER_RIGHTS /cfg $exp /quiet | Out-Null
     $ErrorActionPreference = $prev
     if (-not (Test-Path $exp)) { throw 'secedit export produced no file' }
     $lines = Get-Content $exp
@@ -521,7 +596,7 @@ function Grant-BatchLogon {
     }
     Set-Content -Path $imp -Value $new -Encoding Unicode   # secedit requires UTF-16LE
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & secedit.exe /configure /db $db /cfg $imp /areas USER_RIGHTS /quiet | Out-Null
+    & $secedit /configure /db $db /cfg $imp /areas USER_RIGHTS /quiet | Out-Null
     $ErrorActionPreference = $prev
     Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
     $after = Get-BatchLogonHolders
@@ -533,7 +608,7 @@ Write-Output '=== independent reviewer principal — bootstrap ==='
 # The gate belongs on this route too. The no-switch path creates the account,
 # sets the password and registers the task -- the three things that define the
 # reviewer principal -- and it was the one route not covered.
-Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
+Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
 
 if (-not (Test-Elevated)) {
     Write-Output '  STOP: run this in an ELEVATED PowerShell window.'
@@ -544,7 +619,7 @@ if (-not (Test-Elevated)) {
 $existing = Get-LocalUser -Name $User -ErrorAction SilentlyContinue
 
 if ($GrantAuthorTaskRun) {
-    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
+    Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
     # OPERATOR step. Let the author's ORDINARY user identity start the reviewer
     # task -- and do nothing else to it.
     #
@@ -564,8 +639,12 @@ if ($GrantAuthorTaskRun) {
     $svc.Connect()
     $task = $svc.GetFolder('').GetTask($TaskName)
     $sd = New-Object Security.AccessControl.RawSecurityDescriptor($task.GetSecurityDescriptor(4))
-    $author = ([Security.Principal.NTAccount]("$env:USERDOMAIN\$env:USERNAME")).Translate(
-        [Security.Principal.SecurityIdentifier])
+    # The ACE subject is the AUTHOR. Deriving it from the running process meant
+    # a distinct operator would have made ITSELF the task-control subject simply
+    # by running the grant, leaving the author unable to trigger the reviewer at
+    # all -- the control channel breaks, silently, in the safe configuration.
+    Assert-AuthorNamed
+    $author = [Security.Principal.SecurityIdentifier]::new($AuthorIdentity.Sid)
     $already = @($sd.DiscretionaryAcl | Where-Object { $_.SecurityIdentifier -eq $author })
     if ($already.Count -eq 1 -and $already[0].AccessMask -eq $READ_EXECUTE) {
         Write-Fact 'author task rights' 'already read+execute; nothing to change'
@@ -606,7 +685,7 @@ if ($GrantAuthorTaskRun) {
 }
 
 if ($RepinReviewerCode) {
-    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
+    Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
     # OPERATOR step. Retire the reviewer's code pin so the next reviewer run
     # adopts the current code deliberately.
     #
@@ -629,8 +708,8 @@ if ($RepinReviewerCode) {
         exit 0
     }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & takeown.exe /F $manifest | Out-Null
-    & icacls.exe $manifest /grant "*S-1-5-32-544:(F)" /C /Q | Out-Null
+    & $takeown /F $manifest | Out-Null
+    & $icacls $manifest /grant "*S-1-5-32-544:(F)" /C /Q | Out-Null
     $ErrorActionPreference = $prev
     [System.IO.File]::Delete($manifest)
     $gone = -not (Test-Path $manifest)
@@ -660,7 +739,7 @@ if ($ProvisionReviewerRuntime) {
     # rather than being locked behind permissions. Measured both ways before
     # this was written: with the file the planted hooks are inert, without it
     # the same hooks fire.
-    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
+    Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
     $BuildPython = Resolve-BuildPython -Supplied $BuildPython
     if (-not $BuildPython) {
         Write-Output '  STOP: no interpreter available to build the runtime from.'
@@ -669,14 +748,19 @@ if ($ProvisionReviewerRuntime) {
         exit 2
     }
     if (Test-AuthorWritable -Path $BuildPython) {
-        Write-Output '  NOTE: the build source is writable by the author identity.'
+        # A HARD stop, with its own reason.
+        #
+        # This was waived by the same flag that waived operator/author identity
+        # -- two independent boundaries behind one switch, so satisfying neither
+        # was indistinguishable from accepting both. The runtime is COPIED from
+        # this tree, so an author-writable build source puts author-chosen bytes
+        # inside the runtime the reviewer executes. Nothing downstream can
+        # recover from that, which makes it a gate rather than a declaration.
+        Write-Output '  STOP: the build source is writable by the author identity.'
         Write-Output '  reason: REVIEWER_RUNTIME_SOURCE_AUTHOR_WRITABLE'
-        Write-Output '  The runtime is copied from it, so its contents are only as'
-        Write-Output '  trustworthy as that tree. Recorded, not silently accepted.'
-        if (-not $AcknowledgeSharedOperatorAccount) {
-            Write-Output '  STOPPED. Re-run with -AcknowledgeSharedOperatorAccount to proceed.'
-            exit 2
-        }
+        Write-Output '  The runtime is copied from it, so its contents would be only as'
+        Write-Output '  trustworthy as a tree the author can rewrite.'
+        exit 2
     }
     Assert-TaskRootProtected -Root $HvRoot -Runtime ''
     $builder = Join-Path $SourceRepo 'scripts\offline_reviewer_runtime.py'
@@ -692,8 +776,8 @@ if ($ProvisionReviewerRuntime) {
     # half-built runtime that still looks structurally plausible.
     if (Test-Path $runtimeRoot) {
         $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        & takeown.exe /F $runtimeRoot /R /D Y | Out-Null
-        & icacls.exe $runtimeRoot /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
+        & $takeown /F $runtimeRoot /R /D Y | Out-Null
+        & $icacls $runtimeRoot /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
         $ErrorActionPreference = $prev
     }
 
@@ -740,7 +824,7 @@ if ($HardenInterpreter) {
     $candidate = if ($InterpreterPath) { $InterpreterPath }
                  else { Join-Path $runtimeRoot 'python.exe' }
 
-    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
+    Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
     $verifier = Join-Path $SourceRepo 'scripts\offline_reviewer_runtime.py'
     if (-not (Test-Path $verifier)) {
         Write-Output '  STOP: the runtime verifier is missing from the source repository.'
@@ -775,10 +859,10 @@ if ($HardenInterpreter) {
 
     Assert-TaskRootProtected -Root $HvRoot -Runtime $runtimeRoot
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & icacls.exe $runtimeRoot /reset /T /C /Q | Out-Null
-    & icacls.exe $runtimeRoot /inheritance:r | Out-Null
-    & icacls.exe $runtimeRoot /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
-    & icacls.exe $runtimeRoot /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
+    & $icacls $runtimeRoot /reset /T /C /Q | Out-Null
+    & $icacls $runtimeRoot /inheritance:r | Out-Null
+    & $icacls $runtimeRoot /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
+    & $icacls $runtimeRoot /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
 
     # Pin it where only the reviewer can rewrite the pin.
@@ -795,7 +879,7 @@ if ($HardenInterpreter) {
 }
 
 if ($StagePackage) {
-    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
+    Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
     # OPERATOR step. The non-elevated author BUILDS the package; publishing it
     # where the reviewer EXECUTES it needs administrative rights, because that
     # directory is part of the reviewer's code surface.
@@ -805,7 +889,7 @@ if ($StagePackage) {
     }
     $dest = Join-Path $HvRoot 'reviewer-pkg'
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & icacls.exe $dest /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
+    & $icacls $dest /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
     if (Test-Path $dest) {
         Get-ChildItem $dest -Force -ErrorAction SilentlyContinue |
@@ -815,10 +899,10 @@ if ($StagePackage) {
     }
     Copy-Item -Path (Join-Path $PackageSource '*') -Destination $dest -Recurse -Force
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & icacls.exe $dest /reset /T /C /Q | Out-Null
-    & icacls.exe $dest /inheritance:r | Out-Null
-    & icacls.exe $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
-    & icacls.exe $dest /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
+    & $icacls $dest /reset /T /C /Q | Out-Null
+    & $icacls $dest /inheritance:r | Out-Null
+    & $icacls $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
+    & $icacls $dest /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
     Assert-AclApplied -Path $dest -Account $User
     Write-Fact 'package staged' $true
@@ -829,7 +913,7 @@ if ($StagePackage) {
 }
 
 if ($ExportSource) {
-    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
+    Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
     # Publish a PRISTINE, REVIEWER-READABLE checkout at the exact current head.
     #
     # A local clone rather than `git worktree add`: a worktree's .git is a file
@@ -850,8 +934,8 @@ if ($ExportSource) {
     # half-permissioned clone behind.
     if (Test-Path $dest) {
         $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        & takeown.exe /f $dest /r /d y | Out-Null
-        & icacls.exe $dest /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
+        & $takeown /f $dest /r /d y | Out-Null
+        & $icacls $dest /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
         $ErrorActionPreference = $prev
     }
     if (Test-Path "$dest\.git") { Remove-Item $dest -Recurse -Force }
@@ -879,10 +963,10 @@ if ($ExportSource) {
     # the driver imports, none of which a six-file manifest covered. The comment
     # that used to sit here claimed the opposite of the line above it, which is
     # how that survived a review.
-    & icacls.exe $dest /reset /T /C /Q | Out-Null
-    & icacls.exe $dest /inheritance:r | Out-Null
-    & icacls.exe $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" | Out-Null
-    & icacls.exe $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
+    & $icacls $dest /reset /T /C /Q | Out-Null
+    & $icacls $dest /inheritance:r | Out-Null
+    & $icacls $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" | Out-Null
+    & $icacls $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
     # The REVIEWER must own this directory, or it cannot use git in it at all:
     # git refuses to operate in a repository owned by another user, and returns
@@ -893,7 +977,7 @@ if ($ExportSource) {
     # Ownership is not write access. The ACL above still restricts writes to
     # Administrators and SYSTEM, so owning the directory lets the reviewer READ
     # and VERIFY its source without letting the author's user identity change it.
-    & icacls.exe $dest /setowner "$User" /T /C /Q | Out-Null
+    & $icacls $dest /setowner "$User" /T /C /Q | Out-Null
     Write-Fact 'export owner' 'reviewer (so it can verify the head first hand)'
     Assert-AclApplied -Path $dest -Account $User
     Write-Fact 'reviewer driver present' (Test-Path "$dest\scripts\offline_reviewer_execute.py")
@@ -901,7 +985,7 @@ if ($ExportSource) {
 }
 
 if ($ProvisionPaths) {
-    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
+    Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
     # Repair path for an ALREADY-BOOTSTRAPPED host. Creating directories and
     # setting ACLs is an administrative operation, not a credential operation,
     # so this needs no password and must never prompt for one -- the operator
@@ -911,7 +995,7 @@ if ($ProvisionPaths) {
         Write-Output '  verdict: OFFLINE_INDEPENDENT_ATTESTOR_REQUIRED'
         exit 2
     }
-    $paths = Initialize-ReviewerPaths -Root $HvRoot -Account $User -SessionSource $SessionScript
+    $paths = Initialize-ReviewerPaths -Root $HvRoot -Account $User -SessionSource $SessionScript -AuthorName $AuthorIdentity.Name
     $installed = Get-InstalledSessionScript -Root $HvRoot
     Write-Fact 'reviewer path tree' "provisioned ($($paths.Count) directories)"
     Write-Fact 'entry point installed' (Test-Path $installed)
@@ -1048,7 +1132,7 @@ try {
 
     # Provision BEFORE registering: a task whose entry point cannot create its
     # own state directory logs on correctly and then dies with no artifact.
-    $paths = Initialize-ReviewerPaths -Root $HvRoot -Account $User -SessionSource $SessionScript
+    $paths = Initialize-ReviewerPaths -Root $HvRoot -Account $User -SessionSource $SessionScript -AuthorName $AuthorIdentity.Name
     $installed = Get-InstalledSessionScript -Root $HvRoot
     Write-Fact 'reviewer path tree' "provisioned ($($paths.Count) directories)"
     Write-Fact 'entry point installed' (Test-Path $installed)
@@ -1063,7 +1147,7 @@ try {
     # That is intended: this task exists solely for on-demand `schtasks /Run`,
     # never for a timed run. Verified by NextRunTime being empty with zero
     # missed runs, so no schedule-driven execution is pending or required.
-    & schtasks.exe /Create /TN $TaskName /TR $action /SC ONCE /ST 00:00 `
+    & $schtasks /Create /TN $TaskName /TR $action /SC ONCE /ST 00:00 `
         /RL LIMITED /RU "$env:COMPUTERNAME\$User" /RP $s1 /F | Out-Null
     $rc = $LASTEXITCODE
     $ErrorActionPreference = $prev

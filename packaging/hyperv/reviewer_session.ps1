@@ -617,8 +617,21 @@ New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"
 Assert-CodeStillPinned -Stage $stage
 $prev = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
+# The author identity comes from the OPERATOR-written pin in reviewer-owned
+# state, not from the author's own command file. Absent, the run stops: an
+# authoritative result must name the principal it was produced for.
+$authorPin = Join-Path $StateRoot 'author-account.txt'
+if (-not (Test-Path $authorPin)) {
+    Clear-StaleTranscripts -OutDir $OutRoot
+    New-Status -Stage $stage -State 'FAILED' `
+        -Detail 'no operator-declared author account' `
+        -Extra @{ reason = 'OFFLINE_AUTHOR_ACCOUNT_REQUIRED' }
+    exit 4
+}
+$authorAccount = (Get-Content $authorPin -Raw).Trim()
 & $py -I $driver --stage $stage --run-id $runId --source-root $SourceRoot `
-      --state-root $StateRoot --out-root $OutRoot --xchg-root $XchgRoot
+      --state-root $StateRoot --out-root $OutRoot --xchg-root $XchgRoot `
+      --author-account $authorAccount
 $rc = $LASTEXITCODE
 $ErrorActionPreference = $prev
 

@@ -188,6 +188,10 @@ def stage_bootstrap(args: argparse.Namespace) -> int:
 
     reviewer_name = os.environ.get("USERNAME", "")
     reviewer_sid = current_sid()
+    # RESOLVED HERE, by the reviewer, from the name the operator declared. The
+    # author asserting "I am this account" proves nothing; resolving the name
+    # locally and binding the resulting digest is what makes the binding mean
+    # something.
     author_name = args.author_account
     author_sid = account_sid(author_name)
     if not reviewer_sid or not author_sid:
@@ -839,7 +843,12 @@ def main() -> int:
     parser.add_argument("--state-root", required=True)
     parser.add_argument("--out-root", required=True)
     parser.add_argument("--xchg-root", required=True)
-    parser.add_argument("--author-account", default="ralba")
+    # REQUIRED, with no default.
+    #
+    # `default="ralba"` was load-bearing for authoritative acceptance: the
+    # session never passed the flag, so every trust root ever written bound that
+    # literal rather than the account certification actually ran as.
+    parser.add_argument("--author-account", required=True)
     args = parser.parse_args()
 
     refuse_issuer_material(args)

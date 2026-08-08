@@ -239,6 +239,23 @@ $elevated = ($inAdminRole -or ($canWriteSystemRoot -is [bool] -and $canWriteSyst
 Add-Probe 'TOKEN01 author-process-not-elevated' $elevated `
     "in_admin_role=$inAdminRole can_write_system_root=$canWriteSystemRoot integrity=$integrity"
 
+# TWO DISTINCT CONTROLS, AND THE SECOND IS THE ONE THAT DECIDES.
+#
+# TOKEN01 reads this PROCESS. A filtered Medium token from an account that is
+# still in Administrators reports in_admin_role=False and integrity=Medium --
+# identical to a token from an account that is not. So the whole harness scored
+# a compromised host and a clean one the same way, and the property it is named
+# for was never measured at all.
+#
+# The account is a different question: it reaches SYSTEM at the next consent
+# prompt, reads the reviewer credential the Task Scheduler stored, and obtains a
+# genuine reviewer logon. Closing an elevated window does not change it.
+. (Join-Path $PSScriptRoot 'principal_contract.ps1')
+$authorIdentity = Resolve-PrincipalIdentity -Account $env:USERNAME
+$accountIsAdmin = Test-AccountInAdministrators -Identity $authorIdentity
+Add-Probe 'TOKEN02 author-account-not-administrator' $accountIsAdmin `
+    "the AUTHOR ACCOUNT itself holds no local Administrator, directly or through a nested group (account_is_administrator=$accountIsAdmin); a Medium-integrity process from an admin-capable account fails this and must not be read as separation"
+
 # ------------------------------------------------------------ C1 interpreter
 $pinFile = Join-Path $REVIEWER_STATE 'python-path.txt'
 $py = ''
