@@ -277,6 +277,51 @@ switch ($case.action) {
             -GroupProvider { param($i) return @() } -Mask $mask)
     }
 
+    'provision-acl' {
+        # THE GRANT THE BOOTSTRAP APPLIES, ON A SCRATCH DIRECTORY.
+        #
+        # Three properties have to hold at once and they pull against each
+        # other: the OPERATOR must be able to create its declarations here, the
+        # AUTHOR must not be able to rewrite them, and the AUTHOR must still be
+        # able to read the declaration it is bound by. Dropping the
+        # Administrators ACE satisfied the middle one and broke the first, which
+        # is not visible from any single-property check.
+        #
+        # Applied through SDDL rather than icacls: the author SID here is
+        # synthetic, belonging to no local group so that this measures the ACL
+        # and not this host's group membership, and icacls refuses a SID it
+        # cannot map to an account -- "No mapping between account names and
+        # security IDs was done" -- which fails the whole grant and leaves an
+        # empty DACL that nobody can write. Measured, not assumed.
+        $authorSid = $case.author.sid
+        $dirSddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$authorSid)"
+        $dir = New-Object Security.AccessControl.DirectorySecurity
+        $dir.SetSecurityDescriptorSddlForm($dirSddl, 'Access')
+        Set-Acl -LiteralPath $case.path -AclObject $dir
+
+        $declaration = Join-Path $case.path 'author-account.txt'
+        $wrote = $false
+        try {
+            Set-Content -Path $declaration -Value 'DECLARED-AUTHOR' -Encoding ascii -ErrorAction Stop
+            $wrote = ((Get-Content -LiteralPath $declaration -Raw).Trim() -eq 'DECLARED-AUTHOR')
+        } catch { $wrote = $false }
+        if ($wrote) {
+            $fileSddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;$authorSid)"
+            $file = New-Object Security.AccessControl.FileSecurity
+            $file.SetSecurityDescriptorSddlForm($fileSddl, 'Access')
+            Set-Acl -LiteralPath $declaration -AclObject $file
+        }
+        $identity = New-Identity -Spec $case.author
+        $noGroups = { param($i) return @() }
+        $result.value = [ordered]@{
+            operator_wrote = [bool]$wrote
+            author_can_write = [bool]($wrote -and (Test-AccountCanWritePath -Identity $identity `
+                -Path $declaration -GroupProvider $noGroups))
+            author_can_read = [bool]($wrote -and (Test-AccountCanReadPath -Identity $identity `
+                -Path $declaration -GroupProvider $noGroups))
+        }
+    }
+
     'account-writable' {
         # Resolve the NAME when the fixture supplies no SID, so a probe about a
         # real account is answered about that account rather than about an

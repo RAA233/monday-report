@@ -80,6 +80,28 @@ def probe(case: dict, work: Path, env: dict | None = None) -> dict:
     return {"reasons": [f"PROBE_NO_OUTPUT:{detail[0] if detail else 'silent'}"], "value": None}
 
 
+def blank_string_literals(line: str) -> str:
+    """Replace literal text with filler, LENGTH FOR LENGTH.
+
+    Length is preserved so an offset taken from the result still addresses the
+    same character in the original. Interpolated variable references survive:
+    "$AuthorIdentity" inside a double-quoted string IS a read, and hiding it
+    would defeat the ordering check. A single-quoted string interpolates
+    nothing, so it is blanked outright.
+    """
+
+    def fill(match) -> str:
+        quote, body = match.group(0)[0], match.group(0)[1:-1]
+        if quote == "'":
+            return quote + "x" * len(body) + quote
+        kept = ["x"] * len(body)
+        for reference in re.finditer(r"\$\{?[A-Za-z_:][A-Za-z0-9_:]*\}?", body):
+            kept[reference.start():reference.end()] = list(reference.group(0))
+        return quote + "".join(kept) + quote
+
+    return re.sub(r"'[^']*'|\"[^\"]*\"", fill, line)
+
+
 def strip_powershell_comments(text: str) -> str:
     """Block and line comments removed, line structure kept.
 
@@ -88,13 +110,28 @@ def strip_powershell_comments(text: str) -> str:
     the gate is reached.
     """
 
-    text = re.sub(r"<#.*?#>", "", text, flags=re.S)
+    # A block comment is replaced by its own newlines, so line numbers and line
+    # counts survive. Deleting it outright collapsed the file and made every
+    # offset downstream refer to a different place than the reader expects.
+    text = re.sub(r"<#.*?#>",
+                  lambda match: chr(10) * match.group(0).count(chr(10)),
+                  text, flags=re.S)
     out = []
     for line in text.splitlines():
-        blanked = re.sub(r"'[^']*'", "''", line)
-        blanked = re.sub(r'"[^"]*"', '""', blanked)
+        blanked = blank_string_literals(line)
         hash_at = blanked.find("#")
-        out.append(line[:hash_at] if hash_at >= 0 else line)
+        # THE BLANKED LINE IS WHAT IS RETURNED, and the cut is taken from it.
+        #
+        # Two defects in one line. The index was computed on a line shortened by
+        # collapsing quotes and then applied to the ORIGINAL, so
+        # `$x = 'hello world'  # c` came back as `$x = 'hel` -- live code
+        # truncated mid-statement, and three lines of reviewer_session.ps1 were
+        # being mangled before reachability and position arithmetic ever ran.
+        # And returning the original meant a function name inside a string
+        # counted as a call to it: replacing the one live invocation of the
+        # source-boundary gate with Write-Output 'Assert-TrustedOperatorSource
+        # ...' disabled the second trust boundary and left OP30 green.
+        out.append(blanked[:hash_at] if hash_at >= 0 else blanked)
     return "\n".join(out)
 
 
@@ -197,14 +234,20 @@ def main() -> int:
         # named reason rather than as 39 passes, and rather than a red audit:all
         # on a platform where the question is meaningless. It is NOT an
         # environment switch: os.name is not settable from outside the process.
+        # FAILS CLOSED. Returning 0 made a run that measured nothing about the
+        # acceptance predicate byte-identical -- in exit status and in the
+        # pinned step digest -- to one that measured all of it, and no consumer
+        # read the marker. The certifying host is Windows by construction, so a
+        # non-Windows run of this battery is a run that cannot answer the
+        # question, and that is a failure rather than a pass.
         print(json.dumps({
             "guard": "offline-operator-principal",
-            "skipped": "not-windows",
+            "error": "OFFLINE_PRINCIPAL_CONTRACT_UNMEASURABLE",
             "detail": "the principal contract is a statement about Windows "
-                      "accounts and ACLs; nothing was measured and nothing is "
-                      "claimed",
+                      "accounts, ACLs and scheduled-task descriptors; this "
+                      "platform cannot answer it, and nothing is claimed",
         }, indent=2))
-        return 0
+        return 1
     if not PROBE.is_file():
         rec("OP00 probe-present", False, "the contract probe is missing")
         return 1
@@ -622,6 +665,29 @@ def main() -> int:
             f"a copy with the account gate deleted fails while the process gate "
             f"still passes, so one gate cannot stand in for two ({removed_gates})")
 
+        # ------------------------------------ the provisioning ACL is workable
+        # THE OPERATOR MUST BE ABLE TO WRITE ITS OWN DECLARATIONS.
+        #
+        # The reviewer-owned grant used to be reviewer + SYSTEM + author-read
+        # with no Administrators ACE, and the operator writes two of its own
+        # files into that tree. Measured from an elevated session that OWNED the
+        # directory: icacls answered "Access is denied" and Set-Content raised
+        # UnauthorizedAccessException, so -ProvisionPaths, -HardenInterpreter and
+        # the no-switch bootstrap all died -- the last after setting the reviewer
+        # password and before registering the task. The three properties the
+        # grant has to hold simultaneously are asserted here together.
+        acl_dir = work / "provision-acl"
+        acl_dir.mkdir(exist_ok=True)
+        grant = probe({"action": "provision-acl", "path": str(acl_dir),
+                       "author": identity("SYNTH", SID_AUTHOR)}, work)["value"] or {}
+        rec("OP33 the-reviewer-owned-grant-admits-the-operator",
+            grant.get("operator_wrote") is True
+            and grant.get("author_can_write") is False
+            and grant.get("author_can_read") is True,
+            f"an elevated session can create the declaration in the tree it is "
+            f"provisioning, a non-administrative author cannot rewrite it, and "
+            f"the author can still read the declaration it is bound by ({grant})")
+
         # ------------------------------------------ the write predicate itself
         # THE ARITHMETIC, ON DACL SHAPES THIS HOST DOES NOT PROVIDE.
         #
@@ -713,6 +779,30 @@ def main() -> int:
             f"the contract function it wraps unreached, and is reported "
             f"({severed_unreached or 'none'})")
 
+        stringified = boot_text.replace(
+            "Assert-TrustedOperatorSource -Author $AuthorIdentity -Root $SourceRepo",
+            "Write-Output 'Assert-TrustedOperatorSource -Author $AuthorIdentity "
+            "-Root $SourceRepo'")
+        stringified_sources = [stringified if p.name == "reviewer_bootstrap.ps1" else text
+                               for p, text in zip(production, prod_sources)]
+        stringified_unreached = unreached_in(stringified_sources)
+        rec("OP30b a-call-site-replaced-by-a-string-is-detected",
+            stringified != boot_text
+            and "Assert-TrustedSourceRoot" in stringified_unreached,
+            f"turning the one live invocation into a printed string -- which "
+            f"disables the boundary while leaving the name in the file -- is "
+            f"reported as unreached ({stringified_unreached or 'none'})")
+
+        # Reachability is a static answer, so dynamic dispatch would make it a
+        # guess. There is none, and there must not be.
+        dynamic = [p.name for p, text in zip(production, prod_sources)
+                   if re.search(r"(?<![\w-])(Invoke-Expression|iex)\s",
+                                strip_powershell_comments(text))]
+        rec("OP30c no-dynamic-dispatch-in-the-elevated-scripts",
+            not dynamic,
+            f"no production script builds a command from a string, so a static "
+            f"reachability answer is the whole answer ({dynamic or 'none'})")
+
         # ------------------------------------- the elevated script's own ordering
         # A TOP-LEVEL READ BEFORE THE ASSIGNMENT IS A TERMINATING ERROR.
         #
@@ -771,6 +861,17 @@ def main() -> int:
         print()
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+    # A FLOOR ASSERTED FROM THE RUN, not from a static count of the source.
+    # The manifest's count is a text-shaped proxy and can be restored by adding
+    # string constants; this one is the number of checks that actually
+    # executed. Both are kept: the manifest catches deletion without running
+    # anything, this catches hollowing at run time.
+    MINIMUM_CHECKS = 40
+    if len(CHECKS) < MINIMUM_CHECKS:
+        rec("OP99 the-battery-still-executes-its-pinned-minimum", False,
+            f"only {len(CHECKS)} checks executed, below the pinned minimum of "
+            f"{MINIMUM_CHECKS}")
 
     failed = [c["check_id"] for c in CHECKS if not c["ok"]]
     print(json.dumps({

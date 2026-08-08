@@ -120,15 +120,23 @@ def count_recorded_checks(guard: Path, id_pattern: str) -> int:
     except (OSError, SyntaxError):
         return 0
     matcher = re.compile(id_pattern)
+    # Docstrings are expression statements; excluding them is what stops the
+    # battery's own prose from restoring its floor.
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            first = node.body[0] if node.body else None
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                docstrings.add(id(first.value))
     found = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        for argument in node.args:
-            if (isinstance(argument, ast.Constant)
-                    and isinstance(argument.value, str)
-                    and matcher.match(argument.value)):
-                found.add(argument.value.split()[0])
+        # Anywhere but a docstring: several ids reach their recording call
+        # through a tuple literal rather than as a direct argument, and counting
+        # only direct arguments missed four of them.
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docstrings and matcher.match(node.value)):
+            found.add(node.value.split()[0])
     return len(found)
 
 

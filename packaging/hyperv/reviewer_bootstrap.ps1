@@ -136,7 +136,16 @@ function Assert-SelfSourceTrusted {
     }
 }
 
+# THE DIRECTORY TOO, not only the two files.
+#
+# Checking the leaves left an author holding add-file/delete-child on the
+# containing directory -- and no ACE on either file, so the check passed
+# cleanly -- able to rename either file away and drop a replacement in the
+# window between this returning and the dot-source below. Every gate downstream
+# is defined by the file that dot-source loads. The function's own reasoning is
+# about a privileged TREE; it was sampling two leaves of one.
 Assert-SelfSourceTrusted -Paths @(
+    $PSScriptRoot,
     $PSCommandPath,
     (Join-Path $PSScriptRoot 'principal_contract.ps1')
 )
@@ -321,7 +330,30 @@ function Assert-AclApplied {
         foreach ($entry in ($bad | Select-Object -First 5)) { Write-Output "    $entry" }
         exit 2
     }
-    Write-Fact 'ACL verified by read-back' "$($items.Count) object(s): protected, $ownerLabel, no author ACE"
+    # -Account was accepted and never read. icacls returns 0 having skipped
+    # individual files, and nothing confirmed the principal the tree exists for
+    # can still reach it -- a reviewer that cannot read its own entry point dies
+    # at process start with no artifact, which reads exactly like a credential
+    # failure.
+    $reviewerReach = 'not checked (no account named)'
+    if ($Account) {
+        $reviewerIdentity = Resolve-PrincipalIdentity -Account $Account
+        if ($reviewerIdentity.Exists) {
+            $unreadable = @($items | Where-Object {
+                -not (Test-AccountCanReadPath -Identity $reviewerIdentity -Path $_.FullName)
+            } | Select-Object -First 3)
+            if ($unreadable.Count) {
+                Write-Output '  STOP: the reviewer cannot read the tree that was just locked.'
+                Write-Output '  reason: OFFLINE_REVIEWER_LOST_ACCESS'
+                foreach ($entry in $unreadable) { Write-Output "    $($entry.FullName)" }
+                exit 2
+            }
+            $reviewerReach = 'reviewer retains read+execute'
+        } else {
+            $reviewerReach = 'reviewer account not resolvable'
+        }
+    }
+    Write-Fact 'ACL verified by read-back' "$($items.Count) object(s): protected, $ownerLabel, no author ACE, $reviewerReach"
 }
 
 function Assert-TaskRootProtected {
@@ -398,8 +430,21 @@ function Write-PrincipalCapabilityFacts {
     Write-Fact 'operator is the author' (Test-OperatorIsAuthor -Operator $Operator -Author $Author)
     Write-Fact 'author can write the release tree' `
         (Test-CanAuthorWriteReleaseTree -Author $Author -ReleaseTree $releaseTree)
-    Write-Fact 'author can write reviewer code (want False)' `
-        (Test-CanAuthorWriteReviewerCode -Author $Author -ReviewerCodePaths $reviewerCode)
+    # RETURNED, NOT ONLY PRINTED. This is the most consequential capability in
+    # the whole contract -- author-writable reviewer code is arbitrary execution
+    # in the reviewer's session, the defect this file already documents as
+    # having shipped once -- and it was the one Write-Fact whose value never
+    # reached the verdict function. -Verify printed True and exited 0.
+    $authorWritesCode = Test-CanAuthorWriteReviewerCode -Author $Author `
+        -ReviewerCodePaths $reviewerCode
+    Write-Fact 'author can write reviewer code (want False)' $authorWritesCode
+    $capabilityReasons = New-Object System.Collections.Generic.List[string]
+    if ($authorWritesCode) { $capabilityReasons.Add('OFFLINE_REVIEWER_CODE_AUTHOR_WRITABLE') }
+    if (Test-CanAuthorWriteReleaseTree -Author $Author -ReleaseTree $releaseTree) {
+        # Expected and allowed: the author is the party that writes releases.
+        # Recorded so the transcript states it rather than implying it.
+        Write-Fact 'release tree is author-writable (expected)' $true
+    }
     Write-Fact 'operator can write the release tree' `
         (Test-CanOperatorWriteReleaseTree -Operator $Operator -ReleaseTree $releaseTree)
     if ($Reviewer -and $Reviewer.Exists) {
@@ -410,11 +455,22 @@ function Write-PrincipalCapabilityFacts {
     }
 
     # The two evaluators the fixtures drive, on the real objects.
-    $aceReasons = @(Get-TaskAceViolations -Author $Author -TaskName $TaskName)
+    #
+    # -Operator is passed: without it Get-TaskAceViolations skips the
+    # OFFLINE_TASK_GRANTED_TO_OPERATOR_NOT_AUTHOR clause entirely, so the
+    # failure it exists to catch -- the run grant landing on the operator and
+    # silently breaking the author's control channel -- was unreachable outside
+    # the fixture.
+    $aceReasons = @(Get-TaskAceViolations -Author $Author -Operator $Operator -TaskName $TaskName)
     Write-Fact 'task ACE violations' ($(if ($aceReasons.Count) { $aceReasons -join ', ' } else { 'none' }))
-    $rootReasons = @(Get-TaskRootAclViolations -Root $Root -Author $Author)
+    # -SecuritySensitive is passed for the same reason: the parameter defaults
+    # to @(), so the loop over it -- and both reasons it can raise -- was dead
+    # in production and exercised only by the fixture.
+    $rootReasons = @(Get-TaskRootAclViolations -Root $Root -Author $Author `
+        -SecuritySensitive @("$Root\reviewer-bin", "$Root\reviewer-pkg",
+                             "$Root\reviewer-runtime", "$Root\trust"))
     Write-Fact 'task root ACL violations' ($(if ($rootReasons.Count) { $rootReasons -join ', ' } else { 'none' }))
-    return @($aceReasons) + @($rootReasons)
+    return @($capabilityReasons) + @($aceReasons) + @($rootReasons)
 }
 
 function Assert-CapabilitiesAcceptable {
@@ -435,11 +491,20 @@ function Assert-CapabilitiesAcceptable {
     #>
     param([string[]]$Reasons)
 
+    # ONLY OFFLINE_TASK_ABSENT is excused, and it now means what it says.
+    #
+    # The excused reason used to be OFFLINE_TASK_DESCRIPTOR_UNREADABLE, which
+    # Get-TaskAceViolations returns EARLY and ALONE for any failure to read the
+    # descriptor -- a task that does not exist yet, and equally a Task Scheduler
+    # that could not be reached. So a transient RPC failure discarded the entire
+    # task-ACE battery, printed "not registered yet" about a registered task,
+    # and exited 0. The contract distinguishes the two states now; an unreadable
+    # descriptor is a blocking reason.
     $reasons = @($Reasons | Where-Object { $_ })
-    $absent = @($reasons | Where-Object { $_ -eq 'OFFLINE_TASK_DESCRIPTOR_UNREADABLE' })
-    $blocking = @($reasons | Where-Object { $_ -ne 'OFFLINE_TASK_DESCRIPTOR_UNREADABLE' })
+    $absent = @($reasons | Where-Object { $_ -eq 'OFFLINE_TASK_ABSENT' })
+    $blocking = @($reasons | Where-Object { $_ -ne 'OFFLINE_TASK_ABSENT' })
     if ($absent.Count) {
-        Write-Fact 'task descriptor' 'not readable yet (task not registered)'
+        Write-Fact 'task descriptor' 'not registered yet'
     }
     if (-not $blocking.Count) { return }
     Write-Output ''
@@ -657,8 +722,26 @@ function Initialize-ReviewerPaths {
     & $icacls $Root /grant "${Account}:(NP)(RX)" | Out-Null
     & $icacls $Root /grant "${me}:(NP)(RX)" | Out-Null
     foreach ($d in $reviewerOwned) {
+        # ADMINISTRATORS IS ON THIS ACL, and the omission was not a boundary.
+        #
+        # Measured from a genuinely elevated session that OWNED the directory:
+        # with reviewer/SYSTEM/author-read and no Administrators ACE, `icacls
+        # /inheritance:r` answers "Access is denied" and Set-Content raises
+        # UnauthorizedAccessException. The operator writes two of its own
+        # declarations here -- author-account.txt and the interpreter pin -- so
+        # -ProvisionPaths, -HardenInterpreter and the no-switch bootstrap all
+        # died, the last of them AFTER setting the reviewer password and BEFORE
+        # registering the task.
+        #
+        # Withholding the ACE bought nothing: Administrators holds
+        # SeTakeOwnershipPrivilege and SeBackupPrivilege and reaches this tree
+        # regardless -- -RepinReviewerCode already used takeown to do exactly
+        # that. reviewerCode has always granted Administrators. The boundary
+        # here is that the AUTHOR is not an Administrator; it is a statement
+        # about accounts, which is why the predicate is written about accounts.
         & $icacls $d /inheritance:r | Out-Null
-        & $icacls $d /grant:r "${Account}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${me}:(OI)(CI)R" | Out-Null
+        & $icacls $d /grant:r "${Account}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" `
+            "*S-1-5-32-544:(OI)(CI)F" "${me}:(OI)(CI)R" | Out-Null
     }
     foreach ($d in $authorOwned) {
         & $icacls $d /inheritance:r | Out-Null

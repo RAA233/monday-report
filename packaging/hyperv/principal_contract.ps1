@@ -95,15 +95,29 @@ function Resolve-TrustedGit {
             # ...\Git\cmd\git.exe is a small forwarder; the executable that
             # actually runs lives under mingw64\bin and was never checked, and
             # checking one parent left every directory above it unexamined.
+            # ANCESTORS OF BOTH BINARIES.
+            #
+            # The walk started at the SHIM and never visited mingw64\bin or
+            # mingw64 -- the two directories that contain the executable that
+            # actually runs. An author holding add-file/delete-child on
+            # mingw64\bin replaces git.exe while holding no write on the file
+            # itself, which is exactly the right the 0xD0042 ancestor mask below
+            # exists to detect, arriving through the gap in the walk.
             $targets = @($candidate)
             $real = Join-Path (Split-Path (Split-Path $candidate -Parent) -Parent) 'mingw64\bin\git.exe'
-            if (Test-Path -LiteralPath $real -PathType Leaf) { $targets += $real }
-            $probe = Split-Path $candidate -Parent
-            while ($probe) {
-                $targets += $probe
-                $parent = Split-Path $probe -Parent
-                if ($parent -eq $probe) { break }
-                $probe = $parent
+            $binaries = @($candidate)
+            if (Test-Path -LiteralPath $real -PathType Leaf) {
+                $targets += $real
+                $binaries += $real
+            }
+            foreach ($binary in $binaries) {
+                $probe = Split-Path $binary -Parent
+                while ($probe) {
+                    if ($targets -notcontains $probe) { $targets += $probe }
+                    $parent = Split-Path $probe -Parent
+                    if ($parent -eq $probe) { break }
+                    $probe = $parent
+                }
             }
             # THE ANCESTOR QUESTION IS NARROWER THAN THE FILE QUESTION.
             #
@@ -473,6 +487,58 @@ function Test-AccountCanWritePath {
     return [bool]($effective -band $Mask)
 }
 
+function Test-AccountCanReadPath {
+    <#
+      Can this ACCOUNT read and execute here, per the DACL?
+
+      A SEPARATE FUNCTION, not Test-AccountCanWritePath with another mask,
+      because the two fail closed in OPPOSITE directions. "Could this account
+      write here?" must answer $true when it cannot be established -- the
+      question exists to keep somebody out. "Can the reviewer still reach its
+      own code?" must answer $false when it cannot be established, or an
+      unreadable ACL would report a healthy tree and the reviewer would die at
+      process start with no artifact.
+
+      Same honest limit as its sibling: this is an ACL computation, not an
+      access check.
+    #>
+    param([Parameter(Mandatory = $true)]$Identity,
+          [Parameter(Mandatory = $true)][string]$Path,
+          [scriptblock]$GroupProvider = $null)
+
+    if (-not $Identity -or -not $Identity.Exists) { return $false }
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $acl = $null
+    try { $acl = Get-Acl -LiteralPath $Path } catch { return $false }
+
+    $sids = Get-AccountSidSet -Identity $Identity -GroupProvider $GroupProvider
+    $ownerSid = ''
+    try { $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
+    if ($ownerSid -and $sids.Contains($ownerSid)) { return $true }
+
+    $allow = 0; $deny = 0
+    foreach ($ace in $acl.Access) {
+        if ($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) {
+            continue
+        }
+        $aceSid = ''
+        try {
+            $aceSid = $ace.IdentityReference.Translate(
+                [Security.Principal.SecurityIdentifier]).Value
+        } catch { continue }
+        if (-not $sids.Contains($aceSid)) { continue }
+        $aceMask = [int]$ace.FileSystemRights
+        if ($aceMask -band 0x10000000) { $aceMask = $aceMask -bor 0x1F01FF }
+        if ($aceMask -band 0x80000000) { $aceMask = $aceMask -bor 0x120089 }
+        if ($aceMask -band 0x20000000) { $aceMask = $aceMask -bor 0x1200A0 }
+        if ($ace.AccessControlType -eq 'Allow') { $allow = $allow -bor $aceMask }
+        else { $deny = $deny -bor $aceMask }
+    }
+    $effective = $allow -band (-bnot $deny)
+    # READ_DATA and EXECUTE both, which is what running an entry point needs.
+    return [bool](($effective -band 0x1) -and ($effective -band 0x20))
+}
+
 # ---------------------------------------------------------------- predicates
 # Separate questions get separate answers. Collapsing them into one flag is how
 # a single acknowledgement came to waive two unrelated trust boundaries.
@@ -525,17 +591,32 @@ function Get-TaskRightsForAccount {
           $DescriptorOverride = $null,
           [scriptblock]$GroupProvider = $null)
 
-    $result = [ordered]@{ readable = $false; may_start = $false; may_modify = $false
-                          owns_task = $false }
+    # `absent` is a THIRD state. A task that is not registered yet and a Task
+    # Scheduler that could not be reached both produced readable=$false, and the
+    # caller excuses the first -- so any transient RPC failure discarded the
+    # whole task-ACE battery and printed "not registered yet" about a registered
+    # task. Both still fail closed; the caller is told which.
+    $result = [ordered]@{ readable = $false; absent = $false; may_start = $false
+                          may_modify = $false; owns_task = $false }
     $sd = $null
     if ($DescriptorOverride) {
         $sd = New-Object Security.AccessControl.RawSecurityDescriptor($DescriptorOverride)
         $result.readable = $true
     } else {
+        $svc = $null
         try {
             $svc = New-Object -ComObject Schedule.Service
             $svc.Connect()
-            $task = $svc.GetFolder('\').GetTask($TaskName)
+        } catch { return [pscustomobject]$result }     # scheduler unreachable
+        $task = $null
+        try { $task = $svc.GetFolder('\').GetTask($TaskName) }
+        catch {
+            # The lookup RAN and found nothing. Distinct from the scheduler
+            # being unreachable, and the only one a caller may excuse.
+            $result.absent = $true
+            return [pscustomobject]$result
+        }
+        try {
             $sd = New-Object Security.AccessControl.RawSecurityDescriptor(
                 $task.GetSecurityDescriptor(7))
             $result.readable = $true
@@ -585,7 +666,9 @@ function Get-TaskAceViolations {
     $authorRights = Get-TaskRightsForAccount -Identity $Author -TaskName $TaskName `
         -DescriptorOverride $DescriptorOverride
     if (-not $authorRights.readable) {
-        $reasons.Add('OFFLINE_TASK_DESCRIPTOR_UNREADABLE'); return $reasons
+        $reasons.Add($(if ($authorRights.absent) { 'OFFLINE_TASK_ABSENT' }
+                       else { 'OFFLINE_TASK_DESCRIPTOR_UNREADABLE' }))
+        return $reasons
     }
     if (-not $authorRights.may_start) { $reasons.Add('OFFLINE_TASK_AUTHOR_CANNOT_START') }
     if ($authorRights.may_modify) { $reasons.Add('OFFLINE_TASK_AUTHOR_MAY_MODIFY') }
@@ -698,7 +781,22 @@ function Assert-TrustedSourceRoot {
                  Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
     if ($anyLink.Count) { $reasons.Add('OFFLINE_SOURCE_ROOT_REPARSE_INSIDE') }
 
-    if (Test-AccountCanWritePath -Identity $Author -Path $Root) {
+    # RECURSIVE, like the reparse scan directly above it. Checking the root
+    # alone left an author-writable SUBDIRECTORY of an admin-owned, protected
+    # source root producing no reason at all -- and the files the elevated
+    # session copies into the reviewer's own bin directory live in exactly such
+    # a subdirectory. `git status` does not cover it: that is a point-in-time
+    # content comparison, and the window here spans two interactive password
+    # prompts.
+    $authorWritable = @($Root)
+    $authorWritable += @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Directory `
+                         -ErrorAction SilentlyContinue |
+                         Where-Object { $_.FullName -notmatch '\\\.git($|\\)' } |
+                         Select-Object -ExpandProperty FullName)
+    $writableHit = @($authorWritable |
+                     Where-Object { Test-AccountCanWritePath -Identity $Author -Path $_ } |
+                     Select-Object -First 1)
+    if ($writableHit.Count) {
         $reasons.Add('OFFLINE_SOURCE_ROOT_AUTHOR_WRITABLE')
     }
     if ($Reviewer -and (Test-AccountCanWritePath -Identity $Reviewer -Path $Root)) {
