@@ -7,11 +7,23 @@
 
     THIS SCRIPT IS RUN BY THE OPERATOR, NOT BY THE AUTHORING PROCESS.
 
-    That is the whole point. The reviewer's password is typed here and never
-    leaves this process: it is not printed, not logged, not written to disk, not
-    passed as a command-line argument, and not returned. The authoring process
-    therefore cannot create a reviewer logon session, which is what makes the
-    reviewer's DPAPI-protected Ed25519 review key genuinely unavailable to it.
+    That is the whole point. The reviewer's password is typed here and is not
+    printed, not logged, not written to disk and not returned. The authoring
+    process therefore cannot create a reviewer logon session, which is what
+    makes the reviewer's DPAPI-protected Ed25519 review key genuinely
+    unavailable to it.
+
+    ONE STATED LIMITATION, because the earlier wording denied it. The password
+    IS passed to schtasks as a /RP argument, so it appears in that process's
+    command line: on a host with 4688 command-line auditing, or an EDR
+    capturing process-creation events, the plaintext reaches the Security log.
+    That is a disclosure to whoever can read those logs -- an administrator --
+    and NOT to the author, which is a different, non-administrative account, so
+    the boundary this protocol is about is unaffected. It is recorded here
+    rather than denied; an accurate limitation is worth more than a false
+    claim. Moving the registration in-process would remove it, and is not done
+    in this increment because it cannot be validated without registering a real
+    task.
 
     The authoring process drives the reviewer afterwards with `schtasks /Run`,
     which uses the credential the Task Scheduler stored here and does NOT

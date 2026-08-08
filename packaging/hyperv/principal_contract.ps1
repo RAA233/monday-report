@@ -576,10 +576,20 @@ function Test-AccountCanWritePath {
     param([Parameter(Mandatory = $true)]$Identity,
           [Parameter(Mandatory = $true)][string]$Path,
           [scriptblock]$GroupProvider = $null,
-          # WRITE_DATA | APPEND | WRITE_EA | WRITE_ATTRS | DELETE | WRITE_DAC |
-          # WRITE_OWNER. Callers asking about an ANCESTOR of something they care
-          # about want a narrower question -- see Resolve-TrustedGit.
-          [int]$Mask = 0xD0116)
+          # WRITE_DATA | APPEND | WRITE_EA | WRITE_ATTRS | DELETE_CHILD | DELETE |
+          # WRITE_DAC | WRITE_OWNER. Callers asking about an ANCESTOR of
+          # something they care about want a narrower question -- see
+          # Resolve-TrustedGit.
+          #
+          # FILE_DELETE_CHILD (0x40) was missing. On a container it permits
+          # deleting or RENAMING a child regardless of that child's own DACL, so
+          # a grant of 0x40 alone on reviewer-bin -- with no author ACE anywhere
+          # on reviewer_session.ps1 itself -- scored "the author cannot write
+          # here" while the author could replace the entry point the scheduled
+          # task executes. It is in the 0xD0042 ancestor mask this file adopts
+          # precisely because it is "what it takes to put a different binary in
+          # place", and it was absent from the mask used on every reviewer tree.
+          [int]$Mask = 0xD0156)
 
     if (-not $Identity -or -not $Identity.Exists) { return $true }
     if (-not (Test-Path -LiteralPath $Path)) { return $true }   # absent -> creatable
@@ -1115,8 +1125,13 @@ function Get-TaskRootAclViolations {
         # the two SIDs this file elsewhere calls out as covering every local
         # account -- Local account and INTERACTIVE -- were not in the list at
         # all. The mask was already checked by bit; the subject was not.
+        # The same list the SID set builds for a non-conservative logon. Two of
+        # those -- S-1-2-0 (Local) and S-1-5-15 (This Organization) -- were
+        # missing here, so a Modify grant to either produced no reason while the
+        # contract's own predicate answered "writable" for the same path.
         $broadSubjects = @('S-1-5-11', 'S-1-1-0', 'S-1-5-32-545', 'S-1-5-4',
-                           'S-1-5-113', 'S-1-2-1', 'S-1-5-2', 'S-1-5-3')
+                           'S-1-5-113', 'S-1-2-0', 'S-1-2-1', 'S-1-5-2',
+                           'S-1-5-3', 'S-1-5-15')
         $who = ''
         try {
             $who = $ace.IdentityReference.Translate(
@@ -1129,8 +1144,38 @@ function Get-TaskRootAclViolations {
             $mask = [int]$ace.FileSystemRights
             if ($mask -band 0x10000000) { $mask = $mask -bor 0x1F01FF }
             if ($mask -band 0x40000000) { $mask = $mask -bor 0x0116 }
-            if ($mask -band 0xD0116) { $reasons.Add('OFFLINE_TASK_ROOT_BROAD_MODIFY') }
+            if ($mask -band 0xD0156) { $reasons.Add('OFFLINE_TASK_ROOT_BROAD_MODIFY') }
         }
+    }
+
+    # THE AUTHOR, AND THE OWNER, ASKED ABOUT THE ROOT ITSELF.
+    #
+    # This function enumerated the root's ACEs looking for BROAD subjects and
+    # never once asked the contract's own predicate about the AUTHOR, nor read
+    # the root's owner. Measured on scratch roots: an ACE granting the author
+    # FullControl, a Modify grant to S-1-2-0 or S-1-5-15, and a root OWNED by
+    # the author all returned NO reasons, while Test-AccountCanWritePath
+    # answered True for every one of them.
+    #
+    # The root is the parent of reviewer-bin, reviewer-pkg, reviewer-runtime,
+    # reviewer-src, reviewer\state and trust, and it was the one directory
+    # exempt from the ancestor argument this file makes three separate times.
+    # Write or ownership there renames reviewer-bin away and substitutes the
+    # file the task runs as the reviewer with DPAPI live -- and the substitute
+    # is then its own integrity checker.
+    if (Test-AccountCanWritePath -Identity $Author -Path $Root) {
+        $reasons.Add('OFFLINE_TASK_ROOT_AUTHOR_WRITABLE')
+    }
+    $rootOwner = ''
+    try { $rootOwner = $rootAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value }
+    catch { $rootOwner = '' }
+    if (-not $rootOwner) {
+        $reasons.Add('OFFLINE_TASK_ROOT_OWNER_UNREADABLE')
+    } elseif (@('S-1-5-32-544', 'S-1-5-18',
+                'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+               ) -notcontains $rootOwner) {
+        # An owner holds implicit WRITE_DAC and can grant itself the rest.
+        $reasons.Add('OFFLINE_TASK_ROOT_OWNER_UNTRUSTED')
     }
     foreach ($path in $SecuritySensitive) {
         if (-not (Test-Path -LiteralPath $path)) { continue }

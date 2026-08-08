@@ -966,17 +966,63 @@ def main() -> int:
 
         # --------------------- the boundary harness must not take its subject
         # ---------------------- from a variable the process running it controls
+        # EXECUTED, NOT MATCHED. The substring form of this check passed on the
+        # very regression it was written to catch: re-introducing
+        # `$fromEnv = Resolve-PrincipalIdentity -Account $env:USERNAME;
+        # if ($fromEnv.Exists) { $tokenSid = $fromEnv.Sid }` ABOVE the token
+        # read satisfies "no env spelling present, token spelling present"
+        # while one environment variable decides the gate again. It was also
+        # the only check in this file with no mutation cycle.
         boundary_path = ROOT / "packaging" / "hyperv" / "verify_author_boundary.ps1"
-        boundary_live = strip_powershell_comments(boundary_path.read_text(encoding="utf-8"))
-        subject_from_env = "Resolve-PrincipalIdentity -Account $env:USERNAME" in boundary_live
-        subject_from_token = "WindowsIdentity]::GetCurrent().User.Value" in boundary_live
+        subject = probe({"action": "token-subject", "harness": str(boundary_path),
+                         "first": "DefaultAccount", "second": "WDAGUtilityAccount"},
+                        work)["value"] or {}
         rec("OP45 the-account-gate-takes-its-subject-from-the-token",
-            not subject_from_env and subject_from_token,
-            f"TOKEN02 resolves the account it judges from the process token, not "
-            f"from $env:USERNAME -- which whatever launches the harness sets, and "
-            f"which made the gate PASS for a real administrator simply by naming "
-            f"a built-in account (from-env={subject_from_env}, "
-            f"from-token={subject_from_token})")
+            subject.get("region_found") is True and subject.get("agree") is True
+            and subject.get("both_are_the_real_token") is True,
+            f"the harness's own subject-resolution region, executed twice with "
+            f"$env:USERNAME set to two different built-in accounts, settles on "
+            f"the same SID both times and that SID is the real token's -- so the "
+            f"gate cannot be redirected by the variable whatever launches it "
+            f"controls ({subject})")
+
+        # THE MUTATION. A copy with the environment lookup restored ahead of the
+        # token read must disagree with itself.
+        # THE COPY LIVES BESIDE A CONTRACT IT CAN LOAD.
+        #
+        # Placed in a bare scratch directory the mutated harness threw
+        # CommandNotFoundException on its own dot-source, and the check passed on
+        # THAT rather than on the redirection -- it would have "detected" any
+        # copy moved anywhere, mutation or not. The contract is copied alongside
+        # so the only difference between this run and the one above is the
+        # mutation itself.
+        redirected_dir = work / "redirected"
+        redirected_dir.mkdir(exist_ok=True)
+        shutil.copyfile(ROOT / "packaging" / "hyperv" / "principal_contract.ps1",
+                        redirected_dir / "principal_contract.ps1")
+        redirected = redirected_dir / "redirected-boundary.ps1"
+        boundary_text = boundary_path.read_text(encoding="utf-8")
+        # ANCHORED ON THE TOKEN READ, not on the initialisation above it.
+        # Replacing `$tokenSid = ''` left the real read on the very next line,
+        # which overwrote the redirection -- so the mutation was a no-op. The
+        # check failed rather than passed, which is the right direction, but a
+        # mutation that cannot take effect proves nothing either way.
+        anchor = ("try { $tokenSid = [Security.Principal.WindowsIdentity]"
+                  "::GetCurrent().User.Value } catch { }")
+        assert anchor in boundary_text, "the token read is not where the mutation expects it"
+        redirected.write_text(boundary_text.replace(
+            anchor,
+            "$fromEnv = Resolve-PrincipalIdentity -Account $env:USERNAME; "
+            "$tokenSid = if ($fromEnv.Exists) { $fromEnv.Sid } else { '' }", 1),
+            encoding="utf-8")
+        redirected_subject = probe({"action": "token-subject", "harness": str(redirected),
+                                    "first": "DefaultAccount", "second": "WDAGUtilityAccount"},
+                                   work)["value"] or {}
+        rec("OP45a a-gate-redirected-by-the-environment-is-detected",
+            redirected_subject.get("region_found") is True
+            and redirected_subject.get("both_are_the_real_token") is False,
+            f"a copy whose subject comes from $env:USERNAME no longer settles on "
+            f"the real token, and is reported ({redirected_subject})")
 
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.

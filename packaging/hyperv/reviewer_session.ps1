@@ -105,7 +105,26 @@ function Get-RequestedStage {
     # author to present as the outcome of the run it had just triggered. The
     # command file is author-writable by design, so this was reachable at zero
     # privilege.
-    if ($doc.PSObject.Properties.Name -notcontains 'stage') {
+    # `{}` and `null` STILL KILLED IT.
+    #
+    # The previous fix covered `{"run_id":"x"}` -- an object with properties but
+    # no stage. ConvertFrom-Json turns `{}` into a PSCustomObject whose
+    # PSObject.Properties has no Name to read under StrictMode, and `null` into
+    # $null, whose .PSObject cannot be read at all. Both threw here, before the
+    # stale-result cleanup and before any status was written, which is the exact
+    # outcome the comment above says was closed: the PREVIOUS run's transcripts
+    # and status survive and read as the outcome of the run just triggered. The
+    # command file is author-writable by design, so both are reachable at zero
+    # privilege.
+    if ($null -eq $doc -or -not ($doc -is [psobject])) {
+        Clear-StaleTranscripts -OutDir $OutRoot
+        New-Status -Stage 'unknown' -State 'REFUSED' `
+            -Detail 'command file declares no stage'
+        exit 3
+    }
+    $declared = @()
+    try { $declared = @($doc.PSObject.Properties.Name) } catch { $declared = @() }
+    if ($declared -notcontains 'stage') {
         Clear-StaleTranscripts -OutDir $OutRoot
         New-Status -Stage 'unknown' -State 'REFUSED' `
             -Detail 'command file declares no stage'

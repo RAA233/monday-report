@@ -470,24 +470,73 @@ switch ($case.action) {
     }
 
     'token-subject' {
-        # Does the harness derive its subject from the ENVIRONMENT? Answered by
-        # running the shipped file twice with USERNAME set to two different
-        # built-in accounts and comparing the TOKEN02 verdict. If the two differ,
-        # one environment variable decides the gate.
-        $results = @()
-        foreach ($name in @($case.first, $case.second)) {
-            $prev = $env:USERNAME
-            $env:USERNAME = $name
-            try {
-                $out = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-                    -Command ". '$($case.harness)'; Write-Output ('SID=' + $authorIdentity.Sid)" 2>&1 |
-                    Out-String
-            } catch { $out = '' } finally { $env:USERNAME = $prev }
-            $results += ,([string]$out)
+        # DOES THE ACCOUNT GATE FOLLOW THE ENVIRONMENT?
+        #
+        # Answered by executing the harness's own subject-resolution region --
+        # everything between the TOKEN01 and TOKEN02 Add-Probe invocations,
+        # located through the parse tree so it survives edits inside it -- twice,
+        # with $env:USERNAME set to two different built-in accounts, and
+        # comparing the SID it settles on with the SID of the real token.
+        #
+        # The previous version of this action interpolated $authorIdentity into
+        # a child command, where it was undefined; under StrictMode building
+        # that string threw, the catch swallowed it, and it returned two empty
+        # strings that any equality test would have accepted. It was never
+        # invoked, so it failed silently rather than falsely -- but it is the
+        # fixture the check above now depends on.
+        $errs = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $case.harness, [ref]$null, [ref]$errs)
+        $probes = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+            "$(@($node.CommandElements)[0])" -eq 'Add-Probe' }, $true))
+        $first = $null; $second = $null
+        foreach ($command in $probes) {
+            $marker = "$(@($command.CommandElements)[1])"
+            if (-not $first -and $marker -match 'TOKEN01') { $first = $command }
+            elseif (-not $second -and $marker -match 'TOKEN02') { $second = $command }
         }
-        $result.value = [ordered]@{
-            first_sid = ([regex]::Match($results[0], 'SID=(\S+)')).Groups[1].Value
-            second_sid = ([regex]::Match($results[1], 'SID=(\S+)')).Groups[1].Value
+        if (-not $first -or -not $second) {
+            $result.value = [ordered]@{ region_found = $false }
+        } else {
+            $text = Get-Content -Raw -LiteralPath $case.harness
+            $region = $text.Substring(
+                $first.Extent.EndOffset, $second.Extent.StartOffset - $first.Extent.EndOffset)
+            # $PSScriptRoot is bound to the FILE a script came from, and
+            # Invoke-Expression compiles a scriptblock that came from no file --
+            # so the region's own dot-source failed with "Cannot bind argument to
+            # parameter 'Path' because it is an empty string" and both runs threw
+            # identically, which an equality test would have read as agreement.
+            # Substituted textually so the region resolves the same paths it
+            # would in place.
+            $harnessDir = Split-Path $case.harness -Parent
+            $region = $region.Replace('$PSScriptRoot', "'$harnessDir'")
+            $realSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $seen = @()
+            foreach ($name in @($case.first, $case.second)) {
+                $previous = $env:USERNAME
+                $env:USERNAME = $name
+                $resolved = ''
+                try {
+                    Invoke-Expression $region
+                    $resolved = [string]$authorIdentity.Sid
+                } catch { $resolved = "THREW:$($_.Exception.GetType().Name):$($_.Exception.Message)" }
+                finally { $env:USERNAME = $previous }
+                $seen += ,$resolved
+            }
+            $result.value = [ordered]@{
+                region_found = $true
+                region_length = $region.Length
+                first_outcome = $(if ($seen[0] -eq $realSid) { 'real-token' }
+                                  elseif ($seen[0] -like 'THREW:*') { $seen[0] }
+                                  elseif ($seen[0]) { 'other-sid' } else { 'empty' })
+                second_outcome = $(if ($seen[1] -eq $realSid) { 'real-token' }
+                                   elseif ($seen[1] -like 'THREW:*') { $seen[1] }
+                                   elseif ($seen[1]) { 'other-sid' } else { 'empty' })
+                agree = ($seen[0] -eq $seen[1])
+                both_are_the_real_token = ($seen[0] -eq $realSid -and $seen[1] -eq $realSid)
+            }
         }
     }
 
