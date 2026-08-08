@@ -715,25 +715,34 @@ def elevation_battery() -> None:
     # previous version treated an all-zero mask as a failed measurement, which
     # meant the check could never state the truth in either mode: elevated it
     # over-reported, and honest it refused to report at all.
+    # BOTH checks are recorded on EVERY path, including the unmeasurable one.
+    #
+    # The previous shape substituted a differently-named check when the
+    # descriptor could not be read, so RI18 -- "the author cannot rewrite the
+    # task action" -- simply vanished from the results. A check that disappears
+    # instead of failing is worse than one that fails: the list looks complete,
+    # the count still adds up, and nobody notices the question was never asked.
     rights = author_task_rights(drop_token=self_elevated)
-    if not rights or rights.get("readable") is not True:
-        rec("RI17 author-task-rights-measurable", False,
-            f"the reviewer task's security descriptor could not be read by the "
-            f"measuring token ({rights or 'no document'}), so the control "
-            f"channel's boundary is unproven rather than proven")
-    else:
-        rec("RI17 author-may-start-the-reviewer-task",
-            trustworthy and rights.get("may_start") is True,
-            "the author's ordinary identity can start the reviewer task, so the "
-            "protocol is drivable without elevation "
-            f"(may_start={rights.get('may_start')}){qualifier}")
-        rec("RI18 author-may-not-modify-the-reviewer-task",
-            trustworthy and rights.get("may_modify") is False
-            and rights.get("owns_task") is False,
-            "the author's ordinary identity cannot rewrite the task action, so it "
-            "cannot point the reviewer's session at code of its own choosing "
-            f"(may_modify={rights.get('may_modify')}, "
-            f"owns_task={rights.get('owns_task')}){qualifier}")
+    readable = bool(rights) and rights.get("readable") is True
+    unreadable_note = ("" if readable else
+                       " [UNMEASURED: the measuring token cannot read the task's "
+                       "security descriptor, which is itself the reason -- it holds "
+                       "no rights on the object at all]")
+
+    rec("RI17 author-may-start-the-reviewer-task",
+        readable and trustworthy and rights.get("may_start") is True,
+        "the author's ordinary identity can start the reviewer task, so the "
+        "protocol is drivable without elevation "
+        f"(may_start={rights.get('may_start') if readable else None})"
+        f"{qualifier}{unreadable_note}")
+    rec("RI18 author-may-not-modify-the-reviewer-task",
+        readable and trustworthy and rights.get("may_modify") is False
+        and rights.get("owns_task") is False,
+        "the author's ordinary identity cannot rewrite the task action, so it "
+        "cannot point the reviewer's session at code of its own choosing "
+        f"(may_modify={rights.get('may_modify') if readable else None}, "
+        f"owns_task={rights.get('owns_task') if readable else None})"
+        f"{qualifier}{unreadable_note}")
 
     rec("RI16 author-process-not-elevated", not elevated,
         "the process performing certification holds no administrative rights "
