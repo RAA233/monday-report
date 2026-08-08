@@ -128,6 +128,32 @@ def cycle(case_id: str, label: str, runtime: Path, task_root: Path,
         f"({'clean' if not after else after})")
 
 
+def build_cached_runtime():
+    """A real dedicated runtime, built once and reused across guard runs.
+
+    Building costs about 45 MiB and half a minute, which is why every cycle
+    above uses a synthetic fixture. That is the right trade for structural
+    checks and the wrong one for the probe that executes the interpreter, so
+    this is cached rather than skipped.
+    """
+
+    import sys as _sys
+
+    from offline_reviewer_runtime import build  # noqa: PLC0415
+
+    cache = Path(tempfile.gettempdir()) / ("mr-reviewer-runtime-cache-"
+                                           + ".".join(map(str, _sys.version_info[:3])))
+    marker = cache / "reviewer-runtime-manifest.v1.json"
+    if marker.is_file():
+        return cache
+    try:
+        build(Path(_sys.executable).parent, cache)
+    except (OSError, SystemExit, ValueError):
+        shutil.rmtree(cache, ignore_errors=True)
+        return None
+    return cache
+
+
 def main() -> int:
     CHECKS.clear()
     work = Path(tempfile.mkdtemp(prefix="mr-runtime-guard-"))
@@ -395,6 +421,36 @@ def main() -> int:
         cycle("RT21 path-file-with-byte-order-mark",
               "a ._pth carrying a UTF-8 BOM", runtime, task_root,
               add_bom, strip_bom, "REVIEWER_RUNTIME_PATH_FILE_HAS_BOM")
+
+        # THE HEADLINE CONTROL, EXERCISED AGAINST A REAL INTERPRETER.
+        #
+        # Every cycle above runs with run_probe=False, so site_is_disabled() --
+        # the check that stopped inferring the ._pth from a filename and started
+        # asking the runtime -- had no mutation coverage at all. A real runtime
+        # is built once and cached, because a control that has only ever been
+        # reasoned about is the kind this review keeps finding.
+        real = build_cached_runtime()
+        if real is None:
+            rec("RT22 site-probe-exercised-on-a-real-runtime", False,
+                "no runtime could be built from this host's interpreter, so the "
+                "site probe is untested rather than proven")
+        else:
+            from offline_reviewer_runtime import site_is_disabled  # noqa: PLC0415
+
+            real_pth = next(real.glob("python*._pth"), None)
+            before = site_is_disabled(real / "python.exe")
+            saved = real_pth.read_bytes() if real_pth else b""
+            if real_pth:
+                real_pth.unlink()
+            after = site_is_disabled(real / "python.exe")
+            if real_pth:
+                real_pth.write_bytes(saved)
+            restored = site_is_disabled(real / "python.exe")
+            rec("RT22 site-probe-exercised-on-a-real-runtime",
+                before is True and after is False and restored is True,
+                f"a real dedicated runtime reports site disabled ({before}); "
+                f"removing its ._pth brings site back ({after}); restoring the "
+                f"file disables it again ({restored})")
 
         # The verifier must never repair what it refuses.
         (site / "sitecustomize.py").write_text("import sys\n", encoding="ascii")

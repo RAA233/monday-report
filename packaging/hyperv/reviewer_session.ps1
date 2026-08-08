@@ -263,12 +263,37 @@ function Assert-ReviewerCodeIntegrity {
         # about the same tree while both look correct. Swapping install.ps1 and
         # the packaged executable behind a junction left this function reporting
         # VERIFIED with an empty change list.
-        $links = @(Get-ChildItem -Path $rootFull -Recurse -Force -Directory `
-                       -ErrorAction SilentlyContinue |
+        # REFUSE. Do not record a marker and carry on.
+        #
+        # The previous attempt stored the constant 'REPARSE_POINT_PRESENT' as a
+        # manifest entry, which matches itself on every later run -- so the tree
+        # adopted with a junction in it and reported VERIFIED forever, including
+        # after the files behind the junction were replaced. That is the exact
+        # outcome the change claimed to have fixed.
+        #
+        # The root itself is tested first: Resolve-Path does not collapse a
+        # junction, and Get-ChildItem -Recurse on a junction PATH enumerates the
+        # target's children, none of which are links -- so a junction AT the
+        # TreeRoot produced an ordinary-looking digest over someone else's tree.
+        #
+        # -Directory is gone so file symlinks count, and enumeration errors are
+        # no longer swallowed: a subtree this principal cannot read is a subtree
+        # it cannot vouch for.
+        $rootItem = Get-Item -LiteralPath $rootFull -Force -ErrorAction SilentlyContinue
+        if ((-not $rootItem) -or
+            ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            return @{ state = 'CHANGED'; changed = @("reparse-root:$rootFull") }
+        }
+        $enumErrors = $null
+        $links = @(Get-ChildItem -Path $rootFull -Recurse -Force `
+                       -ErrorAction SilentlyContinue -ErrorVariable enumErrors |
                    Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
         if ($links.Count) {
-            $current['reparse:' + $rootFull.ToLowerInvariant()] = 'REPARSE_POINT_PRESENT'
-            continue
+            return @{ state = 'CHANGED'
+                      changed = @("reparse-inside:" + ($links[0].FullName)) }
+        }
+        if ($enumErrors -and $enumErrors.Count) {
+            return @{ state = 'CHANGED'; changed = @("unreadable:$rootFull") }
         }
         # ORDINAL sort on the relative path, to match the Python implementation.
         #

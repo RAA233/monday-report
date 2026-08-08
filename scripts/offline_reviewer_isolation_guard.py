@@ -330,12 +330,28 @@ def contract_battery() -> None:
     # "COMPLETE result for a run that never happened" that Clear-StaleTranscripts
     # exists to prevent. Only an exit that produces its own result may skip it,
     # and those are the ones reporting COMPLETE or OK.
+    # The NEAREST preceding status decides, not "anything in a 14-line window".
+    #
+    # A window is proximity, not reachability: the credential branch's FAILED
+    # refusal was accepted because the DIAGNOSTICS branch's COMPLETE happened to
+    # sit ten lines above it, in a different block entirely. Three more exits
+    # passed the same way, each with a FAILED path that clears nothing.
     unguarded = []
     for n in exits:
-        window = "\n".join(lines[max(0, n - 14):n])
-        if "Clear-StaleTranscripts" in window:
+        nearest_status = None
+        cleared = False
+        for k in range(n - 1, max(0, n - 30), -1):
+            text = lines[k - 1]
+            if "Clear-StaleTranscripts" in text:
+                cleared = True
+                break
+            if "-State '" in text:
+                nearest_status = text
+                break
+        if cleared:
             continue
-        if "-State 'COMPLETE'" in window or "-State 'OK'" in window:
+        if nearest_status and ("-State 'COMPLETE'" in nearest_status
+                               or "-State 'OK'" in nearest_status):
             continue
         unguarded.append(n)
     rec("RI06 refusals-clear-stale-results", not unguarded,
@@ -470,7 +486,7 @@ def non_elevated_capability() -> dict:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def author_task_rights() -> dict:
+def author_task_rights(*, drop_token: bool = False) -> dict:
     """What the author's ordinary identity may do to the reviewer's task object.
 
     `schtasks /Run` is the entire author-to-reviewer control channel, so two
@@ -521,17 +537,42 @@ def author_task_rights() -> dict:
             "$owns = $false",
             "if ($sd.Owner) { $owns = $sids.Contains($sd.Owner.Value) }",
             "if ($owns) { $effective = $effective -bor 0x40000 }",
-            "@{ present = ($effective -ne 0)",
+            "@{ readable = $true",
+            "   present = ($effective -ne 0)",
             "   may_start = [bool]($effective -band 0x20)",
             "   may_modify = [bool]($effective -band 0xD0116)",
             "   owns_task = [bool]$owns } | ConvertTo-Json -Compress",
         ]), encoding="utf-8")
         shell = (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
                  / "WindowsPowerShell" / "v1.0" / "powershell.exe")
-        proc = subprocess.run([str(shell), "-NoProfile", "-NonInteractive",
-                               "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                              capture_output=True, text=True, timeout=180)
-        for line in (proc.stdout or "").splitlines():
+        # Measured through the SAME dropped token the write probes use, not
+        # through whatever token the guard happens to hold.
+        #
+        # Measuring with an elevated token answered "can an administrator start
+        # this task", which is not the question RI17 and RI18 ask -- and it
+        # reported PASS for a property that is false, since the live descriptor
+        # carries no author ACE at all and an ordinary token's effective mask is
+        # zero.
+        if drop_token:
+            out = work / "rights.json"
+            runner = work / "run.cmd"
+            runner.write_text(
+                "@echo off\r\n"
+                '"%s" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s" > "%s" 2>nul\r\n'
+                % (shell, script, out), encoding="ascii")
+            subprocess.run(["runas.exe", "/trustlevel:0x20000", str(runner)],
+                           capture_output=True, text=True, timeout=180)
+            for _ in range(60):
+                if out.is_file() and out.read_text(encoding="utf-8", errors="ignore").strip():
+                    break
+                time.sleep(1)
+            text = out.read_text(encoding="utf-8", errors="ignore") if out.is_file() else ""
+        else:
+            proc = subprocess.run([str(shell), "-NoProfile", "-NonInteractive",
+                                   "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                                  capture_output=True, text=True, timeout=180)
+            text = proc.stdout or ""
+        for line in text.splitlines():
             line = line.strip()
             if line.startswith("{"):
                 return json.loads(line)
@@ -662,25 +703,33 @@ def elevation_battery() -> None:
         return
     elevated = bool(author.get("in_admin_role")) or bool(author.get("can_write_system_root"))
     # The control channel, from both sides.
-    rights = author_task_rights()
-    if not rights or rights.get("present") is not True:
+    # Elevated: use the dropped token, and label the result unproven exactly as
+    # RI13/RI15 are. Already unprivileged: the guard's token IS the author's, so
+    # measure directly and mean it.
+    #
+    # "No rights" and "could not look" also stop being the same answer here. The
+    # previous version treated an all-zero mask as a failed measurement, which
+    # meant the check could never state the truth in either mode: elevated it
+    # over-reported, and honest it refused to report at all.
+    rights = author_task_rights(drop_token=self_elevated)
+    if not rights or rights.get("readable") is not True:
         rec("RI17 author-task-rights-measurable", False,
-            f"the reviewer task's live security descriptor yielded no rights at "
-            f"all ({rights or 'no document'}); an all-zero result is the shape a "
-            f"failed measurement takes, so the boundary is unproven rather than "
-            f"proven")
+            f"the reviewer task's security descriptor could not be read by the "
+            f"measuring token ({rights or 'no document'}), so the control "
+            f"channel's boundary is unproven rather than proven")
     else:
         rec("RI17 author-may-start-the-reviewer-task",
-            rights.get("may_start") is True,
+            trustworthy and rights.get("may_start") is True,
             "the author's ordinary identity can start the reviewer task, so the "
             "protocol is drivable without elevation "
-            f"(may_start={rights.get('may_start')})")
+            f"(may_start={rights.get('may_start')}){qualifier}")
         rec("RI18 author-may-not-modify-the-reviewer-task",
-            rights.get("may_modify") is False and rights.get("owns_task") is False,
+            trustworthy and rights.get("may_modify") is False
+            and rights.get("owns_task") is False,
             "the author's ordinary identity cannot rewrite the task action, so it "
             "cannot point the reviewer's session at code of its own choosing "
             f"(may_modify={rights.get('may_modify')}, "
-            f"owns_task={rights.get('owns_task')})")
+            f"owns_task={rights.get('owns_task')}){qualifier}")
 
     rec("RI16 author-process-not-elevated", not elevated,
         "the process performing certification holds no administrative rights "
@@ -723,7 +772,14 @@ def multiline_path_literals(paths: list) -> list:
             "      $f, [ref]$null, [ref]$errs)",
             "  if (-not $ast) { continue }",
             "  $strings = $ast.FindAll({ param($n)",
-            "      $n -is [System.Management.Automation.Language.StringConstantExpressionAst] },",
+            # Interpolating literals are a DIFFERENT AST type, and they are the
+            # shape most path construction in these scripts actually uses --
+            # "$Root\\reviewer-bin", "$HvRoot\\reviewer-src". Matching only the
+            # constant type meant the detector could not see the damage most
+            # likely to occur here, and its self-test passed because the fixture
+            # used the one shape it could see.
+            "      ($n -is [System.Management.Automation.Language.StringConstantExpressionAst])",
+            "      -or ($n -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) },",
             "      $true)",
             "  foreach ($s in $strings) {",
             "    if ($s.Extent.StartLineNumber -ne $s.Extent.EndLineNumber) {",
@@ -733,7 +789,10 @@ def multiline_path_literals(paths: list) -> list:
             # (char, char) overload and THROWS -- so the whole walk died, printed
             # no rows, and the check reported every file clean against a
             # deliberately broken fixture. A single boolean is emitted instead.
-            "      $hasSep = ($s.Value.IndexOf([char]92) -ge 0)",
+            # Extent text, not Value: an interpolating literal's Value does not
+            # contain the $-reference, so a path built from one would not look
+            # like a path.
+            "      $hasSep = ($s.Extent.Text.IndexOf([char]92) -ge 0)",
             "      Write-Output ($leaf + '|' + $s.Extent.StartLineNumber + '|' + $hasSep)",
             "    } } }",
         ]

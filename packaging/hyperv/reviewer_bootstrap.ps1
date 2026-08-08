@@ -67,6 +67,123 @@ $ErrorActionPreference = 'Stop'
 
 function Write-Fact { param([string]$k, $v) Write-Output ("  {0,-38} {1}" -f $k, $v) }
 
+# DEFINED HERE, ABOVE EVERY ACTION BLOCK.
+#
+# PowerShell does not hoist function definitions. These sat below the
+# -GrantAuthorTaskRun and -RepinReviewerCode blocks that call them, so both
+# actions died on CommandNotFoundException -- fail-closed, but dead. One is
+# the only documented remedy for a refused run; the other is the only way
+# the author's ordinary token ever gets to start the task.
+function Resolve-BuildPython {
+    <#
+      The interpreter used to BUILD the dedicated runtime, resolved once, by the
+      operator, in an elevated window. Not the same question as which
+      interpreter the REVIEWER runs -- that one is never discovered, it is read
+      from a pin this script writes.
+    #>
+    param([string]$Supplied)
+    if ($Supplied) {
+        if (Test-Path $Supplied) { return $Supplied }
+        return $null
+    }
+    # NO `Get-Command python`.
+    #
+    # An elevated window started by this account inherits the account's own PATH,
+    # and HKCU\Environment is writable without elevation. So PATH discovery let
+    # the author choose which binary the operator would execute at high
+    # integrity, by reordering its own user PATH and waiting. The operator names
+    # the interpreter explicitly or the action stops.
+    return $null
+}
+
+function Test-AuthorWritable {
+    <#
+      Can the ORDINARY author identity write this path?
+
+      Used to decide whether an elevated operator is about to execute, or copy
+      from, something the author controls. Reports on the DACL and the owner,
+      since an owner can grant itself the rest.
+    #>
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return $true }
+    $me = "$env:USERDOMAIN\$env:USERNAME"
+    try { $acl = Get-Acl -LiteralPath $Path } catch { return $true }
+    if ($acl.Owner -eq $me) { return $true }
+    foreach ($ace in $acl.Access) {
+        if ($ace.IdentityReference.Value -ne $me) { continue }
+        if ($ace.AccessControlType -ne 'Allow') { continue }
+        if ($ace.FileSystemRights.ToString() -match 'Write|Modify|FullControl|CreateFiles') {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Assert-OperatorIsNotAuthor {
+    <#
+      THE RESIDUAL THIS PROTOCOL CANNOT CLOSE IN CODE.
+
+      The design has three roles -- OPERATOR, AUTHOR, REVIEWER -- and gets its
+      strength from the reviewer being a different Windows principal. The
+      OPERATOR is not: on a single-account host it is the same user, elevated.
+
+      That is not a technicality. Every elevated action here executes code the
+      author can write: this script, the runtime builder, and the interpreter
+      that runs them. An author that edits those files and then waits for the
+      operator to run the documented step obtains arbitrary code at high
+      integrity -- and from there it can rewrite the task action, replace the
+      reviewer's code, or reset the reviewer's password. No amount of checking
+      inside these scripts fixes that, because the checks are in the files being
+      checked.
+
+      So it stops by default and names the reason. Proceeding requires a
+      deliberate human act, and the acknowledgement is printed into the
+      operator's own transcript rather than assumed.
+    #>
+    param([switch]$Acknowledged)
+
+    # FAIL CLOSED when the answer cannot be established.
+    #
+    # The first version read author_account_name out of the trust root and
+    # returned silently when it was absent. The trust root is written by the
+    # reviewer's own bootstrap stage, which needs the pinned runtime -- the very
+    # thing the guarded actions exist to create. So on a first-time host the
+    # gate could not fire until after it had stopped mattering. Absence is now
+    # "cannot establish that the operator differs from the author", which is a
+    # stop, not a pass.
+    $trustRoot = Join-Path $HvRoot 'trust\offline-review-trust-root.v1.json'
+    $authorName = ''
+    if (Test-Path $trustRoot) {
+        try { $authorName = (Get-Content $trustRoot -Raw | ConvertFrom-Json).author_account_name }
+        catch { $authorName = '' }
+    }
+    $current = $env:USERNAME
+    if (-not $authorName) {
+        # No recorded author yet. Fall back to the account that owns the source
+        # repository this script was launched from -- if that is this account,
+        # the operator and the author are the same principal whatever the trust
+        # root would eventually say.
+        try { $authorName = (Get-Acl -LiteralPath $SourceRepo).Owner -replace '^.*\\', '' }
+        catch { $authorName = '' }
+    }
+    $same = ($authorName -eq '') -or ($authorName -eq $current)
+    if (-not $same) { return }
+
+    Write-Output ''
+    Write-Output '  RESIDUAL: the elevated operator and the author are the same Windows account.'
+    Write-Output '  reason: OFFLINE_OPERATOR_AUTHOR_SAME_PRINCIPAL'
+    Write-Output '  Every elevated step below executes code the author identity can write,'
+    Write-Output '  so the operator role provides no independent trust on this host.'
+    Write-Output '  The complete fix is a separate operator account; there is no code fix.'
+    if (-not $Acknowledged) {
+        Write-Output '  STOPPED. Re-run with -AcknowledgeSharedOperatorAccount to proceed anyway.'
+        exit 2
+    }
+    Write-Output '  ACKNOWLEDGED by the operator; proceeding with the residual recorded.'
+    Write-Output ''
+}
+
+
 function Initialize-ReviewerPaths {
     <#
       Provision the directory tree the reviewer session entry point requires.
@@ -313,6 +430,11 @@ function Grant-BatchLogon {
 
 Write-Output ''
 Write-Output '=== independent reviewer principal — bootstrap ==='
+# The gate belongs on this route too. The no-switch path creates the account,
+# sets the password and registers the task -- the three things that define the
+# reviewer principal -- and it was the one route not covered.
+Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
+
 if (-not (Test-Elevated)) {
     Write-Output '  STOP: run this in an ELEVATED PowerShell window.'
     Write-Output '  verdict: OFFLINE_INDEPENDENT_ATTESTOR_REQUIRED'
@@ -422,115 +544,6 @@ if ($RepinReviewerCode) {
     Write-Output '  The next reviewer run will ADOPT the code now on disk.'
     Write-Output '  Harden and stage BEFORE this step, never after.'
     exit 0
-}
-
-function Resolve-BuildPython {
-    <#
-      The interpreter used to BUILD the dedicated runtime, resolved once, by the
-      operator, in an elevated window. Not the same question as which
-      interpreter the REVIEWER runs -- that one is never discovered, it is read
-      from a pin this script writes.
-    #>
-    param([string]$Supplied)
-    if ($Supplied) {
-        if (Test-Path $Supplied) { return $Supplied }
-        return $null
-    }
-    # NO `Get-Command python`.
-    #
-    # An elevated window started by this account inherits the account's own PATH,
-    # and HKCU\Environment is writable without elevation. So PATH discovery let
-    # the author choose which binary the operator would execute at high
-    # integrity, by reordering its own user PATH and waiting. The operator names
-    # the interpreter explicitly or the action stops.
-    return $null
-}
-
-function Test-AuthorWritable {
-    <#
-      Can the ORDINARY author identity write this path?
-
-      Used to decide whether an elevated operator is about to execute, or copy
-      from, something the author controls. Reports on the DACL and the owner,
-      since an owner can grant itself the rest.
-    #>
-    param([string]$Path)
-    if (-not (Test-Path $Path)) { return $true }
-    $me = "$env:USERDOMAIN\$env:USERNAME"
-    try { $acl = Get-Acl -LiteralPath $Path } catch { return $true }
-    if ($acl.Owner -eq $me) { return $true }
-    foreach ($ace in $acl.Access) {
-        if ($ace.IdentityReference.Value -ne $me) { continue }
-        if ($ace.AccessControlType -ne 'Allow') { continue }
-        if ($ace.FileSystemRights.ToString() -match 'Write|Modify|FullControl|CreateFiles') {
-            return $true
-        }
-    }
-    return $false
-}
-
-function Assert-OperatorIsNotAuthor {
-    <#
-      THE RESIDUAL THIS PROTOCOL CANNOT CLOSE IN CODE.
-
-      The design has three roles -- OPERATOR, AUTHOR, REVIEWER -- and gets its
-      strength from the reviewer being a different Windows principal. The
-      OPERATOR is not: on a single-account host it is the same user, elevated.
-
-      That is not a technicality. Every elevated action here executes code the
-      author can write: this script, the runtime builder, and the interpreter
-      that runs them. An author that edits those files and then waits for the
-      operator to run the documented step obtains arbitrary code at high
-      integrity -- and from there it can rewrite the task action, replace the
-      reviewer's code, or reset the reviewer's password. No amount of checking
-      inside these scripts fixes that, because the checks are in the files being
-      checked.
-
-      So it stops by default and names the reason. Proceeding requires a
-      deliberate human act, and the acknowledgement is printed into the
-      operator's own transcript rather than assumed.
-    #>
-    param([switch]$Acknowledged)
-
-    # FAIL CLOSED when the answer cannot be established.
-    #
-    # The first version read author_account_name out of the trust root and
-    # returned silently when it was absent. The trust root is written by the
-    # reviewer's own bootstrap stage, which needs the pinned runtime -- the very
-    # thing the guarded actions exist to create. So on a first-time host the
-    # gate could not fire until after it had stopped mattering. Absence is now
-    # "cannot establish that the operator differs from the author", which is a
-    # stop, not a pass.
-    $trustRoot = Join-Path $HvRoot 'trust\offline-review-trust-root.v1.json'
-    $authorName = ''
-    if (Test-Path $trustRoot) {
-        try { $authorName = (Get-Content $trustRoot -Raw | ConvertFrom-Json).author_account_name }
-        catch { $authorName = '' }
-    }
-    $current = $env:USERNAME
-    if (-not $authorName) {
-        # No recorded author yet. Fall back to the account that owns the source
-        # repository this script was launched from -- if that is this account,
-        # the operator and the author are the same principal whatever the trust
-        # root would eventually say.
-        try { $authorName = (Get-Acl -LiteralPath $SourceRepo).Owner -replace '^.*\\', '' }
-        catch { $authorName = '' }
-    }
-    $same = ($authorName -eq '') -or ($authorName -eq $current)
-    if (-not $same) { return }
-
-    Write-Output ''
-    Write-Output '  RESIDUAL: the elevated operator and the author are the same Windows account.'
-    Write-Output '  reason: OFFLINE_OPERATOR_AUTHOR_SAME_PRINCIPAL'
-    Write-Output '  Every elevated step below executes code the author identity can write,'
-    Write-Output '  so the operator role provides no independent trust on this host.'
-    Write-Output '  The complete fix is a separate operator account; there is no code fix.'
-    if (-not $Acknowledged) {
-        Write-Output '  STOPPED. Re-run with -AcknowledgeSharedOperatorAccount to proceed anyway.'
-        exit 2
-    }
-    Write-Output '  ACKNOWLEDGED by the operator; proceeding with the residual recorded.'
-    Write-Output ''
 }
 
 if ($ProvisionReviewerRuntime) {

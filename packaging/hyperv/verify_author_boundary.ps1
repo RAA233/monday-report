@@ -86,21 +86,16 @@ function Test-ReviewerPinned {
     #>
     param([string]$Path)
     if (-not $manifestPaths.Count) { return $false }
+    # EXACT keys only.
+    #
+    # The containment branches reintroduced exactly what the leaf-name branch
+    # was removed for: a path merely INSIDE a pinned tree was reported as
+    # proven, so a target that does not exist at all scored DENIED and the probe
+    # certified that the author cannot replace an installer that is not there.
+    # Only an entry the reviewer actually wrote proves anything.
     $lower = $Path.ToLowerInvariant().TrimEnd('\')
     if ($manifestPaths -contains $lower) { return $true }
-    foreach ($key in $manifestPaths) {
-        if (-not $key.StartsWith('tree:')) { continue }
-        $root = $key.Substring(5).TrimEnd('\')
-        # The directory IS a pinned tree, or lies inside one.
-        if ($lower -eq $root) { return $true }
-        if ($lower.StartsWith($root + '\')) { return $true }
-        # A pinned FILE lives beneath this directory, which proves the directory.
-        if ($root.StartsWith($lower + '\')) { return $true }
-    }
-    foreach ($key in $manifestPaths) {
-        if ($key.StartsWith('tree:')) { continue }
-        if ($key.StartsWith($lower + '\')) { return $true }
-    }
+    if ($manifestPaths -contains ('tree:' + $lower)) { return $true }
     return $false
 }
 
@@ -287,11 +282,29 @@ if (-not $py -or -not (Test-Path $py)) {
     Remove-Item -Path Env:\PYTHONPATH -ErrorAction SilentlyContinue
     $honoured = ($rcPlain -eq 0)
     $ignored = ($rcIsolated -ne 0)
+    # These three describe how -I behaves on a STOCK interpreter. On the
+    # dedicated runtime the ._pth removes `site` altogether, so PYTHONPATH is
+    # ignored with or without -I, ENABLE_USER_SITE is None rather than False,
+    # and `site` is legitimately absent -- and all three scored FAIL, which is
+    # to say the probe could never exit 0 on a correctly provisioned host and
+    # its exit code carried no signal.
+    $siteLive = ((& $py -c "import sys; print('site' in sys.modules)" 2>&1 |
+                  Out-String).Trim() -eq 'True')
+    if (-not $siteLive) {
+        Add-Probe 'C1-06 minus-I-ignores-PYTHONPATH' $false `
+            'this runtime does not import site at all, so PYTHONPATH cannot reach an import with or without -I'
+    } else {
     Add-Probe 'C1-06 minus-I-ignores-PYTHONPATH' (-not ($honoured -and $ignored)) `
         "PYTHONPATH import succeeded without -I=$honoured, failed with -I=$ignored (both required, so the flag is seen to bite)"
+    }
     $userSite = (& $py -I -c "import site; print(site.ENABLE_USER_SITE)" 2>&1 | Out-String).Trim()
+    if (-not $siteLive) {
+        Add-Probe 'C1-07 minus-I-disables-user-site' $false `
+            "site is never imported, so there is no user site directory to enable (ENABLE_USER_SITE=$userSite)"
+    } else {
     Add-Probe 'C1-07 minus-I-disables-user-site' ($userSite -ne 'False') `
         "site.ENABLE_USER_SITE under -I = $userSite"
+    }
     # NOT $home: that is a PowerShell automatic variable, and assigning to it
     # left the comparison reading the user profile path, which made -I look as
     # though it honoured PYTHONHOME when it does not.
@@ -305,8 +318,12 @@ if (-not $py -or -not (Test-Path $py)) {
     # reason the interpreter has to be ACL-hardened and pinned rather than
     # merely launched with a flag.
     $siteRuns = (& $py -I -c "import sys; print('site' in sys.modules)" 2>&1 | Out-String).Trim()
-    Add-Probe 'C1-09 minus-I-alone-is-not-enough' ($siteRuns -ne 'True') `
-        "site.py runs under -I = $siteRuns, so sitecustomize and .pth remain live load points"
+    # INVERTED from the original, which reported FAIL precisely BECAUSE the
+    # runtime was correct. On a stock interpreter site.py runs under -I and that
+    # is the finding; on the dedicated runtime it does not, and that is the
+    # control working.
+    Add-Probe 'C1-09 site-not-imported-by-the-runtime' ($siteRuns -eq 'True') `
+        "site.py ran under -I = $siteRuns; on the dedicated runtime this must be False, which is what makes sitecustomize and .pth dead rather than merely guarded"
     Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 

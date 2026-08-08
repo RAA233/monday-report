@@ -129,6 +129,8 @@ def interpreter_version(exe: Path) -> str:
                               capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return ""
+    if proc.returncode != 0:
+        return ""
     return (proc.stdout or "").strip()
 
 
@@ -303,6 +305,11 @@ def site_is_disabled(exe: Path) -> bool:
             capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return False
+    # The exit code counts. A shim that printed "True" and exited 9 satisfied
+    # the old comparison, which is to say the check trusted a string from a
+    # process it had not established was healthy.
+    if proc.returncode != 0:
+        return False
     return (proc.stdout or "").strip() == "True"
 
 
@@ -318,7 +325,12 @@ def reparse_points_within(root: Path) -> list:
                 try:
                     attrs = os.lstat(str(entry)).st_file_attributes
                 except (OSError, AttributeError, ValueError):
-                    continue
+                    # An entry this process cannot stat is an entry it cannot
+                    # vouch for, inside a function whose whole job is to say
+                    # there are no surprises here. Skipping it failed open in
+                    # the middle of a fail-closed check.
+                    found.append("REVIEWER_RUNTIME_UNREADABLE")
+                    return found
                 if attrs & 0x400:            # FILE_ATTRIBUTE_REPARSE_POINT
                     found.append("REVIEWER_RUNTIME_REPARSE_ESCAPE")
                     return found
@@ -420,6 +432,13 @@ def verify(candidate_exe: Path, *, task_root: Path = TASK_ROOT,
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            reasons.append("REVIEWER_RUNTIME_MANIFEST_UNREADABLE")
+            manifest = {}
+        # Valid JSON is not necessarily an object. A manifest of `[]`, `null`,
+        # `0` or `"hello"` raised AttributeError straight out of this function,
+        # which escapes the named-reason contract and crashed the isolation
+        # guard mid-run rather than refusing.
+        if not isinstance(manifest, dict):
             reasons.append("REVIEWER_RUNTIME_MANIFEST_UNREADABLE")
             manifest = {}
 

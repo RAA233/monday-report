@@ -392,11 +392,24 @@ def _assert_package_unchanged() -> None:
     global _PACKAGE_BASELINE
     if not PACKAGE_ROOT.exists():
         raise SystemExit("REVIEWER_PACKAGE_ABSENT")
-    current = _package_digest()
     if _PACKAGE_BASELINE is None:
-        _PACKAGE_BASELINE = current
-        return
-    if current != _PACKAGE_BASELINE:
+        # Seeded from the REVIEWER'S OWN pin, not from the first call here.
+        #
+        # main() dispatches one stage per process, and stage_e2 calls this
+        # exactly once -- immediately before its only child. So the baseline was
+        # the measurement, and the comparison compared a value with itself. The
+        # code manifest holds `tree:<package root>` written by the session
+        # before this process started, which is the anchor that was meant.
+        manifest = Path("C:/mr-hv/reviewer/state/reviewer-code-manifest.json")
+        key = "tree:" + str(PACKAGE_ROOT).lower()
+        try:
+            pinned = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            pinned = {}
+        if not isinstance(pinned, dict) or key not in pinned:
+            raise SystemExit("REVIEWER_PACKAGE_NOT_PINNED")
+        _PACKAGE_BASELINE = str(pinned[key])
+    if _package_digest() != _PACKAGE_BASELINE:
         raise SystemExit("REVIEWER_PACKAGE_CHANGED_BEFORE_EXECUTION")
 
 
