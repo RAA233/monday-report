@@ -314,7 +314,19 @@ function Resolve-PrincipalIdentity {
                 return [pscustomobject]$result
             }
         } catch {
-            $result.Error = 'translation failed'
+            # IdentityNotMappedException is the ORDINARY absence: the lookup ran
+            # and no such account exists. Anything else is a lookup that failed,
+            # and the two must not report the same thing -- -AllowAbsentReviewer
+            # excuses the first and must not excuse the second.
+            if ($_.Exception.InnerException -is
+                [Security.Principal.IdentityNotMappedException] -or
+                $_.Exception -is [Security.Principal.IdentityNotMappedException]) {
+                $result.Error = 'no such account'
+            } else {
+                $result.Error = 'translation failed'
+                $result.Resolved = $false
+                return [pscustomobject]$result
+            }
         }
     }
     # Resolution ran and produced nothing. That is a KNOWN non-existent account,
@@ -449,7 +461,13 @@ function Get-AccountSidSet {
       An account's own SID plus the local groups containing it. Effective rights
       are the union over this set: an ACE granted to a group grants the member.
     #>
-    param([Parameter(Mandatory = $true)]$Identity, [scriptblock]$GroupProvider = $null)
+    param([Parameter(Mandatory = $true)]$Identity, [scriptblock]$GroupProvider = $null,
+          # Conservative drops the logon-type and account-class SIDs. It exists
+          # because the two questions built on this set fail closed in opposite
+          # directions: over-including makes "can the author write here?" answer
+          # yes more often, which is safe, and makes "can the reviewer still
+          # read its code?" answer yes more often, which is not.
+          [switch]$Conservative)
 
     # MEMOISED. Group membership is a property of the ACCOUNT, not of the path,
     # and this enumerated all 24 local groups and all their members on EVERY
@@ -458,9 +476,10 @@ function Get-AccountSidSet {
     # item, so provisioning a runtime of 73,711 files spent well over an hour
     # re-deriving one unchanging answer. Only the providerless path is cached:
     # a supplied GroupProvider is a fixture's answer and must be re-asked.
+    $cacheKey = "$($Identity.Sid)|$([bool]$Conservative)"
     if (-not $GroupProvider -and $Identity.Sid -and
-        $script:SidSetCache.ContainsKey($Identity.Sid)) {
-        return $script:SidSetCache[$Identity.Sid]
+        $script:SidSetCache.ContainsKey($cacheKey)) {
+        return $script:SidSetCache[$cacheKey]
     }
 
     $set = New-Object System.Collections.Generic.List[string]
@@ -501,10 +520,40 @@ function Get-AccountSidSet {
             }
         }
     }
-    # Everyone and Authenticated Users apply to any local interactive account.
-    [void]$set.Add('S-1-1-0')
-    [void]$set.Add('S-1-5-11')
-    if (-not $GroupProvider -and $Identity.Sid) { $script:SidSetCache[$Identity.Sid] = $set }
+    # THE SIDS A LOGON ACTUALLY CARRIES, not just Everyone and Authenticated
+    # Users.
+    #
+    # Measured on this host: a token carries S-1-5-113 (Local account), S-1-5-4
+    # (INTERACTIVE), S-1-5-15 (This Organization) and S-1-2-1 (Console Logon),
+    # and this function returned none of them. A directory granting
+    # S-1-5-113 FullControl with no other ACE for the account scored "the author
+    # cannot write here" -- and the account then created a file in it. The
+    # docstring claimed the union of effective rights; it was a subset, and it
+    # failed in the unsafe direction for OFFLINE_SOURCE_ROOT_AUTHOR_WRITABLE,
+    # OFFLINE_SENSITIVE_ROOT_AUTHOR_WRITABLE, OFFLINE_REVIEWER_CODE_AUTHOR_WRITABLE,
+    # the ACL read-back and the interpreter gate at once. The sibling harness in
+    # this repository builds its list from the full token and does not have this
+    # gap.
+    [void]$set.Add('S-1-1-0')      # Everyone
+    [void]$set.Add('S-1-5-11')     # Authenticated Users
+    if (-not $Conservative) {
+        foreach ($wellKnown in @(
+            'S-1-5-2',     # NETWORK
+            'S-1-5-3',     # BATCH -- the reviewer's scheduled-task logon
+            'S-1-5-4',     # INTERACTIVE
+            'S-1-5-15',    # This Organization
+            'S-1-5-113',   # Local account
+            'S-1-2-0',     # Local
+            'S-1-2-1')) {  # Console Logon
+            [void]$set.Add($wellKnown)
+        }
+        # S-1-5-114 is carried only by a local account that is IN Administrators,
+        # so it is added on the same evidence rather than unconditionally.
+        if (Test-AccountInAdministrators -Identity $Identity) {
+            [void]$set.Add('S-1-5-114')
+        }
+    }
+    if (-not $GroupProvider -and $Identity.Sid) { $script:SidSetCache[$cacheKey] = $set }
     return $set
 }
 
@@ -615,9 +664,10 @@ function Test-AccountCanReadPath {
     $acl = $null
     try { $acl = Get-Acl -LiteralPath $Path } catch { return $false }
 
-    $sids = Get-AccountSidSet -Identity $Identity -GroupProvider $GroupProvider
-    # The opposite direction: "can the reviewer still reach its own code?"
-    # answers no when it cannot be told.
+    # -Conservative: this question fails closed by answering NO, so the set must
+    # not be padded with SIDs the account might not carry in the logon that
+    # matters.
+    $sids = Get-AccountSidSet -Identity $Identity -GroupProvider $GroupProvider -Conservative
     if ($null -eq $sids) { return $false }
     $ownerSid = ''
     try { $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
@@ -989,6 +1039,10 @@ function Assert-TrustedSourceRoot {
         $reasons.Add('OFFLINE_SOURCE_ROOT_INHERITS')
     }
 
+    # git runs FIRST, so OFFLINE_SOURCE_ROOT_DIRTY is evaluated even when no
+    # expected identity was supplied. Returning here meant one acknowledgement
+    # waived two properties: the missing pin AND the untracked .ps1 or .py
+    # dropped beside the bootstrap, which is the case the dirty check exists for.
     if (-not $ExpectedCommit -or -not $ExpectedTree) {
         $reasons.Add('OFFLINE_SOURCE_ROOT_EXPECTED_IDENTITY_MISSING')
         return $reasons
@@ -1056,8 +1110,19 @@ function Get-TaskRootAclViolations {
     }
     foreach ($ace in @($rootAcl.Access)) {
         if ($ace.AccessControlType -ne 'Allow') { continue }
-        $who = $ace.IdentityReference.Value
-        if ($who -match '(Authenticated Users|\\Users$|Everyone)') {
+        # BY SID, NOT BY DISPLAY NAME. An identity that does not translate
+        # renders as a raw SID string and matched none of the three names, and
+        # the two SIDs this file elsewhere calls out as covering every local
+        # account -- Local account and INTERACTIVE -- were not in the list at
+        # all. The mask was already checked by bit; the subject was not.
+        $broadSubjects = @('S-1-5-11', 'S-1-1-0', 'S-1-5-32-545', 'S-1-5-4',
+                           'S-1-5-113', 'S-1-2-1', 'S-1-5-2', 'S-1-5-3')
+        $who = ''
+        try {
+            $who = $ace.IdentityReference.Translate(
+                [Security.Principal.SecurityIdentifier]).Value
+        } catch { $who = '' }
+        if ($broadSubjects -contains $who) {
             # By BIT, not by name. A non-canonical mask renders as a number --
             # GENERIC_ALL prints as 268435456 -- and matches no name at all, so
             # a broad generic grant passed a string test unnoticed.
@@ -1070,9 +1135,29 @@ function Get-TaskRootAclViolations {
     foreach ($path in $SecuritySensitive) {
         if (-not (Test-Path -LiteralPath $path)) { continue }
         $acl = $null
-        try { $acl = Get-Acl -LiteralPath $path } catch { continue }
+        try { $acl = Get-Acl -LiteralPath $path } catch { $acl = $null }
+        if (-not $acl) {
+            # `continue` skipped BOTH tests, so an unreadable sensitive root
+            # produced no reason at all -- while the identical situation on the
+            # task root twenty lines above is named and returned.
+            $reasons.Add('OFFLINE_SENSITIVE_ROOT_UNREADABLE'); continue
+        }
         if (-not $acl.AreAccessRulesProtected) { $reasons.Add("OFFLINE_SENSITIVE_ROOT_INHERITS") }
-        if (Test-AccountCanWritePath -Identity $Author -Path $path) {
+        # RECURSIVE. Testing the container alone is the leaf-only shape already
+        # fixed for the source root and for the reviewer code, left in place on
+        # its counterpart: a file-level author ACE on the interpreter pin or the
+        # code manifest inside a clean, protected reviewer\state produced no
+        # reason, and author write there replaces both and defeats both
+        # integrity gates at once.
+        $sensitiveErrors = $null
+        $sensitiveChildren = @(Get-ChildItem -LiteralPath $path -Recurse -Force `
+                               -ErrorAction SilentlyContinue -ErrorVariable sensitiveErrors |
+                               Select-Object -ExpandProperty FullName)
+        if (@($sensitiveErrors).Count) { $reasons.Add('OFFLINE_SENSITIVE_ROOT_UNREADABLE') }
+        $sensitiveHit = @(@($path) + $sensitiveChildren |
+                          Where-Object { Test-AccountCanWritePath -Identity $Author -Path $_ } |
+                          Select-Object -First 1)
+        if ($sensitiveHit.Count) {
             $reasons.Add('OFFLINE_SENSITIVE_ROOT_AUTHOR_WRITABLE')
         }
     }

@@ -251,7 +251,34 @@ Add-Probe 'TOKEN01 author-process-not-elevated' $elevated `
 # prompt, reads the reviewer credential the Task Scheduler stored, and obtains a
 # genuine reviewer logon. Closing an elevated window does not change it.
 . (Join-Path $PSScriptRoot 'principal_contract.ps1')
-$authorIdentity = Resolve-PrincipalIdentity -Account $env:USERNAME
+# THE SUBJECT COMES FROM THE TOKEN, NOT FROM THE ENVIRONMENT.
+#
+# $env:USERNAME is set by whatever launches this harness. Measured on an
+# unmodified file: with the real token in Administrators, USERNAME=<real> gives
+# accountIsAdmin=True and the gate FAILS as it should; USERNAME=DefaultAccount,
+# Guest or WDAGUtilityAccount gives accountIsAdmin=False and the gate PASSES.
+# All three are built-in local accounts present on every Windows install, so one
+# environment variable defeated the exact case TOKEN02 exists to catch -- an
+# author whose PROCESS is Medium but whose ACCOUNT is in Administrators. TOKEN01
+# two lines above already reads WindowsIdentity::GetCurrent(); this now does the
+# same, and the increment's own design note says the author must never be
+# inferred from $env:USERNAME.
+$tokenSid = ''
+try { $tokenSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch { }
+$authorIdentity = if ($tokenSid) {
+    [pscustomobject]@{
+        Requested = 'token'; Name = 'token'; Sid = $tokenSid
+        Digest = (Get-PrincipalDigest -Sid $tokenSid)
+        Exists = $true; Resolved = $true; Error = ''
+    }
+} else {
+    # No token, no answer. Test-AccountInAdministrators fails closed on an
+    # identity with no SID, which is the direction this gate needs.
+    [pscustomobject]@{
+        Requested = 'token'; Name = 'token'; Sid = ''
+        Digest = ''; Exists = $false; Resolved = $false; Error = 'token unreadable'
+    }
+}
 $accountIsAdmin = Test-AccountInAdministrators -Identity $authorIdentity
 Add-Probe 'TOKEN02 author-account-not-administrator' $accountIsAdmin `
     "the AUTHOR ACCOUNT itself holds no local Administrator, directly or through a nested group (account_is_administrator=$accountIsAdmin); a Medium-integrity process from an admin-capable account fails this and must not be read as separation"

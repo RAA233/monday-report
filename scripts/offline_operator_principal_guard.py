@@ -904,6 +904,80 @@ def main() -> int:
             f"reported -- what matters is what can replace the tree, not only "
             f"what is inside it ({interp_detail or 'no output'})")
 
+        # ------------------------------- the SID set the predicate reasons over
+        # A LOGON CARRIES MORE THAN EVERYONE AND AUTHENTICATED USERS.
+        #
+        # Get-AccountSidSet returned the account SID, its local groups, S-1-1-0
+        # and S-1-5-11, and nothing else -- so a directory granting S-1-5-113
+        # (Local account, which every local account carries) FullControl scored
+        # "the author cannot write here", and the account then created a file in
+        # it. Every fixture missed it by construction: they all pass
+        # `-GroupProvider { return @() }` and a synthetic SID, so the well-known
+        # SIDs were never in play. This one uses the REAL account and no
+        # provider.
+        wellknown = work / "wellknown-ace"
+        wellknown.mkdir(exist_ok=True)
+        wk_script = work / "wellknown.ps1"
+        wk_script.write_text(
+            ". '" + str(ROOT / "packaging" / "hyperv" / "principal_contract.ps1") + "'\n"
+            "$id = Resolve-PrincipalIdentity -Account $env:USERNAME\n"
+            "$sd = New-Object Security.AccessControl.DirectorySecurity\n"
+            "$sd.SetSecurityDescriptorSddlForm("
+            "'O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-113)')\n"
+            "Set-Acl -LiteralPath '" + str(wellknown) + "' -AclObject $sd\n"
+            "$says = Test-AccountCanWritePath -Identity $id -Path '" + str(wellknown) + "'\n"
+            "$wrote = $false\n"
+            "try { Set-Content -Path '" + str(wellknown / "probe.txt")
+            + "' -Value 'x' -Encoding ascii -ErrorAction Stop; $wrote = $true } catch { }\n"
+            "Write-Output ('says=' + $says + ' wrote=' + $wrote)\n", encoding="utf-8")
+        try:
+            wk_run = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(wk_script)], capture_output=True, text=True, timeout=300)
+            wk_out = (wk_run.stdout or "").strip()
+            wk_agrees = "says=True wrote=True" in wk_out
+        except (OSError, subprocess.SubprocessError) as exc:
+            wk_out, wk_agrees = type(exc).__name__, False
+        rec("OP43 the-predicate-agrees-with-what-the-account-can-actually-do",
+            wk_agrees,
+            f"a directory granting only a well-known SID that every local account "
+            f"carries is reported writable, and the account demonstrably writes "
+            f"to it -- the prediction and the outcome agree ({wk_out or 'no output'})")
+
+        # ------------------------ the sensitive-root evaluator, finally driven
+        sensitive_root = work / "sensitive-root"
+        sensitive_root.mkdir(exist_ok=True)
+        planted_sensitive = probe({"action": "sensitive-root", "path": str(sensitive_root),
+                                   "author": identity("SYNTH", SID_AUTHOR),
+                                   "plant_file_ace": True}, work)["reasons"]
+        clean_sensitive_root = work / "sensitive-root-clean"
+        clean_sensitive_root.mkdir(exist_ok=True)
+        clean_sensitive = probe({"action": "sensitive-root", "path": str(clean_sensitive_root),
+                                 "author": identity("SYNTH", SID_AUTHOR),
+                                 "plant_file_ace": False}, work)["reasons"]
+        rec("OP44 a-file-level-ace-inside-a-sensitive-root-is-detected",
+            "OFFLINE_SENSITIVE_ROOT_AUTHOR_WRITABLE" in planted_sensitive
+            and "OFFLINE_SENSITIVE_ROOT_AUTHOR_WRITABLE" not in clean_sensitive,
+            f"an author ACE on the interpreter pin inside a clean, protected "
+            f"sensitive root is reported, and the same tree without it is not -- "
+            f"this evaluator had a probe action that no check invoked, so all "
+            f"six of its named reasons were unexercised "
+            f"(planted={planted_sensitive}, clean={clean_sensitive})")
+
+        # --------------------- the boundary harness must not take its subject
+        # ---------------------- from a variable the process running it controls
+        boundary_path = ROOT / "packaging" / "hyperv" / "verify_author_boundary.ps1"
+        boundary_live = strip_powershell_comments(boundary_path.read_text(encoding="utf-8"))
+        subject_from_env = "Resolve-PrincipalIdentity -Account $env:USERNAME" in boundary_live
+        subject_from_token = "WindowsIdentity]::GetCurrent().User.Value" in boundary_live
+        rec("OP45 the-account-gate-takes-its-subject-from-the-token",
+            not subject_from_env and subject_from_token,
+            f"TOKEN02 resolves the account it judges from the process token, not "
+            f"from $env:USERNAME -- which whatever launches the harness sets, and "
+            f"which made the gate PASS for a real administrator simply by naming "
+            f"a built-in account (from-env={subject_from_env}, "
+            f"from-token={subject_from_token})")
+
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
         #

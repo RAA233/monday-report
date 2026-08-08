@@ -410,8 +410,13 @@ function Assert-AclApplied {
         }
         if ($bad.Count -ge 5) { break }
     }
-    $rootAcl = Get-Acl -LiteralPath $Path
-    if (-not $rootAcl.AreAccessRulesProtected) { $bad += "inherits:$Path" }
+    # Under ErrorActionPreference = Stop an unreadable root ACL killed the
+    # script here with a raw terminating error -- after "unreadable:<path>" had
+    # already been queued and before the named refusal below could print it.
+    $rootAcl = $null
+    try { $rootAcl = Get-Acl -LiteralPath $Path } catch { $rootAcl = $null }
+    if (-not $rootAcl) { $bad += "unreadable-root:$(Split-Path $Path -Leaf)" }
+    elseif (-not $rootAcl.AreAccessRulesProtected) { $bad += "inherits:$Path" }
     # OWNERSHIP IS REPORTED, NOT ASSERTED. The transcript line below used to say
     # "admins-owned" without this function ever reading an owner -- and
     # -ExportSource deliberately makes the reviewer the owner and then calls
@@ -602,7 +607,12 @@ function Write-PrincipalCapabilityFacts {
                              # the interpreter pin. Author write on this directory
                              # replaces the manifest and the pin, defeating both
                              # integrity gates at once.
-                             "$Root\reviewer", "$Root\reviewer\state"))
+                             "$Root\reviewer", "$Root\reviewer\state",
+                             # reviewer-src holds the driver and the attestation
+                             # module the reviewer EXECUTES, and it was in
+                             # neither the code set nor this list -- so on
+                             # -Verify it was covered by nothing at all.
+                             "$Root\reviewer-src"))
     Write-Fact 'task root ACL violations' ($(if ($rootReasons.Count) { $rootReasons -join ', ' } else { 'none' }))
     foreach ($reason in (@($aceReasons) + @($rootReasons))) {
         if ($reason) { $Reasons.Value.Add([string]$reason) }
@@ -1348,24 +1358,6 @@ if ($ProvisionReviewerRuntime) {
     }
     Assert-InterpreterSourceTrusted -Interpreter $BuildPython `
         -Route '-ProvisionReviewerRuntime'
-    # Superseded by Assert-InterpreterSourceTrusted two lines above, which stops
-    # with this same reason. Left as a literal-false branch it read as coverage
-    # that no input could produce, so it is gone; the gate above is the check.
-    if ($false) {
-        # A HARD stop, with its own reason.
-        #
-        # This was waived by the same flag that waived operator/author identity
-        # -- two independent boundaries behind one switch, so satisfying neither
-        # was indistinguishable from accepting both. The runtime is COPIED from
-        # this tree, so an author-writable build source puts author-chosen bytes
-        # inside the runtime the reviewer executes. Nothing downstream can
-        # recover from that, which makes it a gate rather than a declaration.
-        Write-Output '  STOP: the build source is writable by the author identity.'
-        Write-Output '  reason: REVIEWER_RUNTIME_SOURCE_AUTHOR_WRITABLE'
-        Write-Output '  The runtime is copied from it, so its contents would be only as'
-        Write-Output '  trustworthy as a tree the author can rewrite.'
-        exit 2
-    }
     Assert-TaskRootProtected -Root $HvRoot -Runtime ''
     $builder = Join-Path $SourceRepo 'scripts\offline_reviewer_runtime.py'
     if (-not (Test-Path $builder)) {
@@ -1628,6 +1620,10 @@ if ($ProvisionPaths) {
 }
 
 if ($Verify) {
+    # Declared up front: StrictMode 2.0 makes reading an unassigned variable a
+    # terminating error, and the exit status below has to be able to read it
+    # whether or not the branch that sets it ran.
+    $verifyDefect = $false
     $measured = New-Object System.Collections.Generic.List[string]
     Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
         -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName -Reasons ([ref]$measured)
@@ -1689,6 +1685,7 @@ if ($Verify) {
             Write-Fact 'action targets installed copy' ($target -eq $installed)
             if (-not $readable -or $target -ne $installed) {
                 Write-Output ''
+                $verifyDefect = $true
                 Write-Output '  DEFECT: the task action does not target a reviewer-readable'
                 Write-Output '  installed entry point. The reviewer cannot run. Re-register with'
                 Write-Output '  reviewer_bootstrap.ps1 (the operator must re-enter the password;'
@@ -1703,6 +1700,15 @@ if ($Verify) {
     }
     Write-Output ''
     Write-Output '  (no secret is printed by this script in any mode)'
+    # THE VERDICT REACHES THE EXIT STATUS.
+    #
+    # The DEFECT branch above printed
+    # OFFLINE_REVIEWER_BOOTSTRAP_OPERATOR_ACTION_REQUIRED -- the state in which
+    # the reviewer provably cannot run -- and then fell through to an
+    # unconditional exit 0, so any consumer keying on the status read a broken
+    # host as verified. Same printed-but-not-returned shape as the capability
+    # verdict, in the denial direction.
+    if ($verifyDefect) { exit 2 }
     exit 0
 }
 

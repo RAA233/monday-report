@@ -437,6 +437,60 @@ switch ($case.action) {
         }
     }
 
+    'sensitive-root' {
+        # THE SENSITIVE-ROOT EVALUATOR, DRIVEN. principal_contract_probe offered
+        # a task-root-acl action that no check in the pinned battery invoked, so
+        # all six OFFLINE_TASK_ROOT_* / OFFLINE_SENSITIVE_ROOT_* reasons were
+        # unexercised while the bootstrap's comment claimed the loop was
+        # "exercised only by the fixture". A file-level ACE inside a clean,
+        # protected sensitive root is the case the leaf-only test could not see.
+        $authorSid = $case.author.sid
+        $clean = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        $root = New-Object Security.AccessControl.DirectorySecurity
+        $root.SetSecurityDescriptorSddlForm($clean, 'Access')
+        Set-Acl -LiteralPath $case.path -AclObject $root
+
+        $sensitive = Join-Path $case.path 'state'
+        if (-not (Test-Path $sensitive)) { New-Item -ItemType Directory -Force -Path $sensitive | Out-Null }
+        $sensitiveAcl = New-Object Security.AccessControl.DirectorySecurity
+        $sensitiveAcl.SetSecurityDescriptorSddlForm($clean, 'Access')
+        Set-Acl -LiteralPath $sensitive -AclObject $sensitiveAcl
+
+        $pin = Join-Path $sensitive 'python-path.txt'
+        Set-Content -Path $pin -Value 'C:\pinned\python.exe' -Encoding ascii
+        if ($case.plant_file_ace) {
+            $pinAcl = New-Object Security.AccessControl.FileSecurity
+            $pinAcl.SetSecurityDescriptorSddlForm(
+                "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x120116;;;$authorSid)", 'Access')
+            Set-Acl -LiteralPath $pin -AclObject $pinAcl
+        }
+        $identity = New-Identity -Spec $case.author
+        $result.reasons = @(Get-TaskRootAclViolations -Root $case.path -Author $identity `
+            -SecuritySensitive @($sensitive))
+    }
+
+    'token-subject' {
+        # Does the harness derive its subject from the ENVIRONMENT? Answered by
+        # running the shipped file twice with USERNAME set to two different
+        # built-in accounts and comparing the TOKEN02 verdict. If the two differ,
+        # one environment variable decides the gate.
+        $results = @()
+        foreach ($name in @($case.first, $case.second)) {
+            $prev = $env:USERNAME
+            $env:USERNAME = $name
+            try {
+                $out = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+                    -Command ". '$($case.harness)'; Write-Output ('SID=' + $authorIdentity.Sid)" 2>&1 |
+                    Out-String
+            } catch { $out = '' } finally { $env:USERNAME = $prev }
+            $results += ,([string]$out)
+        }
+        $result.value = [ordered]@{
+            first_sid = ([regex]::Match($results[0], 'SID=(\S+)')).Groups[1].Value
+            second_sid = ([regex]::Match($results[1], 'SID=(\S+)')).Groups[1].Value
+        }
+    }
+
     'account-writable' {
         # Resolve the NAME when the fixture supplies no SID, so a probe about a
         # real account is answered about that account rather than about an
