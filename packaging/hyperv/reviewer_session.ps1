@@ -519,7 +519,8 @@ if ($stage -eq 'diagnostics' -or $stage -eq 'diagnostics-deep') {
     $diagScript = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_diagnostics.ps1'
     if (-not (Test-Path $diagScript)) {
         Clear-StaleTranscripts -OutDir $OutRoot
-        New-Status -Stage $stage -State 'FAILED' -Detail 'diagnostics script missing from the install'
+        Clear-StaleTranscripts -OutDir $OutRoot
+    New-Status -Stage $stage -State 'FAILED' -Detail 'diagnostics script missing from the install'
         exit 4
     }
     New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"
@@ -546,7 +547,10 @@ if ($stage -eq 'diagnostics' -or $stage -eq 'diagnostics-deep') {
     Set-Content -Path (Join-Path $OutRoot 'diagnostics-result.json') `
         -Value (Protect-Transcript $out) -Encoding utf8
     if ($rc -eq 0) { New-Status -Stage $stage -State 'COMPLETE' -Detail "run_id=$runId" }
-    else { New-Status -Stage $stage -State 'FAILED' -Detail "diagnostics exited $rc" }
+    else {
+        Clear-StaleTranscripts -OutDir $OutRoot
+        New-Status -Stage $stage -State 'FAILED' -Detail "diagnostics exited $rc"
+    }
     exit $rc
 }
 
@@ -554,7 +558,8 @@ if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate' -or $stage -eq 'cred-
     Assert-CodeStillPinned -Stage $stage
     $migration = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_credential_migration.ps1'
     if (-not (Test-Path $migration)) {
-        New-Status -Stage $stage -State 'FAILED' -Detail 'migration script missing from the install'
+        Clear-StaleTranscripts -OutDir $OutRoot
+    New-Status -Stage $stage -State 'FAILED' -Detail 'migration script missing from the install'
         exit 4
     }
     $migAction = switch ($stage) { 'cms-identity' { 'reviewer-identity' } 'cred-repair' { 'reviewer-repair-acl' } 'cred-seal' { 'reviewer-seal-baseline' } default { 'reviewer-rotate' } }
@@ -571,17 +576,22 @@ if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate' -or $stage -eq 'cred-
     Set-Content -Path (Join-Path $OutRoot "$stage-result.json") `
         -Value (Protect-Transcript $out) -Encoding utf8
     if ($rc -eq 0) { New-Status -Stage $stage -State 'COMPLETE' -Detail "run_id=$runId" }
-    else { New-Status -Stage $stage -State 'FAILED' -Detail "migration exited $rc" }
+    else {
+        Clear-StaleTranscripts -OutDir $OutRoot
+        New-Status -Stage $stage -State 'FAILED' -Detail "migration exited $rc"
+    }
     exit $rc
 }
 
 $py = Get-ReviewerPython
 if (-not $py) {
     Clear-StaleTranscripts -OutDir $OutRoot
+    Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail 'no python interpreter reachable by the reviewer'
     exit 4
 }
 if (-not (Test-Path $SourceRoot)) {
+    Clear-StaleTranscripts -OutDir $OutRoot
     Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail 'pristine source export is absent'
     exit 4
@@ -589,6 +599,7 @@ if (-not (Test-Path $SourceRoot)) {
 
 $driver = Join-Path $SourceRoot 'scripts\offline_reviewer_execute.py'
 if (-not (Test-Path $driver)) {
+    Clear-StaleTranscripts -OutDir $OutRoot
     Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail 'reviewer driver missing from the export'
     exit 4
@@ -614,6 +625,10 @@ $ErrorActionPreference = $prev
 if ($rc -eq 0) {
     New-Status -Stage $stage -State 'COMPLETE' -Detail "run_id=$runId"
 } else {
+    # A failed driver run must not leave the LAST run's transcripts behind it.
+    # Those files are what the evidence chain reads, and a reader cannot tell a
+    # survivor from a fresh one.
+    Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail "driver exited $rc (run_id=$runId)"
 }
 exit $rc

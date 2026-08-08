@@ -340,14 +340,18 @@ def contract_battery() -> None:
     for n in exits:
         nearest_status = None
         cleared = False
+        # Collect BOTH facts; do not stop at the first one.
+        #
+        # Breaking on the status line meant the scan never reached the
+        # Clear-StaleTranscripts call sitting immediately above it, which is the
+        # order the code actually uses -- clear, then report, then exit. Ten
+        # correctly-guarded exits were reported as unguarded.
         for k in range(n - 1, max(0, n - 30), -1):
             text = lines[k - 1]
             if "Clear-StaleTranscripts" in text:
                 cleared = True
-                break
-            if "-State '" in text:
+            if "-State '" in text and nearest_status is None:
                 nearest_status = text
-                break
         if cleared:
             continue
         if nearest_status and ("-State 'COMPLETE'" in nearest_status
