@@ -147,11 +147,24 @@ function Assert-SelfSourceTrusted {
 # window between this returning and the dot-source below. Every gate downstream
 # is defined by the file that dot-source loads. The function's own reasoning is
 # about a privileged TREE; it was sampling two leaves of one.
-Assert-SelfSourceTrusted -Paths @(
-    $PSScriptRoot,
-    $PSCommandPath,
-    (Join-Path $PSScriptRoot 'principal_contract.ps1')
-)
+# THE ANCESTORS TOO. An author holding delete-child on packaging\ -- or on the
+# repository root -- renames hyperv\ away and substitutes a directory in the
+# window between this returning and the dot-source below, at which point the
+# contract that defines every gate is author-written. Checking a directory
+# without checking what can replace it is the same argument this block makes for
+# checking the directory at all, one level up; Resolve-TrustedGit already walks
+# a full ancestor chain for exactly this reason. Assert-TrustedSourceRoot does
+# cover packaging\, but only much later -- after the dot-source has run.
+$selfPaths = @($PSScriptRoot, $PSCommandPath,
+               (Join-Path $PSScriptRoot 'principal_contract.ps1'))
+$selfProbe = Split-Path $PSScriptRoot -Parent
+while ($selfProbe) {
+    $selfPaths += $selfProbe
+    $selfParent = Split-Path $selfProbe -Parent
+    if ($selfParent -eq $selfProbe) { break }
+    $selfProbe = $selfParent
+}
+Assert-SelfSourceTrusted -Paths $selfPaths
 
 . (Join-Path $PSScriptRoot 'principal_contract.ps1')
 
@@ -418,7 +431,13 @@ function Write-PrincipalCapabilityFacts {
 
     $releaseTree   = $SourceRepo
     $reviewerCode  = @("$Root\reviewer-bin", "$Root\reviewer-pkg")
-    $results       = "$Root\reviewer\results"
+    # THE DIRECTORY THAT EXISTS. This named a sibling that appeared exactly once
+    # in the whole tree -- here -- and was never created by anything;
+    # reviewer_session, verify_author_boundary, reviewer_diagnostics and -Verify
+    # all use this one. Test-AccountCanWritePath answers $true for an absent
+    # path ("absent -> creatable"), so the capability printed True
+    # unconditionally and could not fail for any DACL.
+    $results       = "$Root\reviewer\out"
 
     # THE SALT IN FORCE, so these digests are the ones the reviewer publishes.
     # Printed rather than the SIDs they stand for, and directly comparable with
@@ -485,11 +504,73 @@ function Write-PrincipalCapabilityFacts {
     # in production and exercised only by the fixture.
     $rootReasons = @(Get-TaskRootAclViolations -Root $Root -Author $Author `
         -SecuritySensitive @("$Root\reviewer-bin", "$Root\reviewer-pkg",
-                             "$Root\reviewer-runtime", "$Root\trust"))
+                             "$Root\reviewer-runtime", "$Root\trust",
+                             # The reviewer's own state was missing, and it is the
+                             # most sensitive tree here: the DPAPI-sealed review
+                             # key, the guest credential, the code manifest and
+                             # the interpreter pin. Author write on this directory
+                             # replaces the manifest and the pin, defeating both
+                             # integrity gates at once.
+                             "$Root\reviewer", "$Root\reviewer\state"))
     Write-Fact 'task root ACL violations' ($(if ($rootReasons.Count) { $rootReasons -join ', ' } else { 'none' }))
     foreach ($reason in (@($aceReasons) + @($rootReasons))) {
         if ($reason) { $Reasons.Value.Add([string]$reason) }
     }
+}
+
+function Get-AuthorWritableInterpreterPaths {
+    <#
+      Every path an interpreter would load code from, that the author can write.
+
+      THE INTERPRETER'S OWN DIRECTORY IS INCLUDED. It held only python.exe,
+      DLLs\ and Lib\ before -- and the application directory is FIRST in the
+      Windows DLL search order, with python3xx.dll and vcruntime140.dll living
+      beside the executable rather than under DLLs\. An author able to add a
+      file there supplies code that loads at High integrity while every checked
+      path scores clean. verify_author_boundary.ps1 names this attack directly
+      in C1-03.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Interpreter)
+
+    if (-not (Test-Path -LiteralPath $Interpreter)) { return @() }
+    $buildRoot = Split-Path $Interpreter -Parent
+    $candidates = @($Interpreter, $buildRoot)
+    $candidates += @(Get-ChildItem -LiteralPath $buildRoot -Force -File `
+                     -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    foreach ($sub in @('DLLs', 'Lib')) {
+        $dir = Join-Path $buildRoot $sub
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        $candidates += $dir
+        $candidates += @(Get-ChildItem -LiteralPath $dir -Recurse -Force `
+                         -ErrorAction SilentlyContinue |
+                         Select-Object -ExpandProperty FullName)
+    }
+    return @($candidates | Where-Object { Test-AuthorWritable -Path $_ } |
+             Select-Object -First 1)
+}
+
+function Assert-InterpreterSourceTrusted {
+    <#
+      Both routes that EXECUTE an operator-named interpreter must pass the same
+      gate.
+
+      -ProvisionReviewerRuntime hard-stopped on an author-writable build source
+      because "the runtime is copied from it". -HardenInterpreter performed the
+      same `& $BuildPython <verifier>` execution -- author code at High
+      integrity in the operator's elevated session -- with no writability check
+      of any kind, and then trusted the JSON verdict that execution printed to
+      decide whether to lock and pin the runtime. Resolve-BuildPython only
+      tested that the path exists.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Interpreter, [string]$Route)
+
+    $writable = @(Get-AuthorWritableInterpreterPaths -Interpreter $Interpreter)
+    if (-not $writable.Count) { return }
+    Write-Output ''
+    Write-Output "  STOP: the interpreter $Route would execute is writable by the author."
+    Write-Output '  reason: REVIEWER_RUNTIME_SOURCE_AUTHOR_WRITABLE'
+    Write-Output '  Its verdict would be only as trustworthy as bytes the author can choose.'
+    exit 2
 }
 
 function Assert-CapabilitiesAcceptable {
@@ -598,10 +679,14 @@ function Assert-TrustedOperatorSource {
       compromised, and admin-owned code at the wrong commit is still not the
       reviewed artifact. One acknowledgement must never cover both.
     #>
-    param($Author, [string]$Root, [string]$Commit, [string]$Tree, [string]$Git,
+    param($Author, $Reviewer, [string]$Root, [string]$Commit, [string]$Tree, [string]$Git,
           [switch]$Acknowledged)
 
-    $reasons = Assert-TrustedSourceRoot -Root $Root -Author $Author `
+    # -Reviewer is passed. Without it the OFFLINE_SOURCE_ROOT_REVIEWER_WRITABLE
+    # clause could not evaluate, so the stated property -- the party being
+    # measured must not choose the measuring instrument -- was never measured on
+    # any route.
+    $reasons = Assert-TrustedSourceRoot -Root $Root -Author $Author -Reviewer $Reviewer `
         -ExpectedCommit $Commit -ExpectedTree $Tree -GitPath $Git
     # Same unroll as the principal gate. Assert-TrustedSourceRoot returns a
     # List, one element of which arrives as a bare String; `-not $reasons` is
@@ -831,6 +916,17 @@ function Initialize-ReviewerPaths {
     }
     Write-Fact 'declared author (read back)' 'written, author-readable, author-unwritable'
 
+    # READ BACK THE TREES THAT MATTER MOST.
+    #
+    # Assert-AclApplied was called on the runtime, on reviewer-pkg and on
+    # reviewer-src, and never on reviewer-bin -- the directory holding the entry
+    # point the scheduled task actually runs -- nor on reviewer\state, which
+    # holds the sealed key, the code manifest and the interpreter pin. icacls
+    # returns 0 having silently skipped individual files, so applying a grant is
+    # not evidence that it landed.
+    foreach ($d in $reviewerCode) { Assert-AclApplied -Path $d -Account $Account }
+    Assert-AclApplied -Path $stateDir -Account $Account
+
     foreach ($d in $sharedHandoff) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
         & $icacls $d /inheritance:r | Out-Null
@@ -982,8 +1078,8 @@ Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity `
 # author-chosen verdicts, which is the same argument that put
 # Assert-SelfSourceTrusted above the dot-source. Kept separate from the
 # principal gate because one acknowledgement must never waive two boundaries.
-Assert-TrustedOperatorSource -Author $AuthorIdentity -Root $SourceRepo `
-    -Commit $ExpectedCommit -Tree $ExpectedTree -Git $gitExe `
+Assert-TrustedOperatorSource -Author $AuthorIdentity -Reviewer $ReviewerIdentity `
+    -Root $SourceRepo -Commit $ExpectedCommit -Tree $ExpectedTree -Git $gitExe `
     -Acknowledged:$AcknowledgeSharedSourceRoot
 
 if (-not (Test-Elevated)) {
@@ -1134,24 +1230,7 @@ if ($ProvisionReviewerRuntime) {
         Write-Output '  remedy: re-run with -BuildPython naming the python.exe to copy from.'
         exit 2
     }
-    # THE WHOLE SOURCE TREE, not just the executable. The builder copies
-    # DLLs\ and everything under Lib\ -- including site-packages and encodings
-    # -- so an author-writable Lib\ under an admin-owned python.exe put
-    # author-chosen bytes into the runtime that is then locked and pinned as
-    # trusted. That is the same route verify_author_boundary.ps1 exists to
-    # detect, arriving through the gate meant to stop it.
-    $buildRoot = Split-Path $BuildPython -Parent
-    $sourceWritable = @($BuildPython)
-    foreach ($sub in @('DLLs', 'Lib')) {
-        $dir = Join-Path $buildRoot $sub
-        if (-not (Test-Path -LiteralPath $dir)) { continue }
-        $sourceWritable += $dir
-        $sourceWritable += @(Get-ChildItem -LiteralPath $dir -Recurse -Force `
-                             -ErrorAction SilentlyContinue |
-                             Select-Object -ExpandProperty FullName)
-    }
-    $writableSource = @($sourceWritable | Where-Object { Test-AuthorWritable -Path $_ } |
-                        Select-Object -First 1)
+    $writableSource = @(Get-AuthorWritableInterpreterPaths -Interpreter $BuildPython)
     if ($writableSource.Count) {
         # A HARD stop, with its own reason.
         #
@@ -1253,6 +1332,14 @@ if ($HardenInterpreter) {
         Write-Output '  reason: REVIEWER_RUNTIME_NO_SOURCE'
         exit 2
     }
+    # THE SAME GATE THE OTHER EXECUTION ROUTE HAS.
+    #
+    # This runs author-supplied bytes at High integrity and then trusts the JSON
+    # they print to decide whether the runtime is locked and pinned.
+    # -ProvisionReviewerRuntime refuses an author-writable build source for a
+    # weaker reason -- it only COPIES from it. Resolve-BuildPython tested that
+    # the path exists and nothing else.
+    Assert-InterpreterSourceTrusted -Interpreter $BuildPython -Route '-HardenInterpreter'
     $probe = & $BuildPython $verifier --action verify --runtime-root $runtimeRoot 2>&1 | Out-String
     $verdict = $null
     try { $verdict = $probe | ConvertFrom-Json } catch { $verdict = $null }

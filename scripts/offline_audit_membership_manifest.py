@@ -147,6 +147,20 @@ def count_recorded_checks(guard: Path, id_pattern: str) -> int:
                 collected.add(child.value.split()[0])
         return collected
 
+    # STATICALLY UNREACHABLE CODE DOES NOT COUNT.
+    #
+    # Moving from "ids that appear" to "ids that reach a call" still read data
+    # as evidence of execution: forty print("OPnn ...") lines inside `if False:`
+    # scored 40 against a floor of 35. Bodies guarded by a constant-false test
+    # are dropped before anything is counted.
+    def prune(node):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.If) and isinstance(child.test, ast.Constant) \
+                    and not child.test.value:
+                child.body = []
+            prune(child)
+
+    prune(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue

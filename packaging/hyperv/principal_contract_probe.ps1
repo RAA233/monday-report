@@ -387,6 +387,35 @@ switch ($case.action) {
         }
     }
 
+    'reviewer-code-ace' {
+        # A file-level author ACE on the entry point the scheduled task RUNS,
+        # inside an otherwise clean, protected reviewer-bin. The gate was
+        # leaf-only, so this produced no reason and the transcript printed
+        # "author can write reviewer code False" over a host where the author
+        # could rewrite it.
+        $authorSid = $case.author.sid
+        $clean = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        $dir = New-Object Security.AccessControl.DirectorySecurity
+        $dir.SetSecurityDescriptorSddlForm($clean, 'Access')
+        Set-Acl -LiteralPath $case.path -AclObject $dir
+
+        $entry = Join-Path $case.path 'reviewer_session.ps1'
+        Set-Content -Path $entry -Value '# the task runs this' -Encoding ascii
+        if ($case.plant_file_ace) {
+            $fileAcl = New-Object Security.AccessControl.FileSecurity
+            $fileAcl.SetSecurityDescriptorSddlForm(
+                "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x120116;;;$authorSid)", 'Access')
+            Set-Acl -LiteralPath $entry -AclObject $fileAcl
+        }
+        $identity = New-Identity -Spec $case.author
+        $result.value = [ordered]@{
+            gate_says_writable = [bool](Test-CanAuthorWriteReviewerCode -Author $identity `
+                -ReviewerCodePaths @($case.path))
+            container_is_writable = [bool](Test-AccountCanWritePath -Identity $identity `
+                -Path $case.path -GroupProvider { param($i) return @() })
+        }
+    }
+
     'account-writable' {
         # Resolve the NAME when the fixture supplies no SID, so a probe about a
         # real account is answered about that account rather than about an

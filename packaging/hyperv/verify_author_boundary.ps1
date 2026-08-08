@@ -324,8 +324,14 @@ if (-not $py -or -not (Test-Path $py)) {
     $siteOut = (& $py -c "import sys; print('$sentinel'); print('site' in sys.modules)" 2>&1 |
                 Out-String)
     $interpreterRuns = ($null -ne $siteOut -and $siteOut.Contains($sentinel))
+    # @() around the filter. A pipeline that yields nothing gives $null and a
+    # pipeline that yields one line gives a bare String, and .Count on either
+    # throws PropertyNotFoundStrict under the StrictMode this file inherits from
+    # the dot-source. On the dedicated runtime `site` is NOT imported, which is
+    # the accepted configuration, so this raised an ErrorRecord naming its own
+    # path and source line on exactly the host the protocol is meant to reach.
     $siteLive = ($interpreterRuns -and
-                 (($siteOut -split "`n" | Where-Object { $_.Trim() -eq 'True' }).Count -gt 0))
+                 (@($siteOut -split "`n" | Where-Object { $_.Trim() -eq 'True' }).Count -gt 0))
     if (-not $interpreterRuns) {
         foreach ($id in @('C1-06 minus-I-ignores-PYTHONPATH',
                           'C1-07 minus-I-disables-user-site',

@@ -99,7 +99,15 @@ def blank_string_literals(line: str) -> str:
             kept[reference.start():reference.end()] = list(reference.group(0))
         return quote + "".join(kept) + quote
 
-    return re.sub(r"'[^']*'|\"[^\"]*\"", fill, line)
+    # BACKTICK ESCAPES. PowerShell writes a literal quote inside a
+    # double-quoted string as `" -- so "[^"]*" terminated at that quote and left
+    # the rest of the literal unblanked, which is enough to make a function name
+    # inside a string read as a live call again. Measured: the source-boundary
+    # gate could be replaced by Write-Output "`"Assert-TrustedOperatorSource
+    # ...`"" with OP30, OP30a and OP30b all still green. A single-quoted string
+    # escapes a quote by doubling it, which the greedy alternation below already
+    # handles as two adjacent literals.
+    return re.sub(r"'(?:[^']|'')*'|\"(?:`.|[^\"])*\"", fill, line)
 
 
 def strip_powershell_comments(text: str) -> str:
@@ -678,6 +686,61 @@ def main() -> int:
             f"a copy with the account gate deleted fails while the process gate "
             f"still passes, so one gate cannot stand in for two ({removed_gates})")
 
+        # ------------------------------ the tree the scheduled task runs from
+        # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
+        #
+        # Test-CanAuthorWriteReviewerCode tested the container and stopped, so a
+        # file-level Allow ACE on reviewer_session.ps1 -- the entry point the
+        # task executes -- inside a clean, protected reviewer-bin produced no
+        # reason at all. The identical leaf-only shape had already been fixed in
+        # Assert-TrustedSourceRoot, on the tree the files are copied FROM.
+        code_dir = work / "reviewer-bin"
+        code_dir.mkdir(exist_ok=True)
+        planted_code = probe({"action": "reviewer-code-ace", "path": str(code_dir),
+                              "author": identity("SYNTH", SID_AUTHOR),
+                              "plant_file_ace": True}, work)["value"] or {}
+        clean_code = work / "reviewer-bin-clean"
+        clean_code.mkdir(exist_ok=True)
+        unplanted_code = probe({"action": "reviewer-code-ace", "path": str(clean_code),
+                                "author": identity("SYNTH", SID_AUTHOR),
+                                "plant_file_ace": False}, work)["value"] or {}
+        rec("OP37 an-author-ace-on-the-entry-point-is-detected",
+            planted_code.get("gate_says_writable") is True
+            and planted_code.get("container_is_writable") is False
+            and unplanted_code.get("gate_says_writable") is False,
+            f"an author ACE on the file the scheduled task runs is reported even "
+            f"though the directory holding it grants the author nothing, and the "
+            f"same tree without that ACE is not "
+            f"(planted={planted_code}, clean={unplanted_code})")
+
+        # ---------------------------- both interpreter-executing routes gated
+        # -ProvisionReviewerRuntime refused an author-writable build source
+        # because it COPIES from it. -HardenInterpreter EXECUTED the same
+        # operator-named interpreter at High integrity, with no writability
+        # check of any kind, and then trusted the JSON that execution printed to
+        # decide whether to lock and pin the runtime.
+        boot_live = strip_powershell_comments(
+            (ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1").read_text(
+                encoding="utf-8"))
+        boot_body = function_bodies(boot_live)
+        executing_routes = [name for name, body in boot_body.items()
+                            if "$BuildPython $" in body or "& $BuildPython" in body]
+        gated = re.findall(r"Assert-InterpreterSourceTrusted\s+-Interpreter", boot_live)
+        top_level_exec = len(re.findall(r"&\s+\$BuildPython\s", boot_live))
+        rec("OP38 every-route-that-executes-an-interpreter-checks-it-first",
+            len(gated) >= 1 and top_level_exec >= 1 and len(gated) >= top_level_exec - 1,
+            f"the interpreter-trust gate is invoked on the routes that run an "
+            f"operator-named interpreter ({len(gated)} gate call(s), "
+            f"{top_level_exec} execution(s), helper-scoped routes="
+            f"{executing_routes or 'none'})")
+
+        interpreter_helper = boot_body.get("Get-AuthorWritableInterpreterPaths", "")
+        rec("OP38a the-interpreter-check-covers-the-application-directory",
+            "$buildRoot" in interpreter_helper and "-File" in interpreter_helper,
+            "the interpreter's own directory is examined, not only DLLs and Lib "
+            "-- the application directory is first in the Windows DLL search "
+            "order and python3xx.dll lives there, not under DLLs")
+
         # ------------------------------------------ the verdict channel itself
         # A REPORTER MUST NOT RETURN ITS VERDICT DOWN THE STREAM IT PRINTS TO.
         #
@@ -695,14 +758,14 @@ def main() -> int:
             f"caller-supplied list hands over exactly nothing when there is "
             f"nothing to report ({channel})")
 
-        boot_source = (ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1").read_text(
-            encoding="utf-8")
-        boot_live = strip_powershell_comments(boot_source)
         rec("OP34a no-gate-is-fed-from-a-captured-stream",
             "Assert-CapabilitiesAcceptable -Reasons @(" not in boot_live
-            and boot_live.count("-Reasons ([ref]$measured)") == 2,
+            and boot_live.count("-Reasons ([ref]$measured)") == 2
+            and boot_live.count("Assert-CapabilitiesAcceptable -Reasons $measured") == 2,
             "both capability call sites pass a caller-owned list rather than "
-            "collecting whatever the reporter printed")
+            "collecting whatever the reporter printed, and both still feed that "
+            "list to the verdict -- an absence test alone was satisfied by "
+            "deleting the verdict call outright")
 
         # ------------------------------------------- the creation route exists
         # The switch that lets the ONE route which creates the reviewer run
@@ -841,6 +904,15 @@ def main() -> int:
                       if p.name not in ("principal_contract.ps1", "principal_contract_probe.ps1")]
         prod_sources = [p.read_text(encoding="utf-8") for p in production]
 
+        # EVERY FUNCTION IN THE ELEVATED SCRIPTS, not only the shared contract.
+        # Assert-CapabilitiesAcceptable and Write-PrincipalCapabilityFacts -- the
+        # two the previous [void](...) and captured-stream defects lived in --
+        # were outside `declared`, so nothing noticed if their call sites went
+        # away.
+        declared = declared + [line.split()[1] for source in prod_sources
+                               for line in source.splitlines()
+                               if line.startswith("function ")]
+
         def unreached_in(sources: list) -> list:
             live = reachable_names(sources + [contract_text], declared)
             return sorted(n for n in declared if n not in live)
@@ -860,9 +932,18 @@ def main() -> int:
         # function nothing invoked.
         boot = hyperv / "reviewer_bootstrap.ps1"
         boot_text = boot.read_text(encoding="utf-8")
-        severed = boot_text.replace(
-            "Assert-TrustedOperatorSource -Author $AuthorIdentity -Root $SourceRepo",
-            "# Assert-TrustedOperatorSource -Author $AuthorIdentity -Root $SourceRepo")
+        # LOCATED BY PATTERN, NOT BY A FIXED ARGUMENT LIST. Both mutations were
+        # anchored on the exact arguments of the invocation, so adding -Reviewer
+        # to it turned them into silent no-ops. They failed rather than passed,
+        # which is the right direction, but a mutation that cannot be applied
+        # proves nothing either way. The whole invocation is captured, backtick
+        # continuations included, and both checks assert it was applied.
+        gate_call = re.search(r"^Assert-TrustedOperatorSource\b(?:[^\n]*`\n)*[^\n]*",
+                              boot_text, re.M)
+        gate_line = gate_call.group(0) if gate_call else ""
+        severed = (boot_text.replace(
+            gate_line, "\n".join("# " + part for part in gate_line.splitlines()), 1)
+            if gate_line else boot_text)
         severed_sources = [severed if p.name == "reviewer_bootstrap.ps1" else text
                            for p, text in zip(production, prod_sources)]
         severed_unreached = unreached_in(severed_sources)
@@ -872,10 +953,9 @@ def main() -> int:
             f"the contract function it wraps unreached, and is reported "
             f"({severed_unreached or 'none'})")
 
-        stringified = boot_text.replace(
-            "Assert-TrustedOperatorSource -Author $AuthorIdentity -Root $SourceRepo",
-            "Write-Output 'Assert-TrustedOperatorSource -Author $AuthorIdentity "
-            "-Root $SourceRepo'")
+        stringified = (boot_text.replace(
+            gate_line, "Write-Output '" + gate_line.replace("`\n", " ") + "'", 1)
+            if gate_line else boot_text)
         stringified_sources = [stringified if p.name == "reviewer_bootstrap.ps1" else text
                                for p, text in zip(production, prod_sources)]
         stringified_unreached = unreached_in(stringified_sources)
@@ -960,7 +1040,7 @@ def main() -> int:
     # string constants; this one is the number of checks that actually
     # executed. Both are kept: the manifest catches deletion without running
     # anything, this catches hollowing at run time.
-    MINIMUM_CHECKS = 45
+    MINIMUM_CHECKS = 52
     if len(CHECKS) < MINIMUM_CHECKS:
         rec("OP99 the-battery-still-executes-its-pinned-minimum", False,
             f"only {len(CHECKS)} checks executed, below the pinned minimum of "

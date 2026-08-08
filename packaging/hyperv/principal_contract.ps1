@@ -258,19 +258,35 @@ function Resolve-PrincipalIdentity {
                 # group SIDs as though they were accounts -- `-AuthorAccount
                 # Administrators` even satisfies "the author is not in
                 # Administrators", because a group is not a member of itself.
-                $isGroup = $false
-                try {
-                    $isGroup = [bool](Get-LocalGroup -SID $sid -ErrorAction Stop)
-                } catch { $isGroup = $false }
-                if (-not $isGroup) {
-                    foreach ($wellKnown in @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-544',
-                                             'S-1-5-32-545', 'S-1-5-18', 'S-1-5-19',
-                                             'S-1-5-20')) {
-                        if ($sid -eq $wellKnown) { $isGroup = $true; break }
-                    }
+                # AN ALLOW-LIST OF SHAPES, NOT A DENY-LIST OF NAMES.
+                #
+                # Enumerating known group SIDs missed everything that is neither
+                # a local group nor on the list: NT AUTHORITY\INTERACTIVE
+                # (S-1-5-4) and NT AUTHORITY\Local account (S-1-5-113) both
+                # resolved and were accepted as the AUTHOR. The second is the
+                # dangerous one -- EVERY local account carries it, including one
+                # in Administrators, and asking whether S-1-5-113 is a MEMBER of
+                # Administrators answers no, so the acceptance predicate was
+                # satisfied by a SID that names the whole class of accounts it
+                # is supposed to exclude.
+                #
+                # A principal this contract can reason about is an ACCOUNT: an
+                # S-1-5-21-<domain>-<rid> security principal that is not a
+                # group. Everything else -- well-known SIDs, logon-type SIDs,
+                # integrity levels, capability SIDs, BUILTIN groups -- is
+                # refused by shape.
+                $notAnAccount = ''
+                if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') {
+                    $notAnAccount = 'not a user account'
+                } else {
+                    try {
+                        if (Get-LocalGroup -SID $sid -ErrorAction Stop) {
+                            $notAnAccount = 'a group is not an account'
+                        }
+                    } catch { }
                 }
-                if ($isGroup) {
-                    $result.Error = 'a group is not an account'
+                if ($notAnAccount) {
+                    $result.Error = $notAnAccount
                     $result.Resolved = $true
                     return [pscustomobject]$result
                 }
@@ -611,9 +627,30 @@ function Test-CanAuthorWriteReleaseTree {
 }
 
 function Test-CanAuthorWriteReviewerCode {
+    <#
+      RECURSIVE. The same leaf-only shape that was fixed in
+      Assert-TrustedSourceRoot, applied to the SOURCE tree and left in place on
+      the DESTINATION tree.
+
+      Testing the container alone means a file-level Allow ACE on the very
+      entry point the scheduled task executes -- reviewer_session.ps1 inside a
+      clean, protected reviewer-bin -- produces no reason at all, so the
+      transcript prints "author can write reviewer code False" over a host where
+      the author can rewrite it. The route to that ACL state is the one this
+      repository already documents: icacls /reset /T /C returns 0 having
+      silently skipped a file held open across the reset.
+    #>
     param($Author, [string[]]$ReviewerCodePaths)
+
     foreach ($path in $ReviewerCodePaths) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
         if (Test-AccountCanWritePath -Identity $Author -Path $path) { return $true }
+        $children = @(Get-ChildItem -LiteralPath $path -Recurse -Force `
+                      -ErrorAction SilentlyContinue |
+                      Select-Object -ExpandProperty FullName)
+        foreach ($child in $children) {
+            if (Test-AccountCanWritePath -Identity $Author -Path $child) { return $true }
+        }
     }
     return $false
 }
@@ -859,20 +896,38 @@ function Assert-TrustedSourceRoot {
     #
     # .git is no longer excluded: its contents decide what rev-parse and
     # git status report, which is the evidence the commit pin rests on.
-    $authorWritable = @($Root)
-    $authorWritable += @(Get-ChildItem -LiteralPath $Root -Recurse -Force `
-                         -ErrorAction SilentlyContinue |
-                         Select-Object -ExpandProperty FullName)
-    $writableHit = @($authorWritable |
+    # ENUMERATION FAILURES ARE A REASON, NOT SILENCE.
+    #
+    # -ErrorAction SilentlyContinue with no -ErrorVariable meant a subtree the
+    # elevated session could not list -- a path over 260 characters under
+    # Windows PowerShell 5.1 is the ordinary case -- contributed zero paths and
+    # the scan reported clean. That is failing OPEN on the one question this
+    # function exists to answer. reviewer_session.ps1 already treats an
+    # enumeration error as CHANGED; this now does the same.
+    $scanErrors = $null
+    $scanned = @(Get-ChildItem -LiteralPath $Root -Recurse -Force `
+                 -ErrorAction SilentlyContinue -ErrorVariable scanErrors |
+                 Select-Object -ExpandProperty FullName)
+    if (@($scanErrors).Count) { $reasons.Add('OFFLINE_SOURCE_ROOT_UNENUMERABLE') }
+    $writableHit = @(@($Root) + $scanned |
                      Where-Object { Test-AccountCanWritePath -Identity $Author -Path $_ } |
                      Select-Object -First 1)
     if ($writableHit.Count) {
         $reasons.Add('OFFLINE_SOURCE_ROOT_AUTHOR_WRITABLE')
     }
-    if ($Reviewer -and (Test-AccountCanWritePath -Identity $Reviewer -Path $Root)) {
-        # The reviewer must not control the code the OPERATOR runs either: that
-        # would let the party being measured choose the measuring instrument.
-        $reasons.Add('OFFLINE_SOURCE_ROOT_REVIEWER_WRITABLE')
+    # The reviewer must not control the code the OPERATOR runs either: that
+    # would let the party being measured choose the measuring instrument.
+    #
+    # This clause was unreachable in production for as long as it existed: the
+    # only caller, Assert-TrustedOperatorSource, had no $Reviewer parameter to
+    # pass and neither did the fixture, so $Reviewer was always $null and the
+    # property was never measured. OP30 still called the enclosing function
+    # reached, because reachability is per function, not per clause.
+    if ($Reviewer -and $Reviewer.Exists) {
+        $reviewerHit = @(@($Root) + $scanned |
+                         Where-Object { Test-AccountCanWritePath -Identity $Reviewer -Path $_ } |
+                         Select-Object -First 1)
+        if ($reviewerHit.Count) { $reasons.Add('OFFLINE_SOURCE_ROOT_REVIEWER_WRITABLE') }
     }
     $acl = $null
     try { $acl = Get-Acl -LiteralPath $Root } catch { }
