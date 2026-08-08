@@ -768,11 +768,141 @@ def main() -> int:
             refuse_detail = (refused_run.stdout or "").strip().replace("\n", " ")[:200]
         except (OSError, subprocess.SubprocessError) as exc:
             refused, refuse_detail = False, type(exc).__name__
+        # POSITION AND ARGUMENTS, PINNED.
+        #
+        # OP39 and OP39a run the lifted function against synthetic inputs and
+        # never look at the production call site, so moving the invocation BELOW
+        # the dot-source -- which discards the file's headline property, that the
+        # source is checked before it is loaded -- left every check green, as did
+        # reducing it to `-Paths @() -AncestorPaths @()`.
+        call_at = boot_live.find("Assert-SelfSourceTrusted -Paths")
+        # Searched in the BLANKED text, so the filename literal is gone --
+        # blank_string_literals replaced it with filler. The dot-source is
+        # located by the part that survives blanking.
+        load_at = boot_live.find(". (Join-Path $PSScriptRoot ")
+        empty_args = bool(re.search(
+            r"Assert-SelfSourceTrusted\s+-Paths\s+@\(\s*\)", boot_live))
+        rec("OP39b the-pre-load-check-runs-before-the-load-with-real-arguments",
+            call_at >= 0 and load_at >= 0 and call_at < load_at and not empty_args
+            and "-AncestorPaths $selfAncestors" in boot_live,
+            f"the invocation precedes the dot-source it protects and is passed "
+            f"the real path and ancestor lists rather than empty ones "
+            f"(call@{call_at}, load@{load_at}, empty-args={empty_args})")
+
         rec("OP39a a-replaceable-ancestor-is-still-refused",
             refused,
             f"an ancestor granting an untrusted principal delete-child is "
             f"refused by the same function, so accepting the volume root is a "
             f"narrower question and not a disabled one ({refuse_detail or 'no output'})")
+
+        # ------------------------- an ancestor the author OWNS, with no ACE
+        # OWNERSHIP IS A WRITE RIGHT, and the ancestor branch did not read it.
+        #
+        # The -Paths branch of the same function checks the owner and
+        # Resolve-TrustedGit judges ancestors through a predicate that counts
+        # ownership; this branch accepted a directory the author owned outright
+        # with no ACE at all. The author re-grants itself delete-child, renames
+        # the directory away and substitutes -- the exact substitution the
+        # ancestor walk was added to stop.
+        owned = work / "owned-ancestor"
+        owned.mkdir(exist_ok=True)
+        me = subprocess.run(
+            [str(SHELL), "-NoProfile", "-NonInteractive", "-Command",
+             "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value"],
+            capture_output=True, text=True, timeout=60).stdout.strip()
+        setup = work / "own-ancestor.ps1"
+        setup.write_text(
+            "$sd = New-Object Security.AccessControl.DirectorySecurity\n"
+            "$sd.SetSecurityDescriptorSddlForm('O:" + me
+            + "G:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')\n"
+            "Set-Acl -LiteralPath '" + str(owned) + "' -AclObject $sd\n", encoding="utf-8")
+        subprocess.run([str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                        "Bypass", "-File", str(setup)],
+                       capture_output=True, text=True, timeout=180)
+        owned_harness = work / "owned-ancestor-check.ps1"
+        owned_harness.write_text(
+            function_text
+            + "\nAssert-SelfSourceTrusted -Paths @() -AncestorPaths @('" + str(owned) + "')\n"
+            + "Write-Output 'ANCESTOR-ACCEPTED'\n", encoding="utf-8")
+        try:
+            owned_run = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(owned_harness)], capture_output=True, text=True, timeout=180)
+            owned_refused = (owned_run.returncode == 2
+                             and "owned-ancestor" in (owned_run.stdout or ""))
+            owned_detail = (owned_run.stdout or "").strip().replace("\n", " ")[:180]
+        except (OSError, subprocess.SubprocessError) as exc:
+            owned_refused, owned_detail = False, type(exc).__name__
+        rec("OP40 an-ancestor-the-author-owns-is-refused",
+            owned_refused,
+            f"a directory the author owns outright, carrying no ACE for it at "
+            f"all, is refused as an ancestor -- an owner holds implicit "
+            f"WRITE_DAC and can grant itself the rest ({owned_detail or 'no output'})")
+
+        # --------------------------- a failing group enumeration fails closed
+        group_state = probe({"action": "group-enumeration-failure",
+                             "name": os.environ.get("USERNAME", "")}, work)["value"] or {}
+        rec("OP41 a-failing-group-enumeration-yields-no-answer",
+            group_state.get("working_is_null") is False
+            and group_state.get("broken_is_null") is True,
+            f"the account's group set resolves normally, and when the "
+            f"enumeration throws the function returns nothing rather than a "
+            f"truncated set that every caller would read as a complete one "
+            f"({group_state})")
+
+        # --------------------- an author-writable ancestor of the interpreter
+        tools = work / "tools"
+        interpreter_dir = tools / "python"
+        interpreter_dir.mkdir(parents=True, exist_ok=True)
+        (interpreter_dir / "python.exe").write_text("stub", encoding="ascii")
+        harden = work / "harden-interpreter.ps1"
+        harden.write_text(
+            "$sd = New-Object Security.AccessControl.DirectorySecurity\n"
+            "$sd.SetSecurityDescriptorSddlForm('O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')\n"
+            "Set-Acl -LiteralPath '" + str(interpreter_dir) + "' -AclObject $sd\n"
+            "$f = New-Object Security.AccessControl.FileSecurity\n"
+            "$f.SetSecurityDescriptorSddlForm('O:SYG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)')\n"
+            "Set-Acl -LiteralPath '" + str(interpreter_dir / "python.exe") + "' -AclObject $f\n",
+            encoding="utf-8")
+        subprocess.run([str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                        "Bypass", "-File", str(harden)],
+                       capture_output=True, text=True, timeout=180)
+        helper_start = raw_boot.find("function Get-AuthorWritableInterpreterPaths")
+        helper_open = raw_boot.find("{", helper_start)
+        depth, cursor = 0, helper_open
+        while cursor < len(raw_boot):
+            if raw_boot[cursor] == "{":
+                depth += 1
+            elif raw_boot[cursor] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            cursor += 1
+        helper_text = raw_boot[helper_start:cursor + 1] if helper_start >= 0 else ""
+        interp_harness = work / "interpreter-ancestor.ps1"
+        interp_harness.write_text(
+            ". '" + str(ROOT / "packaging" / "hyperv" / "principal_contract.ps1") + "'\n"
+            "$AuthorIdentity = Resolve-PrincipalIdentity -Account $env:USERNAME\n"
+            "function Test-AuthorWritable { param([string]$Path)\n"
+            "  return (Test-AccountCanWritePath -Identity $AuthorIdentity -Path $Path) }\n"
+            + helper_text
+            + "\n$hits = @(Get-AuthorWritableInterpreterPaths -Interpreter '"
+            + str(interpreter_dir / "python.exe") + "')\n"
+            + "Write-Output ('writable-hits=' + $hits.Count)\n", encoding="utf-8")
+        try:
+            interp_run = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(interp_harness)], capture_output=True, text=True, timeout=300)
+            interp_ok = "writable-hits=1" in (interp_run.stdout or "")
+            interp_detail = (interp_run.stdout or "").strip().replace("\n", " ")[:180]
+        except (OSError, subprocess.SubprocessError) as exc:
+            interp_ok, interp_detail = False, type(exc).__name__
+        rec("OP42 an-author-writable-ancestor-of-the-interpreter-is-reported",
+            bool(helper_text) and interp_ok,
+            f"an interpreter whose own directory and executable are hardened, "
+            f"but which sits under a directory the author can write, is still "
+            f"reported -- what matters is what can replace the tree, not only "
+            f"what is inside it ({interp_detail or 'no output'})")
 
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
@@ -812,15 +942,48 @@ def main() -> int:
                             if "$BuildPython $" in body or "& $BuildPython" in body]
         gated = re.findall(r"Assert-InterpreterSourceTrusted\s+-Interpreter", boot_live)
         top_level_exec = len(re.findall(r"&\s+\$BuildPython\s", boot_live))
+
+        # PER ROUTE, AND BEFORE. Counting gate calls against execution sites
+        # cannot see WHICH route each one is in: deleting the gate from
+        # -HardenInterpreter and adding a decorative second call inside
+        # -ProvisionReviewerRuntime kept the totals equal, restored an
+        # ungated `& $BuildPython` at High integrity, and left a check named
+        # "checks it first" green. Each top-level `if ($Switch) { ... }` block
+        # is isolated by brace counting and asked the question separately.
+        def route_blocks(source: str) -> list:
+            blocks = []
+            for opener in re.finditer(r"^if \(\$[A-Za-z]+\) \{", source, re.M):
+                depth, cursor = 0, opener.end() - 1
+                while cursor < len(source):
+                    if source[cursor] == "{":
+                        depth += 1
+                    elif source[cursor] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    cursor += 1
+                blocks.append(source[opener.start():cursor + 1])
+            return blocks
+
+        ungated_routes = []
+        for block in route_blocks(boot_live):
+            execution = re.search(r"&\s+\$BuildPython\s", block)
+            if not execution:
+                continue
+            gate = re.search(r"Assert-InterpreterSourceTrusted\s+-Interpreter", block)
+            if not gate or gate.start() > execution.start():
+                header = block.splitlines()[0].strip()
+                ungated_routes.append(header)
         # ONE GATE PER EXECUTION, not "all but one". `>= top_level_exec - 1`
         # passed at (1, 2) -- exactly the state the file was in -- so deleting
         # the entire writability check protecting the other route left a check
         # named "every-route-...-first" green.
         rec("OP38 every-route-that-executes-an-interpreter-checks-it-first",
-            top_level_exec >= 1 and len(gated) >= top_level_exec,
-            f"the interpreter-trust gate is invoked on the routes that run an "
-            f"operator-named interpreter ({len(gated)} gate call(s), "
-            f"{top_level_exec} execution(s), helper-scoped routes="
+            top_level_exec >= 1 and len(gated) >= top_level_exec and not ungated_routes,
+            f"every route that runs an operator-named interpreter invokes the "
+            f"trust gate BEFORE it, in its own block ({len(gated)} gate call(s), "
+            f"{top_level_exec} execution(s), ungated routes="
+            f"{ungated_routes or 'none'}, helper-scoped routes="
             f"{executing_routes or 'none'})")
 
         interpreter_helper = boot_body.get("Get-AuthorWritableInterpreterPaths", "")

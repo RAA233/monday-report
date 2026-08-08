@@ -468,8 +468,21 @@ function Get-AccountSidSet {
     if ($GroupProvider) {
         foreach ($sid in (& $GroupProvider $Identity)) { [void]$set.Add($sid) }
     } else {
-        $groups = @()
-        try { $groups = Get-LocalGroup -ErrorAction Stop } catch { $groups = @() }
+        # FAIL CLOSED, exactly as the member enumeration below does.
+        #
+        # `catch { $groups = @() }` returned a NON-NULL truncated set -- the
+        # account's own SID plus Everyone and Authenticated Users -- so the
+        # `$null` check every caller relies on never fired and every group ACE
+        # became invisible. Measured on a directory granting BUILTIN\Users Full
+        # with no ACE for the account: writable=True with the enumeration
+        # working, writable=False with it throwing. A wrong negative over a tree
+        # the author fully controls, memoised for the process, feeding
+        # OFFLINE_SOURCE_ROOT_AUTHOR_WRITABLE, Test-CanAuthorWriteReviewerCode,
+        # OFFLINE_SENSITIVE_ROOT_AUTHOR_WRITABLE, Assert-AclApplied and
+        # Assert-InterpreterSourceTrusted at once. Get-LocalGroup fails on the
+        # same unresolvable-SID condition that motivated the member fix.
+        $groups = $null
+        try { $groups = Get-LocalGroup -ErrorAction Stop } catch { return $null }
         foreach ($group in $groups) {
             $members = @()
             # FAIL CLOSED. Dropping a group whose membership cannot be listed

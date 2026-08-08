@@ -416,6 +416,27 @@ switch ($case.action) {
         }
     }
 
+    'group-enumeration-failure' {
+        # A FAILING Get-LocalGroup MUST NOT YIELD A TRUNCATED, NON-NULL SET.
+        #
+        # `catch { $groups = @() }` returned the account's own SID plus Everyone
+        # and Authenticated Users, so the $null check every caller relies on
+        # never fired and every group ACE became invisible -- a wrong "the author
+        # cannot write here" over a tree the author fully controls, memoised for
+        # the process. The enumeration is shadowed here rather than simulated,
+        # so the real function is what answers.
+        $identity = Resolve-PrincipalIdentity -Account $case.name
+        $working = Get-AccountSidSet -Identity $identity
+        function Get-LocalGroup { throw 'simulated enumeration failure' }
+        $script:SidSetCache.Clear()
+        $broken = Get-AccountSidSet -Identity $identity
+        $script:SidSetCache.Clear()
+        $result.value = [ordered]@{
+            working_is_null = ($null -eq $working)
+            broken_is_null = ($null -eq $broken)
+        }
+    }
+
     'account-writable' {
         # Resolve the NAME when the fixture supplies no SID, so a probe about a
         # real account is answered about that account rather than about an

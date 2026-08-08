@@ -145,6 +145,27 @@ function Assert-SelfSourceTrusted {
         $ancestorAcl = $null
         try { $ancestorAcl = Get-Acl -LiteralPath $ancestor }
         catch { $bad += "unreadable-ancestor"; continue }
+        # OWNERSHIP IS A WRITE RIGHT. An owner holds implicit WRITE_DAC and can
+        # grant itself the rest, which this file states at the point where it
+        # takes ownership of the reviewer's code -- "removing the ACE alone
+        # would leave the author able to grant itself back in". The -Paths
+        # branch below checks the owner; this branch did not, so an ancestor
+        # owned by the author with no ACE at all was accepted, and the author
+        # could re-grant itself delete-child, rename hyperv\ away and
+        # substitute -- the exact substitution this walk exists to stop.
+        # Measured against the contract's own predicate on the same path and
+        # the same narrowed mask, which answers "writable" for that shape.
+        #
+        # Stock ancestors are TrustedInstaller- or SYSTEM-owned, measured, so
+        # this does not reintroduce the volume-root refusal.
+        $ancestorOwner = ''
+        try {
+            $ancestorOwner = $ancestorAcl.GetOwner(
+                [Security.Principal.SecurityIdentifier]).Value
+        } catch { }
+        if ($ancestorOwner -and ($trusted -notcontains $ancestorOwner)) {
+            $bad += "owned-ancestor:$(Split-Path $ancestor -Leaf)"
+        }
         foreach ($ace in $ancestorAcl.Access) {
             if ($ace.AccessControlType -ne 'Allow') { continue }
             if ($ace.PropagationFlags -band
@@ -371,8 +392,16 @@ function Assert-AclApplied {
     # "no author ACE" was itself blind to group ACEs and generic bits, so it
     # asserted a clean result over trees the author could still write.
     $bad = @()
+    # An unlistable subtree is not an empty one. This is the function that
+    # PRINTS "no author ACE", and the only author-writability read-back covering
+    # reviewer-src and reviewer-runtime after locking, so silence here is the
+    # most consequential fail-open of the set -- and it was the one site the
+    # previous sweep of these enumerations left untouched.
+    $itemErrors = $null
     $items = @(Get-Item -LiteralPath $Path -Force) +
-             @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue)
+             @(Get-ChildItem -LiteralPath $Path -Recurse -Force `
+               -ErrorAction SilentlyContinue -ErrorVariable itemErrors)
+    if (@($itemErrors).Count) { $bad += "unlistable:$(Split-Path $Path -Leaf)" }
     foreach ($item in $items) {
         $acl = $null
         try { $acl = Get-Acl -LiteralPath $item.FullName } catch { $bad += "unreadable:$($item.FullName)" ; continue }
@@ -597,18 +626,41 @@ function Get-AuthorWritableInterpreterPaths {
     if (-not (Test-Path -LiteralPath $Interpreter)) { return @() }
     $buildRoot = Split-Path $Interpreter -Parent
     $candidates = @($Interpreter, $buildRoot)
+    $rootErrors = $null
     $candidates += @(Get-ChildItem -LiteralPath $buildRoot -Force -File `
-                     -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+                     -ErrorAction SilentlyContinue -ErrorVariable rootErrors |
+                     Select-Object -ExpandProperty FullName)
+    $subErrors = $null
     foreach ($sub in @('DLLs', 'Lib')) {
         $dir = Join-Path $buildRoot $sub
         if (-not (Test-Path -LiteralPath $dir)) { continue }
         $candidates += $dir
         $candidates += @(Get-ChildItem -LiteralPath $dir -Recurse -Force `
-                         -ErrorAction SilentlyContinue |
+                         -ErrorAction SilentlyContinue -ErrorVariable +subErrors |
                          Select-Object -ExpandProperty FullName)
     }
-    return @($candidates | Where-Object { Test-AuthorWritable -Path $_ } |
-             Select-Object -First 1)
+    # An unlistable subtree contributed zero candidates and the gate passed.
+    if (@($rootErrors).Count -or @($subErrors).Count) { return @("$buildRoot (unlistable)") }
+    $writable = @($candidates | Where-Object { Test-AuthorWritable -Path $_ } |
+                  Select-Object -First 1)
+    if ($writable.Count) { return $writable }
+    # THE ANCESTORS OF THE INTERPRETER TOO, judged by the replace-the-subtree
+    # mask. Resolve-TrustedGit walks the full parent chain for precisely this
+    # reason and says why -- "what it takes to put a different binary in place,
+    # or to replace a directory on the way to it". Stopping at the interpreter's
+    # own directory left C:\tools author-writable while C:\tools\python was
+    # hardened, and both routes then executed an interpreter the author could
+    # replace wholesale.
+    $probe = Split-Path $buildRoot -Parent
+    while ($probe) {
+        if (Test-AccountCanWritePath -Identity $AuthorIdentity -Path $probe -Mask 0xD0042) {
+            return @("$probe (replaceable ancestor)")
+        }
+        $parent = Split-Path $probe -Parent
+        if ($parent -eq $probe) { break }
+        $probe = $parent
+    }
+    return @()
 }
 
 function Assert-InterpreterSourceTrusted {
@@ -1296,8 +1348,10 @@ if ($ProvisionReviewerRuntime) {
     }
     Assert-InterpreterSourceTrusted -Interpreter $BuildPython `
         -Route '-ProvisionReviewerRuntime'
-    $writableSource = @()
-    if ($writableSource.Count) {
+    # Superseded by Assert-InterpreterSourceTrusted two lines above, which stops
+    # with this same reason. Left as a literal-false branch it read as coverage
+    # that no input could produce, so it is gone; the gate above is the check.
+    if ($false) {
         # A HARD stop, with its own reason.
         #
         # This was waived by the same flag that waived operator/author identity
@@ -1615,16 +1669,20 @@ if ($Verify) {
             # matched an unrelated local group whose name merely ends in
             # "Users", and reported a file the reviewer provably could not read
             # as readable -- false assurance on the one check that matters here.
-            $granting = @("$env:COMPUTERNAME\$User", $User, 'BUILTIN\Users',
-                          'Everyone', 'NT AUTHORITY\Authenticated Users')
+            # DELEGATED TO THE PREDICATE, not matched on a display name and a
+            # rights STRING. FileSystemRights renders Modify as "Modify" --
+            # which matched none of the three names above -- and a
+            # non-canonical generic mask renders as a number, matching nothing
+            # either. So a reviewer ACE in either shape scored unreadable and
+            # this route printed DEFECT and
+            # OFFLINE_REVIEWER_BOOTSTRAP_OPERATOR_ACTION_REQUIRED about a target
+            # the reviewer could read perfectly well. That is the display-name
+            # and generic-bit class this file documents as fixed everywhere
+            # else by using Test-AccountCanReadPath, which was not used here.
             $readable = $false
             if (Test-Path $target) {
-                $acl = Get-Acl $target
-                $readable = @($acl.Access | Where-Object {
-                    $_.AccessControlType -eq 'Allow' -and
-                    ($granting -contains $_.IdentityReference.Value) -and
-                    $_.FileSystemRights -match 'Read|ReadAndExecute|FullControl'
-                }).Count -gt 0
+                $readable = Test-AccountCanReadPath -Identity $ReviewerIdentity `
+                    -Path $target -RequireExecute
             }
             Write-Fact 'action target reviewer-readable' $readable
             $installed = Get-InstalledSessionScript -Root $HvRoot
