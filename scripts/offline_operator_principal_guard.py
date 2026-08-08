@@ -116,6 +116,19 @@ def strip_powershell_comments(text: str) -> str:
     text = re.sub(r"<#.*?#>",
                   lambda match: chr(10) * match.group(0).count(chr(10)),
                   text, flags=re.S)
+    # HERE-STRINGS, before anything is examined line by line.
+    #
+    # blank_string_literals works within one line, so @" ... "@ and @' ... '@
+    # sailed through intact: replacing the one live invocation of the
+    # source-boundary gate with a here-string containing the same text left
+    # reachability reporting it as still called, and the boundary could be
+    # disabled with the guard green. Braces inside one also corrupted the brace
+    # counting that splits top-level code from function bodies. Blanked to
+    # filler, newlines kept, so offsets and line numbers still hold.
+    def blank_here_string(match):
+        return re.sub(r"[^\n]", "x", match.group(0))
+
+    text = re.sub(r"@([\"'])(?:.|\n)*?\1@", blank_here_string, text)
     out = []
     for line in text.splitlines():
         blanked = blank_string_literals(line)
@@ -665,6 +678,50 @@ def main() -> int:
             f"a copy with the account gate deleted fails while the process gate "
             f"still passes, so one gate cannot stand in for two ({removed_gates})")
 
+        # ------------------------------------------ the verdict channel itself
+        # A REPORTER MUST NOT RETURN ITS VERDICT DOWN THE STREAM IT PRINTS TO.
+        #
+        # Write-Fact emits with Write-Output, so wrapping the reporter in @(...)
+        # collected twelve transcript LINES as though each were a violation.
+        # Measured against zero real violations, the gate refused -- so
+        # -ProvisionPaths and -Verify failed on a fully compliant host, and the
+        # verdict carried no signal: a compromised host and a clean one produced
+        # the same refusal.
+        channel = probe({"action": "reason-channel"}, work)["value"] or {}
+        rec("OP34 the-verdict-channel-is-not-the-transcript-channel",
+            channel.get("stream_reasons") == 2 and channel.get("ref_reasons") == 0,
+            f"a reporter that returns its verdict on the success stream hands the "
+            f"caller its own prose as violations, and one that writes into a "
+            f"caller-supplied list hands over exactly nothing when there is "
+            f"nothing to report ({channel})")
+
+        boot_source = (ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1").read_text(
+            encoding="utf-8")
+        boot_live = strip_powershell_comments(boot_source)
+        rec("OP34a no-gate-is-fed-from-a-captured-stream",
+            "Assert-CapabilitiesAcceptable -Reasons @(" not in boot_live
+            and boot_live.count("-Reasons ([ref]$measured)") == 2,
+            "both capability call sites pass a caller-owned list rather than "
+            "collecting whatever the reporter printed")
+
+        # ------------------------------------------- the creation route exists
+        # The switch that lets the ONE route which creates the reviewer run
+        # before the reviewer exists had no call site anywhere in the tree, so
+        # the top-level gate refused with OFFLINE_REVIEWER_ACCOUNT_UNRESOLVED
+        # and exited before New-LocalUser. The step that establishes the whole
+        # protocol was unreachable in the only state that needs it.
+        absent_reviewer = probe(baseline_case(
+            reviewer=identity("REVIEWER", SID_REVIEWER, exists=False)), work)["reasons"]
+        rec("OP35 an-absent-reviewer-blocks-the-contract-by-default",
+            "OFFLINE_REVIEWER_ACCOUNT_UNRESOLVED" in absent_reviewer,
+            f"a reviewer that does not exist is refused unless the caller says "
+            f"it is about to create one ({absent_reviewer})")
+        rec("OP35a the-creation-route-passes-the-switch",
+            re.search(r"Assert-OperatorIsNotAuthor[^\n]*\n?[^\n]*-AllowAbsentReviewer",
+                      boot_live) is not None,
+            "the top-level principal gate relaxes the existence clause, so the "
+            "route that creates the reviewer can run on a host without one")
+
         # ------------------------------------ the provisioning ACL is workable
         # THE OPERATOR MUST BE ABLE TO WRITE ITS OWN DECLARATIONS.
         #
@@ -687,6 +744,42 @@ def main() -> int:
             f"an elevated session can create the declaration in the tree it is "
             f"provisioning, a non-administrative author cannot rewrite it, and "
             f"the author can still read the declaration it is bound by ({grant})")
+
+        # ------------------------------- a file-level ACE inside a clean root
+        # THE OBJECTS THE ELEVATED SESSION EXECUTES ARE FILES.
+        #
+        # The recursive author-writability scan was -Directory only, so a file
+        # carrying an Allow ACE inside an otherwise clean, protected root
+        # produced no reason -- and the elevated session executes
+        # offline_reviewer_runtime.py out of that tree and copies the reviewer's
+        # own session scripts from it. `icacls /T /C` returning 0 having silently
+        # skipped one open file is a documented route to exactly that state.
+        root_dir = work / "source-root"
+        root_dir.mkdir(exist_ok=True)
+        planted = probe({"action": "source-root-file-ace", "path": str(root_dir),
+                         "author": identity("SYNTH", SID_AUTHOR),
+                         "plant_file_ace": True}, work)["value"] or {}
+        clean_dir = work / "source-root-clean"
+        clean_dir.mkdir(exist_ok=True)
+        unplanted = probe({"action": "source-root-file-ace", "path": str(clean_dir),
+                           "author": identity("SYNTH", SID_AUTHOR),
+                           "plant_file_ace": False}, work)["value"] or {}
+        rec("OP36 a-file-level-author-ace-is-visible",
+            planted.get("file_is_author_writable") is True
+            and planted.get("directory_is_author_writable") is False
+            and unplanted.get("file_is_author_writable") is False,
+            f"a file the author can write inside a directory the author cannot "
+            f"is detected as writable, and the same tree without the planted ACE "
+            f"is not -- so a scan that skips files skips the objects that matter "
+            f"(planted={planted}, clean={unplanted})")
+
+        hyperv_dir = ROOT / "packaging" / "hyperv"
+        contract_live = strip_powershell_comments(
+            (hyperv_dir / "principal_contract.ps1").read_text(encoding="utf-8"))
+        rec("OP36a the-source-root-scan-enumerates-files",
+            "-Recurse -Force -Directory" not in contract_live
+            and "-Recurse -Force `" in contract_live,
+            "the source-root scan enumerates every child, not directories only")
 
         # ------------------------------------------ the write predicate itself
         # THE ARITHMETIC, ON DACL SHAPES THIS HOST DOES NOT PROVIDE.
@@ -867,7 +960,7 @@ def main() -> int:
     # string constants; this one is the number of checks that actually
     # executed. Both are kept: the manifest catches deletion without running
     # anything, this catches hollowing at run time.
-    MINIMUM_CHECKS = 40
+    MINIMUM_CHECKS = 45
     if len(CHECKS) < MINIMUM_CHECKS:
         rec("OP99 the-battery-still-executes-its-pinned-minimum", False,
             f"only {len(CHECKS)} checks executed, below the pinned minimum of "

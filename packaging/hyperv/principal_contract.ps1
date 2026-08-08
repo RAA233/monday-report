@@ -58,6 +58,11 @@ $script:System32 = Join-Path $env:SystemRoot 'System32'
 # reproduce across fresh processes and across reviewer task launches.
 $script:PrincipalSalt = 'monday-report/offline-principal/v1'
 
+# Declared at module scope. StrictMode 2.0 arrives with this file, and reading
+# an undefined $script: variable is a terminating error -- initialising it
+# lazily inside the function threw on every call instead of caching anything.
+$script:SidSetCache = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+
 function Get-TrustedNativeCommand {
     <#
       A system binary by absolute path, verified to exist, never by name.
@@ -246,6 +251,29 @@ function Resolve-PrincipalIdentity {
             $sid = ([Security.Principal.NTAccount]$candidate).Translate(
                 [Security.Principal.SecurityIdentifier]).Value
             if ($sid) {
+                # A GROUP IS NOT A PRINCIPAL THIS CONTRACT CAN REASON ABOUT.
+                #
+                # NTAccount.Translate resolves Administrators, Users and
+                # Everyone perfectly well, and the contract would then compare
+                # group SIDs as though they were accounts -- `-AuthorAccount
+                # Administrators` even satisfies "the author is not in
+                # Administrators", because a group is not a member of itself.
+                $isGroup = $false
+                try {
+                    $isGroup = [bool](Get-LocalGroup -SID $sid -ErrorAction Stop)
+                } catch { $isGroup = $false }
+                if (-not $isGroup) {
+                    foreach ($wellKnown in @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-544',
+                                             'S-1-5-32-545', 'S-1-5-18', 'S-1-5-19',
+                                             'S-1-5-20')) {
+                        if ($sid -eq $wellKnown) { $isGroup = $true; break }
+                    }
+                }
+                if ($isGroup) {
+                    $result.Error = 'a group is not an account'
+                    $result.Resolved = $true
+                    return [pscustomobject]$result
+                }
                 $result.Name = $candidate
                 $result.Sid = $sid
                 $result.Digest = Get-PrincipalDigest -Sid $sid
@@ -391,6 +419,18 @@ function Get-AccountSidSet {
     #>
     param([Parameter(Mandatory = $true)]$Identity, [scriptblock]$GroupProvider = $null)
 
+    # MEMOISED. Group membership is a property of the ACCOUNT, not of the path,
+    # and this enumerated all 24 local groups and all their members on EVERY
+    # call -- 107 ms each, against roughly 1 ms for the Get-Acl the caller
+    # actually wanted. Three recursive scans call the write predicate once per
+    # item, so provisioning a runtime of 73,711 files spent well over an hour
+    # re-deriving one unchanging answer. Only the providerless path is cached:
+    # a supplied GroupProvider is a fixture's answer and must be re-asked.
+    if (-not $GroupProvider -and $Identity.Sid -and
+        $script:SidSetCache.ContainsKey($Identity.Sid)) {
+        return $script:SidSetCache[$Identity.Sid]
+    }
+
     $set = New-Object System.Collections.Generic.List[string]
     if ($Identity.Sid) { [void]$set.Add($Identity.Sid) }
     if ($GroupProvider) {
@@ -411,6 +451,7 @@ function Get-AccountSidSet {
     # Everyone and Authenticated Users apply to any local interactive account.
     [void]$set.Add('S-1-1-0')
     [void]$set.Add('S-1-5-11')
+    if (-not $GroupProvider -and $Identity.Sid) { $script:SidSetCache[$Identity.Sid] = $set }
     return $set
 }
 
@@ -504,7 +545,13 @@ function Test-AccountCanReadPath {
     #>
     param([Parameter(Mandatory = $true)]$Identity,
           [Parameter(Mandatory = $true)][string]$Path,
-          [scriptblock]$GroupProvider = $null)
+          [scriptblock]$GroupProvider = $null,
+          # Code must be runnable; a declaration file only has to be readable.
+          # Requiring EXECUTE unconditionally made the author's `R` grant on
+          # author-account.txt -- 0x120089, exactly what the bootstrap applies --
+          # score as unreadable, so the one property the transcript asserts about
+          # that file was measured against a mask production never uses.
+          [switch]$RequireExecute)
 
     if (-not $Identity -or -not $Identity.Exists) { return $false }
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
@@ -535,8 +582,9 @@ function Test-AccountCanReadPath {
         else { $deny = $deny -bor $aceMask }
     }
     $effective = $allow -band (-bnot $deny)
-    # READ_DATA and EXECUTE both, which is what running an entry point needs.
-    return [bool](($effective -band 0x1) -and ($effective -band 0x20))
+    if (-not ($effective -band 0x1)) { return $false }      # READ_DATA
+    if ($RequireExecute) { return [bool]($effective -band 0x20) }
+    return $true
 }
 
 # ---------------------------------------------------------------- predicates
@@ -608,11 +656,18 @@ function Get-TaskRightsForAccount {
             $svc = New-Object -ComObject Schedule.Service
             $svc.Connect()
         } catch { return [pscustomobject]$result }     # scheduler unreachable
+        # GetFolder and GetTask are separated: a folder lookup that fails is the
+        # scheduler being unreachable, and only a failed GET TASK means the task
+        # is not there. Collapsed into one try, an RPC failure on GetFolder was
+        # reported as OFFLINE_TASK_ABSENT -- the single state the caller
+        # excuses -- which is the conflation this split exists to end, moved one
+        # call earlier.
+        $folder = $null
+        try { $folder = $svc.GetFolder('\') }
+        catch { return [pscustomobject]$result }
         $task = $null
-        try { $task = $svc.GetFolder('\').GetTask($TaskName) }
+        try { $task = $folder.GetTask($TaskName) }
         catch {
-            # The lookup RAN and found nothing. Distinct from the scheduler
-            # being unreachable, and the only one a caller may excuse.
             $result.absent = $true
             return [pscustomobject]$result
         }
@@ -788,10 +843,25 @@ function Assert-TrustedSourceRoot {
     # a subdirectory. `git status` does not cover it: that is a point-in-time
     # content comparison, and the window here spans two interactive password
     # prompts.
+    # FILES TOO, AND .git INCLUDED.
+    #
+    # -Directory made this blind to exactly the objects that matter: the
+    # elevated session EXECUTES scripts\offline_reviewer_runtime.py out of this
+    # tree and COPIES reviewer_session.ps1 and its helpers into the directory
+    # the reviewer runs from, and none of those four files were ever ACL-checked
+    # by anything -- Assert-SelfSourceTrusted covers only this script, the
+    # contract and their directory. A file-level Allow ACE with no ACE on the
+    # parent is not hypothetical: `icacls /T /C` returns 0 having silently
+    # skipped individual files, which this file documents elsewhere, so one file
+    # open at lock time keeps its author ACE while every directory is locked.
+    # git status does not cover it either -- that compares CONTENT at gate time,
+    # and the window afterwards spans two interactive password prompts.
+    #
+    # .git is no longer excluded: its contents decide what rev-parse and
+    # git status report, which is the evidence the commit pin rests on.
     $authorWritable = @($Root)
-    $authorWritable += @(Get-ChildItem -LiteralPath $Root -Recurse -Force -Directory `
+    $authorWritable += @(Get-ChildItem -LiteralPath $Root -Recurse -Force `
                          -ErrorAction SilentlyContinue |
-                         Where-Object { $_.FullName -notmatch '\\\.git($|\\)' } |
                          Select-Object -ExpandProperty FullName)
     $writableHit = @($authorWritable |
                      Where-Object { Test-AccountCanWritePath -Identity $Author -Path $_ } |

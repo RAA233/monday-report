@@ -28,11 +28,14 @@
     Report the principal's state without changing anything. Prints no secret.
 
 .EXAMPLE
-    # In an elevated PowerShell window:
-    .\packaging\hyperv\reviewer_bootstrap.ps1
+    # In an elevated PowerShell window. -AuthorAccount is REQUIRED on every
+    # route: without it the author identity is unresolved, the principal gate
+    # adds OFFLINE_AUTHOR_ACCOUNT_UNRESOLVED and the script exits before
+    # anything runs. Both examples here omitted it, so both exited 2.
+    .\packaging\hyperv\reviewer_bootstrap.ps1 -AuthorAccount <author-account-name>
 
 .EXAMPLE
-    .\packaging\hyperv\reviewer_bootstrap.ps1 -Verify
+    .\packaging\hyperv\reviewer_bootstrap.ps1 -Verify -AuthorAccount <author-account-name>
 #>
 [CmdletBinding()]
 param(
@@ -339,8 +342,12 @@ function Assert-AclApplied {
     if ($Account) {
         $reviewerIdentity = Resolve-PrincipalIdentity -Account $Account
         if ($reviewerIdentity.Exists) {
+            # -RequireExecute: this tree holds the code the reviewer RUNS, and the
+            # grant is RX. Readable alone would pass a tree the reviewer cannot
+            # execute, which fails at process start with no artifact.
             $unreadable = @($items | Where-Object {
-                -not (Test-AccountCanReadPath -Identity $reviewerIdentity -Path $_.FullName)
+                -not (Test-AccountCanReadPath -Identity $reviewerIdentity -Path $_.FullName `
+                      -RequireExecute)
             } | Select-Object -First 3)
             if ($unreadable.Count) {
                 Write-Output '  STOP: the reviewer cannot read the tree that was just locked.'
@@ -406,7 +413,8 @@ function Write-PrincipalCapabilityFacts {
       display-name and stale-exit-code defects survived a green battery. These
       are now the only implementations in play.
     #>
-    param($Operator, $Author, $Reviewer, [string]$Root, [string]$TaskName)
+    param($Operator, $Author, $Reviewer, [string]$Root, [string]$TaskName,
+          [Parameter(Mandatory = $true)][ref]$Reasons)
 
     $releaseTree   = $SourceRepo
     $reviewerCode  = @("$Root\reviewer-bin", "$Root\reviewer-pkg")
@@ -438,8 +446,17 @@ function Write-PrincipalCapabilityFacts {
     $authorWritesCode = Test-CanAuthorWriteReviewerCode -Author $Author `
         -ReviewerCodePaths $reviewerCode
     Write-Fact 'author can write reviewer code (want False)' $authorWritesCode
-    $capabilityReasons = New-Object System.Collections.Generic.List[string]
-    if ($authorWritesCode) { $capabilityReasons.Add('OFFLINE_REVIEWER_CODE_AUTHOR_WRITABLE') }
+    # REASONS GO INTO THE CALLER'S LIST, NEVER INTO THE SUCCESS STREAM.
+    #
+    # Write-Fact emits with Write-Output, so `@(Write-PrincipalCapabilityFacts
+    # ...)` collected twelve transcript LINES alongside the reasons and the gate
+    # read every one of them as a violation. Measured: with zero real
+    # violations the gate printed "STOP: the measured capabilities violate the
+    # contract" followed by "reason:   operator holds Administrator  True", and
+    # exited 2. -ProvisionPaths and -Verify refused on a fully compliant host,
+    # and the verdict carried no signal at all: a compromised host and a clean
+    # one produced the same refusal.
+    if ($authorWritesCode) { $Reasons.Value.Add('OFFLINE_REVIEWER_CODE_AUTHOR_WRITABLE') }
     if (Test-CanAuthorWriteReleaseTree -Author $Author -ReleaseTree $releaseTree) {
         # Expected and allowed: the author is the party that writes releases.
         # Recorded so the transcript states it rather than implying it.
@@ -470,7 +487,9 @@ function Write-PrincipalCapabilityFacts {
         -SecuritySensitive @("$Root\reviewer-bin", "$Root\reviewer-pkg",
                              "$Root\reviewer-runtime", "$Root\trust"))
     Write-Fact 'task root ACL violations' ($(if ($rootReasons.Count) { $rootReasons -join ', ' } else { 'none' }))
-    return @($capabilityReasons) + @($aceReasons) + @($rootReasons)
+    foreach ($reason in (@($aceReasons) + @($rootReasons))) {
+        if ($reason) { $Reasons.Value.Add([string]$reason) }
+    }
 }
 
 function Assert-CapabilitiesAcceptable {
@@ -799,6 +818,17 @@ function Initialize-ReviewerPaths {
         Write-Output '  reason: OFFLINE_AUTHOR_DECLARATION_AUTHOR_WRITABLE'
         exit 2
     }
+    # BOTH HALVES MEASURED. The unwritable half was checked above; the readable
+    # half was asserted in this string and nothing looked. The author has to be
+    # able to read the declaration it is bound by, and the grant applied here is
+    # `R` -- 0x120089, no EXECUTE -- so a read test that demanded execute would
+    # have scored it unreadable.
+    if (-not (Test-AccountCanReadPath -Identity $AuthorIdentity -Path $authorFile)) {
+        Write-Output ''
+        Write-Output '  STOP: the author cannot read the declaration that binds it.'
+        Write-Output '  reason: OFFLINE_AUTHOR_DECLARATION_UNREADABLE'
+        exit 2
+    }
     Write-Fact 'declared author (read back)' 'written, author-readable, author-unwritable'
 
     foreach ($d in $sharedHandoff) {
@@ -921,7 +951,20 @@ Write-Output '=== independent reviewer principal — bootstrap ==='
 # The gate belongs on this route too. The no-switch path creates the account,
 # sets the password and registers the task -- the three things that define the
 # reviewer principal -- and it was the one route not covered.
-Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
+# -AllowAbsentReviewer, ON THE ONE ROUTE THAT CREATES THE REVIEWER.
+#
+# -AllowAbsentReviewer existed, was documented, and was passed by nobody: the
+# switch had no call site anywhere in the tree. On a fresh host the reviewer
+# account does not exist, so this top-level gate refused with
+# OFFLINE_REVIEWER_ACCOUNT_UNRESOLVED and exited 2 -- before Get-LocalUser and
+# long before New-LocalUser. The one-time operator step that establishes the
+# entire protocol was unreachable in the only state in which it is needed.
+#
+# Only the EXISTENCE clause is relaxed. Every membership clause still applies,
+# and the routes that require an already-created reviewer check $existing
+# themselves and stop with their own named reason.
+Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity `
+    -AllowAbsentReviewer
 
 # THE SECOND BOUNDARY, AND IT HAD NO CALL SITE AT ALL.
 #
@@ -1135,7 +1178,9 @@ if ($ProvisionReviewerRuntime) {
 
     # Reclaim first: a previous run leaves the tree owned by Administrators with
     # no author ACE, so replacing it in place would fail partway and leave a
-    # half-built runtime that still looks structurally plausible.
+    # half-built runtime that still looks structurally plausible. takeown is
+    # still used because ownership, not the ACE, is what the previous run left
+    # behind.
     if (Test-Path $runtimeRoot) {
         $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         & $takeown /F $runtimeRoot /R /D Y | Out-Null
@@ -1364,9 +1409,10 @@ if ($ProvisionPaths) {
     Write-Fact 'credential' 'untouched (no prompt, no reset)'
     Write-Output ''
     Write-Output '  capabilities, measured through the contract:'
-    Assert-CapabilitiesAcceptable -Reasons @(Write-PrincipalCapabilityFacts `
-        -Operator $OperatorIdentity -Author $AuthorIdentity `
-        -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName)
+    $measured = New-Object System.Collections.Generic.List[string]
+    Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
+        -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName -Reasons ([ref]$measured)
+    Assert-CapabilitiesAcceptable -Reasons $measured
     Write-Output ''
     Write-Output '  Paths provisioned. The registered scheduled task is unchanged.'
     Write-Output '  If the task action still targets the authoring worktree, repoint it with:'
@@ -1375,9 +1421,10 @@ if ($ProvisionPaths) {
 }
 
 if ($Verify) {
-    Assert-CapabilitiesAcceptable -Reasons @(Write-PrincipalCapabilityFacts `
-        -Operator $OperatorIdentity -Author $AuthorIdentity `
-        -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName)
+    $measured = New-Object System.Collections.Generic.List[string]
+    Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
+        -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName -Reasons ([ref]$measured)
+    Assert-CapabilitiesAcceptable -Reasons $measured
     Write-Fact 'account exists' ([bool]$existing)
     if ($existing) {
         Write-Fact 'enabled' $existing.Enabled

@@ -129,14 +129,29 @@ def count_recorded_checks(guard: Path, id_pattern: str) -> int:
             if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
                     and isinstance(first.value.value, str)):
                 docstrings.add(id(first.value))
+    # IDS THAT REACH A CALL, not ids that merely appear.
+    #
+    # Counting every non-docstring constant meant a module consisting of one
+    # list literal of ids and a main() that returns 0 -- no recording call, no
+    # probe, no checks at all -- scored 48 against a floor of 35. Docstring
+    # exclusion was not the hole; treating data as evidence of execution was.
+    # An id inside a collection that is itself passed to a call still counts,
+    # because several cases are recorded from a shared helper.
     found = set()
+
+    def ids_in(node) -> set:
+        collected = set()
+        for child in ast.walk(node):
+            if (isinstance(child, ast.Constant) and isinstance(child.value, str)
+                    and id(child) not in docstrings and matcher.match(child.value)):
+                collected.add(child.value.split()[0])
+        return collected
+
     for node in ast.walk(tree):
-        # Anywhere but a docstring: several ids reach their recording call
-        # through a tuple literal rather than as a direct argument, and counting
-        # only direct arguments missed four of them.
-        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and id(node) not in docstrings and matcher.match(node.value)):
-            found.add(node.value.split()[0])
+        if not isinstance(node, ast.Call):
+            continue
+        for argument in list(node.args) + [kw.value for kw in node.keywords]:
+            found |= ids_in(argument)
     return len(found)
 
 

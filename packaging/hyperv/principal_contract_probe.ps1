@@ -294,7 +294,10 @@ switch ($case.action) {
         # security IDs was done" -- which fails the whole grant and leaves an
         # empty DACL that nobody can write. Measured, not assumed.
         $authorSid = $case.author.sid
-        $dirSddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$authorSid)"
+        # 0x120089 -- the READ the bootstrap actually grants (`R`), not the RX a
+        # fixture would reach for. Measuring the third property against a mask
+        # production never applies proved nothing about production.
+        $dirSddl = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x120089;;;$authorSid)"
         $dir = New-Object Security.AccessControl.DirectorySecurity
         $dir.SetSecurityDescriptorSddlForm($dirSddl, 'Access')
         Set-Acl -LiteralPath $case.path -AclObject $dir
@@ -306,7 +309,7 @@ switch ($case.action) {
             $wrote = ((Get-Content -LiteralPath $declaration -Raw).Trim() -eq 'DECLARED-AUTHOR')
         } catch { $wrote = $false }
         if ($wrote) {
-            $fileSddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;$authorSid)"
+            $fileSddl = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x120089;;;$authorSid)"
             $file = New-Object Security.AccessControl.FileSecurity
             $file.SetSecurityDescriptorSddlForm($fileSddl, 'Access')
             Set-Acl -LiteralPath $declaration -AclObject $file
@@ -319,6 +322,68 @@ switch ($case.action) {
                 -Path $declaration -GroupProvider $noGroups))
             author_can_read = [bool]($wrote -and (Test-AccountCanReadPath -Identity $identity `
                 -Path $declaration -GroupProvider $noGroups))
+        }
+    }
+
+    'reason-channel' {
+        # THE SHAPE THAT MADE EVERY ROUTE REFUSE ON A CLEAN HOST.
+        #
+        # A reporter that prints its transcript with Write-Output and also
+        # RETURNS its verdict puts both on the success stream, so @(...) around
+        # the call collects the prose as though it were violations. Measured
+        # against zero real violations, the gate saw twelve. Both shapes are run
+        # here: the caller must see exactly the reasons, and never a fact line.
+        function Report-ViaStream {
+            Write-Output '  some fact                              True'
+            Write-Output '  another fact                           none'
+            $reasons = New-Object System.Collections.Generic.List[string]
+            return @($reasons)
+        }
+        function Report-ViaRef {
+            param([Parameter(Mandatory = $true)][ref]$Reasons)
+            Write-Output '  some fact                              True'
+            Write-Output '  another fact                           none'
+        }
+        $viaStream = @(Report-ViaStream)
+        $collected = New-Object System.Collections.Generic.List[string]
+        Report-ViaRef -Reasons ([ref]$collected) | Out-Null
+        $result.value = [ordered]@{
+            stream_reasons = $viaStream.Count
+            ref_reasons = $collected.Count
+        }
+    }
+
+    'source-root-file-ace' {
+        # An author-writable FILE inside an otherwise clean, protected root.
+        # The scan was -Directory only, so the objects the elevated session
+        # executes and copies were never ACL-checked at all.
+        $authorSid = $case.author.sid
+        $clean = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        $dir = New-Object Security.AccessControl.DirectorySecurity
+        $dir.SetSecurityDescriptorSddlForm($clean, 'Access')
+        Set-Acl -LiteralPath $case.path -AclObject $dir
+
+        $nested = Join-Path $case.path 'scripts'
+        if (-not (Test-Path $nested)) { New-Item -ItemType Directory -Force -Path $nested | Out-Null }
+        $nestedAcl = New-Object Security.AccessControl.DirectorySecurity
+        $nestedAcl.SetSecurityDescriptorSddlForm($clean, 'Access')
+        Set-Acl -LiteralPath $nested -AclObject $nestedAcl
+
+        $planted = Join-Path $nested 'offline_reviewer_runtime.py'
+        Set-Content -Path $planted -Value '# executed at high integrity' -Encoding ascii
+        if ($case.plant_file_ace) {
+            $fileAcl = New-Object Security.AccessControl.FileSecurity
+            $fileAcl.SetSecurityDescriptorSddlForm(
+                "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x120116;;;$authorSid)", 'Access')
+            Set-Acl -LiteralPath $planted -AclObject $fileAcl
+        }
+        $identity = New-Identity -Spec $case.author
+        $noGroups = { param($i) return @() }
+        $result.value = [ordered]@{
+            file_is_author_writable = [bool](Test-AccountCanWritePath -Identity $identity `
+                -Path $planted -GroupProvider $noGroups)
+            directory_is_author_writable = [bool](Test-AccountCanWritePath -Identity $identity `
+                -Path $nested -GroupProvider $noGroups)
         }
     }
 
