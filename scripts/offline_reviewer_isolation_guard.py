@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -320,8 +321,10 @@ def contract_battery() -> None:
     # Counting occurrences counted the function DEFINITION too, and said nothing
     # about the exits that never call it. Every `exit` in the session must be
     # preceded by a clear or by New-Status, which writes a fresh result.
+    # Catches `exit`, `Exit`, a bare `exit`, and `...; exit 1`. Matching only
+    # a line that STARTS with "exit " missed three of those shapes.
     exits = [n for n, line in enumerate(session.splitlines(), 1)
-             if line.strip().startswith("exit ")]
+             if re.search(r"(^|;)\s*exit\b", line, re.IGNORECASE)]
     lines = session.splitlines()
     # A fresh status is NOT a substitute for clearing.
     #
@@ -346,7 +349,13 @@ def contract_battery() -> None:
         # Clear-StaleTranscripts call sitting immediately above it, which is the
         # order the code actually uses -- clear, then report, then exit. Ten
         # correctly-guarded exits were reported as unguarded.
-        for k in range(n - 1, max(0, n - 30), -1):
+        #
+        # THREE lines, not thirty. A thirty-line lookback is proximity dressed
+        # as reachability: a clear in one branch of an if/else excused an exit
+        # in the other, and the window was larger than the fourteen it replaced.
+        # Three is short enough that the statement has to belong to the same
+        # branch.
+        for k in range(n - 1, max(0, n - 3), -1):
             text = lines[k - 1]
             if "Clear-StaleTranscripts" in text:
                 cleared = True
@@ -490,7 +499,7 @@ def non_elevated_capability() -> dict:
         shutil.rmtree(work, ignore_errors=True)
 
 
-def author_task_rights(*, drop_token: bool = False) -> dict:
+def author_task_rights() -> dict:
     """What the author's ordinary identity may do to the reviewer's task object.
 
     `schtasks /Run` is the entire author-to-reviewer control channel, so two
@@ -515,12 +524,24 @@ def author_task_rights(*, drop_token: bool = False) -> dict:
     try:
         script = work / "rights.ps1"
         script.write_text("\n".join([
+            # `readable` is DERIVED from the read succeeding. It used to be the
+            # literal $true, which meant "the script reached line 10" -- a value
+            # the asserting process writes about itself.
             "$ErrorActionPreference = 'Stop'",
-            "$svc = New-Object -ComObject Schedule.Service",
-            "$svc.Connect()",
-            "$task = $svc.GetFolder('\\').GetTask('MR-OFFLINE-REVIEWER-RUN')",
-            "$sd = New-Object Security.AccessControl.RawSecurityDescriptor(",
-            "    $task.GetSecurityDescriptor(7))",
+            "$readable = $false",
+            "$sd = $null",
+            "try {",
+            "  $svc = New-Object -ComObject Schedule.Service",
+            "  $svc.Connect()",
+            "  $task = $svc.GetFolder('\\').GetTask('MR-OFFLINE-REVIEWER-RUN')",
+            "  $sd = New-Object Security.AccessControl.RawSecurityDescriptor(",
+            "      $task.GetSecurityDescriptor(7))",
+            "  $readable = $true",
+            "} catch {",
+            "  @{ readable = $false; present = $false; may_start = $false;",
+            "     may_modify = $false; owns_task = $false } | ConvertTo-Json -Compress",
+            "  exit 0",
+            "}",
             "$rows = & \"$env:SystemRoot\System32\whoami.exe\" /groups /fo csv |",
             "    ConvertFrom-Csv",
             "$me = [Security.Principal.WindowsIdentity]::GetCurrent()",
@@ -541,7 +562,7 @@ def author_task_rights(*, drop_token: bool = False) -> dict:
             "$owns = $false",
             "if ($sd.Owner) { $owns = $sids.Contains($sd.Owner.Value) }",
             "if ($owns) { $effective = $effective -bor 0x40000 }",
-            "@{ readable = $true",
+            "@{ readable = $readable",
             "   present = ($effective -ne 0)",
             "   may_start = [bool]($effective -band 0x20)",
             "   may_modify = [bool]($effective -band 0xD0116)",
@@ -549,33 +570,23 @@ def author_task_rights(*, drop_token: bool = False) -> dict:
         ]), encoding="utf-8")
         shell = (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
                  / "WindowsPowerShell" / "v1.0" / "powershell.exe")
-        # Measured through the SAME dropped token the write probes use, not
-        # through whatever token the guard happens to hold.
+        # THIS GUARD'S OWN TOKEN, always.
         #
-        # Measuring with an elevated token answered "can an administrator start
-        # this task", which is not the question RI17 and RI18 ask -- and it
-        # reported PASS for a property that is false, since the live descriptor
-        # carries no author ACE at all and an ordinary token's effective mask is
-        # zero.
-        if drop_token:
-            out = work / "rights.json"
-            runner = work / "run.cmd"
-            runner.write_text(
-                "@echo off\r\n"
-                '"%s" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%s" > "%s" 2>nul\r\n'
-                % (shell, script, out), encoding="ascii")
-            subprocess.run(["runas.exe", "/trustlevel:0x20000", str(runner)],
-                           capture_output=True, text=True, timeout=180)
-            for _ in range(60):
-                if out.is_file() and out.read_text(encoding="utf-8", errors="ignore").strip():
-                    break
-                time.sleep(1)
-            text = out.read_text(encoding="utf-8", errors="ignore") if out.is_file() else ""
-        else:
-            proc = subprocess.run([str(shell), "-NoProfile", "-NonInteractive",
-                                   "-ExecutionPolicy", "Bypass", "-File", str(script)],
-                                  capture_output=True, text=True, timeout=180)
-            text = proc.stdout or ""
+        # A dropped-token branch was added here and could never change a
+        # verdict: it ran only when the guard was elevated, which is exactly
+        # when `trustworthy` is already False, so its answer was ANDed with
+        # False on every path. It also did not work -- under the dropped token
+        # GetTask fails with E_ACCESSDENIED before the descriptor is reached, so
+        # no JSON was produced and a sixty-second poll burned a full minute per
+        # run to learn nothing.
+        #
+        # When the guard is unprivileged its token IS the author's, which is the
+        # mode whose answer counts. When it is elevated the result is labelled
+        # unproven, as every other elevated measurement here is.
+        proc = subprocess.run([str(shell), "-NoProfile", "-NonInteractive",
+                               "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                              capture_output=True, text=True, timeout=180)
+        text = proc.stdout or ""
         for line in text.splitlines():
             line = line.strip()
             if line.startswith("{"):
@@ -722,7 +733,7 @@ def elevation_battery() -> None:
     # task action" -- simply vanished from the results. A check that disappears
     # instead of failing is worse than one that fails: the list looks complete,
     # the count still adds up, and nobody notices the question was never asked.
-    rights = author_task_rights(drop_token=self_elevated)
+    rights = author_task_rights()
     readable = bool(rights) and rights.get("readable") is True
     unreadable_note = ("" if readable else
                        " [UNMEASURED: the measuring token cannot read the task's "
@@ -815,7 +826,18 @@ def multiline_path_literals(paths: list) -> list:
                         break
                     index += 1
                 literal = text[start:index]
-                if ("\n" in literal or "\r" in literal) and "\\" in literal:
+                # NO separator requirement.
+                #
+                # Requiring a surviving backslash meant the check could only see
+                # damage that left one behind. The mangling that actually
+                # survives is a CR that git normalises to CRLF -- and five of
+                # the six "$Root\..." literals in the bootstrap have exactly one
+                # separator, so eating it leaves no backslash at all and both
+                # halves of this battery reported clean. A string literal
+                # spanning lines is the anomaly; here-strings and comments are
+                # already skipped above, and on the real files this finds
+                # nothing, which is how it should read on a healthy tree.
+                if "\n" in literal or "\r" in literal:
                     line = text.count("\n", 0, start) + 1
                     found.append((path.name, f"line {line}: a path literal spans lines"))
                 continue

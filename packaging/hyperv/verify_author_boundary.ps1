@@ -288,9 +288,26 @@ if (-not $py -or -not (Test-Path $py)) {
     # and `site` is legitimately absent -- and all three scored FAIL, which is
     # to say the probe could never exit 0 on a correctly provisioned host and
     # its exit code carried no signal.
-    $siteLive = ((& $py -c "import sys; print('site' in sys.modules)" 2>&1 |
-                  Out-String).Trim() -eq 'True')
-    if (-not $siteLive) {
+    # The interpreter must be shown to RUN before its behaviour means
+    # anything. Deriving $siteLive from output alone treated "could not
+    # execute" as "site is not imported", which hard-coded C1-06 and C1-07 to
+    # $false and made the inverted C1-09 pass on an empty string -- so pointing
+    # $py at a text file scored all four probes as fully hardened. Three of them
+    # had been fail-closed before this round; the fix flipped them open.
+    $siteOut = (& $py -c "import sys; print('site' in sys.modules)" 2>&1 | Out-String)
+    $siteRc = $LASTEXITCODE
+    $interpreterRuns = ($siteRc -eq 0)
+    $siteLive = ($interpreterRuns -and ($siteOut.Trim() -eq 'True'))
+    if (-not $interpreterRuns) {
+        foreach ($id in @('C1-06 minus-I-ignores-PYTHONPATH',
+                          'C1-07 minus-I-disables-user-site',
+                          'C1-08 minus-I-ignores-PYTHONHOME',
+                          'C1-09 site-not-imported-by-the-runtime')) {
+            Add-Probe $id $null `
+                'the pinned interpreter could not be executed, so nothing about its behaviour is established' `
+                -Inconclusive
+        }
+    } elseif (-not $siteLive) {
         Add-Probe 'C1-06 minus-I-ignores-PYTHONPATH' $false `
             'this runtime does not import site at all, so PYTHONPATH cannot reach an import with or without -I'
     } else {
@@ -298,7 +315,8 @@ if (-not $py -or -not (Test-Path $py)) {
         "PYTHONPATH import succeeded without -I=$honoured, failed with -I=$ignored (both required, so the flag is seen to bite)"
     }
     $userSite = (& $py -I -c "import site; print(site.ENABLE_USER_SITE)" 2>&1 | Out-String).Trim()
-    if (-not $siteLive) {
+    if (-not $interpreterRuns) { }
+    elseif (-not $siteLive) {
         Add-Probe 'C1-07 minus-I-disables-user-site' $false `
             "site is never imported, so there is no user site directory to enable (ENABLE_USER_SITE=$userSite)"
     } else {
@@ -322,8 +340,10 @@ if (-not $py -or -not (Test-Path $py)) {
     # runtime was correct. On a stock interpreter site.py runs under -I and that
     # is the finding; on the dedicated runtime it does not, and that is the
     # control working.
+    if ($interpreterRuns) {
     Add-Probe 'C1-09 site-not-imported-by-the-runtime' ($siteRuns -eq 'True') `
         "site.py ran under -I = $siteRuns; on the dedicated runtime this must be False, which is what makes sitecustomize and .pth dead rather than merely guarded"
+    }
     Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 

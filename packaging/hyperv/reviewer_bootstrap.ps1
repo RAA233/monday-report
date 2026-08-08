@@ -119,6 +119,90 @@ function Test-AuthorWritable {
     return $false
 }
 
+function Assert-AclApplied {
+    <#
+      Read the ACL back and prove it. Do not print a sentence describing it.
+
+      -HardenInterpreter and -StagePackage ran icacls with `| Out-Null`,
+      ErrorActionPreference=Continue, no $LASTEXITCODE test and no read-back,
+      then printed the literal "admins+SYSTEM write, reviewer read+execute, no
+      author-user ACE". `icacls /C` returns 0 even where it failed per file, and
+      2 when the target is missing -- both discarded. So the operator's
+      transcript asserted an outcome nothing had measured, and the reviewer
+      adopted whatever was on disk.
+    #>
+    param([string]$Path, [string]$Account)
+
+    if (-not (Test-Path $Path)) {
+        Write-Output "  STOP: $Path does not exist after the ACL step."
+        Write-Output '  reason: OFFLINE_ACL_TARGET_ABSENT'
+        exit 2
+    }
+    $me = "$env:USERDOMAIN\$env:USERNAME"
+    $bad = @()
+    $items = @(Get-Item -LiteralPath $Path -Force) +
+             @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue)
+    foreach ($item in $items) {
+        $acl = $null
+        try { $acl = Get-Acl -LiteralPath $item.FullName } catch { $bad += "unreadable:$($item.FullName)" ; continue }
+        if ($acl.Owner -eq $me) { $bad += "author-owns:$($item.FullName)" }
+        foreach ($ace in $acl.Access) {
+            if ($ace.IdentityReference.Value -ne $me) { continue }
+            if ($ace.AccessControlType -ne 'Allow') { continue }
+            if ($ace.FileSystemRights.ToString() -match 'Write|Modify|FullControl|CreateFiles') {
+                $bad += "author-writes:$($item.FullName)"
+            }
+        }
+        if ($bad.Count -ge 5) { break }
+    }
+    $rootAcl = Get-Acl -LiteralPath $Path
+    if (-not $rootAcl.AreAccessRulesProtected) { $bad += "inherits:$Path" }
+    if ($bad.Count) {
+        Write-Output '  STOP: the ACL did not apply as intended.'
+        Write-Output '  reason: OFFLINE_ACL_NOT_APPLIED'
+        foreach ($entry in ($bad | Select-Object -First 5)) { Write-Output "    $entry" }
+        exit 2
+    }
+    Write-Fact 'ACL verified by read-back' "$($items.Count) object(s): protected, admins-owned, no author ACE"
+}
+
+function Assert-TaskRootProtected {
+    <#
+      The runtime is verified against a manifest that lives INSIDE it, so the
+      whole check is self-consistency: tamper a stdlib module, regenerate the
+      manifest, and verification passes. What makes it mean anything is that the
+      tree was never author-writable in the first place.
+
+      Nothing established that. This function was described in a commit message
+      and did not exist -- the patch that was supposed to add it died on an
+      earlier hunk and wrote nothing, and the failure was not noticed because
+      the claim was reported from the patch's intent rather than from the file.
+    #>
+    param([string]$Root, [string]$Runtime)
+
+    $acl = $null
+    try { $acl = Get-Acl -LiteralPath $Root } catch { $acl = $null }
+    if (-not $acl -or -not $acl.AreAccessRulesProtected) {
+        Write-Output '  STOP: the task root still inherits permissions from its parent.'
+        Write-Output '  reason: OFFLINE_TASK_ROOT_NOT_PROTECTED'
+        Write-Output '  remedy: run -ProvisionPaths first, which breaks that inheritance.'
+        exit 2
+    }
+    if ($Runtime -and (Test-Path $Runtime)) {
+        # Recursive: the leaf's own DACL says nothing about an inherited ACE on
+        # a subdirectory, and ownership anywhere inside is a write right.
+        $writable = @(Get-ChildItem -LiteralPath $Runtime -Recurse -Force -ErrorAction SilentlyContinue |
+                      Where-Object { Test-AuthorWritable -Path $_.FullName } |
+                      Select-Object -First 1)
+        if ((Test-AuthorWritable -Path $Runtime) -or $writable.Count) {
+            Write-Output '  STOP: the runtime is writable by the author identity.'
+            Write-Output '  reason: REVIEWER_RUNTIME_AUTHOR_WRITABLE'
+            Write-Output '  Locking it now would pin bytes the author could still have chosen.'
+            exit 2
+        }
+    }
+}
+
 function Assert-OperatorIsNotAuthor {
     <#
       THE RESIDUAL THIS PROTOCOL CANNOT CLOSE IN CODE.
@@ -158,16 +242,32 @@ function Assert-OperatorIsNotAuthor {
         catch { $authorName = '' }
     }
     $current = $env:USERNAME
-    if (-not $authorName) {
-        # No recorded author yet. Fall back to the account that owns the source
-        # repository this script was launched from -- if that is this account,
-        # the operator and the author are the same principal whatever the trust
-        # root would eventually say.
-        try { $authorName = (Get-Acl -LiteralPath $SourceRepo).Owner -replace '^.*\\', '' }
-        catch { $authorName = '' }
+    # FIRE UNLESS DIFFERENCE IS POSITIVELY ESTABLISHED.
+    #
+    # The previous shape compared a recorded author name to the current user and
+    # returned silently on anything that did not match. So a source repository
+    # owned by BUILTIN\Administrators -- the default for anything created,
+    # takeown'd or restored in an elevated window -- made the gate conclude
+    # "different principals" and skip, on a host where the operator IS the
+    # author. Not attacker-driven, but naturally occurring, which is worse:
+    # nothing would ever have flagged it.
+    $establishedDifferent = $false
+    if ($authorName -and ($authorName -ne $current)) {
+        # A recorded author account that is genuinely somebody else.
+        $establishedDifferent = $true
     }
-    $same = ($authorName -eq '') -or ($authorName -eq $current)
-    if (-not $same) { return }
+    if (-not $authorName) {
+        # Nothing recorded. The owner of the source repository is a hint, not a
+        # proof: a group owner establishes nothing at all.
+        $owner = ''
+        try { $owner = (Get-Acl -LiteralPath $SourceRepo).Owner } catch { $owner = '' }
+        $ownerUser = $owner -replace '^.*\\', ''
+        $ownerIsGroup = ($owner -match '^(BUILTIN|NT AUTHORITY|NT SERVICE)\\')
+        if ($ownerUser -and (-not $ownerIsGroup) -and ($ownerUser -ne $current)) {
+            $establishedDifferent = $true
+        }
+    }
+    if ($establishedDifferent) { return }
 
     Write-Output ''
     Write-Output '  RESIDUAL: the elevated operator and the author are the same Windows account.'
@@ -578,6 +678,7 @@ if ($ProvisionReviewerRuntime) {
             exit 2
         }
     }
+    Assert-TaskRootProtected -Root $HvRoot -Runtime ''
     $builder = Join-Path $SourceRepo 'scripts\offline_reviewer_runtime.py'
     if (-not (Test-Path $builder)) {
         Write-Output '  STOP: the runtime builder is missing from the source repository.'
@@ -672,6 +773,7 @@ if ($HardenInterpreter) {
         exit 2
     }
 
+    Assert-TaskRootProtected -Root $HvRoot -Runtime $runtimeRoot
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & icacls.exe $runtimeRoot /reset /T /C /Q | Out-Null
     & icacls.exe $runtimeRoot /inheritance:r | Out-Null
@@ -685,9 +787,9 @@ if ($HardenInterpreter) {
     Set-Content -Path (Join-Path $stateDir 'python-path.txt') `
         -Value (Join-Path $runtimeRoot 'python.exe') -Encoding ascii
 
+    Assert-AclApplied -Path $runtimeRoot -Account $User
     Write-Fact 'runtime verified' 'accepted (0 refusal reasons)'
     Write-Fact 'runtime pinned' $true
-    Write-Fact 'runtime ACL' 'admins+SYSTEM write, reviewer read+execute, no author-user ACE'
     Write-Fact 'shared interpreters touched' 'none'
     exit 0
 }
@@ -718,10 +820,11 @@ if ($StagePackage) {
     & icacls.exe $dest /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${User}:(OI)(CI)RX" /T /C /Q | Out-Null
     & icacls.exe $dest /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
+    Assert-AclApplied -Path $dest -Account $User
     Write-Fact 'package staged' $true
     Write-Output '  NOTE: the staged package is part of the reviewer code pin.'
     Write-Output '        Run -RepinReviewerCode after this, or the reviewer will refuse.'
-    Write-Fact 'package ACL' 'admins+SYSTEM write, reviewer read+execute, no author-user ACE'
+
     exit 0
 }
 
@@ -792,7 +895,7 @@ if ($ExportSource) {
     # and VERIFY its source without letting the author's user identity change it.
     & icacls.exe $dest /setowner "$User" /T /C /Q | Out-Null
     Write-Fact 'export owner' 'reviewer (so it can verify the head first hand)'
-    Write-Fact 'export ACL' 'admins+SYSTEM write, reviewer read+execute, no author-user ACE'
+    Assert-AclApplied -Path $dest -Account $User
     Write-Fact 'reviewer driver present' (Test-Path "$dest\scripts\offline_reviewer_execute.py")
     exit 0
 }

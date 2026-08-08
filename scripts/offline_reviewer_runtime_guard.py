@@ -141,17 +141,27 @@ def build_cached_runtime():
 
     from offline_reviewer_runtime import build  # noqa: PLC0415
 
-    cache = Path(tempfile.gettempdir()) / ("mr-reviewer-runtime-cache-"
-                                           + ".".join(map(str, _sys.version_info[:3])))
-    marker = cache / "reviewer-runtime-manifest.v1.json"
-    if marker.is_file():
-        return cache
+    # BUILT FRESH, into a path nobody can predict.
+    #
+    # The cache lived at %TEMP%\mr-reviewer-runtime-cache-<x.y.z> and was
+    # trusted on the existence of a file called reviewer-runtime-manifest.v1.json
+    # -- nothing else, and verify() was never called on it. A directory
+    # containing a stub .bat, a hand-written ._pth and a manifest reading
+    # "tree_digest": "DEADBEEF" was returned as "a real dedicated runtime", and
+    # whatever sat at that path is what RT22 then executed. It is also
+    # author-writable and its name is a pure function of the interpreter
+    # version.
+    #
+    # Rebuilding costs about half a minute. That is the correct price for the
+    # one check in this file that runs a real interpreter.
+    root = Path(tempfile.mkdtemp(prefix="mr-runtime-real-"))
+    built = root / "runtime"
     try:
-        build(Path(_sys.executable).parent, cache)
+        build(Path(_sys.executable).parent, built)
     except (OSError, SystemExit, ValueError):
-        shutil.rmtree(cache, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
         return None
-    return cache
+    return built
 
 
 def main() -> int:
@@ -440,11 +450,17 @@ def main() -> int:
             real_pth = next(real.glob("python*._pth"), None)
             before = site_is_disabled(real / "python.exe")
             saved = real_pth.read_bytes() if real_pth else b""
-            if real_pth:
-                real_pth.unlink()
-            after = site_is_disabled(real / "python.exe")
-            if real_pth:
-                real_pth.write_bytes(saved)
+            after = None
+            try:
+                if real_pth:
+                    real_pth.unlink()
+                after = site_is_disabled(real / "python.exe")
+            finally:
+                # try/finally, so an exception mid-cycle cannot leave the
+                # fixture in its mutated state. The claim that this restored on
+                # every path was simply false before.
+                if real_pth:
+                    real_pth.write_bytes(saved)
             restored = site_is_disabled(real / "python.exe")
             rec("RT22 site-probe-exercised-on-a-real-runtime",
                 before is True and after is False and restored is True,
