@@ -159,8 +159,14 @@ def strip_powershell_comments(text: str) -> str:
 def function_bodies(text: str) -> dict:
     """Each function name mapped to its body, by brace counting."""
 
+    # LEADING WHITESPACE IS ALLOWED. Anchoring on column 0 meant a definition
+    # indented by two spaces -- valid PowerShell, and already present in
+    # hyperv_control.ps1 and provision_vm.ps1 -- was not recognised as a
+    # function at all, so its body was folded into "top-level code" and every
+    # call inside it counted as live. Wrapping a dead gate in an indented
+    # function was enough to keep the reachability checks green.
     bodies = {}
-    for match in re.finditer(r"^function\s+([A-Za-z][A-Za-z0-9\-]*)", text, re.M):
+    for match in re.finditer(r"^[ \t]*function\s+([A-Za-z][A-Za-z0-9\-]*)", text, re.M):
         opening = text.find("{", match.end())
         if opening < 0:
             continue
@@ -195,7 +201,7 @@ def reachable_names(sources: list, declared: list) -> set:
         for body in spans.values():
             remainder = remainder.replace(body, "", 1)
         top_level.append(
-            re.sub(r"^function\s+[A-Za-z][A-Za-z0-9\-]*", "", remainder, flags=re.M))
+            re.sub(r"^[ \t]*function\s+[A-Za-z][A-Za-z0-9\-]*", "", remainder, flags=re.M))
 
     known = set(bodies) | set(declared)
 
@@ -273,6 +279,11 @@ def main() -> int:
         rec("OP00 probe-present", False, "the contract probe is missing")
         return 1
     work = Path(tempfile.mkdtemp(prefix="mr-principal-"))
+    # Read once. Several checks below reason about the elevated script; each
+    # re-reading it invited exactly the ordering accident that this hoist
+    # removes.
+    boot_live = strip_powershell_comments(
+        (ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1").read_text(encoding="utf-8"))
     try:
         # ---------------------------------------------------- the contract
         rec("OP00 baseline-accepted", not probe(baseline_case(), work)["reasons"],
@@ -686,6 +697,83 @@ def main() -> int:
             f"a copy with the account gate deleted fails while the process gate "
             f"still passes, so one gate cannot stand in for two ({removed_gates})")
 
+        # ------------------------------ the pre-load check, ACTUALLY EXECUTED
+        # NOTHING IN THIS BATTERY HAD EVER RUN A LINE OF reviewer_bootstrap.ps1.
+        #
+        # Assert-SelfSourceTrusted runs above the dot-source and above every
+        # gate, and it acquired an ancestor walk that judged the volume root by
+        # the full write mask without skipping inherit-only ACEs. A stock C:\
+        # grants Authenticated Users APPEND_DATA outright and GENERIC_WRITE
+        # inherit-only, so it scored "writable" and EVERY route exited 2 --
+        # while this battery stayed 56/56 green, because every check read the
+        # file and none executed it.
+        #
+        # The shipped function is lifted verbatim out of the script and run.
+        boot_bodies = function_bodies(boot_live)
+        self_check = boot_bodies.get("Assert-SelfSourceTrusted", "")
+        raw_boot = (ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1").read_text(
+            encoding="utf-8")
+        start = raw_boot.find("function Assert-SelfSourceTrusted")
+        opening = raw_boot.find("{", start)
+        depth, cursor = 0, opening
+        while cursor < len(raw_boot):
+            if raw_boot[cursor] == "{":
+                depth += 1
+            elif raw_boot[cursor] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            cursor += 1
+        function_text = raw_boot[start:cursor + 1] if start >= 0 else ""
+
+        volume = os.environ.get("SystemDrive", "C:") + "\\"
+        harness = work / "self-source-check.ps1"
+        harness.write_text(
+            function_text
+            + "\nAssert-SelfSourceTrusted -Paths @() -AncestorPaths @('" + volume + "')\n"
+            + "Write-Output 'ANCESTOR-ACCEPTED'\n", encoding="utf-8")
+        try:
+            ran = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(harness)], capture_output=True, text=True, timeout=180)
+            accepted = ran.returncode == 0 and "ANCESTOR-ACCEPTED" in (ran.stdout or "")
+            detail = (ran.stdout or "").strip().replace("\n", " ")[:200]
+        except (OSError, subprocess.SubprocessError) as exc:
+            accepted, detail = False, type(exc).__name__
+        rec("OP39 the-pre-load-check-accepts-an-ordinary-volume-root",
+            bool(function_text) and accepted,
+            f"the shipped Assert-SelfSourceTrusted, run verbatim against the "
+            f"volume root as an ancestor, does not refuse -- so the gate that "
+            f"sits above every other gate does not stop the protocol on a stock "
+            f"host ({detail or 'no output'})")
+
+        # ...and it must still refuse a genuinely replaceable ancestor.
+        replaceable = work / "replaceable"
+        replaceable.mkdir(exist_ok=True)
+        probe({"action": "write-mask", "path": str(replaceable),
+               "sddl": f"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x40;;;{SID_AUTHOR})",
+               "mask": 0xD0042, "author": identity("SYNTH", SID_AUTHOR)}, work)
+        refuse_harness = work / "self-source-refuse.ps1"
+        refuse_harness.write_text(
+            function_text
+            + "\nAssert-SelfSourceTrusted -Paths @() -AncestorPaths @('"
+            + str(replaceable) + "')\n"
+            + "Write-Output 'ANCESTOR-ACCEPTED'\n", encoding="utf-8")
+        try:
+            refused_run = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                 "-File", str(refuse_harness)], capture_output=True, text=True, timeout=180)
+            refused = (refused_run.returncode == 2
+                       and "OFFLINE_OPERATOR_SOURCE_NOT_TRUSTED" in (refused_run.stdout or ""))
+            refuse_detail = (refused_run.stdout or "").strip().replace("\n", " ")[:200]
+        except (OSError, subprocess.SubprocessError) as exc:
+            refused, refuse_detail = False, type(exc).__name__
+        rec("OP39a a-replaceable-ancestor-is-still-refused",
+            refused,
+            f"an ancestor granting an untrusted principal delete-child is "
+            f"refused by the same function, so accepting the volume root is a "
+            f"narrower question and not a disabled one ({refuse_detail or 'no output'})")
+
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
         #
@@ -719,16 +807,17 @@ def main() -> int:
         # operator-named interpreter at High integrity, with no writability
         # check of any kind, and then trusted the JSON that execution printed to
         # decide whether to lock and pin the runtime.
-        boot_live = strip_powershell_comments(
-            (ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1").read_text(
-                encoding="utf-8"))
         boot_body = function_bodies(boot_live)
         executing_routes = [name for name, body in boot_body.items()
                             if "$BuildPython $" in body or "& $BuildPython" in body]
         gated = re.findall(r"Assert-InterpreterSourceTrusted\s+-Interpreter", boot_live)
         top_level_exec = len(re.findall(r"&\s+\$BuildPython\s", boot_live))
+        # ONE GATE PER EXECUTION, not "all but one". `>= top_level_exec - 1`
+        # passed at (1, 2) -- exactly the state the file was in -- so deleting
+        # the entire writability check protecting the other route left a check
+        # named "every-route-...-first" green.
         rec("OP38 every-route-that-executes-an-interpreter-checks-it-first",
-            len(gated) >= 1 and top_level_exec >= 1 and len(gated) >= top_level_exec - 1,
+            top_level_exec >= 1 and len(gated) >= top_level_exec,
             f"the interpreter-trust gate is invoked on the routes that run an "
             f"operator-named interpreter ({len(gated)} gate call(s), "
             f"{top_level_exec} execution(s), helper-scoped routes="

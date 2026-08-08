@@ -154,18 +154,65 @@ def count_recorded_checks(guard: Path, id_pattern: str) -> int:
     # scored 40 against a floor of 35. Bodies guarded by a constant-false test
     # are dropped before anything is counted.
     def prune(node):
+        """Drop `if <constant-falsy>:` bodies and statements after a return."""
+
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.If) and isinstance(child.test, ast.Constant) \
                     and not child.test.value:
                 child.body = []
+            for attribute in ("body", "orelse", "finalbody"):
+                block = getattr(child, attribute, None)
+                if not isinstance(block, list):
+                    continue
+                for index, statement in enumerate(block):
+                    if isinstance(statement, (ast.Return, ast.Raise, ast.Continue, ast.Break)):
+                        del block[index + 1:]
+                        break
             prune(child)
 
     prune(tree)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+
+    # AND ONLY FUNCTIONS THAT ARE CALLED.
+    #
+    # Forty recording calls inside a function nobody invokes scored 40 against a
+    # floor of 35, as did the same ids placed after an unconditional return.
+    # Two of the three commonest forms of unreachable code were being counted as
+    # executed checks. Reachability starts at module level and at main(), and
+    # follows calls between module-level functions.
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    module_level = [node for node in tree.body if node not in functions.values()]
+
+    def called_names(nodes) -> set:
+        names = set()
+        for root in nodes:
+            for node in ast.walk(root):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+                    if name in functions:
+                        names.add(name)
+                elif isinstance(node, ast.Name) and node.id in functions:
+                    names.add(node.id)     # referenced as a value, e.g. a callback
+        return names
+
+    live = {"main"} & set(functions)
+    queue = list(called_names(module_level) | live)
+    reached = set()
+    while queue:
+        name = queue.pop()
+        if name in reached:
             continue
-        for argument in list(node.args) + [kw.value for kw in node.keywords]:
-            found |= ids_in(argument)
+        reached.add(name)
+        queue.extend(called_names([functions[name]]) - reached)
+
+    searchable = list(module_level) + [functions[name] for name in reached]
+    for root in searchable:
+        for node in ast.walk(root):
+            if not isinstance(node, ast.Call):
+                continue
+            for argument in list(node.args) + [kw.value for kw in node.keywords]:
+                found |= ids_in(argument)
     return len(found)
 
 

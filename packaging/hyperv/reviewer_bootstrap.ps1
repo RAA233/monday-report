@@ -72,14 +72,28 @@ param(
     [switch]$AcknowledgeSharedSourceRoot,
     [string]$InterpreterPath = '',
     [string]$PackageSource = '',
-    [string]$SourceRepo = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
+    # RESOLVED IN THE BODY, NOT HERE. [CmdletBinding()] makes this an advanced
+    # function, and in Windows PowerShell 5.1 $PSScriptRoot is EMPTY during
+    # param-default evaluation in that form when the script is launched with
+    # -File. Measured: a plain param block resolves it correctly under -File and
+    # an advanced one does not, which is why an earlier check of this exact
+    # question came back clean. The result was Split-Path refusing an empty
+    # string and the script dying with a raw binding error -- no banner, no
+    # named reason.
+    [string]$SourceRepo = '',
     [string]$User      = 'MR-OFFLINE-REVIEWER',
     [string]$TaskName  = 'MR-OFFLINE-REVIEWER-RUN',
-    [string]$SessionScript = "$PSScriptRoot\reviewer_session.ps1",
+    [string]$SessionScript = '',
     [string]$HvRoot    = 'C:\mr-hv'
 )
 
 $ErrorActionPreference = 'Stop'
+
+# $PSScriptRoot IS populated here, in the body. Both defaults are resolved now
+# rather than in the param block, where an advanced function launched with -File
+# sees an empty string.
+if (-not $SourceRepo) { $SourceRepo = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) }
+if (-not $SessionScript) { $SessionScript = Join-Path $PSScriptRoot 'reviewer_session.ps1' }
 
 # THE SOURCE IS CHECKED BEFORE IT IS LOADED.
 #
@@ -95,10 +109,60 @@ $ErrorActionPreference = 'Stop'
 # hold write on the code about to run? Account resolution is not available here
 # and is not needed -- a privileged tree simply has no such ACE.
 function Assert-SelfSourceTrusted {
-    param([string[]]$Paths)
+    <#
+      TWO CLASSES OF PATH, TWO QUESTIONS.
+
+      -Paths are the objects that get LOADED: this script and the contract. The
+      question there is the full one -- privileged owner, and no untrusted
+      principal holding any write right.
+
+      -AncestorPaths are the directories on the way to them. The question there
+      is narrower: can an untrusted principal REPLACE the subtree? Asking the
+      full question of an ancestor refuses on a stock Windows host, because C:\
+      grants Authenticated Users APPEND_DATA (create-directories) outright and
+      GENERIC_WRITE inherit-only. Both scored against 0xD0116 and every route of
+      this script exited 2 with "writable:C:\", no matter how the source copy
+      was permissioned -- and being above the dot-source and above every gate,
+      with no acknowledgement, that killed the protocol outright.
+
+      This is the identical pair of corrections principal_contract.ps1 already
+      carries and documents: Test-AccountCanWritePath skips inherit-only ACEs
+      because counting them made the volume root writable by any authenticated
+      account, and Resolve-TrustedGit judges ancestors with 0xD0042 because
+      including APPEND_DATA left git unresolvable. This function reproduced the
+      defect both of them were fixed for.
+    #>
+    param([string[]]$Paths, [string[]]$AncestorPaths = @())
 
     $trusted = @('S-1-5-32-544', 'S-1-5-18', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
     $bad = @()
+    # WRITE_DATA | DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER -- what it
+    # takes to put a different file in place or to replace a directory on the
+    # way to one. APPEND_DATA is deliberately absent.
+    $ancestorMask = 0xD0042
+    foreach ($ancestor in $AncestorPaths) {
+        if (-not (Test-Path -LiteralPath $ancestor)) { continue }
+        $ancestorAcl = $null
+        try { $ancestorAcl = Get-Acl -LiteralPath $ancestor }
+        catch { $bad += "unreadable-ancestor"; continue }
+        foreach ($ace in $ancestorAcl.Access) {
+            if ($ace.AccessControlType -ne 'Allow') { continue }
+            if ($ace.PropagationFlags -band
+                [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            $sid = ''
+            try {
+                $sid = $ace.IdentityReference.Translate(
+                    [Security.Principal.SecurityIdentifier]).Value
+            } catch { $bad += "unresolvable-ancestor-ace"; continue }
+            if ($trusted -contains $sid) { continue }
+            $mask = [int]$ace.FileSystemRights
+            if ($mask -band 0x10000000) { $mask = $mask -bor 0x1F01FF }
+            if ($mask -band 0x40000000) { $mask = $mask -bor 0x0116 }
+            if ($mask -band $ancestorMask) {
+                $bad += "replaceable-ancestor:$(Split-Path $ancestor -Leaf)"
+            }
+        }
+    }
     foreach ($path in $Paths) {
         if (-not (Test-Path -LiteralPath $path)) { $bad += "missing:$(Split-Path $path -Leaf)"; continue }
         $item = Get-Item -LiteralPath $path -Force
@@ -114,6 +178,9 @@ function Assert-SelfSourceTrusted {
         }
         foreach ($ace in $acl.Access) {
             if ($ace.AccessControlType -ne 'Allow') { continue }
+            # Inherit-only ACEs describe children, not this object.
+            if ($ace.PropagationFlags -band
+                [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
             $sid = ''
             try {
                 $sid = $ace.IdentityReference.Translate(
@@ -157,14 +224,15 @@ function Assert-SelfSourceTrusted {
 # cover packaging\, but only much later -- after the dot-source has run.
 $selfPaths = @($PSScriptRoot, $PSCommandPath,
                (Join-Path $PSScriptRoot 'principal_contract.ps1'))
+$selfAncestors = @()
 $selfProbe = Split-Path $PSScriptRoot -Parent
 while ($selfProbe) {
-    $selfPaths += $selfProbe
+    $selfAncestors += $selfProbe
     $selfParent = Split-Path $selfProbe -Parent
     if ($selfParent -eq $selfProbe) { break }
     $selfProbe = $selfParent
 }
-Assert-SelfSourceTrusted -Paths $selfPaths
+Assert-SelfSourceTrusted -Paths $selfPaths -AncestorPaths $selfAncestors
 
 . (Join-Path $PSScriptRoot 'principal_contract.ps1')
 
@@ -277,16 +345,6 @@ function Test-AuthorWritable {
     # unqualified, so it matched no ACL identity and reported "not writable"
     # for a directory the author owns outright.
     return (Test-AccountCanWritePath -Identity $AuthorIdentity -Path $Path)
-    try { $acl = Get-Acl -LiteralPath $Path } catch { return $true }
-    if ($acl.Owner -eq $me) { return $true }
-    foreach ($ace in $acl.Access) {
-        if ($ace.IdentityReference.Value -ne $me) { continue }
-        if ($ace.AccessControlType -ne 'Allow') { continue }
-        if ($ace.FileSystemRights.ToString() -match 'Write|Modify|FullControl|CreateFiles') {
-            return $true
-        }
-    }
-    return $false
 }
 
 function Assert-AclApplied {
@@ -401,10 +459,14 @@ function Assert-TaskRootProtected {
     if ($Runtime -and (Test-Path $Runtime)) {
         # Recursive: the leaf's own DACL says nothing about an inherited ACE on
         # a subdirectory, and ownership anywhere inside is a write right.
-        $writable = @(Get-ChildItem -LiteralPath $Runtime -Recurse -Force -ErrorAction SilentlyContinue |
+        $runtimeErrors = $null
+        $writable = @(Get-ChildItem -LiteralPath $Runtime -Recurse -Force `
+                      -ErrorAction SilentlyContinue -ErrorVariable runtimeErrors |
                       Where-Object { Test-AuthorWritable -Path $_.FullName } |
                       Select-Object -First 1)
-        if ((Test-AuthorWritable -Path $Runtime) -or $writable.Count) {
+        # An unlistable subtree is reported, not skipped.
+        if ((Test-AuthorWritable -Path $Runtime) -or $writable.Count -or
+            @($runtimeErrors).Count) {
             Write-Output '  STOP: the runtime is writable by the author identity.'
             Write-Output '  reason: REVIEWER_RUNTIME_AUTHOR_WRITABLE'
             Write-Output '  Locking it now would pin bytes the author could still have chosen.'
@@ -738,8 +800,11 @@ function Initialize-ReviewerPaths {
 
     $reviewerOwned = @("$Root\reviewer", "$Root\reviewer\state", "$Root\reviewer\out",
                        "$Root\trust", "$Root\xchg\requests")
-    # reviewer-bin\ is author-writable so the entry point can be INSTALLED,
-    # and reviewer read+execute so it can be RUN.
+    # reviewer-bin\ holds the entry point the task RUNS, so it is
+    # Administrators/SYSTEM full, reviewer read+execute, and NO author ACE --
+    # the comment here used to say the opposite of the grant below it, which is
+    # the failure mode this file records elsewhere as "how that survived a
+    # review". The operator installs into it; the author does not.
     #
     # It deliberately does NOT live in the author's worktree: the reviewer holds
     # no rights anywhere under the author profile, so a task registered against
@@ -1146,7 +1211,6 @@ if ($GrantAuthorTaskRun) {
         $svc.GetFolder('').GetTask($TaskName).GetSecurityDescriptor(4))
     $got = @($after.DiscretionaryAcl | Where-Object { $_.SecurityIdentifier -eq $author })
     $mask = if ($got.Count -eq 1) { $got[0].AccessMask } else { 0 }
-    Write-Fact 'author may start the task' ([bool]($mask -band 0x20))
     # 0xD0116 -- write data (the action, principal, logon mode and arguments all
     # live in the task definition), append, write EA, write attributes, DELETE,
     # WRITE_DAC and WRITE_OWNER. An earlier mask omitted DELETE, so an author
@@ -1230,7 +1294,9 @@ if ($ProvisionReviewerRuntime) {
         Write-Output '  remedy: re-run with -BuildPython naming the python.exe to copy from.'
         exit 2
     }
-    $writableSource = @(Get-AuthorWritableInterpreterPaths -Interpreter $BuildPython)
+    Assert-InterpreterSourceTrusted -Interpreter $BuildPython `
+        -Route '-ProvisionReviewerRuntime'
+    $writableSource = @()
     if ($writableSource.Count) {
         # A HARD stop, with its own reason.
         #

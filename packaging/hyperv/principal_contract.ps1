@@ -275,15 +275,31 @@ function Resolve-PrincipalIdentity {
                 # group. Everything else -- well-known SIDs, logon-type SIDs,
                 # integrity levels, capability SIDs, BUILTIN groups -- is
                 # refused by shape.
+                # A LOCAL USER, ESTABLISHED POSITIVELY.
+                #
+                # Rejecting local groups by shape left every other group one
+                # namespace over: Get-LocalGroup throws GroupNotFoundException
+                # for a DOMAIN group's S-1-5-21 SID, the bare catch swallowed
+                # it, and DOMAIN\<group> was accepted as the AUTHOR -- after
+                # which "is the author an Administrator" and every
+                # author-writability question were evaluated against a SID no
+                # human logs on as. That is the hazard this rule exists to
+                # remove, surviving the previous fix.
+                #
+                # The protocol is a statement about LOCAL accounts: the reviewer
+                # is a local account, the credential lives in the local SAM, and
+                # the DPAPI argument is local. So the author must be a local user
+                # too, and that is now established by asking for one rather than
+                # by failing to find a group. A domain or AzureAD-backed author
+                # is refused with a named reason rather than silently reasoned
+                # about as though it were an account.
                 $notAnAccount = ''
                 if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') {
                     $notAnAccount = 'not a user account'
                 } else {
-                    try {
-                        if (Get-LocalGroup -SID $sid -ErrorAction Stop) {
-                            $notAnAccount = 'a group is not an account'
-                        }
-                    } catch { }
+                    $localUser = $null
+                    try { $localUser = Get-LocalUser -SID $sid -ErrorAction Stop } catch { }
+                    if (-not $localUser) { $notAnAccount = 'not a local user account' }
                 }
                 if ($notAnAccount) {
                     $result.Error = $notAnAccount
@@ -456,7 +472,15 @@ function Get-AccountSidSet {
         try { $groups = Get-LocalGroup -ErrorAction Stop } catch { $groups = @() }
         foreach ($group in $groups) {
             $members = @()
-            try { $members = Get-LocalGroupMember -SID $group.SID -ErrorAction Stop } catch { continue }
+            # FAIL CLOSED. Dropping a group whose membership cannot be listed
+            # made an ACE granted to it invisible, so the write predicate
+            # answered a wrong $false for every caller that feeds an ACL
+            # decision -- and the answer was then memoised for the process.
+            # Get-LocalGroupMember failing on a group containing an unresolvable
+            # member SID is ordinary Windows behaviour. Get-LocalAdministratorMembers
+            # returns $null for the identical failure and says why; this did not.
+            try { $members = Get-LocalGroupMember -SID $group.SID -ErrorAction Stop }
+            catch { return $null }
             foreach ($member in $members) {
                 $sid = ''
                 try { $sid = $member.SID.Value } catch { $sid = '' }
@@ -501,6 +525,10 @@ function Test-AccountCanWritePath {
     try { $acl = Get-Acl -LiteralPath $Path } catch { return $true }
 
     $sids = Get-AccountSidSet -Identity $Identity -GroupProvider $GroupProvider
+    # $null means the account's group set could not be established, so no ACE
+    # can be attributed with confidence. "Could the author write here?" answers
+    # yes when it cannot be told.
+    if ($null -eq $sids) { return $true }
     $ownerSid = ''
     try { $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
     if ($ownerSid -and $sids.Contains($ownerSid)) { return $true }
@@ -575,6 +603,9 @@ function Test-AccountCanReadPath {
     try { $acl = Get-Acl -LiteralPath $Path } catch { return $false }
 
     $sids = Get-AccountSidSet -Identity $Identity -GroupProvider $GroupProvider
+    # The opposite direction: "can the reviewer still reach its own code?"
+    # answers no when it cannot be told.
+    if ($null -eq $sids) { return $false }
     $ownerSid = ''
     try { $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
     if ($ownerSid -and $sids.Contains($ownerSid)) { return $true }
@@ -645,9 +676,15 @@ function Test-CanAuthorWriteReviewerCode {
     foreach ($path in $ReviewerCodePaths) {
         if (-not (Test-Path -LiteralPath $path)) { continue }
         if (Test-AccountCanWritePath -Identity $Author -Path $path) { return $true }
+        # An unlistable subtree is not an empty one. Answering "the author
+        # cannot write here" because the enumeration failed is failing OPEN on
+        # the tree the scheduled task runs from; the same fail-open was fixed
+        # one function away in Assert-TrustedSourceRoot.
+        $childErrors = $null
         $children = @(Get-ChildItem -LiteralPath $path -Recurse -Force `
-                      -ErrorAction SilentlyContinue |
+                      -ErrorAction SilentlyContinue -ErrorVariable childErrors |
                       Select-Object -ExpandProperty FullName)
+        if (@($childErrors).Count) { return $true }
         foreach ($child in $children) {
             if (Test-AccountCanWritePath -Identity $Author -Path $child) { return $true }
         }
@@ -716,6 +753,10 @@ function Get-TaskRightsForAccount {
     }
 
     $sids = Get-AccountSidSet -Identity $Identity -GroupProvider $GroupProvider
+    if ($null -eq $sids) {
+        $result.readable = $false
+        return [pscustomobject]$result
+    }
     $allow = 0; $deny = 0
     foreach ($ace in $sd.DiscretionaryAcl) {
         if (-not $sids.Contains($ace.SecurityIdentifier.Value)) { continue }
