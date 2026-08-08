@@ -289,6 +289,46 @@ def build(source_root: Path, dest_root: Path) -> dict:
     return manifest
 
 
+def site_is_disabled(exe: Path) -> bool:
+    """Did the runtime actually start without importing ``site``?
+
+    The whole design rests on this being true, and every other check infers it
+    from a filename. This asks the interpreter.
+    """
+
+    try:
+        proc = subprocess.run(
+            [str(exe), "-I", "-c",
+             "import sys; print('site' not in sys.modules and sys.flags.no_site == 1)"],
+            capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (proc.stdout or "").strip() == "True"
+
+
+def reparse_points_within(root: Path) -> list:
+    """Any reparse point among the descendants of a tree that must be pinned."""
+
+    found = []
+    try:
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            for entry in current.iterdir():
+                try:
+                    attrs = os.lstat(str(entry)).st_file_attributes
+                except (OSError, AttributeError, ValueError):
+                    continue
+                if attrs & 0x400:            # FILE_ATTRIBUTE_REPARSE_POINT
+                    found.append("REVIEWER_RUNTIME_REPARSE_ESCAPE")
+                    return found
+                if attrs & 0x10:             # FILE_ATTRIBUTE_DIRECTORY
+                    stack.append(entry)
+    except OSError:
+        found.append("REVIEWER_RUNTIME_UNREADABLE")
+    return found
+
+
 def verify(candidate_exe: Path, *, task_root: Path = TASK_ROOT,
            runtime_root: Path = RUNTIME_ROOT, run_probe: bool = True) -> list[str]:
     """Named, fail-closed reasons why this interpreter must not be accepted.
@@ -355,6 +395,21 @@ def verify(candidate_exe: Path, *, task_root: Path = TASK_ROOT,
         except (ValueError, OSError):
             reasons.append("REVIEWER_RUNTIME_OUTSIDE_RUNTIME_ROOT")
 
+    # DESCENDANTS TOO.
+    #
+    # The walk above covers the path INTO the tree. It said nothing about links
+    # inside it, and that is the more useful attack: a junction at
+    # Lib\site-packages points everything the interpreter imports at a directory
+    # the author still owns. `icacls /T` does not traverse it, so hardening
+    # reports success over bytes it never touched; and the two digest
+    # implementations disagree about it -- PowerShell's Get-ChildItem -Recurse
+    # does not descend a junction while Path.rglob does -- so the reviewer's own
+    # pin verified a tree whose contents had been swapped.
+    #
+    # Refused outright rather than followed or skipped. A pinned tree containing
+    # a link is not a tree anyone can reason about.
+    reasons.extend(reparse_points_within(root))
+
     reasons.extend(shared_installation_reasons(root))
 
     manifest_path = root / MANIFEST_NAME
@@ -391,7 +446,14 @@ def verify(candidate_exe: Path, *, task_root: Path = TASK_ROOT,
     if not pth or not pth.is_file():
         reasons.append("REVIEWER_RUNTIME_PATH_FILE_MISSING")
     else:
-        lines = [ln.strip() for ln in pth.read_text(encoding="ascii", errors="ignore").splitlines()]
+        # utf-8-sig, not ascii-with-errors-ignored. CPython reads a ._pth as
+        # UTF-8, so a byte-order mark becomes part of the FIRST path entry;
+        # dropping it silently here would have compared a line CPython never
+        # sees against the expected set and called them equal.
+        raw_pth = pth.read_text(encoding="utf-8-sig", errors="strict")
+        lines = [ln.strip() for ln in raw_pth.splitlines()]
+        if pth.read_bytes().startswith(b"\xef\xbb\xbf"):
+            reasons.append("REVIEWER_RUNTIME_PATH_FILE_HAS_BOM")
         lines = [ln for ln in lines if ln and not ln.startswith("#")]
         if any(ln.lower() == "import site" for ln in lines):
             reasons.append("REVIEWER_RUNTIME_PATH_FILE_ENABLES_SITE")
@@ -419,7 +481,17 @@ def verify(candidate_exe: Path, *, task_root: Path = TASK_ROOT,
             reasons.append("REVIEWER_RUNTIME_MISSING_DEPENDENCY")
             break
 
+    # A MISSING FIELD IS A REFUSAL, not a skipped check.
+    #
+    # This read the digest and only compared when it was non-empty, so a
+    # manifest present with that one field blanked disabled the only whole-tree
+    # comparison and returned clean over a tampered interpreter -- while a
+    # manifest that was absent entirely produced a named refusal. The weaker
+    # attack was the one that got through.
     recorded = str(manifest.get("tree_digest", "") or "")
+    if manifest and (not recorded
+                     or not str(manifest.get("interpreter_version", "") or "")):
+        reasons.append("REVIEWER_RUNTIME_MANIFEST_INCOMPLETE")
     if recorded:
         # Covers the interpreter executable, every adjacent DLL, every extension
         # module and every stdlib file in one comparison -- separate checks for
@@ -435,6 +507,16 @@ def verify(candidate_exe: Path, *, task_root: Path = TASK_ROOT,
             reasons.append("REVIEWER_RUNTIME_INTERPRETER_UNRUNNABLE")
         elif expected_version and reported != expected_version:
             reasons.append("REVIEWER_RUNTIME_IDENTITY_MISMATCH")
+
+        # MEASURE the control instead of inferring it from a filename.
+        #
+        # The expected ._pth name is derived from whatever python*.dll sits in
+        # the directory, but CPython resolves the file against the DLL it
+        # actually LOADS -- which can come from elsewhere. Renaming both the DLL
+        # and the ._pth to a version that is not really there was accepted. So
+        # the built runtime is asked directly whether site was imported.
+        if not site_is_disabled(resolved):
+            reasons.append("REVIEWER_RUNTIME_SITE_NOT_DISABLED")
 
     return sorted(set(reasons))
 

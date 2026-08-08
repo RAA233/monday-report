@@ -80,6 +80,7 @@ function Assert-NoIssuerMaterial {
     foreach ($name in @('MONDAY_REPORT_OPERATOR_KEY', 'MONDAY_REPORT_OPERATOR_KEY_FILE',
                         'MONDAY_REPORT_OFFLINE_ISSUER_KEY', 'MONDAY_REPORT_LICENSE_PRIVATE_KEY')) {
         if (Test-Path "env:$name") {
+            Clear-StaleTranscripts -OutDir $OutRoot
             New-Status -Stage 'guard' -State 'REFUSED' `
                 -Detail "issuer key material offered via environment: $name"
             exit 3
@@ -137,6 +138,33 @@ function Get-ReviewerPython {
     # fails closed rather than silently selecting an author-controlled
     # interpreter.
     return $null
+}
+
+function Assert-CodeStillPinned {
+    <#
+      Re-verify IMMEDIATELY before executing anything.
+
+      The pin is taken once near the top of the session, and the author knows
+      exactly when to act on the gap: it issued `schtasks /Run` and can watch the
+      status file go RUNNING. Hash-then-execute over a directory someone else can
+      write is a timing puzzle, not a control.
+
+      It was called on the driver path only, which left the diagnostics branch
+      and the credential-migration branch -- the one that handles this
+      principal's DPAPI material -- executing on the strength of the earlier
+      check alone. Every branch that runs code calls this first.
+    #>
+    param([string]$Stage)
+
+    $again = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest `
+        -Paths $codeFiles -TreeRoots @($packageRoot, $runtimeRoot)
+    if ($again.state -eq 'VERIFIED') { return }
+    Clear-StaleTranscripts -OutDir $OutRoot
+    New-Status -Stage $Stage -State 'REFUSED' `
+        -Detail ("reviewer code changed between pinning and execution: " +
+                 ($again.changed -join ',')) `
+        -Extra @{ reason = 'REVIEWER_CODE_CHANGED_BEFORE_EXECUTION' }
+    exit 7
 }
 
 function Clear-StaleTranscripts {
@@ -227,6 +255,21 @@ function Assert-ReviewerCodeIntegrity {
     foreach ($root in $TreeRoots) {
         if (-not (Test-Path $root)) { continue }
         $rootFull = (Resolve-Path $root).Path
+        # A LINK INSIDE THE TREE MAKES THIS DIGEST MEANINGLESS.
+        #
+        # Get-ChildItem -Recurse does not descend a directory junction, so
+        # everything behind one is simply absent from the hash -- and the Python
+        # implementation of the same algorithm DOES descend, so the two disagree
+        # about the same tree while both look correct. Swapping install.ps1 and
+        # the packaged executable behind a junction left this function reporting
+        # VERIFIED with an empty change list.
+        $links = @(Get-ChildItem -Path $rootFull -Recurse -Force -Directory `
+                       -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
+        if ($links.Count) {
+            $current['reparse:' + $rootFull.ToLowerInvariant()] = 'REPARSE_POINT_PRESENT'
+            continue
+        }
         # ORDINAL sort on the relative path, to match the Python implementation.
         #
         # `Sort-Object -Property FullName` is culture-aware, which orders '-',
@@ -405,10 +448,7 @@ if ($integrity.state -eq 'CHANGED') {
     # COMPLETE result for a run that never happened -- which briefly fooled the
     # author's own harness. Results must never outlive the run that produced
     # them.
-    foreach ($stale in @('ENVIRONMENT_1-transcript.json', 'ENVIRONMENT_2-transcript.json')) {
-        $path = Join-Path $OutRoot $stale
-        if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
-    }
+    Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage 'integrity' -State 'REFUSED' `
         -Detail ("reviewer code changed since it was pinned: " + ($integrity.changed -join ',')) `
         -Extra @{ remedy = 'an operator must re-pin deliberately by removing the reviewer-owned manifest' }
@@ -417,6 +457,11 @@ if ($integrity.state -eq 'CHANGED') {
 
 $command = Get-RequestedStage
 if (-not $command) {
+    # A run with no command produces no result, so it must not leave the last
+    # one lying where a reader will take it for this one. Deleting the command
+    # file before triggering the task was a one-line way to have a stale
+    # COMPLETE reported as the outcome of a run that did nothing.
+    Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage 'status' -State 'IDLE' -Detail 'no command file present'
     exit 0
 }
@@ -445,8 +490,10 @@ if ($stage -eq 'status') {
 # facts to the author-readable result area. Troubleshooting only -- never
 # acceptance evidence.
 if ($stage -eq 'diagnostics' -or $stage -eq 'diagnostics-deep') {
+    Assert-CodeStillPinned -Stage $stage
     $diagScript = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_diagnostics.ps1'
     if (-not (Test-Path $diagScript)) {
+        Clear-StaleTranscripts -OutDir $OutRoot
         New-Status -Stage $stage -State 'FAILED' -Detail 'diagnostics script missing from the install'
         exit 4
     }
@@ -479,6 +526,7 @@ if ($stage -eq 'diagnostics' -or $stage -eq 'diagnostics-deep') {
 }
 
 if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate' -or $stage -eq 'cred-repair' -or $stage -eq 'cred-seal') {
+    Assert-CodeStillPinned -Stage $stage
     $migration = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_credential_migration.ps1'
     if (-not (Test-Path $migration)) {
         New-Status -Stage $stage -State 'FAILED' -Detail 'migration script missing from the install'
@@ -530,26 +578,7 @@ New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"
 # who can write its site-packages executes code in THIS session, where
 # DPAPI will decrypt the review key for them. The interpreter is therefore
 # pinned, and its load points are hashed alongside the reviewer's own code.
-# Re-verify IMMEDIATELY before executing out of these trees.
-#
-# The pin was taken once at session start and the driver then installs and runs
-# the packaged executable minutes later. Between the two, the author knows
-# exactly when to act: it issued `schtasks /Run` and can read the status file
-# going RUNNING. Hash-then-execute over a directory someone else can write is
-# not a control, it is a timing puzzle. Cheap to close, so closed.
-$recheck = Assert-ReviewerCodeIntegrity -ManifestPath $codeManifest `
-    -Paths $codeFiles -TreeRoots @($packageRoot, $runtimeRoot)
-if ($recheck.state -ne 'VERIFIED') {
-    foreach ($stale in @('ENVIRONMENT_1-transcript.json', 'ENVIRONMENT_2-transcript.json')) {
-        $path = Join-Path $OutRoot $stale
-        if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
-    }
-    New-Status -Stage $stage -State 'REFUSED' `
-        -Detail ("reviewer code changed between pinning and execution: " +
-                 ($recheck.changed -join ',')) `
-        -Extra @{ reason = 'REVIEWER_CODE_CHANGED_BEFORE_EXECUTION' }
-    exit 7
-}
+Assert-CodeStillPinned -Stage $stage
 $prev = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 & $py -I $driver --stage $stage --run-id $runId --source-root $SourceRoot `

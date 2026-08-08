@@ -74,12 +74,34 @@ if (Test-Path $manifestFile) {
 }
 
 function Test-ReviewerPinned {
+    <#
+      Does something outside this token's control prove the target exists?
+
+      The code manifest keys FILES by full path and TREES as `tree:<root>`. No
+      probed DIRECTORY can ever appear as a key, so consulting it for one always
+      returned false and scored the strongest possible outcome -- the author
+      cannot even see the directory -- as INCONCLUSIVE. The tree keys are the
+      anchor for a directory, and the leaf-name branch is gone: it matched on a
+      filename alone, which passed an ABSENT target as DENIED.
+    #>
     param([string]$Path)
     if (-not $manifestPaths.Count) { return $false }
-    $lower = $Path.ToLowerInvariant()
-    $leaf = (Split-Path $Path -Leaf).ToLowerInvariant()
-    # Tolerates both manifest key shapes: full path, and the earlier leaf keying.
-    return (($manifestPaths -contains $lower) -or ($manifestPaths -contains $leaf))
+    $lower = $Path.ToLowerInvariant().TrimEnd('\')
+    if ($manifestPaths -contains $lower) { return $true }
+    foreach ($key in $manifestPaths) {
+        if (-not $key.StartsWith('tree:')) { continue }
+        $root = $key.Substring(5).TrimEnd('\')
+        # The directory IS a pinned tree, or lies inside one.
+        if ($lower -eq $root) { return $true }
+        if ($lower.StartsWith($root + '\')) { return $true }
+        # A pinned FILE lives beneath this directory, which proves the directory.
+        if ($root.StartsWith($lower + '\')) { return $true }
+    }
+    foreach ($key in $manifestPaths) {
+        if ($key.StartsWith('tree:')) { continue }
+        if ($key.StartsWith($lower + '\')) { return $true }
+    }
+    return $false
 }
 
 function Test-Unreachable {
@@ -145,6 +167,14 @@ function Test-CanOverwriteFile {
         $fs.Close()
         return $true
     } catch [System.UnauthorizedAccessException] {
+        # FILE_WRITE_ATTRIBUTES is a LESSER right than write, so anything able to
+        # rewrite the file can set ReadOnly on it first and make this probe
+        # certify the boundary intact. The attribute is not a permission, and it
+        # must not be read as one.
+        try {
+            if ((Get-Item -LiteralPath $Path -Force).Attributes -band
+                [IO.FileAttributes]::ReadOnly) { return 'inconclusive' }
+        } catch { return 'inconclusive' }
         return $false
     } catch {
         # Anything else -- sharing violation, path error, locked by the OS --
@@ -304,14 +334,31 @@ try {
     $svc.Connect()
     $sd = New-Object Security.AccessControl.RawSecurityDescriptor(
         $svc.GetFolder('\').GetTask($TASK_NAME).GetSecurityDescriptor(4))
-    $me = ([Security.Principal.NTAccount]("$env:USERDOMAIN\$env:USERNAME")).Translate(
-        [Security.Principal.SecurityIdentifier])
-    $mask = 0
+    # EFFECTIVE rights: the union over every non-deny SID in this token, minus
+    # deny ACEs, with generic bits mapped and ownership counted.
+    #
+    # ORing only the ACEs whose SID equals this user's missed an ACE granted to
+    # a group it belongs to (BUILTIN\Users carries task ACEs on this host for
+    # unrelated tasks), missed ownership -- the owner always holds WRITE_DAC --
+    # and missed GENERIC bits, which are stored verbatim and mapped only at
+    # access-check time, so GENERIC_ALL scored zero against a specific mask.
+    $rows = & "$env:SystemRoot\System32\whoami.exe" /groups /fo csv | ConvertFrom-Csv
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $sids = New-Object System.Collections.Generic.List[string]
+    $sids.Add($identity.User.Value)
+    foreach ($r in $rows) { if ($r.Attributes -notlike '*deny*') { $sids.Add($r.SID) } }
+    $allow = 0; $denied = 0
     foreach ($ace in $sd.DiscretionaryAcl) {
-        if ($ace.SecurityIdentifier -eq $me -and $ace.AceType -eq 'AccessAllowed') {
-            $mask = $mask -bor $ace.AccessMask
-        }
+        if (-not $sids.Contains($ace.SecurityIdentifier.Value)) { continue }
+        $m = $ace.AccessMask
+        if ($m -band 0x10000000) { $m = $m -bor 0x1F01FF }
+        if ($m -band 0x40000000) { $m = $m -bor 0x0116 }
+        if ($m -band 0x20000000) { $m = $m -bor 0x20 -bor 0x80 -bor 0x20000 }
+        if ($ace.AceType -eq 'AccessAllowed') { $allow = $allow -bor $m }
+        else { $denied = $denied -bor $m }
     }
+    $mask = $allow -band (-bnot $denied)
+    if ($sd.Owner -and $sids.Contains($sd.Owner.Value)) { $mask = $mask -bor 0x40000 }
 } catch { $mask = $null }
 if ($null -eq $mask) {
     # Reading the descriptor needs READ_CONTROL, which is a DIFFERENT right from
@@ -326,8 +373,18 @@ if ($null -eq $mask) {
 } else {
     Add-Probe 'CH-01 author-can-start-task' (-not [bool]($mask -band 0x20)) `
         "starting the task is required for the protocol to be drivable without elevation (may_start=$([bool]($mask -band 0x20)))"
+    # An elevated window grades itself a pass here every time, because the
+    # rights it is measuring are the ones elevation grants. TOKEN01 already
+    # answers that question; this one defers to it rather than repeating it
+    # wrongly.
+    if ($elevated) {
+        Add-Probe 'CH-02 author-may-not-modify-task' $null `
+            "this session is elevated, so its rights over the task say nothing about an ordinary author's (may_modify=$([bool]($mask -band 0xD0116)))" `
+            -Inconclusive
+    } else {
     Add-Probe 'CH-02 author-may-not-modify-task' ([bool]($mask -band 0xD0116)) `
         "rewriting the task action would point the reviewer's session at author code (may_modify=$([bool]($mask -band 0xD0116)))"
+    }
 }
 
 # ------------------------------------------------- reviewer state and results

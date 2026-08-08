@@ -323,14 +323,24 @@ def contract_battery() -> None:
     exits = [n for n, line in enumerate(session.splitlines(), 1)
              if line.strip().startswith("exit ")]
     lines = session.splitlines()
+    # A fresh status is NOT a substitute for clearing.
+    #
+    # Accepting either token let four exits through that write a status and then
+    # leave the previous run's ENVIRONMENT_1/2 transcripts in place -- the exact
+    # "COMPLETE result for a run that never happened" that Clear-StaleTranscripts
+    # exists to prevent. Only an exit that produces its own result may skip it,
+    # and those are the ones reporting COMPLETE or OK.
     unguarded = []
     for n in exits:
-        window = "\n".join(lines[max(0, n - 12):n])
-        if ("Clear-StaleTranscripts" not in window) and ("New-Status" not in window):
-            unguarded.append(n)
+        window = "\n".join(lines[max(0, n - 14):n])
+        if "Clear-StaleTranscripts" in window:
+            continue
+        if "-State 'COMPLETE'" in window or "-State 'OK'" in window:
+            continue
+        unguarded.append(n)
     rec("RI06 refusals-clear-stale-results", not unguarded,
-        f"every exit in the reviewer session either clears stale transcripts or "
-        f"writes a fresh status first (unguarded exits at lines {unguarded or 'none'})")
+        f"every exit that does not produce its own result clears stale "
+        f"transcripts first (unguarded exits at lines {unguarded or 'none'})")
 
     # RI07 is GONE. Its predicate was the ABSENCE of one exact three-token
     # literal from the bootstrap source, so reordering the arguments or
@@ -464,43 +474,72 @@ def author_task_rights() -> dict:
     """What the author's ordinary identity may do to the reviewer's task object.
 
     `schtasks /Run` is the entire author-to-reviewer control channel, so two
-    opposite things both have to be true: the author must be able to START the
-    task without elevation, and must not be able to MODIFY it. An author that
-    can rewrite the task action points the reviewer's own profile-loaded session
-    at code of its choosing -- the same defect as an author-writable entry
-    point, one level up.
+    opposite things must both hold: the author must be able to START the task
+    without elevation, and must not be able to MODIFY it.
 
-    The live descriptor is read rather than the capability being exercised:
-    attempting the write would risk destroying the registration that the whole
-    protocol depends on, and the descriptor is what decides the answer anyway.
+    Rewritten because the previous version never read the descriptor at all.
+    Two defects, either of which was enough: the folder path arrived as four
+    backslashes rather than one, so GetFolder threw FileNotFoundException; and
+    the whoami invocation, passed through -Command, reached PowerShell with its
+    quotes intact and was not a command. Neither killed the script -- it emitted
+    an all-False document, `if not rights:` did not fire because that dict is
+    truthy, and RI18 recorded PASS on the strength of an exception.
+
+    So: the harness is a FILE run with -File, and it fails LOUDLY. Effective
+    rights are the union of allow ACEs over the token's non-deny SIDs, minus
+    deny ACEs, with generic bits mapped and ownership counted -- an ACL
+    computation rather than a real AuthzAccessCheck, which is why RI16 exists.
     """
 
-    # EFFECTIVE rights, not the rights on one ACE.
-    #
-    # This used to OR only the ACEs whose SID equalled the author's user SID.
-    # That missed three ways an author gets rights it was reported as not
-    # having: an ACE granted to a GROUP it belongs to (BUILTIN\Users carries
-    # task ACEs on this host for several unrelated tasks), OWNERSHIP (the owner
-    # always holds WRITE_DAC and can grant itself the rest), and GENERIC bits,
-    # which are stored verbatim in the ACE and only mapped at access-check
-    # time -- so GENERIC_ALL scored zero against a specific-rights mask.
-    #
-    # Deny ACEs are subtracted, and the descriptor is fetched with OWNER as
-    # well as DACL. Honest limit: this is still an ACL computation rather than
-    # a real AuthzAccessCheck, so it does not model privilege-based access
-    # (SeTakeOwnership and the like) -- which is why RI16 exists.
-    ps = '$svc = New-Object -ComObject Schedule.Service; $svc.Connect();\n$t = $svc.GetFolder(\'\\\\\').GetTask(\'MR-OFFLINE-REVIEWER-RUN\');\n$sd = New-Object Security.AccessControl.RawSecurityDescriptor($t.GetSecurityDescriptor(7));\n$me = ([Security.Principal.WindowsIdentity]::GetCurrent());\n$sids = @($me.User.Value);\nforeach ($g in $me.Groups) {\n  $rows = & \\"$env:SystemRoot\\System32\\whoami.exe\\" /groups /fo csv | ConvertFrom-Csv;\n  break };\nforeach ($r in $rows) { if ($r.Attributes -notlike \'*deny*\') { $sids += $r.SID } };\n$sids = $sids | Sort-Object -Unique;\n$allow = 0; $deny = 0;\nforeach ($a in $sd.DiscretionaryAcl) {\n  if ($sids -notcontains $a.SecurityIdentifier.Value) { continue };\n  $m = $a.AccessMask;\n  if ($m -band 0x10000000) { $m = $m -bor 0x1F01FF };\n  if ($m -band 0x40000000) { $m = $m -bor 0x0001-bor 0x0002-bor 0x0004-bor 0x0010-bor 0x0100 };\n  if ($m -band 0x20000000) { $m = $m -bor 0x0020 -bor 0x0080 -bor 0x20000 };\n  if ($a.AceType -eq \'AccessAllowed\') { $allow = $allow -bor $m } else { $deny = $deny -bor $m } };\n$effective = $allow -band (-bnot $deny);\n$owns = ($sd.Owner -and ($sids -contains $sd.Owner.Value));\nif ($owns) { $effective = $effective -bor 0x40000 };\n@{ present = ($effective -ne 0); may_start = [bool]($effective -band 0x20);\n   may_modify = [bool]($effective -band 0xD0116); owns_task = [bool]$owns\n} | ConvertTo-Json -Compress'
+    work = Path(tempfile.mkdtemp(prefix="mr-task-"))
     try:
-        proc = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
-            capture_output=True, text=True, timeout=120)
-        for line in proc.stdout.splitlines():
+        script = work / "rights.ps1"
+        script.write_text("\n".join([
+            "$ErrorActionPreference = 'Stop'",
+            "$svc = New-Object -ComObject Schedule.Service",
+            "$svc.Connect()",
+            "$task = $svc.GetFolder('\\').GetTask('MR-OFFLINE-REVIEWER-RUN')",
+            "$sd = New-Object Security.AccessControl.RawSecurityDescriptor(",
+            "    $task.GetSecurityDescriptor(7))",
+            "$rows = & \"$env:SystemRoot\System32\whoami.exe\" /groups /fo csv |",
+            "    ConvertFrom-Csv",
+            "$me = [Security.Principal.WindowsIdentity]::GetCurrent()",
+            "$sids = New-Object System.Collections.Generic.List[string]",
+            "$sids.Add($me.User.Value)",
+            "foreach ($r in $rows) {",
+            "  if ($r.Attributes -notlike '*deny*') { $sids.Add($r.SID) } }",
+            "$allow = 0; $deny = 0",
+            "foreach ($a in $sd.DiscretionaryAcl) {",
+            "  if (-not $sids.Contains($a.SecurityIdentifier.Value)) { continue }",
+            "  $m = $a.AccessMask",
+            "  if ($m -band 0x10000000) { $m = $m -bor 0x1F01FF }",
+            "  if ($m -band 0x40000000) { $m = $m -bor 0x0116 }",
+            "  if ($m -band 0x20000000) { $m = $m -bor 0x20 -bor 0x80 -bor 0x20000 }",
+            "  if ($a.AceType -eq 'AccessAllowed') { $allow = $allow -bor $m }",
+            "  else { $deny = $deny -bor $m } }",
+            "$effective = $allow -band (-bnot $deny)",
+            "$owns = $false",
+            "if ($sd.Owner) { $owns = $sids.Contains($sd.Owner.Value) }",
+            "if ($owns) { $effective = $effective -bor 0x40000 }",
+            "@{ present = ($effective -ne 0)",
+            "   may_start = [bool]($effective -band 0x20)",
+            "   may_modify = [bool]($effective -band 0xD0116)",
+            "   owns_task = [bool]$owns } | ConvertTo-Json -Compress",
+        ]), encoding="utf-8")
+        shell = (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+                 / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+        proc = subprocess.run([str(shell), "-NoProfile", "-NonInteractive",
+                               "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                              capture_output=True, text=True, timeout=180)
+        for line in (proc.stdout or "").splitlines():
             line = line.strip()
             if line.startswith("{"):
                 return json.loads(line)
+        return {}
     except (OSError, subprocess.SubprocessError, ValueError):
         return {}
-    return {}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def author_process_elevated() -> dict:
@@ -624,10 +663,12 @@ def elevation_battery() -> None:
     elevated = bool(author.get("in_admin_role")) or bool(author.get("can_write_system_root"))
     # The control channel, from both sides.
     rights = author_task_rights()
-    if not rights:
+    if not rights or rights.get("present") is not True:
         rec("RI17 author-task-rights-measurable", False,
-            "the reviewer task's live security descriptor could not be read, so "
-            "the control channel's boundary is unproven")
+            f"the reviewer task's live security descriptor yielded no rights at "
+            f"all ({rights or 'no document'}); an all-zero result is the shape a "
+            f"failed measurement takes, so the boundary is unproven rather than "
+            f"proven")
     else:
         rec("RI17 author-may-start-the-reviewer-task",
             rights.get("may_start") is True,

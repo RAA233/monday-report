@@ -150,6 +150,23 @@ function Initialize-ReviewerPaths {
 
     $me = "$env:USERDOMAIN\$env:USERNAME"
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    # PROTECT THE ROOT FIRST. Not "before anything under it is reset" as a
+    # sentiment -- literally first, above every loop below.
+    #
+    # The previous arrangement placed these four lines AFTER the reviewerCode
+    # loop, so the comment claimed one order and the file executed another. The
+    # volume root grants `Authenticated Users: (OI)(CI)(IO) Modify`, which
+    # C:\mr-hv inherited, so every directory created underneath inherited author
+    # write -- including the reviewer runtime for the whole interval between
+    # building it and locking it -- and every `icacls /reset /T` re-enabled that
+    # inheritance over the reviewer's code until the following grant landed.
+    & icacls.exe $Root /inheritance:r | Out-Null
+    & icacls.exe $Root /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
+    # Both principals must TRAVERSE the root to reach their own directories, and
+    # neither should inherit anything from it: (NP) keeps these to this object,
+    # so the per-directory grants below stay the only source of rights.
+    & icacls.exe $Root /grant "${Account}:(NP)(RX)" | Out-Null
+    & icacls.exe $Root /grant "${me}:(NP)(RX)" | Out-Null
     foreach ($d in $reviewerOwned) {
         & icacls.exe $d /inheritance:r | Out-Null
         & icacls.exe $d /grant:r "${Account}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${me}:(OI)(CI)R" | Out-Null
@@ -177,24 +194,6 @@ function Initialize-ReviewerPaths {
         # leave the author able to grant itself back in.
         & icacls.exe $d /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     }
-    # PROTECT THE ROOT ITSELF, before anything under it is reset.
-    #
-    # C:\mr-hv inherited `Authenticated Users: (OI)(CI)(IO) Modify` from the
-    # volume root and nothing ever broke that chain. Every `icacls <dir> /reset
-    # /T` below therefore re-enabled inheritance and handed Authenticated Users
-    # DELETE and GENERIC_WRITE over the whole reviewer code tree for the window
-    # between the reset and the following grant -- long enough for a polling
-    # non-elevated process to plant a persistent ACE, since the later
-    # `/grant:r` only replaces the entries for the three SIDs it names.
-    #
-    # Breaking inheritance here removes the window rather than shortening it.
-    & icacls.exe $Root /inheritance:r | Out-Null
-    & icacls.exe $Root /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
-    # Both principals need to TRAVERSE the root to reach their own directories,
-    # and neither should inherit anything from it: (NP) keeps these to this
-    # object, so the per-directory grants below remain the only source of rights.
-    & icacls.exe $Root /grant "${Account}:(NP)(RX)" | Out-Null
-    & icacls.exe $Root /grant "${me}:(NP)(RX)" | Out-Null
     $ErrorActionPreference = $prev
 
     foreach ($d in $sharedHandoff) {
@@ -323,6 +322,7 @@ if (-not (Test-Elevated)) {
 $existing = Get-LocalUser -Name $User -ErrorAction SilentlyContinue
 
 if ($GrantAuthorTaskRun) {
+    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
     # OPERATOR step. Let the author's ORDINARY user identity start the reviewer
     # task -- and do nothing else to it.
     #
@@ -384,6 +384,7 @@ if ($GrantAuthorTaskRun) {
 }
 
 if ($RepinReviewerCode) {
+    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
     # OPERATOR step. Retire the reviewer's code pin so the next reviewer run
     # adopts the current code deliberately.
     #
@@ -491,6 +492,15 @@ function Assert-OperatorIsNotAuthor {
     #>
     param([switch]$Acknowledged)
 
+    # FAIL CLOSED when the answer cannot be established.
+    #
+    # The first version read author_account_name out of the trust root and
+    # returned silently when it was absent. The trust root is written by the
+    # reviewer's own bootstrap stage, which needs the pinned runtime -- the very
+    # thing the guarded actions exist to create. So on a first-time host the
+    # gate could not fire until after it had stopped mattering. Absence is now
+    # "cannot establish that the operator differs from the author", which is a
+    # stop, not a pass.
     $trustRoot = Join-Path $HvRoot 'trust\offline-review-trust-root.v1.json'
     $authorName = ''
     if (Test-Path $trustRoot) {
@@ -498,7 +508,15 @@ function Assert-OperatorIsNotAuthor {
         catch { $authorName = '' }
     }
     $current = $env:USERNAME
-    $same = ($authorName -and ($authorName -eq $current))
+    if (-not $authorName) {
+        # No recorded author yet. Fall back to the account that owns the source
+        # repository this script was launched from -- if that is this account,
+        # the operator and the author are the same principal whatever the trust
+        # root would eventually say.
+        try { $authorName = (Get-Acl -LiteralPath $SourceRepo).Owner -replace '^.*\\', '' }
+        catch { $authorName = '' }
+    }
+    $same = ($authorName -eq '') -or ($authorName -eq $current)
     if (-not $same) { return }
 
     Write-Output ''
@@ -662,6 +680,7 @@ if ($HardenInterpreter) {
 }
 
 if ($StagePackage) {
+    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
     # OPERATOR step. The non-elevated author BUILDS the package; publishing it
     # where the reviewer EXECUTES it needs administrative rights, because that
     # directory is part of the reviewer's code surface.
@@ -694,6 +713,7 @@ if ($StagePackage) {
 }
 
 if ($ExportSource) {
+    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
     # Publish a PRISTINE, REVIEWER-READABLE checkout at the exact current head.
     #
     # A local clone rather than `git worktree add`: a worktree's .git is a file
@@ -765,6 +785,7 @@ if ($ExportSource) {
 }
 
 if ($ProvisionPaths) {
+    Assert-OperatorIsNotAuthor -Acknowledged:$AcknowledgeSharedOperatorAccount
     # Repair path for an ALREADY-BOOTSTRAPPED host. Creating directories and
     # setting ACLs is an administrative operation, not a credential operation,
     # so this needs no password and must never prompt for one -- the operator

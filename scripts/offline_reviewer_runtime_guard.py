@@ -329,6 +329,73 @@ def main() -> int:
               runtime, task_root, misname, rename_back,
               "REVIEWER_RUNTIME_PATH_FILE_VERSION_MISMATCH")
 
+        # A link INSIDE the tree. The walk on the way in never looked at
+        # descendants, and the two digest implementations disagree about them --
+        # PowerShell does not descend a junction, Python does -- so a swap
+        # behind one was invisible to the reviewer's own pin.
+        inner_target = work / "inner-target"
+        inner_target.mkdir()
+        (inner_target / "planted.py").write_text("# planted\n", encoding="utf-8")
+        site_dir = runtime / "Lib" / "site-packages"
+        stash_site = work / "stashed-site"
+
+        def link_inside():
+            shutil.move(str(site_dir), str(stash_site))
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(site_dir), str(inner_target)],
+                           capture_output=True, text=True)
+
+        def unlink_inside():
+            subprocess.run(["cmd", "/c", "rmdir", str(site_dir)],
+                           capture_output=True, text=True)
+            shutil.move(str(stash_site), str(site_dir))
+            write_manifest(runtime)
+
+        cycle("RT18 reparse-point-inside-the-tree",
+              "a junction where site-packages should be", runtime, task_root,
+              link_inside, unlink_inside, "REVIEWER_RUNTIME_REPARSE_ESCAPE")
+
+        # A manifest present with one field blanked disabled the whole-tree
+        # comparison, while a manifest that was absent entirely was a named
+        # refusal -- the weaker attack was the one that got through.
+        manifest_file = runtime / MANIFEST_NAME
+
+        def blank_digest():
+            doc = json.loads(manifest_file.read_text(encoding="utf-8"))
+            doc["tree_digest"] = ""
+            manifest_file.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+
+        cycle("RT19 manifest-with-blank-digest",
+              "a manifest whose tree_digest has been emptied", runtime, task_root,
+              blank_digest, lambda: write_manifest(runtime),
+              "REVIEWER_RUNTIME_MANIFEST_INCOMPLETE")
+
+        def blank_version():
+            doc = json.loads(manifest_file.read_text(encoding="utf-8"))
+            doc["interpreter_version"] = ""
+            manifest_file.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+
+        cycle("RT20 manifest-with-blank-version",
+              "a manifest whose interpreter_version has been emptied",
+              runtime, task_root, blank_version, lambda: write_manifest(runtime),
+              "REVIEWER_RUNTIME_MANIFEST_INCOMPLETE")
+
+        # CPython reads a ._pth as UTF-8, so a byte-order mark becomes part of
+        # the first path entry. Reading it as ascii-with-errors-ignored compared
+        # a line CPython never sees against the expected set.
+        pth_bytes = pth.read_bytes()
+
+        def add_bom():
+            pth.write_bytes(b"\xef\xbb\xbf" + pth_bytes)
+            write_manifest(runtime)
+
+        def strip_bom():
+            pth.write_bytes(pth_bytes)
+            write_manifest(runtime)
+
+        cycle("RT21 path-file-with-byte-order-mark",
+              "a ._pth carrying a UTF-8 BOM", runtime, task_root,
+              add_bom, strip_bom, "REVIEWER_RUNTIME_PATH_FILE_HAS_BOM")
+
         # The verifier must never repair what it refuses.
         (site / "sitecustomize.py").write_text("import sys\n", encoding="ascii")
         reasons = check(runtime, task_root)

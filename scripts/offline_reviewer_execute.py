@@ -366,6 +366,40 @@ def _frozen_package() -> dict:
     return {"frozen": frozen, "recomputed": recomputed, "disagreements": disagreements}
 
 
+_PACKAGE_BASELINE = None
+
+
+def _package_digest() -> str:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from offline_reviewer_runtime import tree_digest  # noqa: PLC0415
+
+    return tree_digest(PACKAGE_ROOT)
+
+
+def _assert_package_unchanged() -> None:
+    """The package must still be the bytes it was when this process started.
+
+    The session re-verifies immediately before launching this driver, and the
+    driver then installs and runs the packaged executable for up to four hours.
+    Everything between those two events was unguarded -- which is exactly the
+    window an author watching the status file would use.
+
+    The anchor is the session's pin plus the first measurement here; this cannot
+    detect a swap that happened before the process began, which is what the
+    session's own gate is for.
+    """
+
+    global _PACKAGE_BASELINE
+    if not PACKAGE_ROOT.exists():
+        raise SystemExit("REVIEWER_PACKAGE_ABSENT")
+    current = _package_digest()
+    if _PACKAGE_BASELINE is None:
+        _PACKAGE_BASELINE = current
+        return
+    if current != _PACKAGE_BASELINE:
+        raise SystemExit("REVIEWER_PACKAGE_CHANGED_BEFORE_EXECUTION")
+
+
 def _isolated_child_env() -> dict:
     """The environment a child interpreter may inherit.
 
@@ -390,6 +424,7 @@ def _run_runner(source: Path, python_exe: str, *, phase: str, label: str,
     """Invoke the environment runner, which accepts NO key material by design --
     and this driver has none to offer."""
 
+    _assert_package_unchanged()
     # -I on the child too: same interpreter, same trust surface, same flag.
     cmd = [python_exe, "-I", str(source / "scripts" / "offline_env_runner.py"),
            "--phase", phase, "--env-label", label, "--env-class", env_class,
@@ -677,6 +712,7 @@ def stage_e2(args) -> int:
         shutil.rmtree(transfer_root, ignore_errors=True)
     transfer_root.mkdir(parents=True, exist_ok=True)
 
+    _assert_package_unchanged()
     cmd = [sys.executable, "-I", str(source / "scripts" / "offline_hyperv_matrix.py"),
            "--phase", "full", "--brokered", "--review-nonce", nonce,
            "--env-label", label,
