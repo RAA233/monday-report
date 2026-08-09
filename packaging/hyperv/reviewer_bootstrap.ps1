@@ -49,9 +49,14 @@
 
 .PARAMETER DestroyReviewerCredentialChain
     Proceed with the credential half of the default route even though this host
-    already holds a reviewer account or sealed reviewer material. Destroys the
-    DPAPI chain. Required only when the reviewer identity is genuinely being
-    rebuilt from nothing; there is no route back.
+    already holds a reviewer account, a reviewer scheduled task, or sealed
+    reviewer material. Destroys the DPAPI chain. Required only when the reviewer
+    identity is genuinely being rebuilt from nothing; there is no route back.
+
+    Takes the exact text DESTROY-THE-REVIEWER-KEY, compared ordinally. It is a
+    string rather than a switch so that no abbreviation can arm it by accident:
+    as a switch it was the only parameter beginning with D, so a bare -D bound
+    it.
 
 .EXAMPLE
     # In an elevated PowerShell window. -AuthorAccount is REQUIRED on every
@@ -87,10 +92,19 @@ param(
     [string]$BuildPython = '',
     [switch]$RepinReviewerCode,
     [switch]$GrantAuthorTaskRun,
-    # Proceed with the credential half of the no-switch route even though this
-    # host already holds sealed reviewer material. Destroys the DPAPI chain --
-    # see OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE below.
-    [switch]$DestroyReviewerCredentialChain,
+    # Proceed with the credential half of the default route even though this
+    # host already holds a reviewer account, a reviewer task, or sealed reviewer
+    # material. Destroys the DPAPI chain -- see
+    # OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE below.
+    #
+    # A STRING, NOT A SWITCH. PowerShell binds any unambiguous prefix, and as a
+    # switch this was the only parameter starting with D -- so a bare `-D`, and
+    # every abbreviation up to the full name, silently armed the destructive
+    # path. That is a worse hazard than the -Re collision the rename fixed:
+    # abbreviating into a refusal is an inconvenience, abbreviating into
+    # permanent key loss is not. Requiring a value means a bare -D is a binding
+    # error, and requiring THIS value means the operator typed the consequence.
+    [string]$DestroyReviewerCredentialChain = '',
     # Required on a host where the operator and the author are the same
     # Windows account. See Assert-OperatorIsNotAuthor.
     # THE AUTHOR, NAMED. Never inferred from $env:USERNAME, the running
@@ -1931,17 +1945,51 @@ try {
 # destroys the ability to drive the reviewer even when the account and its key
 # both survive, and $TaskName is a parameter independent of $User and $HvRoot.
 # Covering two of the three operands is how this block got here twice.
+#
+# PROBED WITH THE RESOLVER THAT DOES THE DAMAGE. Get-ScheduledTask -TaskName
+# matches a LEAF name across folders; schtasks /TN takes a PATH. On a host whose
+# reviewer task lives in a folder the two are exactly inverted -- the cmdlet
+# reports ObjectNotFound for the name schtasks resolves and will overwrite, so
+# the operand was disarmed on every run of such a host. Asking schtasks the same
+# question it will act on removes the namespace gap, and aligns the failure
+# modes: if this query cannot resolve the name, neither can the /Create that
+# would replace it, so a non-zero result is genuinely no exposure.
 $credChainTask = $false
+$prevEap = $ErrorActionPreference
 try {
-    $credChainTask = [bool](Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop)
+    $ErrorActionPreference = 'Continue'
+    & $schtasks /Query /TN $TaskName 2>&1 | Out-Null
+    $credChainTask = ($LASTEXITCODE -eq 0)
 } catch {
-    if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { $credChainTask = $false }
-    else { $credChainUnreadable = $true }
+    $credChainUnreadable = $true
+} finally {
+    $ErrorActionPreference = $prevEap
+}
+# Second opinion in the other namespace. Only ever ADDS presence: the cmdlet
+# sees tasks in any folder that a bare /TN would miss, so the two together
+# cover both name spaces and neither can subtract from the other.
+try {
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop) { $credChainTask = $true }
+} catch {
+    if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { $credChainUnreadable = $true }
+}
+
+# Ordinal, case-sensitive, exact. A near miss is not consent, and -ceq/-contains
+# are culture-sensitive in ways this file has been bitten by before.
+$credChainBypass = [string]::Equals(
+    $DestroyReviewerCredentialChain, 'DESTROY-THE-REVIEWER-KEY', 'Ordinal')
+if ($DestroyReviewerCredentialChain -and -not $credChainBypass) {
+    Write-Output ''
+    Write-Output '  STOP: -DestroyReviewerCredentialChain was given a value that is not'
+    Write-Output '  the confirmation phrase. It takes the exact text'
+    Write-Output '  DESTROY-THE-REVIEWER-KEY and nothing else.'
+    Write-Output '  reason: OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE'
+    exit 2
 }
 
 $credChainLive = $credChainAccount -or $credChainTask -or
                  [bool]$credChainSealed.Count -or $credChainUnreadable
-if ($credChainLive -and -not $DestroyReviewerCredentialChain) {
+if ($credChainLive -and -not $credChainBypass) {
     Write-Output ''
     Write-Output '  STOP: this route resets the reviewer password, deletes the reviewer'
     Write-Output '  task and re-registers it. Each of the following is a thing it would'
@@ -1991,12 +2039,13 @@ if ($credChainLive -and -not $DestroyReviewerCredentialChain) {
         Write-Output '  Do NOT reach for -DestroyReviewerCredentialChain to clear a directory.'
     } else {
         Write-Output '  If the reviewer identity is genuinely being rebuilt from nothing and'
-        Write-Output '  the loss is intended, pass -DestroyReviewerCredentialChain.'
+        Write-Output '  the loss is intended, pass'
+        Write-Output '  -DestroyReviewerCredentialChain DESTROY-THE-REVIEWER-KEY.'
     }
     Write-Output '  reason: OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE'
     exit 2
 }
-if ($credChainLive -and $DestroyReviewerCredentialChain) {
+if ($credChainLive -and $credChainBypass) {
     # Warned on every arm of the condition that was bypassed, including the one
     # that says the answer could not be established: gating the warning on
     # visible files alone left the least certain case the quietest.

@@ -1284,8 +1284,21 @@ def main() -> int:
             # runs first and would throw before the enumeration is reached.
             inject = ""
             if make_unreadable:
-                inject += ("function Test-Path { throw 'synthetic access denial' }\n"
-                           "function Get-ChildItem { throw 'synthetic access denial' }\n")
+                # ADVANCED functions, so -ErrorAction is a real common parameter
+                # and is honoured. A plain `function X { throw }` throws no
+                # matter what the caller asks for, which made the weakening arm
+                # of OP48j dead: the copy with -ErrorAction SilentlyContinue
+                # still refused, for a reason unrelated to the copy. Write-Error
+                # under the shipped 'Stop' is terminating and under
+                # SilentlyContinue is not, which is the distinction being
+                # measured.
+                inject += (
+                    "function Test-Path { [CmdletBinding()]\n"
+                    "  param([Parameter(ValueFromRemainingArguments=$true)]$Rest)\n"
+                    "  Write-Error 'synthetic access denial' }\n"
+                    "function Get-ChildItem { [CmdletBinding()]\n"
+                    "  param([Parameter(ValueFromRemainingArguments=$true)]$Rest)\n"
+                    "  Write-Error 'synthetic access denial' }\n")
             if account:
                 inject += "function Get-LocalUser { [pscustomobject]@{ Name = $User } }\n"
             if task:
@@ -1301,9 +1314,18 @@ def main() -> int:
                 "$ErrorActionPreference = 'Stop'\n"
                 "$User = 'MR-SYNTHETIC-REVIEWER-NOT-ON-THIS-HOST'\n"
                 "$TaskName = 'MR-SYNTHETIC-TASK-NOT-ON-THIS-HOST'\n"
+                # The block probes the task with the same binary the route uses
+                # to overwrite it, so the harness must resolve it the way the
+                # script does. Leaving it unbound made the probe throw under
+                # StrictMode and every case refuse -- fail-closed, and detected
+                # by the one check that asserts a clean host still proceeds.
+                + ("$schtasks = '" + str(
+                    Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                    / "System32" / "schtasks.exe") + "'\n")
                 + inject
                 + f"$HvRoot = '{root}'\n"
-                f"$DestroyReviewerCredentialChain = ${str(bool(recreate)).lower()}\n"
+                + ("$DestroyReviewerCredentialChain = 'DESTROY-THE-REVIEWER-KEY'\n"
+                   if recreate else "$DestroyReviewerCredentialChain = ''\n")
                 + body
                 + "\nWrite-Output 'CHAIN-PROCEEDED'\n", encoding="utf-8")
             try:
@@ -1435,26 +1457,48 @@ def main() -> int:
             "        $short = ($name -split '\\\\')[-1].ToLowerInvariant()\n"
             "        if ('set-localuser', 'new-localuser' -contains $short) {\n"
             "            # WHOSE ACCOUNT DATABASE. Two of these run inside the\n"
-            "            # Hyper-V guest, against the guest's own local account,\n"
-            "            # and touch nothing on this host. They are lexically\n"
-            "            # inside a scriptblock handed to Invoke-Command -VMName,\n"
-            "            # which is the structural difference -- not the cmdlet,\n"
-            "            # not the file, not the account name.\n"
+            "            # Hyper-V guest and touch nothing here. Lexical\n"
+            "            # ancestry does NOT establish that: an expression in\n"
+            "            # -ArgumentList is evaluated by the LOCAL session before\n"
+            "            # dispatch, and -ComputerName/-Session name this host as\n"
+            "            # readily as another. Classifying by ancestry let two\n"
+            "            # planted host-side resets above the marker be reported\n"
+            "            # as guest calls -- a false statement, not just a miss.\n"
+            "            #\n"
+            "            # The call must sit INSIDE the scriptblock that is bound\n"
+            "            # to -ScriptBlock of an Invoke-Command carrying -VMName\n"
+            "            # or -VMId. That is the only construct here whose body\n"
+            "            # provably executes in the guest. Anything else counts\n"
+            "            # as host-side, which is the failing direction.\n"
             "            $guest = $false\n"
-            "            $p = $c.Parent\n"
-            "            while ($p) {\n"
-            "                if ($p -is [System.Management.Automation.Language.CommandAst]) {\n"
-            "                    $pn = $p.GetCommandName()\n"
-            "                    if ($pn -and ($pn -split '\\\\')[-1].ToLowerInvariant() -eq 'invoke-command') {\n"
-            "                        foreach ($el in $p.CommandElements) {\n"
-            "                            if ($el -is [System.Management.Automation.Language.CommandParameterAst] `\n"
-            "                                -and $el.ParameterName -match '^(VMName|VMId|Session|ComputerName)$') {\n"
-            "                                $guest = $true\n"
+            "            $n = $c\n"
+            "            while ($n -and -not $guest) {\n"
+            "                $sb = $n\n"
+            "                if ($sb -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {\n"
+            "                    $cmd = $sb.Parent\n"
+            "                    if ($cmd -is [System.Management.Automation.Language.CommandAst]) {\n"
+            "                        $cn = $cmd.GetCommandName()\n"
+            "                        if ($cn -and ($cn -split '\\\\')[-1].ToLowerInvariant() -eq 'invoke-command') {\n"
+            "                            $els = @($cmd.CommandElements)\n"
+            "                            $idx = [Array]::IndexOf($els, $sb)\n"
+            "                            $boundToScriptBlock = $false\n"
+            "                            if ($idx -gt 0) {\n"
+            "                                $prev = $els[$idx - 1]\n"
+            "                                if ($prev -is [System.Management.Automation.Language.CommandParameterAst] `\n"
+            "                                    -and $prev.ParameterName -match '^(sb|scr|script|scriptb|scriptbl|scriptblo|scriptbloc|scriptblock)$') {\n"
+            "                                    $boundToScriptBlock = $true\n"
+            "                                }\n"
             "                            }\n"
+            "                            $vm = $false\n"
+            "                            foreach ($el in $els) {\n"
+            "                                if ($el -is [System.Management.Automation.Language.CommandParameterAst] `\n"
+            "                                    -and $el.ParameterName -match '^(VMName|VMId)$') { $vm = $true }\n"
+            "                            }\n"
+            "                            if ($boundToScriptBlock -and $vm) { $guest = $true }\n"
             "                        }\n"
             "                    }\n"
             "                }\n"
-            "                $p = $p.Parent\n"
+            "                $n = $n.Parent\n"
             "            }\n"
             "            $rows += [ordered]@{ kind = $short; file = $leaf\n"
             "                                 offset = $c.Extent.StartOffset\n"
@@ -1507,15 +1551,22 @@ def main() -> int:
         reset_files = {r["file"] for r in ast_rows
                        if r["kind"] == "set-localuser" and not r.get("remote")}
 
+        same_file = (
+            len(markers) == 1 and markers[0]["file"] == "reviewer_bootstrap.ps1"
+            and reset_files == {"reviewer_bootstrap.ps1"}
+            and {r["file"] for r in ast_rows
+                 if r["kind"] == "new-localuser" and not r.get("remote")}
+            == {"reviewer_bootstrap.ps1"})
         rec("OP48e the-refusal-precedes-account-creation-and-the-reset",
-            ast_answered and marker_at >= 0 and marker_count == 1
+            ast_answered and marker_at >= 0 and marker_count == 1 and same_file
             and len(creates) == 1 and len(resets) == 1
             and marker_at < creates[0] < resets[0]
             and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in raw_boot,
             f"the block sits above every parsed New-LocalUser and Set-LocalUser "
             f"invocation across every script on the trust path, measured in one "
-            f"coordinate space, and the marker it is located by occurs once "
-            f"(answered={ast_answered}, marker@{marker_at}x{marker_count}, "
+            f"coordinate space, all three in the same file, and the marker it is "
+            f"located by occurs once (answered={ast_answered}, "
+            f"same-file={same_file}, marker@{marker_at}x{marker_count}, "
             f"creates={creates}, resets={resets})")
 
         rec("OP48f the-account-password-still-has-a-single-host-invocation",
@@ -1568,21 +1619,130 @@ def main() -> int:
         # raw access-denied, adding -ErrorAction SilentlyContinue, would leave
         # every check green while restoring the fail-open the block exists to
         # remove. Applied to a copy and measured.
-        weak_rc, weak_text, weak_detail = run_chain(
-            [], recreate=False, tag="weak", make_unreadable=True,
-            weaken="Get-ChildItem -LiteralPath $credChainRoot -Force")
-        # Counted in the STRIPPED text. The first version matched the phrase
-        # wherever it appeared, including the comment that explains why the
-        # block does not use it -- so the check reported the shipped block as
-        # already weakened, on the strength of prose about not weakening it.
-        probe_calls = len(re.findall(r"-ErrorAction\s+SilentlyContinue",
-                                     strip_powershell_comments(chain_text)))
-        rec("OP48j weakening-a-probe-to-silentlycontinue-is-detected",
-            probe_calls == 0 and weak_rc != 0 and "CHAIN-PROCEEDED" not in weak_text,
-            f"the shipped block contains no SilentlyContinue probe, and a copy "
-            f"with one added does not reach the proceed path -- so the branch "
-            f"OP48d certifies cannot be disarmed while OP48d still passes "
-            f"({probe_calls} silent probe(s), weakened rc={weak_rc})")
+        # BOTH probes, not one. Weakening the enumeration and not the leaf test
+        # is this codebase's second defect shape, applied by the check written
+        # to close its third.
+        weak_results = {}
+        for label, target in (
+                ("enumeration", "Get-ChildItem -LiteralPath $credChainRoot -Force"),
+                ("leaf", "Test-Path -LiteralPath (Join-Path $credChainRoot $leaf)")):
+            w_rc, w_text, _ = run_chain(
+                [], recreate=False, tag=f"weak-{label}", make_unreadable=True,
+                weaken=target)
+            weak_results[label] = (w_rc, "CHAIN-PROCEEDED" in w_text)
+
+        # AST, NOT TEXT. The regex matched only the fully written-out
+        # "-ErrorAction SilentlyContinue", so -EA SilentlyContinue, -ea Ignore
+        # and a quoted value all read as clean: a check claiming no probe is
+        # silenced, silent about the ways to silence one. Counting it in
+        # stripped text fixed which characters it looked at, not what it looked
+        # for.
+        region_file = work / "chain-region.ps1"
+        region_file.write_text(chain_text, encoding="utf-8")
+        ea_probe = work / "chain-region-ea.ps1"
+        ea_probe.write_text(
+            "$e = $null\n"
+            "$ast = [System.Management.Automation.Language.Parser]::ParseFile(\n"
+            "    $env:MR_REGION, [ref]$null, [ref]$e)\n"
+            "if ($e.Count -or -not $ast) { Write-Output 'PARSE-FAILED'; exit 0 }\n"
+            "$hits = @()\n"
+            "foreach ($c in $ast.FindAll({ param($n)\n"
+            "        $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {\n"
+            "    $els = @($c.CommandElements)\n"
+            "    for ($i = 0; $i -lt $els.Count; $i++) {\n"
+            "        $el = $els[$i]\n"
+            "        if ($el -isnot [System.Management.Automation.Language.CommandParameterAst]) { continue }\n"
+            "        if ($el.ParameterName -notmatch '^(ea|er|err|erro|error|errora|erroract|erroracti|erroractio|erroraction)$') { continue }\n"
+            "        $v = $el.Argument\n"
+            "        if (-not $v -and ($i + 1) -lt $els.Count) { $v = $els[$i + 1] }\n"
+            "        $t = ''\n"
+            "        if ($v) { $t = $v.Extent.Text.Trim(([char]39), ([char]34)) }\n"
+            "        if ($t -match '^(SilentlyContinue|Ignore|0|4)$') {\n"
+            "            $hits += (([string]$c.GetCommandName()) + ':' + $t)\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "if (-not $hits.Count) { Write-Output 'NONE' } else { Write-Output ($hits -join ',') }\n",
+            encoding="utf-8")
+        try:
+            ea_out = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                 "Bypass", "-File", str(ea_probe)],
+                capture_output=True, text=True, timeout=180,
+                env={**os.environ, "MR_REGION": str(region_file)})
+            ea_verdict = (ea_out.stdout or "").strip()
+        except (OSError, subprocess.SubprocessError):
+            ea_verdict = "PROBE-FAILED"
+
+        rec("OP48j weakening-either-probe-to-a-suppressed-error-is-detected",
+            ea_verdict == "NONE"
+            and all(rc != 0 and not proceeded
+                    for rc, proceeded in weak_results.values()),
+            f"no command in the shipped block carries a suppressing ErrorAction "
+            f"in any spelling, and a copy with one added to EITHER probe does "
+            f"not reach the proceed path -- so the branch OP48d certifies cannot "
+            f"be disarmed while OP48d still passes (ast={ea_verdict}, "
+            f"{weak_results})")
+
+        # NO ABBREVIATION ARMS THE DESTRUCTION. PowerShell binds any
+        # unambiguous prefix, so a destructive SWITCH whose name is the only one
+        # starting with D is armed by a bare -D -- which the rename that removed
+        # the -Re collision created. As a string parameter a bare -D is a
+        # binding error, and the value must be the confirmation phrase. Measured
+        # by binding against the real parameter block rather than read off it.
+        bind_probe = work / "bind-probe.ps1"
+        bind_probe.write_text(
+            "$boot = $env:MR_BOOT_PATH\n"
+            "$e = $null\n"
+            "$ast = [System.Management.Automation.Language.Parser]::ParseFile(\n"
+            "    $boot, [ref]$null, [ref]$e)\n"
+            "if ($e.Count) { Write-Output 'PARSE-FAILED'; exit 0 }\n"
+            "$p = $ast.ParamBlock\n"
+            "if (-not $p) { Write-Output 'NO-PARAM-BLOCK'; exit 0 }\n"
+            "$rows = @()\n"
+            "foreach ($v in $p.Parameters) {\n"
+            "    $nm = $v.Name.VariablePath.UserPath\n"
+            "    $isSwitch = $false\n"
+            "    foreach ($a in $v.Attributes) {\n"
+            "        if ($a -is [System.Management.Automation.Language.TypeConstraintAst] `\n"
+            "            -and $a.TypeName.Name -match '^switch$') { $isSwitch = $true }\n"
+            "    }\n"
+            "    $rows += [ordered]@{ name = $nm; isSwitch = $isSwitch }\n"
+            "}\n"
+            "ConvertTo-Json -InputObject @($rows) -Depth 3 -Compress\n",
+            encoding="utf-8")
+        try:
+            bind_out = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                 "Bypass", "-File", str(bind_probe)],
+                capture_output=True, text=True, timeout=180,
+                env={**os.environ, "MR_BOOT_PATH": str(
+                    ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1")})
+            params = json.loads((bind_out.stdout or "[]").strip() or "[]")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            params = []
+        destructive = [p for p in params
+                       if p["name"] == "DestroyReviewerCredentialChain"]
+        # Every prefix of the destructive name that no other parameter shares is
+        # a spelling PowerShell will bind. If the parameter is a switch, each of
+        # those arms it with no value typed at all.
+        others = [p["name"].lower() for p in params
+                  if p["name"] != "DestroyReviewerCredentialChain"]
+        arming_prefixes = []
+        if destructive and destructive[0]["isSwitch"]:
+            full = "DestroyReviewerCredentialChain"
+            for i in range(1, len(full) + 1):
+                pre = full[:i].lower()
+                if not any(o.startswith(pre) for o in others):
+                    arming_prefixes.append("-" + full[:i])
+        rec("OP48k no-abbreviation-can-arm-the-destructive-path",
+            bool(destructive) and not destructive[0]["isSwitch"]
+            and not arming_prefixes,
+            f"the bypass takes a value rather than being a switch, so no "
+            f"unambiguous prefix arms it and the operator must type the "
+            f"confirmation phrase (is-switch="
+            f"{destructive[0]['isSwitch'] if destructive else 'ABSENT'}, "
+            f"arming-prefixes={arming_prefixes[:3] or 'none'})")
 
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
@@ -2058,7 +2218,7 @@ def main() -> int:
                       + "; ".join(missing_family),
         }, indent=2))
         return 1
-    MINIMUM_CREDENTIAL_CHAIN_CHECKS = 9
+    MINIMUM_CREDENTIAL_CHAIN_CHECKS = 12
     chain_checks = sorted(i for i in executed_ids if i.startswith("OP48"))
     if len(chain_checks) < MINIMUM_CREDENTIAL_CHAIN_CHECKS:
         print(json.dumps({
