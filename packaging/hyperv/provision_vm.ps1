@@ -132,18 +132,18 @@ function Save-ProtectedCredential {
     # DPAPI (CryptProtectData) bound to the CURRENT user, plus an ACL restricted
     # to that user and SYSTEM. No plaintext is written to any host path.
     param([string]$Plain, [string]$Path = $CredPath)
-    if (-not (Test-Path $StateRoot)) { New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $StateRoot)) { New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null }
     $secure = ConvertTo-SecureString -String $Plain -AsPlainText -Force
     $blob = ConvertFrom-SecureString -SecureString $secure   # no -Key => DPAPI CurrentUser
-    Set-Content -Path $Path -Value $blob -Encoding ASCII -NoNewline
+    Set-Content -LiteralPath $Path -Value $blob -Encoding ASCII -NoNewline
     icacls $Path /inheritance:r /grant:r "$($env:USERNAME):(F)" /grant:r "SYSTEM:(F)" | Out-Null
     $secure.Dispose()
 }
 
 function Get-CredentialFrom {
     param([string]$Path)
-    if (-not (Test-Path $Path)) { return $null }
-    $raw = Get-Content -Path $Path -Raw -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
     if ($null -eq $raw) { return $null }
     $blob = ([string]$raw).Trim()
     if (-not $blob) { return $null }
@@ -155,13 +155,13 @@ function Get-ProtectedCredential {
     # Decrypts in memory immediately before a bounded PowerShell Direct call.
     # Fails CLOSED: a missing or corrupt blob stops the run; there is no
     # fallback to a blank, default or prompted password.
-    if (-not (Test-Path $CredPath)) {
+    if (-not (Test-Path -LiteralPath $CredPath)) {
         Stop-With "HYPERV_GUEST_CREDENTIAL_UNAVAILABLE" "protected guest credential is absent"
     }
     # Get-Content -Raw returns $null for an empty file, and $null.Trim() throws
     # under ErrorActionPreference=Stop -- which would abort with an untyped
     # crash instead of the typed fail-closed verdict.
-    $raw = Get-Content -Path $CredPath -Raw -ErrorAction SilentlyContinue
+    $raw = Get-Content -LiteralPath $CredPath -Raw -ErrorAction SilentlyContinue
     $blob = ""
     if ($null -ne $raw) { $blob = ([string]$raw).Trim() }
     if (-not $blob) {
@@ -179,12 +179,12 @@ function Get-ProtectedCredential {
 
 function Invoke-MediaVerify {
     if (-not $IsoPath) { Stop-With "WINDOWS_EVALUATION_MEDIA_APPROVAL_REQUIRED" "-IsoPath is required" }
-    if (-not (Test-Path $IsoPath)) { Stop-With "WINDOWS_EVALUATION_MEDIA_APPROVAL_REQUIRED" "media file not found" }
+    if (-not (Test-Path -LiteralPath $IsoPath)) { Stop-With "WINDOWS_EVALUATION_MEDIA_APPROVAL_REQUIRED" "media file not found" }
 
-    $item = Get-Item $IsoPath
+    $item = Get-Item -LiteralPath $IsoPath
     $script:Facts["media_class"] = "ISO"
     $script:Facts["media_size_bytes"] = $item.Length
-    $sha = (Get-FileHash -Path $IsoPath -Algorithm SHA256).Hash.ToLower()
+    $sha = (Get-FileHash -LiteralPath $IsoPath -Algorithm SHA256).Hash.ToLower()
     $script:Facts["media_sha256"] = $sha
     Add-Check "HM01 media-sha256-computed" ($sha.Length -eq 64) "full SHA-256 recorded"
 
@@ -199,7 +199,7 @@ function Invoke-MediaVerify {
         $wim = "$($drive):\sources\install.wim"
         $esd = "$($drive):\sources\install.esd"
         $img = $null
-        if (Test-Path $wim) { $img = $wim } elseif (Test-Path $esd) { $img = $esd }
+        if (Test-Path -LiteralPath $wim) { $img = $wim } elseif (Test-Path -LiteralPath $esd) { $img = $esd }
         Add-Check "HM03 install-image-present" ($null -ne $img) $(if ($img) { Split-Path $img -Leaf } else { "absent" })
         if (-not $img) { Stop-With "WINDOWS_EVALUATION_MEDIA_APPROVAL_REQUIRED" "no install image inside the media" }
 
@@ -228,7 +228,7 @@ function Invoke-MediaVerify {
         $signedCount = 0
         $presentCount = 0
         foreach ($t in $sigTargets) {
-            if (-not (Test-Path $t)) { continue }
+            if (-not (Test-Path -LiteralPath $t)) { continue }
             $presentCount++
             $s = Get-AuthenticodeSignature -FilePath $t
             $subject = ""
@@ -274,9 +274,9 @@ function Invoke-MediaVerify {
 
     # Write the record from the script, so no field in it is hand-authored.
     $recordDir = Split-Path -Parent $MediaRecordPath
-    if ($recordDir -and -not (Test-Path $recordDir)) { New-Item -ItemType Directory -Path $recordDir -Force | Out-Null }
+    if ($recordDir -and -not (Test-Path -LiteralPath $recordDir)) { New-Item -ItemType Directory -Path $recordDir -Force | Out-Null }
     ([ordered]@{ facts = $script:Facts; checks = $script:Checks }) |
-        ConvertTo-Json -Depth 8 | Set-Content -Path $MediaRecordPath -Encoding UTF8
+        ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $MediaRecordPath -Encoding UTF8
 }
 
 # ---------------------------------------------------------------- provision
@@ -285,9 +285,9 @@ function Invoke-Provision {
     if (Get-VM -Name $VmName -ErrorAction SilentlyContinue) {
         Stop-With "HYPERV_WINDOWS_SETUP_NOT_ACCEPTED" "a VM named $VmName already exists; refusing to reuse or alter it"
     }
-    if (-not (Test-Path $VmRoot)) { New-Item -ItemType Directory -Path $VmRoot -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $VmRoot)) { New-Item -ItemType Directory -Path $VmRoot -Force | Out-Null }
     $vhdPath = Join-Path $VmRoot "$VmName.vhdx"
-    if (Test-Path $vhdPath) { Stop-With "HYPERV_WINDOWS_SETUP_NOT_ACCEPTED" "a disk already exists at the task VHDX path; refusing to overwrite" }
+    if (Test-Path -LiteralPath $vhdPath) { Stop-With "HYPERV_WINDOWS_SETUP_NOT_ACCEPTED" "a disk already exists at the task VHDX path; refusing to overwrite" }
 
     # Two distinct secrets: the bootstrap one goes into the unattend (and so onto
     # the guest disk in reversible form), the real one never leaves the host's
@@ -305,7 +305,7 @@ function Invoke-Provision {
         $mount = Mount-DiskImage -ImagePath $IsoPath -PassThru -ErrorAction Stop
         $srcDrive = ($mount | Get-Volume).DriveLetter
         $img = "$($srcDrive):\sources\install.wim"
-        if (-not (Test-Path $img)) { $img = "$($srcDrive):\sources\install.esd" }
+        if (-not (Test-Path -LiteralPath $img)) { $img = "$($srcDrive):\sources\install.esd" }
         $eval = Get-WindowsImage -ImagePath $img | Where-Object { $_.ImageName -like "*Enterprise*Evaluation*" } | Select-Object -First 1
         if (-not $eval) { Stop-With "WINDOWS_EVALUATION_MEDIA_APPROVAL_REQUIRED" "no Enterprise Evaluation index at apply time" }
 
@@ -336,7 +336,7 @@ function Invoke-Provision {
 
         # ---- supported image application ----
         Expand-WindowsImage -ImagePath $img -Index $eval.ImageIndex -ApplyPath "$($winLetter):\" | Out-Null
-        Add-Check "HP01 image-applied-with-dism" (Test-Path "$($winLetter):\Windows\System32\ntoskrnl.exe") "Expand-WindowsImage completed"
+        Add-Check "HP01 image-applied-with-dism" (Test-Path -LiteralPath "$($winLetter):\Windows\System32\ntoskrnl.exe") "Expand-WindowsImage completed"
 
         # ---- supported boot configuration ----
         # Use the HOST's bcdboot, not the one inside the applied image: an image
@@ -345,7 +345,7 @@ function Invoke-Provision {
         $bcdboot = Join-Path $env:SystemRoot "System32\bcdboot.exe"
         $bcd = & $bcdboot "$($winLetter):\Windows" /s "$($efiLetter):" /f UEFI 2>&1
         $bcdCode = $LASTEXITCODE
-        $booted = (Test-Path "$($efiLetter):\EFI\Microsoft\Boot\bootmgfw.efi") -and ($bcdCode -eq 0)
+        $booted = (Test-Path -LiteralPath "$($efiLetter):\EFI\Microsoft\Boot\bootmgfw.efi") -and ($bcdCode -eq 0)
         Add-Check "HP02 bcdboot-uefi" $booted ("bcdboot exit=" + $bcdCode + ": " + ($bcd -join " ").Trim())
         if (-not $booted) {
             Stop-With "HYPERV_WINDOWS_SETUP_NOT_ACCEPTED" "BCDBoot did not produce a UEFI boot path; the VHDX would not boot"
@@ -353,8 +353,8 @@ function Invoke-Provision {
 
         # ---- supported unattend, rendered in memory, written into the guest ----
         $panther = "$($winLetter):\Windows\Panther"
-        if (-not (Test-Path $panther)) { New-Item -ItemType Directory -Path $panther -Force | Out-Null }
-        $xml = (Get-Content -Path $TemplatePath -Raw).
+        if (-not (Test-Path -LiteralPath $panther)) { New-Item -ItemType Directory -Path $panther -Force | Out-Null }
+        $xml = (Get-Content -LiteralPath $TemplatePath -Raw).
             Replace("__COMPUTER_NAME__", $ComputerName).
             Replace("__ADMIN_NAME__", $AdminName).
             Replace("__ADMIN_PASSWORD_B64__", $pwB64).
@@ -494,7 +494,7 @@ function Wait-GuestReady {
                         Set-LocalUser -Name $name -Password $secure -ErrorAction Stop
                     }
                     $real = $null
-                    Remove-Item -Path $BootstrapCredPath -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $BootstrapCredPath -Force -ErrorAction SilentlyContinue
                     $script:Facts["bootstrap_password_rotated"] = $true
                 }
                 $script:Facts["powershell_direct_ready"] = $true
@@ -534,11 +534,11 @@ function Invoke-GuestVerify {
             os_caption = (Get-CimInstance Win32_OperatingSystem).Caption
             os_build = (Get-CimInstance Win32_OperatingSystem).BuildNumber
             clean_state = [ordered]@{
-                no_prior_installation      = -not (Test-Path (Join-Path $localApp "Programs\MondayReportOffline"))
-                no_prior_application_data  = -not (Test-Path (Join-Path $localApp "MondayReportOffline"))
-                no_prior_license           = -not (Test-Path (Join-Path $localApp "MondayReportOffline\licenses"))
+                no_prior_installation      = -not (Test-Path -LiteralPath (Join-Path $localApp "Programs\MondayReportOffline"))
+                no_prior_application_data  = -not (Test-Path -LiteralPath (Join-Path $localApp "MondayReportOffline"))
+                no_prior_license           = -not (Test-Path -LiteralPath (Join-Path $localApp "MondayReportOffline\licenses"))
                 no_repository              = -not (Test-Path "C:\mr-offline")
-                no_customer_data           = -not (Test-Path (Join-Path $localApp "MondayReportOffline\data"))
+                no_customer_data           = -not (Test-Path -LiteralPath (Join-Path $localApp "MondayReportOffline\data"))
             }
             dependency_absence = [ordered]@{
                 node_absent     = ($null -eq (Get-Command node -ErrorAction SilentlyContinue))
@@ -617,15 +617,15 @@ function Invoke-Baseline {
                          "C:\Windows\Panther\UnattendGC\unattend.xml",
                          "C:\Windows\System32\Sysprep\unattend.xml",
                          "C:\Windows\System32\Sysprep\Panther\unattend.xml")) {
-            if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
         }
         $residue = @()
         foreach ($root in $roots) {
-            if (-not (Test-Path $root)) { continue }
-            foreach ($file in @(Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path -LiteralPath $root)) { continue }
+            foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue)) {
                 if ($file.Length -gt 8MB) { continue }
                 $text = ""
-                try { $text = Get-Content $file.FullName -Raw -ErrorAction Stop } catch { $text = "" }
+                try { $text = Get-Content -LiteralPath $file.FullName -Raw -ErrorAction Stop } catch { $text = "" }
                 if ($text -match "<Password>" -or $text -match "PlainText") { $residue += $file.Name }
             }
         }
@@ -633,7 +633,7 @@ function Invoke-Baseline {
     }
     $cred = $null
     Add-Check "HB01 unattend-removed-from-guest" (@($scrub.residue_files).Count -eq 0) ("no surviving password element or unattend marker under Panther or Sysprep (residue: " + (@($scrub.residue_files) -join ",") + ")")
-    Add-Check "HB01b bootstrap-password-rotated-away" ((-not (Test-Path $BootstrapCredPath)) -and (Test-Path $CredPath)) "the password written into the unattend was rotated away on first contact and its protected copy deleted; only the host-only credential remains"
+    Add-Check "HB01b bootstrap-password-rotated-away" ((-not (Test-Path -LiteralPath $BootstrapCredPath)) -and (Test-Path -LiteralPath $CredPath)) "the password written into the unattend was rotated away on first contact and its protected copy deleted; only the host-only credential remains"
 
     # Remove any temporary adapter BEFORE the baseline, then prove isolation.
     Get-VMNetworkAdapter -VMName $VmName | Remove-VMNetworkAdapter -ErrorAction SilentlyContinue

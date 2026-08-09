@@ -1589,7 +1589,17 @@ if ($StagePackage) {
     } else {
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
     }
-    Copy-Item -LiteralPath (Join-Path $PackageSource '*') -Destination $dest -Recurse -Force
+    # `<source>\*` means "the CONTENTS of the source", and that is the only
+    # shape that copies them. The literal-path sweep converted this one too, and
+    # -LiteralPath on a path ending in `*` copies NOTHING and raises NO error --
+    # measured: 0 items copied, exit clean, where the -Path form copies every
+    # child. Since the block above has already emptied the destination, the
+    # result was an empty reviewer-pkg, an ACL read-back that passed over it (an
+    # empty protected admins-owned tree satisfies every clause), and a printed
+    # claim that the package was staged.
+    #
+    # WILDCARD-BY-DESIGN
+    Copy-Item -Path (Join-Path $PackageSource '*') -Destination $dest -Recurse -Force
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $icacls $dest /reset /T /C /Q | Out-Null
     & $icacls $dest /inheritance:r | Out-Null
@@ -1597,7 +1607,23 @@ if ($StagePackage) {
     & $icacls $dest /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
     Assert-AclApplied -Path $dest -Account $User
-    Write-Fact 'package staged' $true
+    # MEASURED, NOT ASSERTED. `Write-Fact 'package staged' $true` was a constant:
+    # it printed the same thing over a correctly staged tree and over an empty
+    # one. Counting what arrived, and refusing an empty destination, is what
+    # makes the line mean something -- and it is the check that would have
+    # caught the copy above going silently to nothing.
+    $stagedCount = @(Get-ChildItem -LiteralPath $dest -Recurse -Force `
+                     -ErrorAction SilentlyContinue).Count
+    $sourceCount = @(Get-ChildItem -LiteralPath $PackageSource -Recurse -Force `
+                     -ErrorAction SilentlyContinue).Count
+    if ($stagedCount -eq 0 -or $stagedCount -lt $sourceCount) {
+        Write-Output ''
+        Write-Output '  STOP: the staged package does not match its source.'
+        Write-Output '  reason: OFFLINE_PACKAGE_STAGE_INCOMPLETE'
+        Write-Output ("  source objects: {0}; staged objects: {1}" -f $sourceCount, $stagedCount)
+        exit 2
+    }
+    Write-Fact 'package staged' ("{0} object(s) copied and read back" -f $stagedCount)
     Write-Output '  NOTE: the staged package is part of the reviewer code pin.'
     Write-Output '        Run -RepinReviewerCode after this, or the reviewer will refuse.'
 
@@ -1630,7 +1656,7 @@ if ($ExportSource) {
         & $icacls $dest /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
         $ErrorActionPreference = $prev
     }
-    if (Test-Path "$dest\.git") { Remove-Item -LiteralPath $dest -Recurse -Force }
+    if (Test-Path -LiteralPath "$dest\.git") { Remove-Item -LiteralPath $dest -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $gitExe clone --local --no-hardlinks --quiet $SourceRepo $dest | Out-Null
@@ -1672,7 +1698,7 @@ if ($ExportSource) {
     & $icacls $dest /setowner "$User" /T /C /Q | Out-Null
     Write-Fact 'export owner' 'reviewer (so it can verify the head first hand)'
     Assert-AclApplied -Path $dest -Account $User
-    Write-Fact 'reviewer driver present' (Test-Path "$dest\scripts\offline_reviewer_execute.py")
+    Write-Fact 'reviewer driver present' (Test-Path -LiteralPath "$dest\scripts\offline_reviewer_execute.py")
     exit 0
 }
 

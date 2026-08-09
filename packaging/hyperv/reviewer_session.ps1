@@ -79,7 +79,7 @@ function Assert-NoIssuerMaterial {
     # Refuse before doing anything, and refuse loudly.
     foreach ($name in @('MONDAY_REPORT_OPERATOR_KEY', 'MONDAY_REPORT_OPERATOR_KEY_FILE',
                         'MONDAY_REPORT_OFFLINE_ISSUER_KEY', 'MONDAY_REPORT_LICENSE_PRIVATE_KEY')) {
-        if (Test-Path "env:$name") {
+        if (Test-Path -LiteralPath "env:$name") {
             Clear-StaleTranscripts -OutDir $OutRoot
             New-Status -Stage 'guard' -State 'REFUSED' `
                 -Detail "issuer key material offered via environment: $name"
@@ -329,7 +329,10 @@ function Assert-ReviewerCodeIntegrity {
     # instead of a hand-written sample of it, so ANY byte that changes shows up.
     foreach ($root in $TreeRoots) {
         if (-not (Test-Path -LiteralPath $root)) { continue }
-        $rootFull = (Resolve-Path $root).Path
+        # -LiteralPath: this value becomes the manifest key AND the prefix
+        # every relative path is measured against, so resolving it as a
+        # pattern would move every entry in the digest.
+        $rootFull = (Resolve-Path -LiteralPath $root).Path
         # A LINK INSIDE THE TREE MAKES THIS DIGEST MEANINGLESS.
         #
         # Get-ChildItem -Recurse does not descend a directory junction, so

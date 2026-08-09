@@ -382,8 +382,8 @@ if (-not $py) {
     # nine probes simply vanished from the totals and nothing said so.
     foreach ($unpinned in @(
         'C1-01 cannot-write-site-packages', 'C1-02 cannot-replace-interpreter',
-        'C1-03 cannot-write-interpreter-directory', 'C1-04 cannot-write-scripts-directory',
-        'C1-05 cannot-write-pth-into-site-packages', 'C1-06 minus-I-ignores-PYTHONPATH',
+        'C1-03 cannot-write-interpreter-root', 'C1-04 cannot-write-stdlib',
+        'C1-05 cannot-write-dlls-dir', 'C1-06 minus-I-ignores-PYTHONPATH',
         'C1-07 minus-I-disables-user-site', 'C1-08 minus-I-ignores-PYTHONHOME',
         'C1-09 site-not-imported-by-the-runtime')) {
         Add-Probe $unpinned $null 'no interpreter pin has been published' -Inconclusive
@@ -397,8 +397,8 @@ if (-not $py) {
         -Inconclusive
     foreach ($unproven in @(
         'C1-01 cannot-write-site-packages', 'C1-02 cannot-replace-interpreter',
-        'C1-03 cannot-write-interpreter-directory', 'C1-04 cannot-write-scripts-directory',
-        'C1-05 cannot-write-pth-into-site-packages', 'C1-06 minus-I-ignores-PYTHONPATH',
+        'C1-03 cannot-write-interpreter-root', 'C1-04 cannot-write-stdlib',
+        'C1-05 cannot-write-dlls-dir', 'C1-06 minus-I-ignores-PYTHONPATH',
         'C1-07 minus-I-disables-user-site', 'C1-08 minus-I-ignores-PYTHONHOME',
         'C1-09 site-not-imported-by-the-runtime')) {
         Add-Probe $unproven $null `
@@ -419,9 +419,13 @@ if (-not $py) {
     # evidence is the same for every one of them: a tree this token cannot
     # reach cannot be influenced by it.
     foreach ($skipped in @(
-        @('C1-03 cannot-write-interpreter-directory', 'nothing can be written beside it'),
-        @('C1-04 cannot-write-scripts-directory', 'the scripts directory is unreachable'),
-        @('C1-05 cannot-write-pth-into-site-packages', 'no .pth can be placed'),
+        # THE SAME IDS THE REACHABLE BRANCH USES. These three slots carried
+        # different property names on different branches, so $results held
+        # disjoint keys and a consumer keying on one found nothing on a host
+        # where the other branch ran.
+        @('C1-03 cannot-write-interpreter-root', 'nothing can be written beside it'),
+        @('C1-04 cannot-write-stdlib', 'the standard library is unreachable'),
+        @('C1-05 cannot-write-dlls-dir', 'the DLLs directory is unreachable'),
         @('C1-06 minus-I-ignores-PYTHONPATH', 'no environment reaches an unreachable interpreter'),
         @('C1-07 minus-I-disables-user-site', 'no user site applies to an unreachable interpreter'),
         @('C1-08 minus-I-ignores-PYTHONHOME', 'no environment reaches an unreachable interpreter'),

@@ -1162,15 +1162,29 @@ def main() -> int:
         # ...and no trust-path script may still resolve a variable path as a
         # pattern. New-Item is excluded: it has no -LiteralPath in Windows
         # PowerShell 5.1, and it creates rather than resolves.
+        # EVERY SCRIPT, and Resolve-Path with them.
+        #
+        # The exclusion list dropped five files with no stated reason -- and two
+        # of them are named in reviewer_session's own $codeFiles, executed inside
+        # the DPAPI-live reviewer session, while stage e2 runs hyperv_control and
+        # hyperv_session against the author-built package. One carried a live
+        # instance: a staged file named with brackets, holding bare key-shaped
+        # hex, read through a wildcard path and therefore never seen by the
+        # boundary check that exists to catch exactly that. Resolve-Path belongs
+        # here too: its result becomes the manifest key and the relative-path
+        # prefix.
         wildcard_cmdlets = ("Get-FileHash", "Test-Path", "Get-Content", "Set-Content",
                             "Add-Content", "Get-Acl", "Set-Acl", "Get-Item",
-                            "Get-ChildItem", "Remove-Item", "Copy-Item", "Move-Item")
+                            "Get-ChildItem", "Remove-Item", "Copy-Item", "Move-Item",
+                            "Resolve-Path")
         offenders = []
+        opt_outs = 0
+        # The MARKERS are what a reader audits, and one marker can cover only
+        # the call beneath it, so counting declarations is the honest pin.
+        declared_optouts = sum(
+            source.read_text(encoding='utf-8').count('WILDCARD-BY-DESIGN')
+            for source in (ROOT / 'packaging' / 'hyperv').glob('*.ps1'))
         for source in sorted((ROOT / "packaging" / "hyperv").glob("*.ps1")):
-            if source.name in ("hyperv_control.ps1", "hyperv_session.ps1",
-                               "provision_vm.ps1", "reviewer_diagnostics.ps1",
-                               "reviewer_credential_migration.ps1"):
-                continue
             lines = source.read_text(encoding="utf-8").splitlines()
             for number, line in enumerate(lines, 1):
                 if line.lstrip().startswith("#"):
@@ -1182,17 +1196,41 @@ def main() -> int:
                 # so it cannot be applied silently or in bulk.
                 if any("WILDCARD-BY-DESIGN" in lines[back]
                        for back in range(max(0, number - 3), number - 1)):
+                    opt_outs += 1
                     continue
                 for cmdlet in wildcard_cmdlets:
-                    if not re.search(rf"\b{cmdlet}\b", line) or "-LiteralPath" in line:
+                    if not re.search(rf"\b{cmdlet}\b", line):
                         continue
-                    if re.search(rf"\b{cmdlet}\b\s+(-Path\s+)?[\$\(]", line):
+                    # PER CALL, NOT PER LINE. `if (Test-Path $x) { Remove-Item
+                    # -LiteralPath $x }` exempted the whole line, including the
+                    # Test-Path that still resolves as a pattern.
+                    #
+                    # And a double-quoted interpolated path is a path: matching
+                    # only `$` or `(` after the cmdlet missed every `"...$x..."`
+                    # argument.
+                    for call in re.finditer(
+                            rf"\b{cmdlet}\b\s+(?:-Path\s+|-LiteralPath\s+)?"
+                            rf"(\$[^\s,)]*|\([^\n]*|\"[^\"]*\")", line):
+                        if "-LiteralPath" in call.group(0):
+                            continue
+                        argument = call.group(1)
+                        # A double-quoted CONSTANT is already a name: the source
+                        # decides it, not a caller. Only an INTERPOLATED one
+                        # carries a value from elsewhere, and only that can carry
+                        # a bracket an author chose.
+                        if argument.startswith('"') and "$" not in argument:
+                            continue
                         offenders.append(f"{source.name}:{number}")
+                        break
+        # The opt-out count is pinned for the same reason the pending-grant
+        # exemption's is: a marker that can be applied freely is not an
+        # exception, it is a way out.
         rec("OP47a no-trust-path-script-resolves-a-variable-path-as-a-pattern",
-            not offenders,
+            not offenders and declared_optouts == 3,
             f"every wildcard-interpreting call in the scripts on the trust path "
-            f"takes -LiteralPath, so no author-chosen filename can redirect one "
-            f"({offenders[:4] or 'none'})")
+            f"takes -LiteralPath, so no author-chosen filename can redirect one, "
+            f"and the wildcard opt-outs are exactly the declared ones "
+            f"({offenders[:4] or 'none'}, declared-opt-outs={declared_optouts})")
 
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.

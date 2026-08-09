@@ -83,8 +83,8 @@ function Redact-Any {
 }
 
 function Get-GuestCredential {
-    if (-not (Test-Path $CredPath)) { throw 'reviewer guest credential absent' }
-    $raw = Get-Content -Path $CredPath -Raw -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $CredPath)) { throw 'reviewer guest credential absent' }
+    $raw = Get-Content -LiteralPath $CredPath -Raw -ErrorAction SilentlyContinue
     if ($null -eq $raw -or -not ([string]$raw).Trim()) {
         throw 'reviewer guest credential unreadable or empty in this context'
     }
@@ -106,7 +106,7 @@ try {
     $diag.reviewer_credential_usable = $false
     $diag.named_failure_reason = 'REVIEWER_GUEST_CREDENTIAL_UNUSABLE'
     $diag.detail = Redact $_.Exception.Message
-    $diag | ConvertTo-Json -Depth 8 | Set-Content -Path $Result -Encoding utf8
+    $diag | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Result -Encoding utf8
     $diag | ConvertTo-Json -Depth 8
     exit 2
 }
@@ -114,7 +114,7 @@ try {
 $vm = Get-VM -Name $VmName -ErrorAction SilentlyContinue
 if (-not $vm) {
     $diag.named_failure_reason = 'TASK_VM_ABSENT'
-    $diag | ConvertTo-Json -Depth 8 | Set-Content -Path $Result -Encoding utf8
+    $diag | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Result -Encoding utf8
     $diag | ConvertTo-Json -Depth 8
     exit 3
 }
@@ -138,7 +138,7 @@ while ((Get-Date) -lt $deadline) {
 $diag.powershell_direct_ready = $ready
 if (-not $ready) {
     $diag.named_failure_reason = 'GUEST_UNREACHABLE_WITH_REVIEWER_CREDENTIAL'
-    $diag | ConvertTo-Json -Depth 8 | Set-Content -Path $Result -Encoding utf8
+    $diag | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Result -Encoding utf8
     $diag | ConvertTo-Json -Depth 8
     exit 4
 }
@@ -148,26 +148,26 @@ $probe = Invoke-Command -VMName $VmName -Credential $cred -ErrorAction Stop -Scr
     $tool = 'C:\tool'; $out = 'C:\out'; $work = 'C:\env2'
     $runner = Join-Path $tool 'offline_env_runner.ps1'
     $r = [ordered]@{}
-    $r.tool_dir_present    = Test-Path $tool
-    $r.out_dir_present     = Test-Path $out
-    $r.work_dir_present    = Test-Path $work
-    $r.runner_present      = Test-Path $runner
-    $r.runner_length       = $(if (Test-Path $runner) { (Get-Item $runner).Length } else { 0 })
-    $r.meta_present        = Test-Path (Join-Path $tool 'package-meta.json')
-    $r.out_files           = @(Get-ChildItem $out -File -ErrorAction SilentlyContinue |
+    $r.tool_dir_present    = Test-Path -LiteralPath $tool
+    $r.out_dir_present     = Test-Path -LiteralPath $out
+    $r.work_dir_present    = Test-Path -LiteralPath $work
+    $r.runner_present      = Test-Path -LiteralPath $runner
+    $r.runner_length       = $(if (Test-Path -LiteralPath $runner) { (Get-Item -LiteralPath $runner).Length } else { 0 })
+    $r.meta_present        = Test-Path -LiteralPath (Join-Path $tool 'package-meta.json')
+    $r.out_files           = @(Get-ChildItem -LiteralPath $out -File -ErrorAction SilentlyContinue |
                                ForEach-Object { $_.Name })
-    $r.request_present     = Test-Path (Join-Path $out 'activation-request.json')
-    $r.request_size        = $(if (Test-Path (Join-Path $out 'activation-request.json')) {
-                                  (Get-Item (Join-Path $out 'activation-request.json')).Length } else { 0 })
+    $r.request_present     = Test-Path -LiteralPath (Join-Path $out 'activation-request.json')
+    $r.request_size        = $(if (Test-Path -LiteralPath (Join-Path $out 'activation-request.json')) {
+                                  (Get-Item -LiteralPath (Join-Path $out 'activation-request.json')).Length } else { 0 })
     $log = Join-Path $out '04-request-phase.log'
-    $r.request_log_present = Test-Path $log
-    $r.request_log_size    = $(if (Test-Path $log) { (Get-Item $log).Length } else { 0 })
-    $r.request_log_tail    = $(if (Test-Path $log) {
-                                  (Get-Content $log -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' })
+    $r.request_log_present = Test-Path -LiteralPath $log
+    $r.request_log_size    = $(if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 })
+    $r.request_log_tail    = $(if (Test-Path -LiteralPath $log) {
+                                  (Get-Content -LiteralPath $log -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' })
 
     # Can the runner even be PARSED and started? A parse error explains an empty
     # log exactly: PowerShell fails before the script writes anything.
-    if (Test-Path $runner) {
+    if (Test-Path -LiteralPath $runner) {
         $errs = $null
         [void][System.Management.Automation.Language.Parser]::ParseFile($runner, [ref]$null, [ref]$errs)
         $bad = @($errs) | Where-Object { $_ }
@@ -207,15 +207,15 @@ if ($RunRequestProbe) {
         param($budget)
         $tool = 'C:\tool'; $out = 'C:\out'; $work = 'C:\env2'
         $runner = Join-Path $tool 'offline_env_runner.ps1'
-        $meta = Get-Content (Join-Path $tool 'package-meta.json') -Raw | ConvertFrom-Json
+        $meta = Get-Content -LiteralPath (Join-Path $tool 'package-meta.json') -Raw | ConvertFrom-Json
         $appDir = Join-Path $work 'pkg'
         $staged = Join-Path $out '03-package-staged.json'
-        if (Test-Path $staged) {
-            $s = Get-Content $staged -Raw | ConvertFrom-Json
+        if (Test-Path -LiteralPath $staged) {
+            $s = Get-Content -LiteralPath $staged -Raw | ConvertFrom-Json
             if ($s.app_dir) { $appDir = $s.app_dir }
         }
         $log = Join-Path $out 'diag-request.log'
-        if (Test-Path $log) { Remove-Item $log -Force }
+        if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
 
         $args = @('-NoProfile','-ExecutionPolicy','Bypass','-File',$runner,
                   '-Phase','request','-EnvLabel','ENVIRONMENT_2',
@@ -236,8 +236,8 @@ if ($RunRequestProbe) {
         $proc = [System.Diagnostics.Process]::Start($psi)
         $exited = $proc.WaitForExit($budget * 1000)
         $r = [ordered]@{}
-        $r.app_dir_present = Test-Path $appDir
-        $r.exe_present = Test-Path (Join-Path $appDir 'MondayReportOffline.exe')
+        $r.app_dir_present = Test-Path -LiteralPath $appDir
+        $r.exe_present = Test-Path -LiteralPath (Join-Path $appDir 'MondayReportOffline.exe')
         if (-not $exited) {
             $r.probe_outcome = 'TIMED_OUT'
             $r.exit_code = -1
@@ -250,7 +250,7 @@ if ($RunRequestProbe) {
             $r.stdout_tail = $proc.StandardOutput.ReadToEnd()
             $r.stderr_tail = $proc.StandardError.ReadToEnd()
         }
-        $r.request_present_after = Test-Path (Join-Path $out 'activation-request.json')
+        $r.request_present_after = Test-Path -LiteralPath (Join-Path $out 'activation-request.json')
         return $r
     }
     foreach ($k in $run.Keys) {
@@ -271,6 +271,6 @@ $diag.named_failure_reason =
     elseif ($probe.request_log_size -eq 0)     { 'RUNNER_PRODUCED_NO_OUTPUT' }
     else                                       { 'RUNNER_RAN_BUT_EXPORTED_NO_REQUEST' }
 
-$diag | ConvertTo-Json -Depth 8 | Set-Content -Path $Result -Encoding utf8
+$diag | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Result -Encoding utf8
 $diag | ConvertTo-Json -Depth 8
 exit 0

@@ -109,7 +109,7 @@ switch ($Action) {
         # The reviewer mints the migration nonce, so the author cannot pre-build
         # an envelope for a migration that has not been requested.
         $nonceValue = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
-        Set-Content -Path $NonceFile -Value $nonceValue -Encoding ascii
+        Set-Content -LiteralPath $NonceFile -Value $nonceValue -Encoding ascii
 
         Emit ([ordered]@{
             action           = 'reviewer-identity'
@@ -117,8 +117,8 @@ switch ($Action) {
             certificate      = $(if ($created) { 'created' } else { 'reused' })
             thumbprint       = $cert.Thumbprint
             has_private_key  = $cert.HasPrivateKey
-            public_exported  = (Test-Path $PublicCert)
-            nonce_published  = (Test-Path $NonceFile)
+            public_exported  = (Test-Path -LiteralPath $PublicCert)
+            nonce_published  = (Test-Path -LiteralPath $NonceFile)
         })
     }
 
@@ -127,25 +127,25 @@ switch ($Action) {
         # RUNS AS THE AUTHOR. Transiently decrypts the retained credential and
         # re-encrypts it to the reviewer certificate. The plaintext is never
         # written anywhere.
-        if (-not (Test-Path $PublicCert)) {
+        if (-not (Test-Path -LiteralPath $PublicCert)) {
             Emit ([ordered]@{ action='author-envelope'; ok=$false
                               detail='reviewer CMS certificate has not been published' }) 2
         }
-        if (-not (Test-Path $NonceFile)) {
+        if (-not (Test-Path -LiteralPath $NonceFile)) {
             Emit ([ordered]@{ action='author-envelope'; ok=$false
                               detail='reviewer migration nonce is absent' }) 2
         }
-        if (-not (Test-Path $AuthorCred)) {
+        if (-not (Test-Path -LiteralPath $AuthorCred)) {
             Emit ([ordered]@{ action='author-envelope'; ok=$false
                               detail='author guest credential is absent (already retired?)' }) 2
         }
-        $nonceValue = (Get-Content $NonceFile -Raw).Trim()
+        $nonceValue = (Get-Content -LiteralPath $NonceFile -Raw).Trim()
         if (-not $nonceValue) {
             Emit ([ordered]@{ action='author-envelope'; ok=$false
                               detail='migration nonce is empty' }) 2
         }
 
-        $blob = (Get-Content -Path $AuthorCred -Raw).Trim()
+        $blob = (Get-Content -LiteralPath $AuthorCred -Raw).Trim()
         $secure = ConvertTo-SecureString -String $blob   # author DPAPI, in memory
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try {
@@ -162,7 +162,7 @@ switch ($Action) {
         Emit ([ordered]@{
             action        = 'author-envelope'
             ok            = $true
-            envelope      = (Test-Path $Envelope)
+            envelope      = (Test-Path -LiteralPath $Envelope)
             plaintext_persisted = $false
             bound_to_nonce = $true
         })
@@ -172,7 +172,7 @@ switch ($Action) {
     'reviewer-rotate' {
         # RUNS AS THE REVIEWER. Uses the old credential exactly once, rotates the
         # guest password to a value only this context ever sees, and seals it.
-        if (-not (Test-Path $Envelope)) {
+        if (-not (Test-Path -LiteralPath $Envelope)) {
             Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
                               detail='no CMS envelope to open' }) 2
         }
@@ -197,7 +197,7 @@ switch ($Action) {
         Remove-Variable opened
 
         $expected = ''
-        if (Test-Path $NonceFile) { $expected = (Get-Content $NonceFile -Raw).Trim() }
+        if (Test-Path -LiteralPath $NonceFile) { $expected = (Get-Content -LiteralPath $NonceFile -Raw).Trim() }
         if (-not $expected -or $doc.nonce -ne $expected) {
             Emit ([ordered]@{ action='reviewer-rotate'; ok=$false
                               detail='envelope nonce does not match the reviewer migration nonce' }) 3
@@ -246,7 +246,7 @@ switch ($Action) {
         # Seal the NEW credential under the reviewer principal, restrictively.
         New-Item -ItemType Directory -Force -Path $ReviewerState -ErrorAction SilentlyContinue | Out-Null
         $protected = ConvertFrom-SecureString $newSecure      # reviewer DPAPI
-        Set-Content -Path $ReviewerCred -Value $protected -Encoding ascii
+        Set-Content -LiteralPath $ReviewerCred -Value $protected -Encoding ascii
         Remove-Variable protected
         # Explicit ACEs, not inherited ones. The blob is already unreadable to
         # the author because the parent directory is reviewer-owned, but relying
@@ -265,7 +265,7 @@ switch ($Action) {
         # even this principal -- and the next run reports the credential as
         # "empty" because Get-Content -SilentlyContinue returns null. Repair it
         # here while this context still owns the file.
-        if (@((Get-Acl $ReviewerCred).Access).Count -eq 0) {
+        if (@((Get-Acl -LiteralPath $ReviewerCred).Access).Count -eq 0) {
             # Re-grant with icacls rather than Set-Acl: Set-Acl writes back a
             # descriptor including the SACL and needs SeSecurityPrivilege, which
             # this non-administrative principal does not hold.
@@ -290,8 +290,8 @@ switch ($Action) {
         } catch { $oldStillWorks = $false }
 
         # Destroy the one-time material.
-        Remove-Item $Envelope -Force -ErrorAction SilentlyContinue
-        Remove-Item $NonceFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $Envelope -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $NonceFile -Force -ErrorAction SilentlyContinue
         if ($started) { Stop-VM -Name $VmName -Confirm:$false -ErrorAction SilentlyContinue }
 
         Emit ([ordered]@{
@@ -300,9 +300,9 @@ switch ($Action) {
             old_credential_worked_before = [bool]$before
             new_credential_works      = [bool]$after
             old_credential_still_works = $oldStillWorks
-            reviewer_credential_sealed = (Test-Path $ReviewerCred)
-            envelope_destroyed        = (-not (Test-Path $Envelope))
-            nonce_destroyed           = (-not (Test-Path $NonceFile))
+            reviewer_credential_sealed = (Test-Path -LiteralPath $ReviewerCred)
+            envelope_destroyed        = (-not (Test-Path -LiteralPath $Envelope))
+            nonce_destroyed           = (-not (Test-Path -LiteralPath $NonceFile))
         }) $(if ($oldStillWorks) { 8 } else { 0 })
     }
 
@@ -311,14 +311,14 @@ switch ($Action) {
         # RUNS AS THE AUTHOR. Retires its own copy from the supported workflow.
         # Renamed rather than deleted so the migration remains auditable; it is
         # dead either way, because the password it protects no longer works.
-        if (Test-Path $AuthorCred) {
-            Move-Item -Path $AuthorCred -Destination $AuthorRetired -Force
+        if (Test-Path -LiteralPath $AuthorCred) {
+            Move-Item -LiteralPath $AuthorCred -Destination $AuthorRetired -Force
         }
         Emit ([ordered]@{
             action                   = 'author-retire'
-            ok                       = (-not (Test-Path $AuthorCred))
-            author_credential_active = (Test-Path $AuthorCred)
-            retired_marker_present   = (Test-Path $AuthorRetired)
+            ok                       = (-not (Test-Path -LiteralPath $AuthorCred))
+            author_credential_active = (Test-Path -LiteralPath $AuthorCred)
+            retired_marker_present   = (Test-Path -LiteralPath $AuthorRetired)
         })
     }
 
@@ -341,7 +341,7 @@ switch ($Action) {
         # VM state the certification discards. The reviewer seals that
         # credential here; the author then destroys its own copy, which is what
         # makes the ownership exclusive.
-        if (-not (Test-Path $Envelope)) {
+        if (-not (Test-Path -LiteralPath $Envelope)) {
             Emit ([ordered]@{ action='reviewer-seal-baseline'; ok=$false
                               detail='no CMS envelope to open' }) 2
         }
@@ -360,7 +360,7 @@ switch ($Action) {
         Remove-Variable opened
 
         $expected = ''
-        if (Test-Path $NonceFile) { $expected = (Get-Content $NonceFile -Raw).Trim() }
+        if (Test-Path -LiteralPath $NonceFile) { $expected = (Get-Content -LiteralPath $NonceFile -Raw).Trim() }
         if (-not $expected -or $doc.nonce -ne $expected) {
             Emit ([ordered]@{ action='reviewer-seal-baseline'; ok=$false
                               detail='envelope nonce does not match the reviewer migration nonce' }) 3
@@ -376,7 +376,7 @@ switch ($Action) {
 
         New-Item -ItemType Directory -Force -Path $ReviewerState -ErrorAction SilentlyContinue | Out-Null
         $protected = ConvertFrom-SecureString $secure          # reviewer DPAPI
-        Set-Content -Path $ReviewerCred -Value $protected -Encoding ascii
+        Set-Content -LiteralPath $ReviewerCred -Value $protected -Encoding ascii
         Remove-Variable protected
         $me = "$env:USERDOMAIN\$env:USERNAME"
         $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -385,7 +385,7 @@ switch ($Action) {
         & icacls.exe $ReviewerCred /grant 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
         $ErrorActionPreference = $prev
 
-        $raw = Get-Content -Path $ReviewerCred -Raw -ErrorAction SilentlyContinue
+        $raw = Get-Content -LiteralPath $ReviewerCred -Raw -ErrorAction SilentlyContinue
         $readable = ($null -ne $raw -and ([string]$raw).Trim().Length -gt 0)
         $decrypts = $false
         if ($readable) {
@@ -393,18 +393,18 @@ switch ($Action) {
                   $decrypts = $true } catch { $decrypts = $false }
         }
 
-        Remove-Item $Envelope -Force -ErrorAction SilentlyContinue
-        Remove-Item $NonceFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $Envelope -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $NonceFile -Force -ErrorAction SilentlyContinue
 
         Emit ([ordered]@{
             action              = 'reviewer-seal-baseline'
             ok                  = ($readable -and $decrypts)
-            sealed              = (Test-Path $ReviewerCred)
+            sealed              = (Test-Path -LiteralPath $ReviewerCred)
             readable_by_reviewer = $readable
             decrypts_for_reviewer = $decrypts
-            aces                = @((Get-Acl $ReviewerCred).Access).Count
-            envelope_destroyed  = (-not (Test-Path $Envelope))
-            nonce_destroyed     = (-not (Test-Path $NonceFile))
+            aces                = @((Get-Acl -LiteralPath $ReviewerCred).Access).Count
+            envelope_destroyed  = (-not (Test-Path -LiteralPath $Envelope))
+            nonce_destroyed     = (-not (Test-Path -LiteralPath $NonceFile))
         }) $(if ($readable -and $decrypts) { 0 } else { 4 })
     }
 
@@ -418,19 +418,19 @@ switch ($Action) {
         # false. Overwrite then unlink.
         $destroyed = @()
         foreach ($path in @($AuthorCred, $AuthorRetired)) {
-            if (Test-Path $path) {
-                $len = (Get-Item $path).Length
+            if (Test-Path -LiteralPath $path) {
+                $len = (Get-Item -LiteralPath $path).Length
                 [System.IO.File]::WriteAllBytes($path, (New-Object byte[] $len))
-                Remove-Item $path -Force
+                Remove-Item -LiteralPath $path -Force
                 $destroyed += (Split-Path $path -Leaf)
             }
         }
         Emit ([ordered]@{
             action                   = 'author-destroy'
-            ok                       = (-not (Test-Path $AuthorCred)) -and (-not (Test-Path $AuthorRetired))
+            ok                       = (-not (Test-Path -LiteralPath $AuthorCred)) -and (-not (Test-Path -LiteralPath $AuthorRetired))
             destroyed                = $destroyed
-            author_credential_active = (Test-Path $AuthorCred)
-            author_retired_present   = (Test-Path $AuthorRetired)
+            author_credential_active = (Test-Path -LiteralPath $AuthorCred)
+            author_retired_present   = (Test-Path -LiteralPath $AuthorRetired)
         })
     }
 
@@ -440,12 +440,12 @@ switch ($Action) {
         # The owner always retains the right to rewrite the DACL, and DPAPI
         # decryption is per-user and unaffected by file permissions, so the
         # sealed value stays usable once access is restored.
-        if (-not (Test-Path $ReviewerCred)) {
+        if (-not (Test-Path -LiteralPath $ReviewerCred)) {
             Emit ([ordered]@{ action='reviewer-repair-acl'; ok=$false
                               detail='no reviewer credential to repair' }) 2
         }
         $me = "$env:USERDOMAIN\$env:USERNAME"
-        $before = @((Get-Acl $ReviewerCred).Access).Count
+        $before = @((Get-Acl -LiteralPath $ReviewerCred).Access).Count
         # icacls, not Set-Acl. Get-Acl returns a descriptor that includes the
         # SACL, so writing it back demands SeSecurityPrivilege -- which this
         # deliberately non-administrative principal does not hold. icacls edits
@@ -454,7 +454,7 @@ switch ($Action) {
         & icacls.exe $ReviewerCred /grant "${me}:(F)" | Out-Null
         & icacls.exe $ReviewerCred /grant 'NT AUTHORITY\SYSTEM:(F)' | Out-Null
         $ErrorActionPreference = $prev
-        $raw = Get-Content -Path $ReviewerCred -Raw -ErrorAction SilentlyContinue
+        $raw = Get-Content -LiteralPath $ReviewerCred -Raw -ErrorAction SilentlyContinue
         $readable = ($null -ne $raw -and ([string]$raw).Trim().Length -gt 0)
         $decrypts = $false
         if ($readable) {
@@ -465,7 +465,7 @@ switch ($Action) {
             action        = 'reviewer-repair-acl'
             ok            = ($readable -and $decrypts)
             aces_before   = $before
-            aces_after    = @((Get-Acl $ReviewerCred).Access).Count
+            aces_after    = @((Get-Acl -LiteralPath $ReviewerCred).Access).Count
             readable      = $readable
             decrypts      = $decrypts
         }) $(if ($readable -and $decrypts) { 0 } else { 3 })
@@ -477,11 +477,11 @@ switch ($Action) {
             action                    = 'verify'
             reviewer_cms_present      = [bool]$cert
             reviewer_cms_has_private  = $(if ($cert) { $cert.HasPrivateKey } else { $false })
-            public_cert_published     = (Test-Path $PublicCert)
-            envelope_present          = (Test-Path $Envelope)
-            reviewer_credential_sealed = (Test-Path $ReviewerCred)
-            author_credential_active  = (Test-Path $AuthorCred)
-            author_credential_retired = (Test-Path $AuthorRetired)
+            public_cert_published     = (Test-Path -LiteralPath $PublicCert)
+            envelope_present          = (Test-Path -LiteralPath $Envelope)
+            reviewer_credential_sealed = (Test-Path -LiteralPath $ReviewerCred)
+            author_credential_active  = (Test-Path -LiteralPath $AuthorCred)
+            author_credential_retired = (Test-Path -LiteralPath $AuthorRetired)
         })
     }
 }
