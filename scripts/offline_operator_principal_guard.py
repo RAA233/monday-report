@@ -1088,6 +1088,25 @@ def main() -> int:
             f"a copy whose subject comes from $env:USERNAME no longer settles on "
             f"the real token, and is reported ({redirected_subject})")
 
+        # ------------------------- the task root's ancestors, fired and quiet
+        ancestor_fires = work / "anc-fires"
+        ancestor_fires.mkdir(exist_ok=True)
+        fired = probe({"action": "task-root-ancestor", "path": str(ancestor_fires),
+                       "author": identity("SYNTH", SID_AUTHOR),
+                       "grant_delete_child": True}, work)["reasons"]
+        ancestor_quiet = work / "anc-quiet"
+        ancestor_quiet.mkdir(exist_ok=True)
+        quiet = probe({"action": "task-root-ancestor", "path": str(ancestor_quiet),
+                       "author": identity("SYNTH", SID_AUTHOR),
+                       "grant_delete_child": False}, work)["reasons"]
+        rec("OP46 a-replaceable-task-root-ancestor-is-detected",
+            "OFFLINE_TASK_ROOT_ANCESTOR_REPLACEABLE" in fired
+            and "OFFLINE_TASK_ROOT_ANCESTOR_REPLACEABLE" not in quiet,
+            f"a task root whose PARENT grants the author delete-child is reported "
+            f"-- renaming that parent's child substitutes reviewer-bin, "
+            f"reviewer-runtime and reviewer state at once -- and the same root "
+            f"under a clean parent is not (fired={fired}, quiet={quiet})")
+
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
         #
@@ -1476,11 +1495,23 @@ def main() -> int:
     # string constants; this one is the number of checks that actually
     # executed. Both are kept: the manifest catches deletion without running
     # anything, this catches hollowing at run time.
+    # REPORTED DIRECTLY, NOT THROUGH rec().
+    #
+    # Making rec() a no-op that returns True is a one-line, syntactically valid
+    # edit. It leaves every check id in the file -- so the manifest's static
+    # count is unchanged -- and empties CHECKS, so this floor's own failure was
+    # recorded through the same no-op and vanished, and main() returned 0 with
+    # zero checks executed. The floor cannot be allowed to depend on the
+    # mechanism it exists to police.
     MINIMUM_CHECKS = 60
     if len(CHECKS) < MINIMUM_CHECKS:
-        rec("OP99 the-battery-still-executes-its-pinned-minimum", False,
-            f"only {len(CHECKS)} checks executed, below the pinned minimum of "
-            f"{MINIMUM_CHECKS}")
+        print(json.dumps({
+            "guard": "offline-operator-principal",
+            "error": "OFFLINE_PRINCIPAL_BATTERY_HOLLOW",
+            "detail": f"only {len(CHECKS)} checks executed, below the pinned "
+                      f"minimum of {MINIMUM_CHECKS}",
+        }, indent=2))
+        return 1
 
     failed = [c["check_id"] for c in CHECKS if not c["ok"]]
     print(json.dumps({

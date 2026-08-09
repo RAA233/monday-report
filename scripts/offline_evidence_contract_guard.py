@@ -493,10 +493,10 @@ def main() -> int:
             "audit:all is reported")
         battery.record(
             "CT12f principal-battery-hollowing-detected",
-            any("below the pinned minimum" in r
+            any("does not" in r and "append a result" in r
                 for r in membership_reasons_for("hollow-principal-battery")),
-            "commenting out the recording calls is reported, even though every "
-            "check id is still present in the file as prose")
+            "shadowing the recording function with a no-op is reported, even "
+            "though the file still parses and every check id still reaches a call")
         battery.record(
             "CT13c membership-restored", not membership_reasons_for(None),
             "baseline still passes after every membership mutation")
@@ -667,13 +667,17 @@ def membership_reasons_for(mutation: str | None) -> list[str]:
         elif mutation == "hollow-principal-battery":
             target = work / "scripts" / "offline_operator_principal_guard.py"
             text = target.read_text(encoding="utf-8")
-            # Same shape as the contract battery's own hollowing cycle: the
-            # recording calls are commented out, leaving every check id in the
-            # file as prose. Renaming the call instead does NOT hollow it -- the
-            # counter counts ids that reach ANY call, so `_dropped("OP01 ...")`
-            # still counts, which is the right answer and the reason this
-            # mutation had to be the stronger one.
-            target.write_text(text.replace('rec("', 'pass  # ("'), encoding="utf-8")
+            # A SYNTACTICALLY VALID HOLLOWING, and the cheapest one.
+            #
+            # Commenting the calls out left the file unparseable, so the cycle
+            # proved that count_recorded_checks returns 0 on a SyntaxError --
+            # not that it detects hollowing. Meanwhile the edit an author would
+            # actually make -- shadowing the recorder with a no-op -- kept every
+            # id in the file, scored 64 against a floor of 35, and emptied the
+            # results list. This appends exactly that.
+            target.write_text(
+                text + "\n\ndef rec(check_id, ok, detail):\n    return True\n",
+                encoding="utf-8")
         elif mutation == "hollow-battery":
             target = work / "scripts" / "offline_evidence_contract_guard.py"
             text = target.read_text(encoding="utf-8")

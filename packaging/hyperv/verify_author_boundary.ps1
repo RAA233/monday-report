@@ -96,6 +96,24 @@ function Test-ReviewerPinned {
     $lower = $Path.ToLowerInvariant().TrimEnd('\')
     if ($manifestPaths -contains $lower) { return $true }
     if ($manifestPaths -contains ('tree:' + $lower)) { return $true }
+    # A TREE ENTRY COVERS WHAT IS INSIDE IT, which is what a tree entry means.
+    #
+    # Requiring an exact key left five C2 probes permanently INCONCLUSIVE on a
+    # correct host: the reviewer's manifest records `tree:<root>` and no
+    # per-file entry for the installer, the executable, the payload manifest or
+    # the frozen descriptor, so the probes asking whether the author can replace
+    # those files could never answer at all. The exact-key narrowing was
+    # introduced to stop a path that DOES NOT EXIST from scoring DENIED -- so
+    # existence is now required explicitly, rather than inferred from the
+    # manifest's shape.
+    if (Test-Path -LiteralPath $Path) {
+        foreach ($entry in $manifestPaths) {
+            if (-not $entry.StartsWith('tree:')) { continue }
+            $tree = $entry.Substring(5).TrimEnd('\')
+            if (-not $tree) { continue }
+            if ($lower.StartsWith($tree + '\')) { return $true }
+        }
+    }
     return $false
 }
 
@@ -284,12 +302,38 @@ Add-Probe 'TOKEN02 author-account-not-administrator' $accountIsAdmin `
     "the AUTHOR ACCOUNT itself holds no local Administrator, directly or through a nested group (account_is_administrator=$accountIsAdmin); a Medium-integrity process from an admin-capable account fails this and must not be read as separation"
 
 # ------------------------------------------------------------ C1 interpreter
+# UNREACHABLE IS AN ANSWER, AND IT IS THE RIGHT ONE.
+#
+# In the accepted configuration the reviewer runtime grants
+# Administrators/SYSTEM/reviewer and nothing else -- no author ACE, and no
+# traverse. Test-Path on a child of such a directory returns FALSE from this
+# token, so the pin "did not resolve" and every C1 probe was skipped: ten probes
+# covering the interpreter attack class this file lists first, never executed
+# and never recorded, on a host that is exactly right. The harness then exited
+# non-zero for having measured nothing.
+#
+# Three states, not two. The pin is ABSENT (nothing to say), or it is present
+# and the path is UNREACHABLE from this token (which is precisely the property
+# the C1 probes exist to establish -- the author cannot touch what it cannot
+# even see), or it is present and reachable (in which case the individual
+# probes must run and answer).
 $pinFile = Join-Path $REVIEWER_STATE 'python-path.txt'
 $py = ''
 if (Test-Path $pinFile) { try { $py = (Get-Content $pinFile -Raw).Trim() } catch { $py = '' } }
-if (-not $py -or -not (Test-Path $py)) {
+$pinReachable = $false
+if ($py) { try { $pinReachable = [bool](Test-Path -LiteralPath $py) } catch { $pinReachable = $false } }
+if (-not $py) {
     Add-Probe 'C1-00 interpreter-pin-resolvable' $null `
-        'the reviewer interpreter pin is missing or does not resolve from this session' -Inconclusive
+        'the reviewer has not published an interpreter pin yet' -Inconclusive
+} elseif (-not $pinReachable) {
+    # DENIED, on the strongest possible evidence: the path the reviewer runs is
+    # not even enumerable from this token.
+    Add-Probe 'C1-00 interpreter-pin-resolvable' $false `
+        'the reviewer published a pin and this token cannot resolve it at all'
+    Add-Probe 'C1-01 cannot-write-site-packages' $false `
+        'the interpreter tree is not reachable from this token, so nothing in it can be written'
+    Add-Probe 'C1-02 cannot-replace-interpreter' $false `
+        'the interpreter is not reachable from this token, so it cannot be replaced'
 } else {
     Add-Probe 'C1-00 interpreter-pin-resolvable' $false `
         'the reviewer published which interpreter it runs, and this token can read the pin'

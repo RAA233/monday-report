@@ -74,6 +74,7 @@ PINNED_MEMBERS = (
         "guard": "scripts/offline_evidence_contract_guard.py",
         "min_checks": MIN_CONTRACT_CHECKS,
         "id_pattern": r"^[A-Z]{2,3}\d+[a-z]?\s",
+        "recorder": "record",
     },
     {
         "command": "audit:offline-operator-principal",
@@ -81,6 +82,7 @@ PINNED_MEMBERS = (
         "guard": "scripts/offline_operator_principal_guard.py",
         "min_checks": 35,
         "id_pattern": r"^OP\d+[a-z]?\s",
+        "recorder": "rec",
     },
 )
 
@@ -216,6 +218,35 @@ def count_recorded_checks(guard: Path, id_pattern: str) -> int:
     return len(found)
 
 
+def recorder_records(guard: Path, name: str) -> bool:
+    """Does EVERY definition of the recording function actually record?
+
+    Counting ids that reach a call cannot see a recorder that does nothing with
+    them: `def rec(a, b, c): return True` is one syntactically valid line, keeps
+    every id in the file, and empties the results list. Appending a shadowing
+    redefinition at the end of the module is the same edit without touching the
+    original, so every definition of the name is checked, not just the first.
+    """
+
+    try:
+        tree = ast.parse(guard.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return False
+    definitions = [node for node in ast.walk(tree)
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and node.name == name]
+    if not definitions:
+        return False
+    for definition in definitions:
+        appends = [child for child in ast.walk(definition)
+                   if isinstance(child, ast.Call)
+                   and isinstance(child.func, ast.Attribute)
+                   and child.func.attr == "append"]
+        if not appends:
+            return False
+    return True
+
+
 def audit_all_step_digest() -> str:
     """Digest of the expanded step list. Bound into the reviewer's attestation so
     the chain that ran is the chain that was reviewed."""
@@ -269,6 +300,10 @@ def verify_membership() -> list[str]:
             # cases. COUNTED FROM THE PARSE TREE, because a text pattern counts
             # its own documentation -- renaming every rec("OP call and adding a
             # docstring full of the same literals restored the floor exactly.
+            if not recorder_records(guard, member["recorder"]):
+                reasons.append(
+                    f"{command}'s recording function {member['recorder']}() does not "
+                    f"append a result, so its check ids reach a call that keeps nothing")
             recorded = count_recorded_checks(guard, member["id_pattern"])
             if recorded < member["min_checks"]:
                 reasons.append(

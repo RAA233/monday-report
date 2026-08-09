@@ -979,6 +979,33 @@ function Initialize-ReviewerPaths {
     # so the per-directory grants below stay the only source of rights.
     & $icacls $Root /grant "${Account}:(NP)(RX)" | Out-Null
     & $icacls $Root /grant "${me}:(NP)(RX)" | Out-Null
+    # OWNERSHIP IS RECLAIMED, NOT JUST THE DACL.
+    #
+    # C:\ grants Authenticated Users create-folder on the object itself, and
+    # $HvRoot defaults to a fixed path, so the AUTHOR can pre-create this whole
+    # tree before the operator's one-time run. Every grant below then lands on
+    # directories the author still OWNS -- and an owner holds implicit WRITE_DAC.
+    #
+    # Measured by replaying this exact sequence on a tree an ordinary account
+    # pre-created: reviewer-bin and reviewer-pkg were reclaimed (they get
+    # /setowner below), while $Root, reviewer, reviewer\out and trust kept the
+    # author as owner. End to end on that shape, the author could not write a
+    # transcript directly -- and then rewrote the directory DACL because it owned
+    # it, deleted the reviewer's ENVIRONMENT_2 transcript, and substituted its
+    # own. The same primitive replaces the trust root.
+    #
+    # This file already states the rule where it takes ownership of the
+    # reviewer's code: "the owner keeps implicit WRITE_DAC, so removing the ACE
+    # alone would leave the author able to grant itself back in". It was applied
+    # to two trees and not to their counterparts.
+    #
+    # /T reclaims anything the author pre-created underneath. $Root itself is
+    # taken WITHOUT /T, because -ExportSource deliberately leaves reviewer-src
+    # owned by the reviewer so git can operate there.
+    & $icacls $Root /setowner "*S-1-5-32-544" /C /Q | Out-Null
+    foreach ($d in $reviewerOwned + $authorOwned) {
+        & $icacls $d /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
+    }
     foreach ($d in $reviewerOwned) {
         # ADMINISTRATORS IS ON THIS ACL, and the omission was not a boundary.
         #
@@ -1078,11 +1105,19 @@ function Initialize-ReviewerPaths {
     # holds the sealed key, the code manifest and the interpreter pin. icacls
     # returns 0 having silently skipped individual files, so applying a grant is
     # not evidence that it landed.
+    # READ BACK EVERY TREE THAT HOLDS EVIDENCE.
+    #
+    # Assert-AclApplied is the only check here whose predicate counts OWNERSHIP,
+    # and it was invoked on the code trees and on reviewer state -- never on
+    # trust, which holds the trust root, nor on reviewer\out, which holds the
+    # transcripts. Those are precisely the two the author had kept.
     foreach ($d in $reviewerCode) { Assert-AclApplied -Path $d -Account $Account }
     Assert-AclApplied -Path $stateDir -Account $Account
+    foreach ($d in $reviewerOwned) { Assert-AclApplied -Path $d -Account $Account }
 
     foreach ($d in $sharedHandoff) {
         if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+        & $icacls $d /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
         & $icacls $d /inheritance:r | Out-Null
         & $icacls $d /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)F" | Out-Null
     }
@@ -1821,6 +1856,22 @@ try {
     Remove-Variable s1, s2 -ErrorAction SilentlyContinue
     [GC]::Collect()
 }
+
+# THE VERDICT RUNS ON THE ROUTE THAT ACTUALLY PROVISIONS.
+#
+# Assert-CapabilitiesAcceptable was reachable only from -ProvisionPaths and
+# -Verify. The no-switch route -- the one that creates the account, sets the
+# password, provisions every tree and registers the task -- ran none of it, so
+# OFFLINE_SENSITIVE_ROOT_AUTHOR_WRITABLE and OFFLINE_TASK_ROOT_OWNER_UNTRUSTED
+# could not fire on the only run that establishes the protocol. The route that
+# builds the thing is the route that most needs to be told it built it wrong.
+Write-Output ''
+Write-Output '  capabilities, measured through the contract:'
+$bootstrapMeasured = New-Object System.Collections.Generic.List[string]
+Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
+    -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName `
+    -Reasons ([ref]$bootstrapMeasured)
+Assert-CapabilitiesAcceptable -Reasons $bootstrapMeasured
 
 Write-Output ''
 Write-Output '  Bootstrap complete. The authoring process can now run the reviewer with'

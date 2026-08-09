@@ -575,6 +575,38 @@ switch ($case.action) {
         }
     }
 
+    'task-root-ancestor' {
+        # THE ANCESTOR WALK ON THE TASK ROOT, DRIVEN.
+        #
+        # The reason it raises appears nowhere under scripts/, and the
+        # sensitive-root case cannot reach it: its scratch ancestors grant the
+        # synthetic author nothing, so the walk contributes no reason and the
+        # only newly added rule of its round had neither a cycle proving it
+        # fires nor one proving it stays quiet.
+        #
+        # Both directories are created here, inside the caller's scratch tree,
+        # and the ACL writes touch only those two.
+        $authorSid = $case.author.sid
+        $clean = "O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        $ancestor = $case.path
+        $root = Join-Path $ancestor 'root'
+        if (-not (Test-Path $root)) { New-Item -ItemType Directory -Force -Path $root | Out-Null }
+
+        $rootAcl = New-Object Security.AccessControl.DirectorySecurity
+        $rootAcl.SetSecurityDescriptorSddlForm($clean)
+        Set-Acl -LiteralPath $root -AclObject $rootAcl
+
+        $ancestorSddl = if ($case.grant_delete_child) {
+            "O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x40;;;$authorSid)"
+        } else { $clean }
+        $ancestorAcl = New-Object Security.AccessControl.DirectorySecurity
+        $ancestorAcl.SetSecurityDescriptorSddlForm($ancestorSddl)
+        Set-Acl -LiteralPath $ancestor -AclObject $ancestorAcl
+
+        $identity = New-Identity -Spec $case.author
+        $result.reasons = @(Get-TaskRootAclViolations -Root $root -Author $identity)
+    }
+
     'account-writable' {
         # Resolve the NAME when the fixture supplies no SID, so a probe about a
         # real account is answered about that account rather than about an

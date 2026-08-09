@@ -131,7 +131,12 @@ function Get-RequestedStage {
         exit 3
     }
     $stage = [string]$doc.stage
-    if ($AllowedStages -notcontains $stage) {
+    # CASE-SENSITIVE, because the consumer is. PowerShell's -notcontains is
+    # case-insensitive, so `{"stage":"E1"}` passed this gate and then hit
+    # argparse's choices, which are not -- the session recorded FAILED for a
+    # stage the gate had approved. Denial either way, but the gate and the thing
+    # it gates must admit the same set.
+    if (-not (@($AllowedStages) -ccontains $stage)) {
         Clear-StaleTranscripts -OutDir $OutRoot
         New-Status -Stage 'unknown' -State 'REFUSED' `
             -Detail 'requested stage is not in the reviewer allowlist'
@@ -197,10 +202,36 @@ function Clear-StaleTranscripts {
       Every exit that does not produce a result now calls this first.
     #>
     param([string]$OutDir)
+
+    # -ErrorAction SilentlyContinue MADE THE FAILURE INVISIBLE.
+    #
+    # The author holds (OI)(CI)R on this directory by design, so it can open a
+    # transcript with FileShare.Read -- withholding FILE_SHARE_DELETE -- and then
+    # trigger any refusal. Measured: with such a handle open the delete fails and
+    # SilentlyContinue discards the error, so the file survives; with -Stop the
+    # same call raises IOException. The status then says REFUSED while a full
+    # COMPLETE transcript from an earlier run sits beside it -- exactly the state
+    # this function's own docstring says already fooled a harness once, reachable
+    # by the principal the mechanism defends against.
+    #
+    # So: attempt, then VERIFY, and report what is still there.
+    # RETURNS NOTHING. Twelve call sites invoke this at statement level, so a
+    # return value would land on the success stream and be collected by whatever
+    # captured the caller -- the print-and-return defect this codebase has
+    # already shipped once. It reports and stops here instead.
+    $survivors = @()
     foreach ($stale in @('ENVIRONMENT_1-transcript.json', 'ENVIRONMENT_2-transcript.json')) {
         $path = Join-Path $OutDir $stale
-        if (Test-Path $path) { Remove-Item $path -Force -ErrorAction SilentlyContinue }
+        if (-not (Test-Path $path)) { continue }
+        try { Remove-Item $path -Force -ErrorAction Stop } catch { }
+        if (Test-Path $path) { $survivors += $stale }
     }
+    if (-not $survivors.Count) { return }
+    New-Status -Stage 'unknown' -State 'REFUSED' `
+        -Detail 'a previous run''s transcripts could not be removed' `
+        -Extra @{ reason = 'OFFLINE_STALE_TRANSCRIPT_NOT_CLEARED'
+                  stale = ($survivors -join ',') }
+    exit 5
 }
 
 function Protect-Transcript {
@@ -510,7 +541,26 @@ if (-not $command) {
     exit 0
 }
 $stage = [string]$command.stage
+# THE COMMAND FILE CANNOT SUPPLY ARGUMENT TOKENS.
+#
+# This file states that the command file "selects one of a fixed set of stages
+# and nothing else: it cannot supply paths, keys, flags, or code". That was
+# false. run_id was taken verbatim into a native command line, and Windows
+# PowerShell 5.1 escapes a bare quote but not a backslash-quote -- so
+# `run_id = 'q\" --stage bootstrap'` reached the driver as separate argv
+# tokens and argparse took the LAST --stage. A command file declaring
+# "stage":"preflight" made the driver execute bootstrap, while the status line
+# reported the stage the allowlist had approved. The other roots were safe only
+# because they happen to appear after --run-id on the command line, which is
+# argument ordering rather than a control.
 $runId = if ($command.PSObject.Properties.Name -contains 'run_id') { [string]$command.run_id } else { 'unset' }
+if ($runId -notmatch '^[A-Za-z0-9._-]{1,64}$') {
+    Clear-StaleTranscripts -OutDir $OutRoot
+    New-Status -Stage $stage -State 'REFUSED' `
+        -Detail 'run identifier is not a bare token' `
+        -Extra @{ reason = 'OFFLINE_RUN_ID_REJECTED' }
+    exit 3
+}
 
 if ($stage -eq 'status') {
     $py = Get-ReviewerPython
