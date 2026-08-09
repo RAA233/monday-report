@@ -1241,7 +1241,8 @@ def main() -> int:
         # e2-guest.cred present, correctly sized, correctly ACL'd and forever
         # unopenable. Every earlier check in this battery read that route; none
         # executed it, and reading it is exactly how the asymmetry survived --
-        # the guarded branch sits four lines above the unguarded one.
+        # the guarded branch and the unguarded one were 45 lines apart in the
+        # same top-level route, with nothing between them that reads either.
         #
         # The shipped block is lifted verbatim between its own markers and run
         # against synthetic state directories. Lifting a REGION rather than a
@@ -1253,26 +1254,39 @@ def main() -> int:
         chain_text = raw_boot[chain_start:chain_end] if chain_start >= 0 < chain_end else ""
 
         def run_chain(state_files: list, *, recreate: bool, tag: str,
-                      make_unreadable: bool = False) -> tuple:
-            """Run the shipped block against a synthetic C:\\mr-hv-shaped root."""
+                      make_unreadable: bool = False, existing: bool = False) -> tuple:
+            """Run the shipped block against a synthetic C:\\mr-hv-shaped root.
+
+            The harness reproduces the script's own error regime. Under
+            $ErrorActionPreference = 'Stop' a denied Test-Path throws instead of
+            returning $false, so a harness left on the default 'Continue'
+            exercises different control flow from the shipped route and would
+            certify a branch production never takes.
+            """
             root = work / f"chain-{tag}"
             state = root / "reviewer" / "state"
             state.mkdir(parents=True, exist_ok=True)
             for leaf in state_files:
                 (state / leaf).write_bytes(b"synthetic-sealed-material")
             # Present but not enumerable is the shape a half-applied ACL leaves,
-            # and the one Test-Path reports identically to absent. It cannot be
-            # built with a DACL here: an elevated token enumerates a SYSTEM-only
-            # directory anyway -- measured, not assumed. The denial is injected
-            # at the call instead, so the branch under test is the shipped one
-            # and only the failure it reacts to is synthetic.
-            deny = ("function Get-ChildItem { throw "
-                    "'synthetic access denial' }\n") if make_unreadable else ""
+            # and the one Test-Path reports identically to absent. Whether that
+            # denial can be built with a DACL depends on the token and the
+            # owner, and it did not reproduce from this session -- so it is
+            # injected at the call rather than asserted about the platform. The
+            # branch under test is the shipped one; only the failure it reacts
+            # to is synthetic. Both probes are overridden, because the leaf test
+            # runs first and would throw before the enumeration is reached.
+            deny = ("function Test-Path { throw 'synthetic access denial' }\n"
+                    "function Get-ChildItem { throw 'synthetic access denial' }\n"
+                    ) if make_unreadable else ""
             harness = work / f"chain-{tag}.ps1"
             harness.write_text(
                 "Set-StrictMode -Version 2.0\n"
+                "$ErrorActionPreference = 'Stop'\n"
                 + deny
                 + f"$HvRoot = '{root}'\n"
+                f"$User = 'MR-SYNTHETIC-REVIEWER'\n"
+                f"$existing = ${str(bool(existing)).lower()}\n"
                 f"$RecreateReviewerCredential = ${str(bool(recreate)).lower()}\n"
                 + chain_text
                 + "\nWrite-Output 'CHAIN-PROCEEDED'\n", encoding="utf-8")
@@ -1331,36 +1345,106 @@ def main() -> int:
         rec("OP48d an-unreadable-state-directory-refuses-rather-than-proceeds",
             dark_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in dark_text,
             f"a state directory that exists but cannot be enumerated is treated "
-            f"as possibly holding sealed material, not as holding none "
+            f"as possibly holding sealed material, not as holding none, and it "
+            f"reaches the NAMED refusal rather than dying on the raw "
+            f"access-denied that 'Stop' turns the probe into "
             f"({dark_detail or 'no output'})")
+
+        # THE LEAST CERTAIN ARM WAS THE QUIETEST. The refusal covered three
+        # conditions and the warning covered one, so an operator who bypassed
+        # "I cannot establish whether material is present" was told nothing at
+        # all about what the bypass was about to destroy.
+        warn_rc, warn_text, warn_detail = run_chain(
+            [], recreate=True, tag="darkwarn", make_unreadable=True)
+        rec("OP48h the-bypass-warns-on-every-arm-it-can-bypass",
+            warn_rc == 0 and "CHAIN-PROCEEDED" in warn_text and "WARNING" in warn_text,
+            f"bypassing the unestablished-state arm still says what is being "
+            f"destroyed, so the warning covers the same conditions the refusal "
+            f"does ({warn_detail or 'no output'})")
 
         # POSITION, PINNED. Refusing after New-LocalUser would leave a fresh
         # principal behind on the host the operator was told was untouched, and
         # the reset itself must be downstream or the guard is decorative.
-        # Anchored on the variable, not on the reason string: reason strings
-        # live inside string literals, which boot_live has blanked, and the same
-        # literal also appears ~100 lines earlier in the -Verify remedy text --
-        # so searching for it would have located the wrong site and passed for
-        # a reason unrelated to where the guard actually sits.
-        guard_at = boot_live.find("$credChainSealed")
-        create_at = boot_live.find("New-LocalUser -Name $User")
-        reset_at = boot_live.find("Set-LocalUser -Name $User")
-        rec("OP48e the-refusal-precedes-account-creation-and-the-reset",
-            guard_at >= 0 and create_at >= 0 and reset_at >= 0
-            and guard_at < create_at < reset_at
-            and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in raw_boot,
-            f"the block sits above both New-LocalUser and Set-LocalUser, so a "
-            f"refusal cannot leave a half-created principal and cannot be "
-            f"reached after the damage (guard@{guard_at}, create@{create_at}, "
-            f"reset@{reset_at})")
+        # AN INVOCATION, NOT A SPELLING.
+        #
+        # These two located the account cmdlets with `find`/`re.findall` over
+        # one exact spelling of one argument order. Seven ordinary alternatives
+        # -- a pipeline, lowercase $user, "$User", splatting, reordered
+        # parameters, positional, -InputObject -- are the same call and matched
+        # none of them, so a second unguarded reset could be added and both
+        # checks would still report a single site above the guard. Measuring the
+        # text next to the call instead of the call is the third recurring
+        # defect shape in this codebase, committed by the check written to close
+        # the second one.
+        #
+        # The parser answers instead: every CommandAst resolving to the cmdlet,
+        # whatever it looks like. Offsets are into the raw file, and so is the
+        # marker search, so the two are comparable.
+        ast_probe = work / "account-cmdlet-ast.ps1"
+        ast_probe.write_text(
+            "$e = $null\n"
+            "$ast = [System.Management.Automation.Language.Parser]::ParseFile(\n"
+            "    $env:MR_BOOT_PATH, [ref]$null, [ref]$e)\n"
+            "if ($e.Count) { Write-Output '[]'; exit 0 }\n"
+            "$found = $ast.FindAll({ param($n)\n"
+            "    $n -is [System.Management.Automation.Language.CommandAst] }, $true)\n"
+            "$rows = @()\n"
+            "foreach ($c in $found) {\n"
+            "    $name = $c.GetCommandName()\n"
+            "    if (-not $name) { continue }\n"
+            "    if ('set-localuser', 'new-localuser' -contains $name.ToLowerInvariant()) {\n"
+            "        $rows += [ordered]@{ name = $name.ToLowerInvariant()\n"
+            "                             offset = $c.Extent.StartOffset }\n"
+            "    }\n"
+            "}\n"
+            "if (-not $rows.Count) { Write-Output '[]' }\n"
+            "else { ConvertTo-Json -InputObject @($rows) -Depth 3 -Compress }\n",
+            encoding="utf-8")
+        boot_path = str(ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1")
+        try:
+            ast_out = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                 "Bypass", "-File", str(ast_probe)],
+                capture_output=True, text=True, timeout=180,
+                env={**os.environ, "MR_BOOT_PATH": boot_path})
+            account_cmds = json.loads((ast_out.stdout or "[]").strip() or "[]")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            account_cmds = []
+        resets = sorted(c["offset"] for c in account_cmds if c["name"] == "set-localuser")
+        creates = sorted(c["offset"] for c in account_cmds if c["name"] == "new-localuser")
 
-        # The reviewer password has exactly one site. A second one added later
-        # would be outside the guard and this check is what would say so.
-        reviewer_pw_sites = len(re.findall(r"Set-LocalUser\s+-Name\s+\$User", boot_live))
-        rec("OP48f the-reviewer-password-still-has-a-single-site",
-            reviewer_pw_sites == 1,
-            f"the guard covers the credential route because there is one route "
-            f"to cover ({reviewer_pw_sites} site(s) setting the reviewer password)")
+        guard_at = raw_boot.find("# ---- live credential chain")
+        rec("OP48e the-refusal-precedes-account-creation-and-the-reset",
+            guard_at >= 0 and len(creates) == 1 and len(resets) == 1
+            and guard_at < creates[0] < resets[0]
+            and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in raw_boot,
+            f"the block sits above every parsed New-LocalUser and Set-LocalUser "
+            f"invocation, so a refusal cannot leave a half-created principal and "
+            f"cannot be reached after the damage (guard@{guard_at}, "
+            f"creates={creates}, resets={resets})")
+
+        rec("OP48f the-account-password-still-has-a-single-invocation",
+            len(resets) == 1 and bool(account_cmds),
+            f"the parser finds exactly one Set-LocalUser invocation in the "
+            f"elevated script, in any spelling, so the guard above it covers "
+            f"the whole credential route ({len(resets)} invocation(s), "
+            f"{len(creates)} creation(s))")
+
+        # THE ACCOUNT IS THE SUBJECT OF THE RESET.
+        #
+        # Gating on material found under $HvRoot let `-HvRoot <anywhere else>`
+        # -- a different parameter from the $User being reset -- report no
+        # material and proceed, resetting the live account whose sealed state
+        # sits under the real root. Denial keyed to one operand, damage keyed to
+        # the other: the closed defect, one level along.
+        acct_rc, acct_text, acct_detail = run_chain(
+            [], recreate=False, tag="acct", existing=True)
+        rec("OP48g an-existing-account-refuses-even-when-the-root-holds-nothing",
+            acct_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in acct_text
+            and "CHAIN-PROCEEDED" not in acct_text,
+            f"an inspected root with no sealed material does not license the "
+            f"reset while the account it would reset exists, so pointing the run "
+            f"at another root cannot reach it ({acct_detail or 'no output'})")
 
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
@@ -1805,7 +1889,7 @@ def main() -> int:
     # recorded through the same no-op and vanished, and main() returned 0 with
     # zero checks executed. The floor cannot be allowed to depend on the
     # mechanism it exists to police.
-    MINIMUM_CHECKS = 67
+    MINIMUM_CHECKS = 69
     if len(CHECKS) < MINIMUM_CHECKS:
         print(json.dumps({
             "guard": "offline-operator-principal",

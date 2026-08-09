@@ -36,8 +36,22 @@
     it is deliberate. The only permitted rotation is a user-initiated change that
     supplies the old password.
 
+    The route that sets the password enforces that red line rather than only
+    documenting it: it refuses with OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE when
+    the reviewer account already exists or sealed material is present, and the
+    one way past it is -RecreateReviewerCredential, which is an operator
+    declaring the identity is being rebuilt from nothing. Passing it is not the
+    permitted rotation and never repairs anything -- it destroys the chain on
+    purpose, and everything sealed under it is gone.
+
 .PARAMETER Verify
     Report the principal's state without changing anything. Prints no secret.
+
+.PARAMETER RecreateReviewerCredential
+    Proceed with the credential half of the default route even though this host
+    already holds a reviewer account or sealed reviewer material. Destroys the
+    DPAPI chain. Required only when the reviewer identity is genuinely being
+    rebuilt from nothing; there is no route back.
 
 .EXAMPLE
     # In an elevated PowerShell window. -AuthorAccount is REQUIRED on every
@@ -1855,55 +1869,97 @@ if ($Verify) {
 # key is the reviewer, and it cannot be re-derived from anything the operator
 # still holds.
 #
-# Gated on the MATERIAL, not on the account, because the counterpart case is
-# just as fatal and reads as the safe one: with the account deleted out from
-# under its own sealed state, `-not $existing` is true, New-LocalUser mints a
-# fresh principal with a fresh master key, and the route completes cleanly over
-# blobs that no principal will ever open again.
+# THE ACCOUNT IS THE PRIMARY CONDITION, and gating on the material alone was
+# the same defect one level along. What the reset destroys is the master key of
+# $User. What the material scan reads is $HvRoot. They are independent
+# parameters, so `-HvRoot <anywhere else>` -- the obvious next move for an
+# operator who has just been refused, or a relative path, or a typo -- found no
+# material, proceeded, and reset the very account whose sealed state sits
+# untouched under the real root. Denial keyed to one operand, damage keyed to
+# the other.
+#
+# $existing is the reset's own subject, resolved at the top of the script from
+# $User, and an account that already exists is the necessary condition for the
+# reset to destroy anything: a principal created moments ago by this route has
+# no master key worth keeping. The material scan stays as the counterpart for
+# state the account question cannot see.
 $credChainRoot = Join-Path $HvRoot 'reviewer\state'
 $credChainSealed = @()
-foreach ($leaf in @('review-key.dpapi', 'e2-guest.cred')) {
-    if (Test-Path -LiteralPath (Join-Path $credChainRoot $leaf)) { $credChainSealed += $leaf }
-}
 # Test-Path answers "absent" and "present but I cannot look" with the same
-# $false. Taking that at face value would let an unreadable state directory --
-# the very shape a half-applied ACL leaves behind -- report no material and
-# license the reset. Enumerated explicitly so the two are distinguishable.
+# $false, and under this script's $ErrorActionPreference = 'Stop' a denied
+# probe does not return $false at all -- it throws, and the route dies with a
+# raw access-denied message and no named reason. Both are handled here: a
+# refusal to answer is recorded as "cannot establish", which is the only
+# reading that fails closed.
 $credChainUnreadable = $false
-if (Test-Path -LiteralPath $credChainRoot) {
-    try { Get-ChildItem -LiteralPath $credChainRoot -Force -ErrorAction Stop | Out-Null }
-    catch { $credChainUnreadable = $true }
+foreach ($leaf in @('review-key.dpapi', 'e2-guest.cred')) {
+    try {
+        if (Test-Path -LiteralPath (Join-Path $credChainRoot $leaf)) { $credChainSealed += $leaf }
+    } catch { $credChainUnreadable = $true }
 }
-if (($credChainSealed.Count -or $credChainUnreadable) -and -not $RecreateReviewerCredential) {
+try {
+    if (Test-Path -LiteralPath $credChainRoot) {
+        Get-ChildItem -LiteralPath $credChainRoot -Force -ErrorAction Stop | Out-Null
+    }
+} catch { $credChainUnreadable = $true }
+
+$credChainLive = [bool]$existing -or [bool]$credChainSealed.Count -or $credChainUnreadable
+if ($credChainLive -and -not $RecreateReviewerCredential) {
     Write-Output ''
-    if ($credChainUnreadable) {
+    if ($existing) {
+        Write-Output ('  STOP: the reviewer account ' + $User + ' already exists on this host.')
+        Write-Output '  This route resets its password, which issues a new DPAPI master key'
+        Write-Output '  and permanently destroys whatever the old one sealed -- wherever that'
+        Write-Output '  material lives, not only under the root this run was pointed at.'
+    } elseif ($credChainUnreadable) {
         Write-Output '  STOP: the reviewer state directory exists but cannot be enumerated,'
         Write-Output '  so whether sealed reviewer material is present cannot be established.'
+        Write-Output '  Treated as present, because the alternative reading is the one that'
+        Write-Output '  destroys it.'
     } else {
-        Write-Output ('  STOP: this host already holds sealed reviewer material (' +
-                      ($credChainSealed -join ', ') + ').')
+        Write-Output ('  STOP: sealed reviewer material is present (' +
+                      ($credChainSealed -join ', ') + ') with no reviewer account to own it.')
     }
-    Write-Output '  This route resets the reviewer password, which destroys the DPAPI'
-    Write-Output '  chain those files are sealed under. The loss is permanent.'
     Write-Output ''
-    Write-Output '  To update an already-bootstrapped host, use the routes that do not'
-    Write-Output '  touch the credential:'
-    Write-Output '    -ProvisionPaths      directories, ACLs, ownership, author identity'
-    Write-Output '    -ExportSource        reviewer source copy'
-    Write-Output '    -ProvisionReviewerRuntime / -HardenInterpreter   dedicated runtime'
-    Write-Output '    -RepinReviewerCode   re-pin after any of the above'
-    Write-Output '    -GrantAuthorTaskRun  author control channel'
-    Write-Output '    -Verify              read-only check'
-    Write-Output ''
-    Write-Output '  If the reviewer identity is genuinely being rebuilt from nothing and'
-    Write-Output '  the loss is intended, pass -RecreateReviewerCredential.'
+    if ($existing) {
+        Write-Output '  To update an already-bootstrapped host, use the routes that do not'
+        Write-Output '  touch the credential:'
+        Write-Output '    -ProvisionPaths      directories, ACLs, ownership, author identity'
+        Write-Output '    -ExportSource        reviewer source copy'
+        Write-Output '    -ProvisionReviewerRuntime / -HardenInterpreter   dedicated runtime'
+        Write-Output '    -RepinReviewerCode   re-pin after any of the above'
+        Write-Output '    -GrantAuthorTaskRun  author control channel'
+        Write-Output '    -Verify              read-only check'
+        Write-Output ''
+        Write-Output '  If the reviewer identity is genuinely being rebuilt from nothing and'
+        Write-Output '  the loss is intended, pass -RecreateReviewerCredential.'
+    } else {
+        # No account, but state under the task root. On a stock host C:\ lets
+        # any authenticated principal create directories, so this is also what
+        # an author gets by dropping a file at the default path before the
+        # operator's one run -- a denial it can trigger without any privilege.
+        # -RecreateReviewerCredential would "fix" it and is the wrong lesson to
+        # teach: there is no chain to recreate, and reaching for the bypass here
+        # is how it becomes habitual. Inspect the tree instead.
+        Write-Output '  There is no reviewer account, so this material is not protecting a'
+        Write-Output '  live identity. Do NOT pass -RecreateReviewerCredential to clear it.'
+        Write-Output '  Establish who created that tree first -- on a stock host any'
+        Write-Output '  authenticated principal can create it at the default path before the'
+        Write-Output '  operator runs -- then remove it as an administrator and re-run.'
+    }
     Write-Output '  reason: OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE'
     exit 2
 }
-if ($credChainSealed.Count -and $RecreateReviewerCredential) {
+if ($credChainLive -and $RecreateReviewerCredential) {
+    # Warned on every arm of the condition that was bypassed, including the one
+    # that says the answer could not be established: gating the warning on
+    # visible files alone left the least certain case the quietest.
     Write-Output ''
+    $what = if ($credChainSealed.Count) { $credChainSealed -join ', ' }
+            elseif ($credChainUnreadable) { 'state that could not be enumerated' }
+            else { 'the existing reviewer account''s master key' }
     Write-Output ('  WARNING: -RecreateReviewerCredential given; the DPAPI chain sealing ' +
-                  ($credChainSealed -join ', ') + ' is being destroyed.')
+                  $what + ' is being destroyed.')
 }
 
 # ---- account -------------------------------------------------------------
