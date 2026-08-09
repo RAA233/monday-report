@@ -53,7 +53,7 @@ $OutRoot      = Join-Path $ReviewerRoot 'out'          # reviewer-owned results
 $CredentialStages = @('cms-identity', 'cred-rotate', 'cred-seal', 'cred-repair')
 $AllowedStages = @('bootstrap', 'preflight', 'diagnostics', 'diagnostics-deep',
                    'e1', 'e2', 'review', 'status')
-if (-not (Test-Path (Join-Path $StateRoot 'e2-guest.cred'))) {
+if (-not (Test-Path -LiteralPath (Join-Path $StateRoot 'e2-guest.cred'))) {
     # Migration has not completed yet, so the one-time stages are still needed.
     $AllowedStages += $CredentialStages
 }
@@ -70,7 +70,7 @@ function New-Status {
     }
     if ($Extra) { $doc.extra = $Extra }
     New-Item -ItemType Directory -Force -Path $OutRoot | Out-Null
-    $doc | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $OutRoot 'reviewer-status.json') -Encoding utf8
+    $doc | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutRoot 'reviewer-status.json') -Encoding utf8
     Write-Output ("[reviewer] {0}: {1} {2}" -f $Stage, $State, $Detail)
 }
 
@@ -89,9 +89,9 @@ function Assert-NoIssuerMaterial {
 }
 
 function Get-RequestedStage {
-    if (-not (Test-Path $CommandFile)) { return $null }
+    if (-not (Test-Path -LiteralPath $CommandFile)) { return $null }
     try {
-        $raw = Get-Content $CommandFile -Raw -Encoding UTF8
+        $raw = Get-Content -LiteralPath $CommandFile -Raw -Encoding UTF8
         $doc = $raw | ConvertFrom-Json
     } catch {
         Clear-StaleTranscripts -OutDir $OutRoot
@@ -166,9 +166,9 @@ function Get-ReviewerPython {
     # Resolved from a fixed location recorded at bootstrap, never from the
     # command file. Hashed into the transcript by the Python driver.
     $pin = Join-Path $StateRoot 'python-path.txt'
-    if (Test-Path $pin) {
-        $p = (Get-Content $pin -Raw).Trim()
-        if ($p -and (Test-Path $p)) { return $p }
+    if (Test-Path -LiteralPath $pin) {
+        $p = (Get-Content -LiteralPath $pin -Raw).Trim()
+        if ($p -and (Test-Path -LiteralPath $p)) { return $p }
     }
     # NO run-time discovery.
     #
@@ -239,9 +239,9 @@ function Clear-StaleTranscripts {
     $survivors = @()
     foreach ($stale in @('ENVIRONMENT_1-transcript.json', 'ENVIRONMENT_2-transcript.json')) {
         $path = Join-Path $OutDir $stale
-        if (-not (Test-Path $path)) { continue }
-        try { Remove-Item $path -Force -ErrorAction Stop } catch { }
-        if (Test-Path $path) { $survivors += $stale }
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        try { Remove-Item -LiteralPath $path -Force -ErrorAction Stop } catch { }
+        if (Test-Path -LiteralPath $path) { $survivors += $stale }
     }
     if (-not $survivors.Count) { return }
     New-Status -Stage 'unknown' -State 'REFUSED' `
@@ -307,8 +307,16 @@ function Assert-ReviewerCodeIntegrity {
     # catch it.
     $current = @{}
     foreach ($f in $Paths) {
-        if (Test-Path $f) {
-            $current[$f.ToLowerInvariant()] = (Get-FileHash -Path $f -Algorithm SHA256).Hash
+        if (Test-Path -LiteralPath $f) {
+            # A FAILED HASH IS NOT A HASH. Get-FileHash returns nothing when it
+            # cannot read the file, and `.Hash` on nothing throws
+            # PropertyNotFoundStrict under this script's StrictMode -- a
+            # terminating error before any status is written and before the
+            # stale-result cleanup, which leaves the previous run's transcripts
+            # standing. Recorded as an explicit sentinel instead: it differs
+            # from every real digest, so the comparison reports CHANGED.
+            $hashed = Get-FileHash -LiteralPath $f -Algorithm SHA256 -ErrorAction SilentlyContinue
+            $current[$f.ToLowerInvariant()] = $(if ($hashed) { $hashed.Hash } else { 'UNREADABLE' })
         }
     }
 
@@ -320,7 +328,7 @@ function Assert-ReviewerCodeIntegrity {
     # executable actually loads unpinned. A recursive digest covers the closure
     # instead of a hand-written sample of it, so ANY byte that changes shows up.
     foreach ($root in $TreeRoots) {
-        if (-not (Test-Path $root)) { continue }
+        if (-not (Test-Path -LiteralPath $root)) { continue }
         $rootFull = (Resolve-Path $root).Path
         # A LINK INSIDE THE TREE MAKES THIS DIGEST MEANINGLESS.
         #
@@ -352,7 +360,7 @@ function Assert-ReviewerCodeIntegrity {
             return @{ state = 'CHANGED'; changed = @("reparse-root:$rootFull") }
         }
         $enumErrors = $null
-        $links = @(Get-ChildItem -Path $rootFull -Recurse -Force `
+        $links = @(Get-ChildItem -LiteralPath $rootFull -Recurse -Force `
                        -ErrorAction SilentlyContinue -ErrorVariable enumErrors |
                    Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
         if ($links.Count) {
@@ -375,10 +383,12 @@ function Assert-ReviewerCodeIntegrity {
         # kept a leading separator. That stayed stable and stayed sensitive to
         # mutation, so it too passed its own four-step test while disagreeing.
         $lines = New-Object System.Collections.Generic.List[string]
-        Get-ChildItem -Path $rootFull -Recurse -File -Force -ErrorAction SilentlyContinue |
+        Get-ChildItem -LiteralPath $rootFull -Recurse -File -Force -ErrorAction SilentlyContinue |
             ForEach-Object {
                 $rel = $_.FullName.Substring($rootFull.Length).TrimStart('\').ToLowerInvariant()
-                $lines.Add($rel + ':' + (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash)
+                $entryHash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 `
+                    -ErrorAction SilentlyContinue
+                $lines.Add($rel + ':' + $(if ($entryHash) { $entryHash.Hash } else { 'UNREADABLE' }))
             }
         $ordered = $lines.ToArray()
         [Array]::Sort($ordered, [StringComparer]::Ordinal)
@@ -393,14 +403,14 @@ function Assert-ReviewerCodeIntegrity {
         $current['tree:' + $rootFull.ToLowerInvariant()] = $digest.ToUpperInvariant()
     }
 
-    if (-not (Test-Path $ManifestPath)) {
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
         # First run after an authorised install: adopt what is on disk and pin
         # it. Adoption happens once and is recorded; every later run compares.
-        ($current | ConvertTo-Json -Depth 4) | Set-Content -Path $ManifestPath -Encoding utf8
+        ($current | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $ManifestPath -Encoding utf8
         return @{ state = 'ADOPTED'; changed = @() }
     }
 
-    $pinned = Get-Content $ManifestPath -Raw | ConvertFrom-Json
+    $pinned = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
     $changed = @()
     $pinnedNames = @($pinned.PSObject.Properties.Name)
     foreach ($name in $current.Keys) {
@@ -427,11 +437,11 @@ Assert-NoIssuerMaterial
 # point's job is to say so plainly when it has not happened.
 $missing = @()
 foreach ($d in @($ReviewerRoot, $StateRoot, $OutRoot)) {
-    if (-not (Test-Path $d)) { $missing += $d; continue }
+    if (-not (Test-Path -LiteralPath $d)) { $missing += $d; continue }
     try {
         $probe = Join-Path $d ('.write-probe-' + [Guid]::NewGuid().ToString('N'))
-        Set-Content -Path $probe -Value 'x' -ErrorAction Stop
-        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+        Set-Content -LiteralPath $probe -Value 'x' -ErrorAction Stop
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
     } catch { $missing += $d }
 }
 if ($missing.Count -gt 0) {
@@ -450,7 +460,7 @@ if ($missing.Count -gt 0) {
 $codeManifest = Join-Path $StateRoot 'reviewer-code-manifest.json'
 $interpreterPin = Join-Path $StateRoot 'python-path.txt'
 $interpreterPath = ''
-if (Test-Path $interpreterPin) { $interpreterPath = (Get-Content $interpreterPin -Raw).Trim() }
+if (Test-Path -LiteralPath $interpreterPin) { $interpreterPath = (Get-Content -LiteralPath $interpreterPin -Raw).Trim() }
 $codeFiles = @(
     $PSCommandPath,
     (Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_credential_migration.ps1'),
@@ -481,7 +491,7 @@ $runtimeRoot = 'C:\mr-hv\reviewer-runtime'
 # reported VERIFIED -- the pin looked complete while covering less than it
 # claimed. Absence is a refusal now, so a typo, a deletion or a rename cannot
 # quietly shrink what is pinned.
-$missingCode = @($codeFiles | Where-Object { -not (Test-Path $_) })
+$missingCode = @($codeFiles | Where-Object { -not (Test-Path -LiteralPath $_) })
 if ($missingCode.Count) {
     Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage 'integrity' -State 'REFUSED' `
@@ -491,7 +501,7 @@ if ($missingCode.Count) {
     exit 7
 }
 foreach ($tree in @($packageRoot, $runtimeRoot)) {
-    if (-not (Test-Path $tree)) {
+    if (-not (Test-Path -LiteralPath $tree)) {
         Clear-StaleTranscripts -OutDir $OutRoot
         New-Status -Stage 'integrity' -State 'REFUSED' `
             -Detail ('a pinned code tree is absent: ' + (Split-Path $tree -Leaf)) `
@@ -502,16 +512,16 @@ foreach ($tree in @($packageRoot, $runtimeRoot)) {
 # The interpreter is executed code, so it is pinned like executed code, and
 # so are its load points: a sitecustomize.py or usercustomize.py dropped
 # into site-packages runs before anything this script controls.
-if ($interpreterPath -and (Test-Path $interpreterPath)) {
+if ($interpreterPath -and (Test-Path -LiteralPath $interpreterPath)) {
     $codeFiles += $interpreterPath
     $sitePackages = Join-Path (Split-Path $interpreterPath -Parent) 'Lib\site-packages'
     foreach ($hook in @('sitecustomize.py', 'usercustomize.py')) {
         $hookPath = Join-Path $sitePackages $hook
-        if (Test-Path $hookPath) { $codeFiles += $hookPath }
+        if (Test-Path -LiteralPath $hookPath) { $codeFiles += $hookPath }
     }
     # .pth files execute any line beginning with `import`, so they are a load
     # point in exactly the same sense as sitecustomize.py.
-    Get-ChildItem -Path $sitePackages -Filter '*.pth' -File -ErrorAction SilentlyContinue |
+    Get-ChildItem -LiteralPath $sitePackages -Filter '*.pth' -File -ErrorAction SilentlyContinue |
         ForEach-Object { $codeFiles += $_.FullName }
 }
 # The pinned interpreter must BE the dedicated runtime.
@@ -590,9 +600,9 @@ if ($stage -eq 'status') {
     New-Status -Stage 'status' -State 'OK' -Detail 'reviewer session reachable' -Extra @{
         run_id           = $runId
         profile          = $env:USERPROFILE
-        profile_loaded   = (Test-Path $env:USERPROFILE)
+        profile_loaded   = (Test-Path -LiteralPath $env:USERPROFILE)
         python_resolved  = [bool]$py
-        source_present   = (Test-Path $SourceRoot)
+        source_present   = (Test-Path -LiteralPath $SourceRoot)
         trust_root_ready = (Test-Path 'C:\mr-hv\trust\offline-review-trust-root.v1.json')
     }
     exit 0
@@ -609,7 +619,7 @@ if ($stage -eq 'status') {
 if ($stage -eq 'diagnostics' -or $stage -eq 'diagnostics-deep') {
     Assert-CodeStillPinned -Stage $stage
     $diagScript = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_diagnostics.ps1'
-    if (-not (Test-Path $diagScript)) {
+    if (-not (Test-Path -LiteralPath $diagScript)) {
         Clear-StaleTranscripts -OutDir $OutRoot
         New-Status -Stage $stage -State 'FAILED' `
             -Detail 'diagnostics script missing from the install'
@@ -636,7 +646,7 @@ if ($stage -eq 'diagnostics' -or $stage -eq 'diagnostics-deep') {
     # ErrorRecord -- script path, offending source line, positional message --
     # and capturing it raw put all of that into a file the author can read,
     # bypassing the redactor entirely.
-    Set-Content -Path (Join-Path $OutRoot 'diagnostics-result.json') `
+    Set-Content -LiteralPath (Join-Path $OutRoot 'diagnostics-result.json') `
         -Value (Protect-Transcript $out) -Encoding utf8
     if ($rc -eq 0) { New-Status -Stage $stage -State 'COMPLETE' -Detail "run_id=$runId" }
     else {
@@ -649,7 +659,7 @@ if ($stage -eq 'diagnostics' -or $stage -eq 'diagnostics-deep') {
 if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate' -or $stage -eq 'cred-repair' -or $stage -eq 'cred-seal') {
     Assert-CodeStillPinned -Stage $stage
     $migration = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_credential_migration.ps1'
-    if (-not (Test-Path $migration)) {
+    if (-not (Test-Path -LiteralPath $migration)) {
         Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail 'migration script missing from the install'
         exit 4
@@ -665,7 +675,7 @@ if ($stage -eq 'cms-identity' -or $stage -eq 'cred-rotate' -or $stage -eq 'cred-
     # "emits JSON only; it never prints a secret" -- true on the happy path, but
     # the rotation branch holds decrypted material in scope across calls that
     # can throw, and a thrown ErrorRecord is not JSON.
-    Set-Content -Path (Join-Path $OutRoot "$stage-result.json") `
+    Set-Content -LiteralPath (Join-Path $OutRoot "$stage-result.json") `
         -Value (Protect-Transcript $out) -Encoding utf8
     if ($rc -eq 0) { New-Status -Stage $stage -State 'COMPLETE' -Detail "run_id=$runId" }
     else {
@@ -682,7 +692,7 @@ if (-not $py) {
     New-Status -Stage $stage -State 'FAILED' -Detail 'no python interpreter reachable by the reviewer'
     exit 4
 }
-if (-not (Test-Path $SourceRoot)) {
+if (-not (Test-Path -LiteralPath $SourceRoot)) {
     Clear-StaleTranscripts -OutDir $OutRoot
     Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail 'pristine source export is absent'
@@ -690,7 +700,7 @@ if (-not (Test-Path $SourceRoot)) {
 }
 
 $driver = Join-Path $SourceRoot 'scripts\offline_reviewer_execute.py'
-if (-not (Test-Path $driver)) {
+if (-not (Test-Path -LiteralPath $driver)) {
     Clear-StaleTranscripts -OutDir $OutRoot
     Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' -Detail 'reviewer driver missing from the export'
@@ -713,14 +723,14 @@ $ErrorActionPreference = 'Continue'
 # state, not from the author's own command file. Absent, the run stops: an
 # authoritative result must name the principal it was produced for.
 $authorPin = Join-Path $StateRoot 'author-account.txt'
-if (-not (Test-Path $authorPin)) {
+if (-not (Test-Path -LiteralPath $authorPin)) {
     Clear-StaleTranscripts -OutDir $OutRoot
     New-Status -Stage $stage -State 'FAILED' `
         -Detail 'no operator-declared author account' `
         -Extra @{ reason = 'OFFLINE_AUTHOR_ACCOUNT_REQUIRED' }
     exit 4
 }
-$authorAccount = (Get-Content $authorPin -Raw).Trim()
+$authorAccount = (Get-Content -LiteralPath $authorPin -Raw).Trim()
 & $py -I $driver --stage $stage --run-id $runId --source-root $SourceRoot `
       --state-root $StateRoot --out-root $OutRoot --xchg-root $XchgRoot `
       --author-account $authorAccount

@@ -66,9 +66,9 @@ $results = [ordered]@{}
 # the denial it is, rather than confused with "the file is gone".
 $manifestPaths = @()
 $manifestFile = Join-Path $REVIEWER_STATE 'reviewer-code-manifest.json'
-if (Test-Path $manifestFile) {
+if (Test-Path -LiteralPath $manifestFile) {
     try {
-        $mf = Get-Content $manifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $mf = Get-Content -LiteralPath $manifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
         $manifestPaths = @($mf.PSObject.Properties.Name | ForEach-Object { $_.ToLowerInvariant() })
     } catch { $manifestPaths = @() }
 }
@@ -182,11 +182,11 @@ function Add-Probe {
 
 function Test-CanWriteFileIn {
     param([string]$Directory)
-    if (-not (Test-Path $Directory)) { return 'unreachable' }
+    if (-not (Test-Path -LiteralPath $Directory)) { return 'unreachable' }
     $probe = Join-Path $Directory ('.probe-' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
-        Set-Content -Path $probe -Value '# disposable boundary probe' -ErrorAction Stop
-        $created = Test-Path $probe
+        Set-Content -LiteralPath $probe -Value '# disposable boundary probe' -ErrorAction Stop
+        $created = Test-Path -LiteralPath $probe
         [System.IO.File]::Delete($probe)
         return $created
     } catch [System.UnauthorizedAccessException] {
@@ -198,7 +198,7 @@ function Test-CanWriteFileIn {
 
 function Test-CanOverwriteFile {
     param([string]$Path)
-    if (-not (Test-Path $Path)) { return 'unreachable' }
+    if (-not (Test-Path -LiteralPath $Path)) { return 'unreachable' }
     try {
         # FileShare.ReadWrite, not None. Requesting EXCLUSIVE access made any
         # other open handle raise a sharing violation, and `catch { $false }`
@@ -348,7 +348,7 @@ Add-Probe 'TOKEN02 author-account-not-administrator' $accountIsAdmin `
 # probes must run and answer).
 $pinFile = Join-Path $REVIEWER_STATE 'python-path.txt'
 $py = ''
-if (Test-Path $pinFile) { try { $py = (Get-Content $pinFile -Raw).Trim() } catch { $py = '' } }
+if (Test-Path -LiteralPath $pinFile) { try { $py = (Get-Content -LiteralPath $pinFile -Raw).Trim() } catch { $py = '' } }
 $pinReachable = $false
 if ($py) { try { $pinReachable = [bool](Test-Path -LiteralPath $py) } catch { $pinReachable = $false } }
 
@@ -365,9 +365,9 @@ if ($py) { try { $pinReachable = [bool](Test-Path -LiteralPath $py) } catch { $p
 # interpreter_sha256 precisely so the author can check this, and nothing read it.
 $pinAnchored = $false
 $anchorFile = Join-Path $HV 'trust\reviewer-interpreter-pin.v1.json'
-if (Test-Path $anchorFile) {
+if (Test-Path -LiteralPath $anchorFile) {
     try {
-        $anchor = Get-Content $anchorFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $anchor = Get-Content -LiteralPath $anchorFile -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($anchor.PSObject.Properties.Name -contains 'interpreter_path') {
             $pinAnchored = [string]::Equals(
                 [string]$anchor.interpreter_path, $py, 'OrdinalIgnoreCase')
@@ -450,7 +450,7 @@ if (-not $py) {
     # work, it has only been shown not to break anything.
     $work = Join-Path $env:TEMP ('mr-boundary-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $work | Out-Null
-    Set-Content -Path (Join-Path $work 'mr_boundary_probe.py') `
+    Set-Content -LiteralPath (Join-Path $work 'mr_boundary_probe.py') `
         -Value 'VALUE = "imported"' -Encoding ascii
     # Judged on the child's EXIT CODE, never on matching its output.
     #
@@ -549,7 +549,7 @@ if (-not $py) {
     Add-Probe 'C1-09 site-not-imported-by-the-runtime' ($siteRuns -eq 'True') `
         "site.py ran under -I = $siteRuns; on the dedicated runtime this must be False, which is what makes sitecustomize and .pth dead rather than merely guarded"
     }
-    Remove-Item -Path $work -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # --------------------------------------------------------------- C2 package

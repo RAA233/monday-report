@@ -282,8 +282,12 @@ def main() -> int:
     # Read once. Several checks below reason about the elevated script; each
     # re-reading it invited exactly the ordering accident that this hoist
     # removes.
-    boot_live = strip_powershell_comments(
-        (ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1").read_text(encoding="utf-8"))
+    # BOTH forms, read once. boot_live has comments removed and string literals
+    # blanked -- which is what stops a name inside a string reading as a call --
+    # so any check looking for string DATA must use the raw text instead.
+    boot_text = (ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1").read_text(
+        encoding="utf-8")
+    boot_live = strip_powershell_comments(boot_text)
     try:
         # ---------------------------------------------------- the contract
         rec("OP00 baseline-accepted", not probe(baseline_case(), work)["reasons"],
@@ -529,9 +533,26 @@ def main() -> int:
         # And an explicit git inside a directory the author can write is refused
         # -- the property Resolve-TrustedGit documents and the reason it takes
         # an author identity at all.
-        planted_git = work / "author-writable" / "git.exe"
-        planted_git.parent.mkdir(exist_ok=True)
+        # THE PLANTED CANDIDATE MUST BE WRITABLE BY THE PRINCIPAL UNDER TEST.
+        #
+        # Using the real account for this leg and the synthetic one for the
+        # control meant the two legs were about different principals -- and the
+        # real account is in Administrators here, so resolution produces nothing
+        # for it and "equals_shadow is False" was satisfied by a resolution that
+        # had failed for its own reasons. Using the synthetic account for both
+        # is only meaningful if the planted directory is one IT can write, so
+        # the DACL says so explicitly and that precondition is asserted.
+        planted_dir = work / "synth-writable-git"
+        planted_dir.mkdir(exist_ok=True)
+        # The candidate is created BEFORE the DACL is applied: that DACL names
+        # SYSTEM and the synthetic account only, so this process cannot write
+        # into the directory afterwards.
+        planted_git = planted_dir / "git.exe"
         planted_git.write_text("not a real program", encoding="ascii")
+        writable_precondition = probe(
+            {"action": "write-mask", "path": str(planted_dir),
+             "sddl": f"O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{SID_AUTHOR})",
+             "mask": 0xD0156, "author": identity("SYNTH", SID_AUTHOR)}, work)["value"]
         # A POSITIVE CONTROL FIRST. `equals_shadow is False` is satisfied by a
         # resolution that produced NOTHING, for any reason -- and that is exactly
         # what was happening: the ancestor mask was inert, every candidate scored
@@ -540,18 +561,29 @@ def main() -> int:
         # local group, so a machine-wide git must resolve for it.
         git_control = probe({"action": "trusted-git",
                              "author": identity("SYNTH", SID_AUTHOR)}, work)["value"] or {}
+        # THE SAME PRINCIPAL IN BOTH LEGS.
+        #
+        # The control resolved git for the SYNTHETIC author and the assertion was
+        # then made about the REAL one -- which on this host is in
+        # Administrators, so Test-AccountCanWritePath answers true for every git
+        # candidate and resolution produces nothing at all. `equals_shadow is
+        # False` is satisfied by that, so the stated property -- that the refusal
+        # is a refusal and not a resolution that failed for its own reasons --
+        # was exactly what the control failed to establish. Both legs now use the
+        # synthetic identity, for which resolution demonstrably works.
         git_author = probe({"action": "trusted-git", "explicit": str(planted_git),
                             "shadow": str(planted_git),
-                            "author": {"name": os.environ.get("USERNAME", ""), "sid": "",
-                                       "exists": True, "resolved": True}}, work)["value"] or {}
+                            "author": identity("SYNTH", SID_AUTHOR)}, work)["value"] or {}
         rec("OP22c author-writable-git-is-refused",
-            git_control.get("resolved") is True and git_control.get("exists") is True
+            writable_precondition is True
+            and git_control.get("resolved") is True and git_control.get("exists") is True
             and git_author.get("equals_shadow") is False,
             f"resolution genuinely works for a non-administrative author, and the "
-            f"explicitly supplied git inside a directory the author owns is "
-            f"skipped rather than trusted -- so the refusal is a refusal and not "
-            f"a resolution that failed for its own reasons "
-            f"(control={git_control}, planted={git_author})")
+            f"explicitly supplied git inside a directory that SAME principal "
+            f"provably can write is skipped rather than trusted -- so the refusal "
+            f"is a refusal and not a resolution that failed for its own reasons "
+            f"(writable={writable_precondition}, control={git_control}, "
+            f"planted={git_author})")
 
         bogus = probe({"action": "native-command", "name": "definitely-not-real.exe"},
                       work)["value"]
@@ -1107,6 +1139,61 @@ def main() -> int:
             f"reviewer-runtime and reviewer state at once -- and the same root "
             f"under a clean parent is not (fired={fired}, quiet={quiet})")
 
+        # --------------------------------- a path is a NAME, not a pattern
+        # Get-FileHash -Path, Test-Path -Path and their siblings treat [ and ]
+        # as wildcards. The reviewer's code-integrity digest hashed two trees
+        # whose filenames the AUTHOR chooses, so a bracketed name was hashed as
+        # a different file -- the digest was provably invariant under replacing
+        # that file's entire contents -- or resolved to nothing, whereupon
+        # `.Hash` on nothing threw under StrictMode before any status was
+        # written and before the stale-result cleanup.
+        wildcard_dir = work / "wildcard"
+        wildcard_dir.mkdir(exist_ok=True)
+        wildcard = probe({"action": "wildcard-path", "path": str(wildcard_dir)},
+                         work)["value"] or {}
+        rec("OP47 a-bracketed-filename-is-a-name-not-a-pattern",
+            wildcard.get("literal_sees_the_change") is True
+            and wildcard.get("wildcard_sees_the_change") is False,
+            f"replacing the entire contents of a file whose name contains "
+            f"brackets changes its literal digest and does NOT change its "
+            f"wildcard-resolved one -- so the class is real and -LiteralPath is "
+            f"the property that closes it ({wildcard})")
+
+        # ...and no trust-path script may still resolve a variable path as a
+        # pattern. New-Item is excluded: it has no -LiteralPath in Windows
+        # PowerShell 5.1, and it creates rather than resolves.
+        wildcard_cmdlets = ("Get-FileHash", "Test-Path", "Get-Content", "Set-Content",
+                            "Add-Content", "Get-Acl", "Set-Acl", "Get-Item",
+                            "Get-ChildItem", "Remove-Item", "Copy-Item", "Move-Item")
+        offenders = []
+        for source in sorted((ROOT / "packaging" / "hyperv").glob("*.ps1")):
+            if source.name in ("hyperv_control.ps1", "hyperv_session.ps1",
+                               "provision_vm.ps1", "reviewer_diagnostics.ps1",
+                               "reviewer_credential_migration.ps1"):
+                continue
+            lines = source.read_text(encoding="utf-8").splitlines()
+            for number, line in enumerate(lines, 1):
+                if line.lstrip().startswith("#"):
+                    continue
+                # ONE OPT-OUT, spelled out in the source it applies to: the
+                # fixture that DEMONSTRATES this defect must keep a wildcard arm,
+                # or it would have nothing to compare the literal arm against.
+                # It has to be declared on an immediately preceding comment line,
+                # so it cannot be applied silently or in bulk.
+                if any("WILDCARD-BY-DESIGN" in lines[back]
+                       for back in range(max(0, number - 3), number - 1)):
+                    continue
+                for cmdlet in wildcard_cmdlets:
+                    if not re.search(rf"\b{cmdlet}\b", line) or "-LiteralPath" in line:
+                        continue
+                    if re.search(rf"\b{cmdlet}\b\s+(-Path\s+)?[\$\(]", line):
+                        offenders.append(f"{source.name}:{number}")
+        rec("OP47a no-trust-path-script-resolves-a-variable-path-as-a-pattern",
+            not offenders,
+            f"every wildcard-interpreting call in the scripts on the trust path "
+            f"takes -LiteralPath, so no author-chosen filename can redirect one "
+            f"({offenders[:4] or 'none'})")
+
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
         #
@@ -1230,15 +1317,29 @@ def main() -> int:
         # exactly one route, never that it is mentioned a certain number of
         # times.
         pending_uses = len(re.findall(r"-PendingAuthorTaskGrant\b", boot_live))
+        # AND THE EXCUSED SET ITSELF. Counting applications does not stop the
+        # DEFAULT branch being widened: adding the two task reasons to the
+        # `else` arm waives them on -Verify and -ProvisionPaths as well, with
+        # every count unchanged. The unexempted branch must excuse exactly one
+        # reason, and that reason must be the absent-task one.
+        # SEARCHED IN THE RAW TEXT. boot_live has every string literal blanked --
+        # which is what stops a function name inside a string reading as a call
+        # -- so the reason names this check is looking for were filler by the
+        # time it saw them, and the inspection silently found nothing.
+        default_arm = re.search(r"\}\s*else\s*\{\s*@\(([^)]*)\)\s*\}", boot_text)
+        default_excused = []
+        if default_arm:
+            default_excused = re.findall(r"'([A-Z_]+)'", default_arm.group(1))
         rec("OP34a no-gate-is-fed-from-a-captured-stream",
             "Assert-CapabilitiesAcceptable -Reasons @(" not in boot_live
-            and reporter_calls == 3 and verdict_calls == 3 and pending_uses == 1,
+            and reporter_calls == 3 and verdict_calls == 3 and pending_uses == 1
+            and default_excused == ["OFFLINE_TASK_ABSENT"],
             f"all three routes report through a caller-owned list and feed it to "
             f"the verdict, and the pending-grant exemption is APPLIED on exactly "
             f"one route, so it cannot be widened to "
             f"a route that has no grant pending "
             f"(reporters={reporter_calls}, verdicts={verdict_calls}, "
-            f"pending={pending_uses})")
+            f"pending={pending_uses}, default-excused={default_excused})")
 
         # ------------------------------------------- the creation route exists
         # The switch that lets the ONE route which creates the reviewer run
@@ -1404,7 +1505,6 @@ def main() -> int:
         # production occurrence sat inside Assert-TrustedOperatorSource, a
         # function nothing invoked.
         boot = hyperv / "reviewer_bootstrap.ps1"
-        boot_text = boot.read_text(encoding="utf-8")
         # LOCATED BY PATTERN, NOT BY A FIXED ARGUMENT LIST. Both mutations were
         # anchored on the exact arguments of the invocation, so adding -Reviewer
         # to it turned them into silent no-ops. They failed rather than passed,

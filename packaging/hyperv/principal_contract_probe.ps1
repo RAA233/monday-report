@@ -305,7 +305,7 @@ switch ($case.action) {
         $declaration = Join-Path $case.path 'author-account.txt'
         $wrote = $false
         try {
-            Set-Content -Path $declaration -Value 'DECLARED-AUTHOR' -Encoding ascii -ErrorAction Stop
+            Set-Content -LiteralPath $declaration -Value 'DECLARED-AUTHOR' -Encoding ascii -ErrorAction Stop
             $wrote = ((Get-Content -LiteralPath $declaration -Raw).Trim() -eq 'DECLARED-AUTHOR')
         } catch { $wrote = $false }
         if ($wrote) {
@@ -364,13 +364,13 @@ switch ($case.action) {
         Set-Acl -LiteralPath $case.path -AclObject $dir
 
         $nested = Join-Path $case.path 'scripts'
-        if (-not (Test-Path $nested)) { New-Item -ItemType Directory -Force -Path $nested | Out-Null }
+        if (-not (Test-Path -LiteralPath $nested)) { New-Item -ItemType Directory -Force -Path $nested | Out-Null }
         $nestedAcl = New-Object Security.AccessControl.DirectorySecurity
         $nestedAcl.SetSecurityDescriptorSddlForm($clean, 'Access')
         Set-Acl -LiteralPath $nested -AclObject $nestedAcl
 
         $planted = Join-Path $nested 'offline_reviewer_runtime.py'
-        Set-Content -Path $planted -Value '# executed at high integrity' -Encoding ascii
+        Set-Content -LiteralPath $planted -Value '# executed at high integrity' -Encoding ascii
         if ($case.plant_file_ace) {
             $fileAcl = New-Object Security.AccessControl.FileSecurity
             $fileAcl.SetSecurityDescriptorSddlForm(
@@ -400,7 +400,7 @@ switch ($case.action) {
         Set-Acl -LiteralPath $case.path -AclObject $dir
 
         $entry = Join-Path $case.path 'reviewer_session.ps1'
-        Set-Content -Path $entry -Value '# the task runs this' -Encoding ascii
+        Set-Content -LiteralPath $entry -Value '# the task runs this' -Encoding ascii
         if ($case.plant_file_ace) {
             $fileAcl = New-Object Security.AccessControl.FileSecurity
             $fileAcl.SetSecurityDescriptorSddlForm(
@@ -451,13 +451,13 @@ switch ($case.action) {
         Set-Acl -LiteralPath $case.path -AclObject $root
 
         $sensitive = Join-Path $case.path 'state'
-        if (-not (Test-Path $sensitive)) { New-Item -ItemType Directory -Force -Path $sensitive | Out-Null }
+        if (-not (Test-Path -LiteralPath $sensitive)) { New-Item -ItemType Directory -Force -Path $sensitive | Out-Null }
         $sensitiveAcl = New-Object Security.AccessControl.DirectorySecurity
         $sensitiveAcl.SetSecurityDescriptorSddlForm($clean, 'Access')
         Set-Acl -LiteralPath $sensitive -AclObject $sensitiveAcl
 
         $pin = Join-Path $sensitive 'python-path.txt'
-        Set-Content -Path $pin -Value 'C:\pinned\python.exe' -Encoding ascii
+        Set-Content -LiteralPath $pin -Value 'C:\pinned\python.exe' -Encoding ascii
         if ($case.plant_file_ace) {
             $pinAcl = New-Object Security.AccessControl.FileSecurity
             $pinAcl.SetSecurityDescriptorSddlForm(
@@ -590,7 +590,7 @@ switch ($case.action) {
         $clean = "O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
         $ancestor = $case.path
         $root = Join-Path $ancestor 'root'
-        if (-not (Test-Path $root)) { New-Item -ItemType Directory -Force -Path $root | Out-Null }
+        if (-not (Test-Path -LiteralPath $root)) { New-Item -ItemType Directory -Force -Path $root | Out-Null }
 
         $rootAcl = New-Object Security.AccessControl.DirectorySecurity
         $rootAcl.SetSecurityDescriptorSddlForm($clean)
@@ -605,6 +605,46 @@ switch ($case.action) {
 
         $identity = New-Identity -Spec $case.author
         $result.reasons = @(Get-TaskRootAclViolations -Root $root -Author $identity)
+    }
+
+    'wildcard-path' {
+        # IS A PATH A NAME, OR A PATTERN?
+        #
+        # Get-FileHash -Path treats [ and ] as wildcard metacharacters, so
+        # `payload[1].dll` addresses whatever `payload1.dll` happens to be -- or
+        # nothing at all. Both hashed trees hold author-chosen filenames (a
+        # PyInstaller onedir and a Python runtime), and [Content_Types].xml is
+        # ordinary. Measured here rather than argued: the same file, hashed both
+        # ways, before and after its contents are replaced.
+        $dir = $case.path
+        $bracketed = Join-Path $dir 'payload[1].dll'
+        $collapsed = Join-Path $dir 'payload1.dll'
+        Set-Content -LiteralPath $bracketed -Value 'ORIGINAL' -Encoding ascii
+        Set-Content -LiteralPath $collapsed -Value 'DECOY' -Encoding ascii
+
+        function Get-EitherHash {
+            param([string]$Path, [switch]$Literal)
+            $h = if ($Literal) {
+                Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction SilentlyContinue
+            } else {
+                # WILDCARD-BY-DESIGN: this arm exists to DEMONSTRATE the defect,
+                # so it must keep resolving the path as a pattern.
+                Get-FileHash -Path $Path -Algorithm SHA256 -ErrorAction SilentlyContinue
+            }
+            if ($h) { return $h.Hash }
+            return 'UNREADABLE'
+        }
+
+        $wildBefore = Get-EitherHash -Path $bracketed
+        $litBefore  = Get-EitherHash -Path $bracketed -Literal
+        Set-Content -LiteralPath $bracketed -Value 'REPLACED-ENTIRELY' -Encoding ascii
+        $wildAfter  = Get-EitherHash -Path $bracketed
+        $litAfter   = Get-EitherHash -Path $bracketed -Literal
+
+        $result.value = [ordered]@{
+            wildcard_sees_the_change = ($wildBefore -ne $wildAfter)
+            literal_sees_the_change  = ($litBefore -ne $litAfter)
+        }
     }
 
     'account-writable' {

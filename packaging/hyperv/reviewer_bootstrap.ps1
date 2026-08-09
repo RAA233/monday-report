@@ -350,7 +350,7 @@ function Resolve-BuildPython {
     #>
     param([string]$Supplied)
     if ($Supplied) {
-        if (Test-Path $Supplied) { return $Supplied }
+        if (Test-Path -LiteralPath $Supplied) { return $Supplied }
         return $null
     }
     # NO `Get-Command python`.
@@ -372,7 +372,7 @@ function Test-AuthorWritable {
       since an owner can grant itself the rest.
     #>
     param([string]$Path)
-    if (-not (Test-Path $Path)) { return $true }
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
     # The AUTHOR, not the caller. This function decides whether an elevated
     # operator is about to lock something the author can still rewrite; keying
     # it to $env:USERNAME made it answer about the operator instead.
@@ -401,7 +401,7 @@ function Assert-AclApplied {
     #>
     param([string]$Path, [string]$Account)
 
-    if (-not (Test-Path $Path)) {
+    if (-not (Test-Path -LiteralPath $Path)) {
         Write-Output "  STOP: $Path does not exist after the ACL step."
         Write-Output '  reason: OFFLINE_ACL_TARGET_ABSENT'
         exit 2
@@ -509,7 +509,7 @@ function Assert-TaskRootProtected {
         Write-Output '  remedy: run -ProvisionPaths first, which breaks that inheritance.'
         exit 2
     }
-    if ($Runtime -and (Test-Path $Runtime)) {
+    if ($Runtime -and (Test-Path -LiteralPath $Runtime)) {
         # Recursive: the leaf's own DACL says nothing about an inherited ACE on
         # a subdirectory, and ownership anywhere inside is a write right.
         $runtimeErrors = $null
@@ -966,7 +966,7 @@ function Initialize-ReviewerPaths {
     $sharedHandoff = @("$Root\xchg\credential")
 
     foreach ($d in @($Root) + $authorOwned + $reviewerOwned) {
-        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+        if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
     }
 
     # Directional ACLs name the AUTHOR explicitly. Every grant below used to
@@ -995,7 +995,7 @@ function Initialize-ReviewerPaths {
     # resolves the NAME to a principal itself rather than trusting a digest it
     # was handed.
     $stateDir = Join-Path $Root 'reviewer\state'
-    if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
+    if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
     $authorFile = Join-Path $stateDir 'author-account.txt'
 
     # Both principals must TRAVERSE the root to reach their own directories, and
@@ -1060,7 +1060,7 @@ function Initialize-ReviewerPaths {
     # read and execute it; the author's USER identity gets nothing. Granting by
     # user SID is exactly what made this writable without elevation.
     foreach ($d in $reviewerCode) {
-        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+        if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
         # ORDER MATTERS. Reset first so files installed earlier lose their own
         # explicit author ACE; then break inheritance; then grant. Doing the
         # reset LAST re-inherited the parent's permissions and handed
@@ -1084,7 +1084,7 @@ function Initialize-ReviewerPaths {
     # from an earlier provision naming a DIFFERENT account survives it. The
     # operator sees a successful run and the reviewer binds the wrong author,
     # which is the one fact in this file that nothing downstream can re-derive.
-    Set-Content -Path $authorFile -Value $AuthorName -Encoding ascii
+    Set-Content -LiteralPath $authorFile -Value $AuthorName -Encoding ascii
     # The file is the reviewer's, not the author's: the author may read the
     # declaration it is bound by, and may not edit it.
     & $icacls $authorFile /inheritance:r | Out-Null
@@ -1140,20 +1140,20 @@ function Initialize-ReviewerPaths {
     foreach ($d in $reviewerOwned) { Assert-AclApplied -Path $d -Account $Account }
 
     foreach ($d in $sharedHandoff) {
-        if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+        if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
         & $icacls $d /setowner "*S-1-5-32-544" /T /C /Q | Out-Null
         & $icacls $d /inheritance:r | Out-Null
         & $icacls $d /grant:r "${me}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "${Account}:(OI)(CI)F" | Out-Null
     }
 
-    if ($SessionSource -and (Test-Path $SessionSource)) {
-        Copy-Item -Path $SessionSource -Destination (Get-InstalledSessionScript -Root $Root) -Force
+    if ($SessionSource -and (Test-Path -LiteralPath $SessionSource)) {
+        Copy-Item -LiteralPath $SessionSource -Destination (Get-InstalledSessionScript -Root $Root) -Force
         # The migration script must sit beside the entry point, or the reviewer
         # cannot read it: it holds no rights under the authoring worktree.
         foreach ($helper in @('reviewer_credential_migration.ps1', 'reviewer_diagnostics.ps1')) {
             $src = Join-Path (Split-Path $SessionSource -Parent) $helper
-            if (Test-Path $src) {
-                Copy-Item -Path $src -Destination `
+            if (Test-Path -LiteralPath $src) {
+                Copy-Item -LiteralPath $src -Destination `
                     (Join-Path (Join-Path $Root 'reviewer-bin') $helper) -Force
             }
         }
@@ -1206,11 +1206,11 @@ function Get-BatchLogonHolders {
     & $secedit /export /areas USER_RIGHTS /cfg $cfg /quiet | Out-Null
     $ErrorActionPreference = $prev
     $line = ''
-    if (Test-Path $cfg) {
-        $line = (Get-Content $cfg | Where-Object { $_ -match '^SeBatchLogonRight\s*=' } |
+    if (Test-Path -LiteralPath $cfg) {
+        $line = (Get-Content -LiteralPath $cfg | Where-Object { $_ -match '^SeBatchLogonRight\s*=' } |
                  Select-Object -First 1)
     }
-    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     return $line
 }
 
@@ -1227,8 +1227,8 @@ function Grant-BatchLogon {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $secedit /export /areas USER_RIGHTS /cfg $exp /quiet | Out-Null
     $ErrorActionPreference = $prev
-    if (-not (Test-Path $exp)) { throw 'secedit export produced no file' }
-    $lines = Get-Content $exp
+    if (-not (Test-Path -LiteralPath $exp)) { throw 'secedit export produced no file' }
+    $lines = Get-Content -LiteralPath $exp
     $cur = ($lines | Where-Object { $_ -match '^SeBatchLogonRight\s*=' } | Select-Object -First 1)
     if ($cur) {
         # PRESERVE every existing holder; append only.
@@ -1246,11 +1246,11 @@ function Grant-BatchLogon {
         }
         if (-not $done) { $new += '[Privilege Rights]'; $new += "SeBatchLogonRight = *$Sid" }
     }
-    Set-Content -Path $imp -Value $new -Encoding Unicode   # secedit requires UTF-16LE
+    Set-Content -LiteralPath $imp -Value $new -Encoding Unicode   # secedit requires UTF-16LE
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $secedit /configure /db $db /cfg $imp /areas USER_RIGHTS /quiet | Out-Null
     $ErrorActionPreference = $prev
-    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     $after = Get-BatchLogonHolders
     return [bool]($after -match [regex]::Escape($Sid) -or $after -match [regex]::Escape($Name))
 }
@@ -1398,7 +1398,7 @@ if ($RepinReviewerCode) {
     # is on disk at that moment, so re-pinning before the author has lost write
     # access would pin bytes the author could still have chosen.
     $manifest = Join-Path $HvRoot 'reviewer\state\reviewer-code-manifest.json'
-    if (-not (Test-Path $manifest)) {
+    if (-not (Test-Path -LiteralPath $manifest)) {
         Write-Fact 'code pin' 'already absent; the next reviewer run will adopt'
         exit 0
     }
@@ -1407,7 +1407,7 @@ if ($RepinReviewerCode) {
     & $icacls $manifest /grant "*S-1-5-32-544:(F)" /C /Q | Out-Null
     $ErrorActionPreference = $prev
     [System.IO.File]::Delete($manifest)
-    $gone = -not (Test-Path $manifest)
+    $gone = -not (Test-Path -LiteralPath $manifest)
     Write-Fact 'code pin retired' $gone
     Write-Fact 'reviewer state ACL' 'untouched (ownership was taken on the manifest only)'
     if (-not $gone) {
@@ -1446,7 +1446,7 @@ if ($ProvisionReviewerRuntime) {
         -Route '-ProvisionReviewerRuntime'
     Assert-TaskRootProtected -Root $HvRoot -Runtime ''
     $builder = Join-Path $SourceRepo 'scripts\offline_reviewer_runtime.py'
-    if (-not (Test-Path $builder)) {
+    if (-not (Test-Path -LiteralPath $builder)) {
         Write-Output '  STOP: the runtime builder is missing from the source repository.'
         Write-Output '  reason: REVIEWER_RUNTIME_BUILDER_ABSENT'
         exit 2
@@ -1458,7 +1458,7 @@ if ($ProvisionReviewerRuntime) {
     # half-built runtime that still looks structurally plausible. takeown is
     # still used because ownership, not the ACE, is what the previous run left
     # behind.
-    if (Test-Path $runtimeRoot) {
+    if (Test-Path -LiteralPath $runtimeRoot) {
         $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         & $takeown /F $runtimeRoot /R /D Y | Out-Null
         & $icacls $runtimeRoot /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
@@ -1510,12 +1510,12 @@ if ($HardenInterpreter) {
 
     Assert-OperatorIsNotAuthor -Operator $OperatorIdentity -Author $AuthorIdentity
     $verifier = Join-Path $SourceRepo 'scripts\offline_reviewer_runtime.py'
-    if (-not (Test-Path $verifier)) {
+    if (-not (Test-Path -LiteralPath $verifier)) {
         Write-Output '  STOP: the runtime verifier is missing from the source repository.'
         Write-Output '  reason: REVIEWER_RUNTIME_VERIFIER_ABSENT'
         exit 2
     }
-    if (-not (Test-Path $candidate)) {
+    if (-not (Test-Path -LiteralPath $candidate)) {
         Write-Output '  STOP: no dedicated reviewer runtime is present.'
         Write-Output '  reason: REVIEWER_RUNTIME_ABSENT'
         Write-Output '  remedy: run -ProvisionReviewerRuntime first.'
@@ -1559,8 +1559,8 @@ if ($HardenInterpreter) {
 
     # Pin it where only the reviewer can rewrite the pin.
     $stateDir = Join-Path $HvRoot 'reviewer\state'
-    if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
-    Set-Content -Path (Join-Path $stateDir 'python-path.txt') `
+    if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Force -Path $stateDir | Out-Null }
+    Set-Content -LiteralPath (Join-Path $stateDir 'python-path.txt') `
         -Value (Join-Path $runtimeRoot 'python.exe') -Encoding ascii
 
     Assert-AclApplied -Path $runtimeRoot -Account $User
@@ -1575,7 +1575,7 @@ if ($StagePackage) {
     # OPERATOR step. The non-elevated author BUILDS the package; publishing it
     # where the reviewer EXECUTES it needs administrative rights, because that
     # directory is part of the reviewer's code surface.
-    if (-not $PackageSource -or -not (Test-Path $PackageSource)) {
+    if (-not $PackageSource -or -not (Test-Path -LiteralPath $PackageSource)) {
         Write-Output '  STOP: -PackageSource must point at the built package staging directory.'
         exit 2
     }
@@ -1583,13 +1583,13 @@ if ($StagePackage) {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $icacls $dest /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
     $ErrorActionPreference = $prev
-    if (Test-Path $dest) {
-        Get-ChildItem $dest -Force -ErrorAction SilentlyContinue |
+    if (Test-Path -LiteralPath $dest) {
+        Get-ChildItem -LiteralPath $dest -Force -ErrorAction SilentlyContinue |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     } else {
         New-Item -ItemType Directory -Force -Path $dest | Out-Null
     }
-    Copy-Item -Path (Join-Path $PackageSource '*') -Destination $dest -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $PackageSource '*') -Destination $dest -Recurse -Force
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $icacls $dest /reset /T /C /Q | Out-Null
     & $icacls $dest /inheritance:r | Out-Null
@@ -1624,13 +1624,13 @@ if ($ExportSource) {
     # delete it until ownership and a DACL entry are restored. Doing this here
     # keeps the export self-contained instead of failing halfway and leaving a
     # half-permissioned clone behind.
-    if (Test-Path $dest) {
+    if (Test-Path -LiteralPath $dest) {
         $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         & $takeown /f $dest /r /d y | Out-Null
         & $icacls $dest /grant "*S-1-5-32-544:(OI)(CI)F" /T /C /Q | Out-Null
         $ErrorActionPreference = $prev
     }
-    if (Test-Path "$dest\.git") { Remove-Item $dest -Recurse -Force }
+    if (Test-Path "$dest\.git") { Remove-Item -LiteralPath $dest -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $gitExe clone --local --no-hardlinks --quiet $SourceRepo $dest | Out-Null
@@ -1690,7 +1690,7 @@ if ($ProvisionPaths) {
     $paths = Initialize-ReviewerPaths -Root $HvRoot -Account $User -SessionSource $SessionScript -AuthorName $AuthorIdentity.Name
     $installed = Get-InstalledSessionScript -Root $HvRoot
     Write-Fact 'reviewer path tree' "provisioned ($($paths.Count) directories)"
-    Write-Fact 'entry point installed' (Test-Path $installed)
+    Write-Fact 'entry point installed' (Test-Path -LiteralPath $installed)
     Write-Fact 'credential' 'untouched (no prompt, no reset)'
     Write-Output ''
     Write-Output '  capabilities, measured through the contract:'
@@ -1746,7 +1746,7 @@ if ($Verify) {
             $target = $matches[1].Trim('"')
         }
         if ($target) {
-            Write-Fact 'action target exists' (Test-Path $target)
+            Write-Fact 'action target exists' (Test-Path -LiteralPath $target)
             # EXACT identities only. A substring match on "Users" silently
             # matched an unrelated local group whose name merely ends in
             # "Users", and reported a file the reviewer provably could not read
@@ -1762,7 +1762,7 @@ if ($Verify) {
             # and generic-bit class this file documents as fixed everywhere
             # else by using Test-AccountCanReadPath, which was not used here.
             $readable = $false
-            if (Test-Path $target) {
+            if (Test-Path -LiteralPath $target) {
                 $readable = Test-AccountCanReadPath -Identity $ReviewerIdentity `
                     -Path $target -RequireExecute
             }
@@ -1782,7 +1782,7 @@ if ($Verify) {
     }
     foreach ($d in @("$HvRoot\reviewer", "$HvRoot\reviewer\state", "$HvRoot\reviewer\out",
                      "$HvRoot\trust", "$HvRoot\reviewer-bin")) {
-        Write-Fact ("path present: " + (Split-Path $d -Leaf)) (Test-Path $d)
+        Write-Fact ("path present: " + (Split-Path $d -Leaf)) (Test-Path -LiteralPath $d)
     }
     Write-Output ''
     Write-Output '  (no secret is printed by this script in any mode)'
@@ -1848,15 +1848,15 @@ try {
     Write-Output ''
     Write-Fact 'password' 'set by operator (never seen by the authoring process)'
 
-    if (-not (Test-Path $SessionScript)) { throw "reviewer session script not found: $SessionScript" }
+    if (-not (Test-Path -LiteralPath $SessionScript)) { throw "reviewer session script not found: $SessionScript" }
 
     # Provision BEFORE registering: a task whose entry point cannot create its
     # own state directory logs on correctly and then dies with no artifact.
     $paths = Initialize-ReviewerPaths -Root $HvRoot -Account $User -SessionSource $SessionScript -AuthorName $AuthorIdentity.Name
     $installed = Get-InstalledSessionScript -Root $HvRoot
     Write-Fact 'reviewer path tree' "provisioned ($($paths.Count) directories)"
-    Write-Fact 'entry point installed' (Test-Path $installed)
-    if (-not (Test-Path $installed)) { throw "reviewer entry point was not installed to $installed" }
+    Write-Fact 'entry point installed' (Test-Path -LiteralPath $installed)
+    if (-not (Test-Path -LiteralPath $installed)) { throw "reviewer entry point was not installed to $installed" }
 
     # Target the INSTALLED copy. The worktree copy is unreadable by the reviewer.
     $action = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installed`""
@@ -1891,6 +1891,13 @@ try {
 # builds the thing is the route that most needs to be told it built it wrong.
 Write-Output ''
 Write-Output '  capabilities, measured through the contract:'
+# RE-RESOLVED. $ReviewerIdentity is settled ~1500 lines above New-LocalUser, so
+# on the route that CREATES the reviewer it is still "does not exist" here --
+# and Write-PrincipalCapabilityFacts then skips the reviewer digest and both
+# reviewer facts on the one run that establishes everything. The digest is the
+# value this file says lets an operator confirm the reviewer bound the account
+# the operator declared.
+$ReviewerIdentity = Resolve-PrincipalIdentity -Account $User
 $bootstrapMeasured = New-Object System.Collections.Generic.List[string]
 Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
     -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName `
