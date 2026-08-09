@@ -49,9 +49,11 @@
 
 .PARAMETER DestroyReviewerCredentialChain
     Proceed with the credential half of the default route even though this host
-    already holds a reviewer account, a reviewer scheduled task, or sealed
-    reviewer material. Destroys the DPAPI chain. Required only when the reviewer
-    identity is genuinely being rebuilt from nothing; there is no route back.
+    already holds a reviewer account, a reviewer scheduled task, sealed reviewer
+    material, or a state directory whose contents could not be established --
+    the four conditions the refusal reports. Destroys the DPAPI chain. Required
+    only when the reviewer identity is genuinely being rebuilt from nothing;
+    there is no route back.
 
     Takes the exact text DESTROY-THE-REVIEWER-KEY, compared ordinally. It is a
     string rather than a switch so that no abbreviation can arm it by accident:
@@ -1983,7 +1985,11 @@ if ($DestroyReviewerCredentialChain -and -not $credChainBypass) {
     Write-Output '  STOP: -DestroyReviewerCredentialChain was given a value that is not'
     Write-Output '  the confirmation phrase. It takes the exact text'
     Write-Output '  DESTROY-THE-REVIEWER-KEY and nothing else.'
-    Write-Output '  reason: OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE'
+    # Its own reason. Reusing the live-chain reason conflated "this host holds
+    # something the route would destroy" with "you mistyped the acknowledgement"
+    # -- two different operator actions, and a consumer keying on the reason
+    # could not tell which had happened.
+    Write-Output '  reason: OFFLINE_REVIEWER_CREDENTIAL_CONFIRMATION_INVALID'
     exit 2
 }
 

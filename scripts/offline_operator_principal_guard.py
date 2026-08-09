@@ -220,6 +220,10 @@ def reachable_names(sources: list, declared: list) -> set:
     return seen
 
 
+def _ps_literal(value: str) -> str:
+    """A single-quoted PowerShell string literal for an arbitrary value."""
+    return "'" + str(value).replace("'", "''") + "'"
+
 def baseline_case(**overrides) -> dict:
     """Three distinct principals, correct memberships: the contract is satisfied."""
 
@@ -1253,9 +1257,10 @@ def main() -> int:
         chain_end = raw_boot.find("# ---- account ---", chain_start)
         chain_text = raw_boot[chain_start:chain_end] if chain_start >= 0 < chain_end else ""
 
-        def run_chain(state_files: list, *, recreate: bool, tag: str,
-                      make_unreadable: bool = False, account: bool = False,
-                      task: bool = False, weaken: str = "") -> tuple:
+        def run_chain(state_files: list, *, recreate=False, tag: str,
+                      make_unreadable: bool = False, account: str = "",
+                      task: str = "", weaken: str = "",
+                      task_name: str = "") -> tuple:
             """Run the shipped block against a synthetic C:\\mr-hv-shaped root.
 
             The harness reproduces the script's own error regime. Under
@@ -1299,10 +1304,32 @@ def main() -> int:
                     "function Get-ChildItem { [CmdletBinding()]\n"
                     "  param([Parameter(ValueFromRemainingArguments=$true)]$Rest)\n"
                     "  Write-Error 'synthetic access denial' }\n")
-            if account:
+            # PRESENCE AND FAILURE. Every stub here used to SUCCEED, so each
+            # probe's "I found it" direction was pinned and its "I could not
+            # establish it" direction was not -- the same one-side-of-the-pair
+            # shape the block itself was fixed for, committed by the checks
+            # measuring the block. An advanced function is required for the
+            # failure stubs so that -ErrorAction is honoured and the shipped
+            # 'Stop' makes Write-Error terminating, exactly as the real cmdlet
+            # would behave.
+            if account == "present":
                 inject += "function Get-LocalUser { [pscustomobject]@{ Name = $User } }\n"
-            if task:
+            elif account == "unreadable":
+                inject += ("function Get-LocalUser { [CmdletBinding()]\n"
+                           "  param([Parameter(ValueFromRemainingArguments=$true)]$Rest)\n"
+                           "  Write-Error 'synthetic SAM failure' }\n")
+            if task == "present":
                 inject += "function Get-ScheduledTask { [pscustomobject]@{ TaskName = $TaskName } }\n"
+            elif task == "absent":
+                # The cmdlet second opinion says absent. Only the schtasks
+                # primary probe can still see the task, so this isolates it.
+                inject += ("function Get-ScheduledTask { [CmdletBinding()]\n"
+                           "  param([Parameter(ValueFromRemainingArguments=$true)]$Rest)\n"
+                           "  Write-Error -Message 'not found' -Category ObjectNotFound }\n")
+            elif task == "unreadable":
+                inject += ("function Get-ScheduledTask { [CmdletBinding()]\n"
+                           "  param([Parameter(ValueFromRemainingArguments=$true)]$Rest)\n"
+                           "  Write-Error 'synthetic scheduler failure' }\n")
             body = chain_text
             if weaken:
                 # A regression applied to the shipped text, to prove a check
@@ -1313,7 +1340,8 @@ def main() -> int:
                 "Set-StrictMode -Version 2.0\n"
                 "$ErrorActionPreference = 'Stop'\n"
                 "$User = 'MR-SYNTHETIC-REVIEWER-NOT-ON-THIS-HOST'\n"
-                "$TaskName = 'MR-SYNTHETIC-TASK-NOT-ON-THIS-HOST'\n"
+                + ("$TaskName = " + _ps_literal(
+                    task_name or "MR-SYNTHETIC-TASK-NOT-ON-THIS-HOST") + "\n")
                 # The block probes the task with the same binary the route uses
                 # to overwrite it, so the harness must resolve it the way the
                 # script does. Leaving it unbound made the probe throw under
@@ -1324,8 +1352,12 @@ def main() -> int:
                     / "System32" / "schtasks.exe") + "'\n")
                 + inject
                 + f"$HvRoot = '{root}'\n"
-                + ("$DestroyReviewerCredentialChain = 'DESTROY-THE-REVIEWER-KEY'\n"
-                   if recreate else "$DestroyReviewerCredentialChain = ''\n")
+                # The bypass value is passed through verbatim so the comparison
+                # itself is what gets exercised -- True means the exact phrase,
+                # any other string is tested as written.
+                + ("$DestroyReviewerCredentialChain = " + _ps_literal(
+                    "DESTROY-THE-REVIEWER-KEY" if recreate is True
+                    else (recreate or "")) + "\n")
                 + body
                 + "\nWrite-Output 'CHAIN-PROCEEDED'\n", encoding="utf-8")
             try:
@@ -1589,7 +1621,7 @@ def main() -> int:
         # sits under the real root. Denial keyed to one operand, damage keyed to
         # the other: the closed defect, one level along.
         acct_rc, acct_text, acct_detail = run_chain(
-            [], recreate=False, tag="acct", account=True)
+            [], recreate=False, tag="acct", account="present")
         rec("OP48g an-existing-account-refuses-even-when-the-root-holds-nothing",
             acct_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in acct_text
             and "CHAIN-PROCEEDED" not in acct_text,
@@ -1604,7 +1636,7 @@ def main() -> int:
         # of both $User and $HvRoot; covering two of three is how this block was
         # bypassed twice.
         task_rc, task_text, task_detail = run_chain(
-            [], recreate=False, tag="task", task=True)
+            [], recreate=False, tag="task", task="present")
         rec("OP48i an-existing-task-refuses-on-its-own",
             task_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in task_text
             and "CHAIN-PROCEEDED" not in task_text,
@@ -1743,6 +1775,84 @@ def main() -> int:
             f"confirmation phrase (is-switch="
             f"{destructive[0]['isSwitch'] if destructive else 'ABSENT'}, "
             f"arming-prefixes={arming_prefixes[:3] or 'none'})")
+
+        # THE PHRASE ITSELF, EXECUTED. OP48k reads the parameter's AST type and
+        # concludes "the operator must type the confirmation phrase" -- a claim
+        # about behaviour, established by looking at a type constraint. Nothing
+        # ran the comparison, so replacing [string]::Equals(...) with
+        # [bool]$DestroyReviewerCredentialChain left the battery green while
+        # `-D yes` destroyed the chain: the one thing standing between a
+        # deliberately-bindable abbreviation and unrecoverable key loss, and it
+        # was the unmeasured thing.
+        PHRASE = "DESTROY-THE-REVIEWER-KEY"
+        phrase_cases = [
+            (PHRASE, True, "the exact phrase"),
+            (PHRASE.lower(), False, "lower case"),
+            ("yes", False, "a truthy non-phrase"),
+            (PHRASE + " ", False, "a trailing space"),
+            (" " + PHRASE, False, "a leading space"),
+            (PHRASE + "\ufeff", False, "a zero-width no-break space suffix"),
+            (PHRASE + "\u00ad", False, "a soft-hyphen suffix"),
+            (PHRASE[:-1], False, "a truncated phrase"),
+        ]
+        phrase_results = {}
+        for value, should_pass, label in phrase_cases:
+            p_rc, p_text, _ = run_chain(
+                ["review-key.dpapi"], recreate=value,
+                tag=f"phrase-{abs(hash(value)) % 10000}")
+            proceeded = "CHAIN-PROCEEDED" in p_text and p_rc == 0
+            phrase_results[label] = (proceeded == should_pass, p_rc)
+        rec("OP48l only-the-exact-confirmation-phrase-permits-the-destruction",
+            all(ok for ok, _ in phrase_results.values()),
+            f"the comparison is executed, not read off a type: the exact phrase "
+            f"proceeds and case changes, whitespace, invisible suffixes, a "
+            f"truncation and a merely truthy value all refuse "
+            f"({ {k: v[1] for k, v in phrase_results.items()} })")
+
+        # THE FAILURE DIRECTION OF THE ACCOUNT PROBE. Its presence direction was
+        # pinned by a succeeding stub; a lookup that CANNOT ANSWER was not
+        # measured at all, so reducing the catch to `$credChainAccount = $false`
+        # restored the review-1K High with nothing red.
+        af_rc, af_text, af_detail = run_chain(
+            [], recreate=False, tag="acct-fail", account="unreadable")
+        rec("OP48m an-account-lookup-that-cannot-answer-refuses",
+            af_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in af_text
+            and "CHAIN-PROCEEDED" not in af_text,
+            f"a Get-LocalUser failure that is not 'no such user' is treated as "
+            f"'cannot establish' rather than 'no account', so the operand the "
+            f"block promotes to primary fails closed in both directions "
+            f"({af_detail or 'no output'})")
+
+        # THE PRIMARY TASK PROBE, ISOLATED. OP48i injects the cmdlet, which is
+        # the SECOND opinion -- the arm that was in the wrong namespace. With
+        # the cmdlet stubbed to report absent, only the schtasks query can see
+        # the task, so this is the check that would notice if the primary probe
+        # were removed.
+        live_task = "MR-OFFLINE-REVIEWER-RUN"
+        sch_present = subprocess.run(
+            [str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                 / "System32" / "schtasks.exe"), "/Query", "/TN", live_task],
+            capture_output=True, text=True, timeout=120).returncode == 0
+        ti_rc, ti_text, ti_detail = run_chain(
+            [], recreate=False, tag="task-primary", task="absent",
+            task_name=live_task)
+        rec("OP48n the-schtasks-probe-alone-is-enough-to-refuse",
+            sch_present and ti_rc == 2
+            and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in ti_text
+            and "CHAIN-PROCEEDED" not in ti_text,
+            f"with the cmdlet second opinion reporting absent, the query that "
+            f"uses the same binary as the damage still sees the task and "
+            f"refuses -- so the primary probe is load-bearing on its own "
+            f"(schtasks-sees-it={sch_present}, {ti_detail or 'no output'})")
+
+        tf_rc, tf_text, tf_detail = run_chain(
+            [], recreate=False, tag="task-fail", task="unreadable")
+        rec("OP48o a-task-lookup-that-cannot-answer-refuses",
+            tf_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in tf_text
+            and "CHAIN-PROCEEDED" not in tf_text,
+            f"a Get-ScheduledTask failure that is not 'no such task' is treated "
+            f"as 'cannot establish', matching the account arm rather than "
+            f"diverging from it ({tf_detail or 'no output'})")
 
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
@@ -2187,7 +2297,7 @@ def main() -> int:
     # recorded through the same no-op and vanished, and main() returned 0 with
     # zero checks executed. The floor cannot be allowed to depend on the
     # mechanism it exists to police.
-    MINIMUM_CHECKS = 69
+    MINIMUM_CHECKS = 74
     if len(CHECKS) < MINIMUM_CHECKS:
         print(json.dumps({
             "guard": "offline-operator-principal",
@@ -2197,11 +2307,14 @@ def main() -> int:
         }, indent=2))
         return 1
 
-    # A COUNT IS NOT A MEMBERSHIP. The floor is 69 against 82 executed, so the
-    # whole credential-chain family could be deleted and the battery would still
-    # report a clean 73/73 and exit 0 -- the checks that close two Criticals'
-    # worth of findings were the most deletable thing in the file. Families that
-    # exist because something was got wrong are pinned by id, not by census.
+    # A COUNT IS NOT A MEMBERSHIP. When this was written the floor sat far
+    # enough below the executed total that the whole credential-chain family
+    # could be deleted and the battery would still report a clean pass and exit
+    # 0 -- the checks closing several rounds of findings were the most deletable
+    # thing in the file. Families that exist because something was got wrong are
+    # pinned by id and by size, not by census. Both numbers below are asserted
+    # against what actually ran, so drift shows up as a failure rather than as
+    # slack.
     REQUIRED_FAMILIES = {
         "OP48": ("the credential-chain refusal: without these the route that "
                  "resets the reviewer password is unmeasured"),
@@ -2218,7 +2331,7 @@ def main() -> int:
                       + "; ".join(missing_family),
         }, indent=2))
         return 1
-    MINIMUM_CREDENTIAL_CHAIN_CHECKS = 12
+    MINIMUM_CREDENTIAL_CHAIN_CHECKS = 16
     chain_checks = sorted(i for i in executed_ids if i.startswith("OP48"))
     if len(chain_checks) < MINIMUM_CREDENTIAL_CHAIN_CHECKS:
         print(json.dumps({
