@@ -1213,14 +1213,32 @@ def main() -> int:
             f"caller-supplied list hands over exactly nothing when there is "
             f"nothing to report ({channel})")
 
+        # EVERY CALL SITE, AND THE EXEMPTION PINNED TO ONE OF THEM.
+        #
+        # Both counters keyed on the literal `$measured`; the bootstrap route
+        # uses `$bootstrapMeasured`, so it sat outside the count and deleting
+        # its verdict left the battery green -- the exact regression the route
+        # was given a verdict to close. And nothing pinned the confinement of
+        # -PendingAuthorTaskGrant: appending it to the other two sites was
+        # invisible, so the two excused task reasons could be waived everywhere.
+        reporter_calls = len(re.findall(r"Write-PrincipalCapabilityFacts\b", boot_live)) - 1
+        verdict_calls = len(re.findall(r"Assert-CapabilitiesAcceptable\s+-Reasons\s+\$",
+                                       boot_live))
+        # CALL-SITE uses only. The parameter is DECLARED with a `$`, so a
+        # dash-anchored pattern counts applications and not the declaration --
+        # and the property that matters is that the exemption is APPLIED on
+        # exactly one route, never that it is mentioned a certain number of
+        # times.
+        pending_uses = len(re.findall(r"-PendingAuthorTaskGrant\b", boot_live))
         rec("OP34a no-gate-is-fed-from-a-captured-stream",
             "Assert-CapabilitiesAcceptable -Reasons @(" not in boot_live
-            and boot_live.count("-Reasons ([ref]$measured)") == 2
-            and boot_live.count("Assert-CapabilitiesAcceptable -Reasons $measured") == 2,
-            "both capability call sites pass a caller-owned list rather than "
-            "collecting whatever the reporter printed, and both still feed that "
-            "list to the verdict -- an absence test alone was satisfied by "
-            "deleting the verdict call outright")
+            and reporter_calls == 3 and verdict_calls == 3 and pending_uses == 1,
+            f"all three routes report through a caller-owned list and feed it to "
+            f"the verdict, and the pending-grant exemption is APPLIED on exactly "
+            f"one route, so it cannot be widened to "
+            f"a route that has no grant pending "
+            f"(reporters={reporter_calls}, verdicts={verdict_calls}, "
+            f"pending={pending_uses})")
 
         # ------------------------------------------- the creation route exists
         # The switch that lets the ONE route which creates the reviewer run
@@ -1488,7 +1506,23 @@ def main() -> int:
 
         print()
     finally:
+        # THE FIXTURES ARE SYSTEM-OWNED AND PROTECTED, so rmtree cannot remove
+        # them and ignore_errors hid that: every run left a directory behind
+        # that the module docstring calls disposable and that in fact required
+        # an ownership write to delete. Ownership first, then the ACL, then the
+        # tree -- and only ever this run's own directory.
+        if os.name == "nt" and work.exists():
+            for command in (["takeown.exe", "/F", str(work), "/R", "/D", "Y"],
+                            ["icacls.exe", str(work), "/reset", "/T", "/C", "/Q"]):
+                try:
+                    subprocess.run(command, capture_output=True, text=True, timeout=180)
+                except (OSError, subprocess.SubprocessError):
+                    pass
         shutil.rmtree(work, ignore_errors=True)
+        if work.exists():
+            print(json.dumps({"guard": "offline-operator-principal",
+                              "warning": "scratch directory could not be removed",
+                              "detail": work.name}, indent=2))
 
     # A FLOOR ASSERTED FROM THE RUN, not from a static count of the source.
     # The manifest's count is a text-shaped proxy and can be restored by adding

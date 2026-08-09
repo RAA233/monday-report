@@ -351,9 +351,59 @@ $py = ''
 if (Test-Path $pinFile) { try { $py = (Get-Content $pinFile -Raw).Trim() } catch { $py = '' } }
 $pinReachable = $false
 if ($py) { try { $pinReachable = [bool](Test-Path -LiteralPath $py) } catch { $pinReachable = $false } }
+
+# THE ANCHOR THE REVIEWER PUBLISHES FOR EXACTLY THIS PURPOSE.
+#
+# Unreachable and does-not-exist are the same Test-Path result, so awarding ten
+# denials on unreachability alone certified the whole C1 class for a pin naming
+# a path that never existed -- measured: writing C:\nope\python.exe into the pin
+# scored C1-00..C1-09 all DENIED. This file's own rule (see the header) is that
+# unreachable counts as a denial ONLY when something outside this token's
+# control proves the target exists; Add-WriteProbe and Add-ReplaceProbe enforce
+# it, and the C1 path never did. The reviewer publishes
+# trust\reviewer-interpreter-pin.v1.json with interpreter_path and
+# interpreter_sha256 precisely so the author can check this, and nothing read it.
+$pinAnchored = $false
+$anchorFile = Join-Path $HV 'trust\reviewer-interpreter-pin.v1.json'
+if (Test-Path $anchorFile) {
+    try {
+        $anchor = Get-Content $anchorFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($anchor.PSObject.Properties.Name -contains 'interpreter_path') {
+            $pinAnchored = [string]::Equals(
+                [string]$anchor.interpreter_path, $py, 'OrdinalIgnoreCase')
+        }
+    } catch { $pinAnchored = $false }
+}
 if (-not $py) {
     Add-Probe 'C1-00 interpreter-pin-resolvable' $null `
         'the reviewer has not published an interpreter pin yet' -Inconclusive
+    # ALL TEN, for the same reason the unreachable branch records all ten:
+    # $failed, summary.total and failed_checks are derived from $results, so
+    # nine probes simply vanished from the totals and nothing said so.
+    foreach ($unpinned in @(
+        'C1-01 cannot-write-site-packages', 'C1-02 cannot-replace-interpreter',
+        'C1-03 cannot-write-interpreter-directory', 'C1-04 cannot-write-scripts-directory',
+        'C1-05 cannot-write-pth-into-site-packages', 'C1-06 minus-I-ignores-PYTHONPATH',
+        'C1-07 minus-I-disables-user-site', 'C1-08 minus-I-ignores-PYTHONHOME',
+        'C1-09 site-not-imported-by-the-runtime')) {
+        Add-Probe $unpinned $null 'no interpreter pin has been published' -Inconclusive
+    }
+} elseif (-not $pinReachable -and -not $pinAnchored) {
+    # Unreachable AND unproven: the pin may simply name nothing. Every probe in
+    # the class is recorded so the totals stay stable, and every one of them
+    # fails closed.
+    Add-Probe 'C1-00 interpreter-pin-resolvable' $null `
+        'the pin does not resolve and the reviewer has published no anchor proving it exists' `
+        -Inconclusive
+    foreach ($unproven in @(
+        'C1-01 cannot-write-site-packages', 'C1-02 cannot-replace-interpreter',
+        'C1-03 cannot-write-interpreter-directory', 'C1-04 cannot-write-scripts-directory',
+        'C1-05 cannot-write-pth-into-site-packages', 'C1-06 minus-I-ignores-PYTHONPATH',
+        'C1-07 minus-I-disables-user-site', 'C1-08 minus-I-ignores-PYTHONHOME',
+        'C1-09 site-not-imported-by-the-runtime')) {
+        Add-Probe $unproven $null `
+            'the interpreter is unreachable and its existence is unproven' -Inconclusive
+    }
 } elseif (-not $pinReachable) {
     # DENIED, on the strongest possible evidence: the path the reviewer runs is
     # not even enumerable from this token.

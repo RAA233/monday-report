@@ -580,6 +580,12 @@ if ($runId -notmatch '^[A-Za-z0-9._-]{1,64}$') {
 }
 
 if ($stage -eq 'status') {
+    # This exit produces no result either, and Clear-StaleTranscripts's own
+    # docstring says every exit that does not produce one calls it first. The
+    # IDLE path above -- the identical "a run that did nothing" case -- does,
+    # and this was the one author-selectable stage that did not, so a previous
+    # run's COMPLETE transcripts survived a status query intact.
+    Clear-StaleTranscripts -OutDir $OutRoot
     $py = Get-ReviewerPython
     New-Status -Stage 'status' -State 'OK' -Detail 'reviewer session reachable' -Extra @{
         run_id           = $runId
@@ -605,8 +611,8 @@ if ($stage -eq 'diagnostics' -or $stage -eq 'diagnostics-deep') {
     $diagScript = Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_diagnostics.ps1'
     if (-not (Test-Path $diagScript)) {
         Clear-StaleTranscripts -OutDir $OutRoot
-        Clear-StaleTranscripts -OutDir $OutRoot
-    New-Status -Stage $stage -State 'FAILED' -Detail 'diagnostics script missing from the install'
+        New-Status -Stage $stage -State 'FAILED' `
+            -Detail 'diagnostics script missing from the install'
         exit 4
     }
     New-Status -Stage $stage -State 'RUNNING' -Detail "run_id=$runId"

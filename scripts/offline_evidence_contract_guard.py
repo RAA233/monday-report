@@ -637,6 +637,27 @@ def audit_all_steps() -> list[str]:
     return expand("audit:all", set())
 
 
+def insert_above_entry_point(text: str, snippet: str) -> str:
+    """Place a mutation where the module would actually execute it.
+
+    Both guards end with ``raise SystemExit(main())`` under an
+    ``if __name__ == "__main__":`` guard, so anything appended after that line
+    is parsed and never run. A mutation that cannot execute exercises only the
+    static detector, which is not what a cycle named for hollowing should be
+    demonstrating.
+    """
+
+    marker = 'if __name__ == "__main__":'
+    if marker not in text:
+        return text + "\n\n" + snippet
+    # rpartition, NOT partition. This module contains the marker inside its own
+    # mutation code, so splitting at the FIRST occurrence dropped the snippet
+    # into a string literal, where it parsed fine, hollowed nothing, and the
+    # cycle reported no reasons at all. The real entry point is the last one.
+    head, _, tail = text.rpartition(marker)
+    return head + snippet + "\n\n" + marker + tail
+
+
 def membership_reasons_for(mutation: str | None) -> list[str]:
     """Run the REAL membership verifier against a mutated COPY of the repo.
 
@@ -699,8 +720,15 @@ def membership_reasons_for(mutation: str | None) -> list[str]:
             # actually make -- shadowing the recorder with a no-op -- kept every
             # id in the file, scored 64 against a floor of 35, and emptied the
             # results list. This appends exactly that.
+            # INSERTED WHERE IT WOULD RUN. Both guards end with
+            # `raise SystemExit(main())`, so text APPENDED after that never
+            # executes -- measured. A cycle that appends therefore exercises the
+            # STATIC detector and nothing else, which is a real property of the
+            # manifest but not the property the wording claimed. Placed above
+            # the entry point, this is the edit as an author would make it.
             target.write_text(
-                text + "\n\ndef rec(check_id, ok, detail):\n    return True\n",
+                insert_above_entry_point(
+                    text, "def rec(check_id, ok, detail):\n    return True\n"),
                 encoding="utf-8")
         elif mutation == "hollow-battery":
             target = work / "scripts" / "offline_evidence_contract_guard.py"
@@ -712,7 +740,8 @@ def membership_reasons_for(mutation: str | None) -> list[str]:
                 # SyntaxError -- not that hollowing is detected. This rebinds the
                 # recorder, which is the cheapest real hollowing and the one the
                 # sibling cycle was rewritten to use.
-                text + "\n\nBattery.record = lambda self, cid, ok, detail: True\n",
+                insert_above_entry_point(
+                    text, "Battery.record = lambda self, cid, ok, detail: True\n"),
                 encoding="utf-8")
         else:
             raise ValueError(f"unknown membership mutation: {mutation}")

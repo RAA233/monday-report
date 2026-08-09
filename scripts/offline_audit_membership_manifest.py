@@ -248,9 +248,24 @@ def recorder_records(guard: Path, name: str) -> bool:
         elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
             targets = [node.target]
         for target in targets:
+            # A subscript target too: `globals()['rec'] = lambda ...` binds the
+            # name without ever presenting it as a Name or an Attribute.
+            if isinstance(target, ast.Subscript):
+                key = target.slice
+                if isinstance(key, ast.Constant) and key.value == name:
+                    return False
+                continue
             bound = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
             if bound == name:
                 return False
+        # And setattr(), which is an ordinary call.
+        if isinstance(node, ast.Call):
+            func = node.func
+            called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if called == "setattr" and len(node.args) >= 2:
+                key = node.args[1]
+                if isinstance(key, ast.Constant) and key.value == name:
+                    return False
 
     definitions = [node for node in ast.walk(tree)
                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
