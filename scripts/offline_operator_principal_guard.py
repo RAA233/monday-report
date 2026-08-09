@@ -1359,7 +1359,16 @@ def main() -> int:
                     "DESTROY-THE-REVIEWER-KEY" if recreate is True
                     else (recreate or "")) + "\n")
                 + body
-                + "\nWrite-Output 'CHAIN-PROCEEDED'\n", encoding="utf-8")
+                # utf-8-SIG. Windows PowerShell 5.1 decodes a BOM-less .ps1 with
+                # the host ANSI code page, so the two invisible-suffix phrase
+                # cases arrived as cp1252 mojibake -- U+FEFF as three printable
+                # characters, U+00AD as two -- which every comparison rejects.
+                # Measured: a soft hyphen round-trips as length 3 without a BOM
+                # and 2 with one. The two cases that exist to tell an ordinal
+                # comparison from a culture-sensitive one were the two that
+                # could not, and what the check measured depended on the code
+                # page of the host it ran on.
+                + "\nWrite-Output 'CHAIN-PROCEEDED'\n", encoding="utf-8-sig")
             try:
                 out = subprocess.run(
                     [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
@@ -1845,6 +1854,74 @@ def main() -> int:
             f"refuses -- so the primary probe is load-bearing on its own "
             f"(schtasks-sees-it={sch_present}, {ti_detail or 'no output'})")
 
+        # THE ENUMERATION ARM, ISOLATED, WITHOUT A STUB.
+        #
+        # Every make_unreadable case overrides Test-Path AND Get-ChildItem, and
+        # the leaf loop runs first -- so the enumeration was never entered in
+        # its failing direction by any check, and deleting it, emptying its
+        # catch or silencing it left the battery green. It is the SOLE detector
+        # of "the directory is there but cannot be listed", which is the state
+        # the whole block was written for.
+        #
+        # Reproduced as a real filesystem state rather than an injection: a
+        # directory junction whose target has been removed answers Test-Path
+        # $true on the container, $false on every leaf with NO error, and throws
+        # only on enumeration. Nothing else in the block can see it.
+        junction_ok, junction_rc, junction_detail = False, -1, ""
+        junction_named = False
+        jroot = work / "chain-junction"
+        jstate = jroot / "reviewer" / "state"
+        jtarget = work / "junction-target"
+        try:
+            (jroot / "reviewer").mkdir(parents=True, exist_ok=True)
+            jtarget.mkdir(exist_ok=True)
+            made = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-Command",
+                 "$ErrorActionPreference='Stop';"
+                 "New-Item -ItemType Junction -Path $env:MR_LINK"
+                 " -Target $env:MR_TARGET | Out-Null; 'ok'"],
+                capture_output=True, text=True, timeout=120,
+                env={**os.environ, "MR_LINK": str(jstate),
+                     "MR_TARGET": str(jtarget)})
+            if "ok" in (made.stdout or ""):
+                shutil.rmtree(jtarget, ignore_errors=True)
+                junction_ok = not jtarget.exists()
+        except (OSError, subprocess.SubprocessError):
+            junction_ok = False
+        if junction_ok:
+            jh = work / "chain-junction.ps1"
+            jh.write_text(
+                "Set-StrictMode -Version 2.0\n$ErrorActionPreference = 'Stop'\n"
+                "$User = 'MR-SYNTHETIC-REVIEWER-NOT-ON-THIS-HOST'\n"
+                "$TaskName = 'MR-SYNTHETIC-TASK-NOT-ON-THIS-HOST'\n"
+                + ("$schtasks = '" + str(
+                    Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                    / "System32" / "schtasks.exe") + "'\n")
+                + f"$HvRoot = '{jroot}'\n"
+                "$DestroyReviewerCredentialChain = ''\n"
+                + chain_text + "\nWrite-Output 'CHAIN-PROCEEDED'\n",
+                encoding="utf-8-sig")
+            try:
+                jout = subprocess.run(
+                    [str(SHELL), "-NoProfile", "-NonInteractive",
+                     "-ExecutionPolicy", "Bypass", "-File", str(jh)],
+                    capture_output=True, text=True, timeout=180)
+                jtext = (jout.stdout or "") + (jout.stderr or "")
+                junction_rc = jout.returncode
+                # The reason is the LAST line printed, so a truncated detail
+                # cannot be what the assertion reads -- the first version of
+                # this check failed on its own 150-character clip.
+                junction_named = ("OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in jtext)
+                junction_detail = jtext.strip().replace("\n", " ")[:150]
+            except (OSError, subprocess.SubprocessError) as exc:
+                junction_rc, junction_detail = -1, type(exc).__name__
+        rec("OP48p a-listable-only-failure-is-caught-by-the-enumeration-arm",
+            junction_ok and junction_rc == 2 and junction_named,
+            f"a real state in which Test-Path answers cleanly and only "
+            f"enumeration fails is refused, so the arm that alone detects it is "
+            f"load-bearing rather than shadowed by the leaf probe "
+            f"(built={junction_ok}, rc={junction_rc}, {junction_detail or 'no output'})")
+
         tf_rc, tf_text, tf_detail = run_chain(
             [], recreate=False, tag="task-fail", task="unreadable")
         rec("OP48o a-task-lookup-that-cannot-answer-refuses",
@@ -1853,6 +1930,206 @@ def main() -> int:
             f"a Get-ScheduledTask failure that is not 'no such task' is treated "
             f"as 'cannot establish', matching the account arm rather than "
             f"diverging from it ({tf_detail or 'no output'})")
+
+        # ---------------------- the refusal's position in the WHOLE route
+        # A LIFTED REGION CANNOT ESTABLISH A PROPERTY OF THE ROUTE.
+        #
+        # Everything above executes the text between two comment markers with
+        # $User, $TaskName, $HvRoot and the bypass supplied by the harness. That
+        # measures what the region does; it cannot measure that the region is
+        # REACHED on the damaging route, that its operands are the ones the
+        # damage uses, that its condition has not gained a term, or that the
+        # damage has not moved above it. Six edits that disarm the refusal left
+        # the whole battery green, each with the region byte-identical:
+        # assigning the bypass phrase above the marker; shadowing the three
+        # operands around the region; adding a conjunct that reads a flag file;
+        # resetting the password through ADSI, which the cmdlet scan cannot see;
+        # moving the task deletion above the marker; and wrapping the region in
+        # `if ($Verify)`.
+        #
+        # These are structural facts about the file, so they are asked of the
+        # parser rather than of a harness.
+        route_probe = work / "route-invariants.ps1"
+        route_probe.write_text("\n".join([
+            "$ErrorActionPreference = 'Stop'",
+            "$out = [ordered]@{ parse_failed = $false; refusal = $null;",
+            "                   reassigned = @(); damaging = @(); alt = @() }",
+            "$boot = $env:MR_BOOT_PATH",
+            "$e = $null",
+            "$ast = [System.Management.Automation.Language.Parser]::ParseFile(",
+            "    $boot, [ref]$null, [ref]$e)",
+            "if ($e.Count -or -not $ast) { $out.parse_failed = $true;",
+            "    ConvertTo-Json -InputObject $out -Depth 6 -Compress; exit 0 }",
+            "",
+            "function Enclosers([System.Management.Automation.Language.Ast]$n) {",
+            "    $names = @()",
+            "    $p = $n.Parent",
+            "    while ($p) {",
+            "        if ($p -is [System.Management.Automation.Language.IfStatementAst] -or",
+            "            $p -is [System.Management.Automation.Language.FunctionDefinitionAst] -or",
+            "            $p -is [System.Management.Automation.Language.TryStatementAst] -or",
+            "            $p -is [System.Management.Automation.Language.LoopStatementAst] -or",
+            "            $p -is [System.Management.Automation.Language.SwitchStatementAst]) {",
+            "            $names += $p.GetType().Name",
+            "        }",
+            "        $p = $p.Parent",
+            "    }",
+            "    return ,$names",
+            "}",
+            "",
+            "# The refusal: the if-statement on the liveness flag WHOSE BODY",
+            "# EXITS. Two statements test that flag -- the refusal and the",
+            "# bypass warning -- and taking the last match silently pinned the",
+            "# warning, whose condition is the same two terms, so an extra",
+            "# conjunct on the real refusal went unseen. The exit is what",
+            "# distinguishes them, and there must be exactly one.",
+            "$candidates = @()",
+            "foreach ($i in $ast.FindAll({ param($n)",
+            "        $n -is [System.Management.Automation.Language.IfStatementAst] }, $true)) {",
+            "    $cond = $i.Clauses[0].Item1.Extent.Text",
+            "    if ($cond -notmatch 'credChainLive') { continue }",
+            "    $exits = @($i.Clauses[0].Item2.FindAll({ param($n)",
+            "        $n -is [System.Management.Automation.Language.ExitStatementAst] }, $true))",
+            "    if (-not $exits.Count) { continue }",
+            "    $candidates += [ordered]@{",
+            "        offset = $i.Extent.StartOffset",
+            "        condition = ($cond -replace '\\s+', ' ')",
+            "        enclosers = (Enclosers $i)",
+            "    }",
+            "}",
+            "$out.refusal_count = $candidates.Count",
+            "if ($candidates.Count -eq 1) { $out.refusal = $candidates[0] }",
+            "",
+            "# Top-level assignments to any operand the refusal depends on, made",
+            "# anywhere outside the block itself. A shadowed operand answers",
+            "# 'absent' for live state; an assigned bypass arms the destruction.",
+            "$guarded = 'User','TaskName','HvRoot','DestroyReviewerCredentialChain'",
+            "foreach ($a in $ast.FindAll({ param($n)",
+            "        $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {",
+            "    $l = $a.Left",
+            "    if ($l -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }",
+            "    $nm = $l.VariablePath.UserPath",
+            "    if ($guarded -notcontains $nm) { continue }",
+            "    if ((Enclosers $a).Count -gt 0) { continue }",
+            "    $out.reassigned += [ordered]@{ name = $nm; offset = $a.Extent.StartOffset }",
+            "}",
+            "",
+            "# Every operation on this route that destroys retained state, at its",
+            "# top-level CALL SITE (a helper's own body is not a call site).",
+            "foreach ($c in $ast.FindAll({ param($n)",
+            "        $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {",
+            "    $nm = $c.GetCommandName()",
+            "    $txt = $c.Extent.Text",
+            "    $what = ''",
+            "    if ($nm) {",
+            "        $short = ($nm -split '\\\\')[-1].ToLowerInvariant()",
+            "        if ('set-localuser','new-localuser','remove-taskifpresent' -contains $short) {",
+            "            $what = $short",
+            "        }",
+            "    }",
+            "    if (-not $what -and $txt -match '/Create|/Delete') {",
+            "        if ($txt -match '\\$schtasks') { $what = 'schtasks-write' }",
+            "    }",
+            "    if (-not $what) { continue }",
+            "    $enc = Enclosers $c",
+            "    if ($enc -contains 'FunctionDefinitionAst') { continue }",
+            "    $out.damaging += [ordered]@{ what = $what; offset = $c.Extent.StartOffset }",
+            "}",
+            "",
+            "# Any OTHER way to change a password or write the task, in any of the",
+            "# scripts on the trust path. The cmdlet scan sees two cmdlet names;",
+            "# these are the mechanisms that bypass it entirely.",
+            "$patterns = @{",
+            "    'adsi-winnt'      = 'WinNT://';",
+            "    'adsi-setpasswd'  = '\.SetPassword\(|\.ChangePassword\(';",
+            "    'net-user'        = 'net(\\.exe)?\\s+user';",
+            "    'register-task'   = 'Register-ScheduledTask|Set-ScheduledTask';",
+            "    'task-com-write'  = 'RegisterTaskDefinition';",
+            "    'wmi-account'     = 'Win32_UserAccount'",
+            "}",
+            "foreach ($p in ($env:MR_SCAN_PATHS -split ';')) {",
+            "    if (-not $p) { continue }",
+            "    $se = $null",
+            "    $sast = [System.Management.Automation.Language.Parser]::ParseFile(",
+            "        $p, [ref]$null, [ref]$se)",
+            "    if ($se.Count -or -not $sast) { $out.parse_failed = $true; continue }",
+            "    # Comments are not code: the AST's extent text excludes them",
+            "    # only inside nodes, so scan statement extents rather than raw.",
+            "    foreach ($st in $sast.FindAll({ param($n)",
+            "            $n -is [System.Management.Automation.Language.CommandAst] -or",
+            "            $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -or",
+            "            $n -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true)) {",
+            "        foreach ($k in $patterns.Keys) {",
+            "            if ($st.Extent.Text -match $patterns[$k]) {",
+            "                $out.alt += [ordered]@{ file = (Split-Path -Leaf $p); what = $k;",
+            "                                        offset = $st.Extent.StartOffset }",
+            "            }",
+            "        }",
+            "    }",
+            "}",
+            "ConvertTo-Json -InputObject $out -Depth 6 -Compress",
+        ]), encoding="utf-8-sig")
+        try:
+            r_out = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                 "Bypass", "-File", str(route_probe)],
+                capture_output=True, text=True, timeout=300,
+                env={**os.environ,
+                     "MR_BOOT_PATH": str(ROOT / "packaging" / "hyperv"
+                                         / "reviewer_bootstrap.ps1"),
+                     "MR_SCAN_PATHS": ";".join(scan_paths)})
+            route = json.loads((r_out.stdout or "{}").strip() or "{}")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            route = {}
+        route_ok = bool(route) and not route.get("parse_failed", True)
+        refusal = route.get("refusal") or {}
+        damaging = route.get("damaging") or []
+        reassigned = route.get("reassigned") or []
+        alt = route.get("alt") or []
+
+        rec("OP48q the-refusal-is-not-nested-inside-anything",
+            route_ok and bool(refusal) and route.get("refusal_count") == 1
+            and not (refusal.get("enclosers") or []),
+            f"exactly one exiting statement turns on the liveness flag and it "
+            f"is at top level, so it cannot be placed behind a condition that "
+            f"never holds on the damaging route "
+            f"(matches={route.get('refusal_count')}, "
+            f"enclosers={(refusal.get('enclosers') or []) or 'none'})")
+
+        # The condition is pinned to its four terms. An added conjunct -- a flag
+        # file, an environment variable, a switch -- is a disarm that leaves
+        # every executing check green because the region still behaves as
+        # written when the harness supplies the operands.
+        EXPECTED_TERMS = {"credChainLive", "credChainBypass"}
+        cond = refusal.get("condition", "")
+        cond_vars = set(re.findall(r"\$(\w+)", cond))
+        rec("OP48r the-refusal-condition-has-not-acquired-a-term",
+            route_ok and cond_vars == EXPECTED_TERMS,
+            f"the refusal turns on exactly the computed liveness flag and the "
+            f"validated bypass, so no extra conjunct can disarm it "
+            f"(condition={cond or 'ABSENT'})")
+
+        rec("OP48s no-operand-is-reassigned-outside-the-block",
+            route_ok and not reassigned,
+            f"$User, $TaskName, $HvRoot and the bypass are never assigned at "
+            f"top level outside the block, so the operands the refusal reads "
+            f"are the ones the damage uses ({reassigned or 'none'})")
+
+        before = [d for d in damaging
+                  if d["offset"] < (refusal.get("offset", -1))]
+        rec("OP48t every-destructive-operation-follows-the-refusal",
+            route_ok and bool(refusal) and bool(damaging) and not before,
+            f"all {len(damaging)} top-level destructive call sites -- the "
+            f"account creation and reset, the task removal and the schtasks "
+            f"write -- sit after the refusal, so none can run before it "
+            f"({[d['what'] for d in before] or 'none precede it'})")
+
+        rec("OP48u no-other-mechanism-changes-a-password-or-writes-the-task",
+            route_ok and not alt,
+            f"no script on the trust path reaches the account database or the "
+            f"scheduler through ADSI, net.exe, WMI, Register-ScheduledTask or "
+            f"the COM task service, so the cmdlet-name scan is not looking at "
+            f"one of several doors ({[a['what'] for a in alt] or 'none'})")
 
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
@@ -2331,7 +2608,7 @@ def main() -> int:
                       + "; ".join(missing_family),
         }, indent=2))
         return 1
-    MINIMUM_CREDENTIAL_CHAIN_CHECKS = 16
+    MINIMUM_CREDENTIAL_CHAIN_CHECKS = 22
     chain_checks = sorted(i for i in executed_ids if i.startswith("OP48"))
     if len(chain_checks) < MINIMUM_CREDENTIAL_CHAIN_CHECKS:
         print(json.dumps({
