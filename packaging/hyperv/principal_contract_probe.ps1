@@ -470,20 +470,20 @@ switch ($case.action) {
     }
 
     'token-subject' {
-        # DOES THE ACCOUNT GATE FOLLOW THE ENVIRONMENT?
+        # WHAT DOES THE MEMBERSHIP CALL ACTUALLY RECEIVE?
         #
-        # Answered by executing the harness's own subject-resolution region --
-        # everything between the TOKEN01 and TOKEN02 Add-Probe invocations,
-        # located through the parse tree so it survives edits inside it -- twice,
-        # with $env:USERNAME set to two different built-in accounts, and
-        # comparing the SID it settles on with the SID of the real token.
+        # Reading $authorIdentity after the region ran answered a different
+        # question. Replacing only the ARGUMENT --
+        # `Test-AccountInAdministrators -Identity (Resolve-PrincipalIdentity
+        # -Account $env:USERNAME)` -- leaves $authorIdentity assigned from the
+        # token and unused, so the subject check passed while the gate was
+        # redirected by the variable whatever launches the harness controls.
         #
-        # The previous version of this action interpolated $authorIdentity into
-        # a child command, where it was undefined; under StrictMode building
-        # that string threw, the catch swallowed it, and it returned two empty
-        # strings that any equality test would have accepted. It was never
-        # invoked, so it failed silently rather than falsely -- but it is the
-        # fixture the check above now depends on.
+        # So the identity is captured AT THE CALL. The region is split at the
+        # Test-AccountInAdministrators invocation: everything before it is
+        # evaluated (including its own dot-source, which would otherwise restore
+        # the real function), then a shadow that records its -Identity argument
+        # is installed, then the call itself is evaluated.
         $errs = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile(
             $case.harness, [ref]$null, [ref]$errs)
@@ -497,37 +497,72 @@ switch ($case.action) {
             if (-not $first -and $marker -match 'TOKEN01') { $first = $command }
             elseif (-not $second -and $marker -match 'TOKEN02') { $second = $command }
         }
-        if (-not $first -or -not $second) {
+        $membership = $null
+        foreach ($command in @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+            "$(@($node.CommandElements)[0])" -eq 'Test-AccountInAdministrators' }, $true))) {
+            if ($first -and $second -and
+                $command.Extent.StartOffset -gt $first.Extent.EndOffset -and
+                $command.Extent.EndOffset -le $second.Extent.StartOffset) {
+                $membership = $command; break
+            }
+        }
+        # SPLIT AT THE ENCLOSING STATEMENT, not at the command. The command
+        # starts after `$accountIsAdmin = `, so cutting there left the prelude
+        # ending in a dangling assignment and both runs died with a
+        # ParseException -- which, being identical, an equality test would have
+        # read as agreement.
+        if ($membership) {
+            $node = $membership
+            while ($node.Parent -and -not (
+                $node.Parent -is [System.Management.Automation.Language.StatementBlockAst] -or
+                $node.Parent -is [System.Management.Automation.Language.NamedBlockAst] -or
+                $node.Parent -is [System.Management.Automation.Language.ScriptBlockAst])) {
+                $node = $node.Parent
+            }
+            $membership = $node
+        }
+        if (-not $first -or -not $second -or -not $membership) {
             $result.value = [ordered]@{ region_found = $false }
         } else {
             $text = Get-Content -Raw -LiteralPath $case.harness
-            $region = $text.Substring(
-                $first.Extent.EndOffset, $second.Extent.StartOffset - $first.Extent.EndOffset)
             # $PSScriptRoot is bound to the FILE a script came from, and
             # Invoke-Expression compiles a scriptblock that came from no file --
-            # so the region's own dot-source failed with "Cannot bind argument to
-            # parameter 'Path' because it is an empty string" and both runs threw
-            # identically, which an equality test would have read as agreement.
-            # Substituted textually so the region resolves the same paths it
-            # would in place.
+            # so the region's own dot-source failed identically in both runs and
+            # an equality test read that as agreement. Substituted textually.
             $harnessDir = Split-Path $case.harness -Parent
-            $region = $region.Replace('$PSScriptRoot', "'$harnessDir'")
+            $prelude = $text.Substring(
+                $first.Extent.EndOffset,
+                $membership.Extent.StartOffset - $first.Extent.EndOffset
+            ).Replace('$PSScriptRoot', "'$harnessDir'")
+            $callText = $text.Substring(
+                $membership.Extent.StartOffset,
+                $second.Extent.StartOffset - $membership.Extent.StartOffset
+            ).Replace('$PSScriptRoot', "'$harnessDir'")
             $realSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             $seen = @()
             foreach ($name in @($case.first, $case.second)) {
                 $previous = $env:USERNAME
                 $env:USERNAME = $name
-                $resolved = ''
+                $script:CapturedSubject = ''
+                $captured = ''
                 try {
-                    Invoke-Expression $region
-                    $resolved = [string]$authorIdentity.Sid
-                } catch { $resolved = "THREW:$($_.Exception.GetType().Name):$($_.Exception.Message)" }
+                    Invoke-Expression $prelude
+                    function Test-AccountInAdministrators {
+                        param([Parameter(Mandatory = $true)]$Identity,
+                              [scriptblock]$MembershipProvider = $null)
+                        $script:CapturedSubject = [string]$Identity.Sid
+                        return $false
+                    }
+                    Invoke-Expression $callText
+                    $captured = $script:CapturedSubject
+                } catch { $captured = "THREW:$($_.Exception.GetType().Name)" }
                 finally { $env:USERNAME = $previous }
-                $seen += ,$resolved
+                $seen += ,$captured
             }
             $result.value = [ordered]@{
                 region_found = $true
-                region_length = $region.Length
                 first_outcome = $(if ($seen[0] -eq $realSid) { 'real-token' }
                                   elseif ($seen[0] -like 'THREW:*') { $seen[0] }
                                   elseif ($seen[0]) { 'other-sid' } else { 'empty' })

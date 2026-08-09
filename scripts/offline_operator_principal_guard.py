@@ -851,18 +851,46 @@ def main() -> int:
             f"({group_state})")
 
         # --------------------- an author-writable ancestor of the interpreter
+        # THE FIXTURE HAS TO REACH THE ANCESTOR WALK.
+        #
+        # It did not. With no DLLs and no Lib the helper returned at the
+        # unlistable branch, and the single "writable hit" the check asserted
+        # was `<tools>\python (unlistable)` -- not an ancestor result at all.
+        # Adding DLLs and Lib was not enough either: the "hardened" tree grants
+        # BUILTIN\Administrators, and the real account is in Administrators on
+        # this host, so python.exe itself matched and the helper returned before
+        # the walk again. Deleting the entire ancestor walk would have left the
+        # check green.
+        #
+        # So: a SYNTHETIC author in no local group, the subdirectories present,
+        # the interpreter tree granting only SYSTEM and Administrators, and the
+        # PARENT granting that synthetic SID delete-child. The only path to a
+        # hit is the walk, and the hit is required to say so.
         tools = work / "tools"
         interpreter_dir = tools / "python"
-        interpreter_dir.mkdir(parents=True, exist_ok=True)
+        (interpreter_dir / "DLLs").mkdir(parents=True, exist_ok=True)
+        (interpreter_dir / "Lib").mkdir(parents=True, exist_ok=True)
         (interpreter_dir / "python.exe").write_text("stub", encoding="ascii")
+        (interpreter_dir / "python313.dll").write_text("stub", encoding="ascii")
+        hardened_sddl = "O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
         harden = work / "harden-interpreter.ps1"
         harden.write_text(
-            "$sd = New-Object Security.AccessControl.DirectorySecurity\n"
-            "$sd.SetSecurityDescriptorSddlForm('O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')\n"
-            "Set-Acl -LiteralPath '" + str(interpreter_dir) + "' -AclObject $sd\n"
-            "$f = New-Object Security.AccessControl.FileSecurity\n"
-            "$f.SetSecurityDescriptorSddlForm('O:SYG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)')\n"
-            "Set-Acl -LiteralPath '" + str(interpreter_dir / "python.exe") + "' -AclObject $f\n",
+            "$dirs = @('" + str(interpreter_dir) + "', '" + str(interpreter_dir / "DLLs")
+            + "', '" + str(interpreter_dir / "Lib") + "')\n"
+            "foreach ($d in $dirs) {\n"
+            "  $sd = New-Object Security.AccessControl.DirectorySecurity\n"
+            "  $sd.SetSecurityDescriptorSddlForm('" + hardened_sddl + "')\n"
+            "  Set-Acl -LiteralPath $d -AclObject $sd\n}\n"
+            "foreach ($p in @('" + str(interpreter_dir / "python.exe") + "', '"
+            + str(interpreter_dir / "python313.dll") + "')) {\n"
+            "  $f = New-Object Security.AccessControl.FileSecurity\n"
+            "  $f.SetSecurityDescriptorSddlForm('O:SYG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)')\n"
+            "  Set-Acl -LiteralPath $p -AclObject $f\n}\n"
+            "# The PARENT is where the author gets delete-child, and nowhere else.\n"
+            "$parent = New-Object Security.AccessControl.DirectorySecurity\n"
+            "$parent.SetSecurityDescriptorSddlForm("
+            "'O:SYG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x40;;;" + SID_AUTHOR + ")')\n"
+            "Set-Acl -LiteralPath '" + str(tools) + "' -AclObject $parent\n",
             encoding="utf-8")
         subprocess.run([str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
                         "Bypass", "-File", str(harden)],
@@ -882,18 +910,26 @@ def main() -> int:
         interp_harness = work / "interpreter-ancestor.ps1"
         interp_harness.write_text(
             ". '" + str(ROOT / "packaging" / "hyperv" / "principal_contract.ps1") + "'\n"
-            "$AuthorIdentity = Resolve-PrincipalIdentity -Account $env:USERNAME\n"
+            # A SYNTHETIC author in no local group. The real account is in
+            # Administrators here, so it matched the hardened tree's own ACE and
+            # the helper never reached the walk.
+            "$AuthorIdentity = [pscustomobject]@{ Name='SYNTH'; Sid='" + SID_AUTHOR + "';\n"
+            "  Exists=$true; Resolved=$true; Digest=''; Requested='SYNTH'; Error='' }\n"
             "function Test-AuthorWritable { param([string]$Path)\n"
             "  return (Test-AccountCanWritePath -Identity $AuthorIdentity -Path $Path) }\n"
             + helper_text
             + "\n$hits = @(Get-AuthorWritableInterpreterPaths -Interpreter '"
             + str(interpreter_dir / "python.exe") + "')\n"
-            + "Write-Output ('writable-hits=' + $hits.Count)\n", encoding="utf-8")
+            + "Write-Output ('writable-hits=' + $hits.Count)\n"
+            + "Write-Output ('hit=' + ($hits -join ';'))\n", encoding="utf-8")
         try:
             interp_run = subprocess.run(
                 [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                  "-File", str(interp_harness)], capture_output=True, text=True, timeout=300)
-            interp_ok = "writable-hits=1" in (interp_run.stdout or "")
+            # The hit must be the ANCESTOR result. Asserting only a count let an
+            # unrelated early return satisfy the check.
+            interp_ok = ("writable-hits=1" in (interp_run.stdout or "")
+                         and "(replaceable ancestor)" in (interp_run.stdout or ""))
             interp_detail = (interp_run.stdout or "").strip().replace("\n", " ")[:180]
         except (OSError, subprocess.SubprocessError) as exc:
             interp_ok, interp_detail = False, type(exc).__name__
@@ -1018,6 +1054,34 @@ def main() -> int:
         redirected_subject = probe({"action": "token-subject", "harness": str(redirected),
                                     "first": "DefaultAccount", "second": "WDAGUtilityAccount"},
                                    work)["value"] or {}
+        # THE ARGUMENT ALONE. OP45a replaces the token READ; this replaces only
+        # what the membership call is HANDED, leaving $authorIdentity assigned
+        # from the token and unused. That is the cheaper edit and the one the
+        # previous form of this check -- which read $authorIdentity after the
+        # fact -- could not see at all.
+        argument_dir = work / "argument-redirected"
+        argument_dir.mkdir(exist_ok=True)
+        shutil.copyfile(ROOT / "packaging" / "hyperv" / "principal_contract.ps1",
+                        argument_dir / "principal_contract.ps1")
+        argument_copy = argument_dir / "argument-boundary.ps1"
+        argument_anchor = ("$accountIsAdmin = Test-AccountInAdministrators "
+                           "-Identity $authorIdentity")
+        assert argument_anchor in boundary_text, "the membership call moved"
+        argument_copy.write_text(boundary_text.replace(
+            argument_anchor,
+            "$accountIsAdmin = Test-AccountInAdministrators -Identity "
+            "(Resolve-PrincipalIdentity -Account $env:USERNAME)", 1), encoding="utf-8")
+        argument_subject = probe({"action": "token-subject", "harness": str(argument_copy),
+                                  "first": "DefaultAccount", "second": "WDAGUtilityAccount"},
+                                 work)["value"] or {}
+        rec("OP45b a-redirected-argument-is-detected",
+            argument_subject.get("region_found") is True
+            and argument_subject.get("both_are_the_real_token") is False,
+            f"a copy that leaves the token read intact and redirects only the "
+            f"identity handed to the membership call is reported -- the subject "
+            f"is captured AT the call, not read from a variable beside it "
+            f"({argument_subject})")
+
         rec("OP45a a-gate-redirected-by-the-environment-is-detected",
             redirected_subject.get("region_found") is True
             and redirected_subject.get("both_are_the_real_token") is False,
@@ -1412,7 +1476,7 @@ def main() -> int:
     # string constants; this one is the number of checks that actually
     # executed. Both are kept: the manifest catches deletion without running
     # anything, this catches hollowing at run time.
-    MINIMUM_CHECKS = 52
+    MINIMUM_CHECKS = 60
     if len(CHECKS) < MINIMUM_CHECKS:
         rec("OP99 the-battery-still-executes-its-pinned-minimum", False,
             f"only {len(CHECKS)} checks executed, below the pinned minimum of "

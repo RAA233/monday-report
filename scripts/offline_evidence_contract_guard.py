@@ -486,6 +486,18 @@ def main() -> int:
             any("below the pinned minimum" in r for r in membership_reasons_for("hollow-battery")),
             "hollowing the contract battery is detected")
         battery.record(
+            "CT12e principal-membership-removal-detected",
+            any("does not contain audit:offline-operator-principal" in r
+                for r in membership_reasons_for("remove-principal-step")),
+            "dropping the battery that decides the acceptance predicate from "
+            "audit:all is reported")
+        battery.record(
+            "CT12f principal-battery-hollowing-detected",
+            any("below the pinned minimum" in r
+                for r in membership_reasons_for("hollow-principal-battery")),
+            "commenting out the recording calls is reported, even though every "
+            "check id is still present in the file as prose")
+        battery.record(
             "CT13c membership-restored", not membership_reasons_for(None),
             "baseline still passes after every membership mutation")
 
@@ -623,9 +635,17 @@ def membership_reasons_for(mutation: str | None) -> list[str]:
         (work / "scripts").mkdir()
         package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
         steps = package["scripts"]["audit:all"].split(" && ")
+        # THE SECOND PINNED MEMBER'S GUARD IS COPIED TOO.
+        #
+        # Without it `guard.exists()` was False for PINNED_MEMBERS[1] in every
+        # cycle, so its min_checks/id_pattern branch never ran and no cycle
+        # proved that removing the battery which DECIDES the acceptance
+        # predicate from audit:all is detected. The property held against the
+        # real tree; nothing demonstrated the detector works.
         for relative in ("scripts/audit_harness_guard.py",
                          "scripts/offline_evidence_contract_guard.py",
-                         "scripts/offline_audit_membership_manifest.py"):
+                         "scripts/offline_audit_membership_manifest.py",
+                         "scripts/offline_operator_principal_guard.py"):
             shutil.copy2(ROOT / relative, work / relative)
 
         if mutation == "remove-step":
@@ -642,6 +662,18 @@ def membership_reasons_for(mutation: str | None) -> list[str]:
                 .replace(CONTRACT_SCRIPT, "python scripts/unrelated.py")
                 .replace(CONTRACT_COMMAND, "audit:unrelated"),
                 encoding="utf-8")
+        elif mutation == "remove-principal-step":
+            steps = [s for s in steps if s != PRINCIPAL_SCRIPT]
+        elif mutation == "hollow-principal-battery":
+            target = work / "scripts" / "offline_operator_principal_guard.py"
+            text = target.read_text(encoding="utf-8")
+            # Same shape as the contract battery's own hollowing cycle: the
+            # recording calls are commented out, leaving every check id in the
+            # file as prose. Renaming the call instead does NOT hollow it -- the
+            # counter counts ids that reach ANY call, so `_dropped("OP01 ...")`
+            # still counts, which is the right answer and the reason this
+            # mutation had to be the stronger one.
+            target.write_text(text.replace('rec("', 'pass  # ("'), encoding="utf-8")
         elif mutation == "hollow-battery":
             target = work / "scripts" / "offline_evidence_contract_guard.py"
             text = target.read_text(encoding="utf-8")

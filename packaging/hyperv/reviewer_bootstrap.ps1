@@ -225,7 +225,14 @@ function Assert-SelfSourceTrusted {
             # matches no name, which is how GENERIC_ALL slips past a string test.
             if ($mask -band 0x10000000) { $mask = $mask -bor 0x1F01FF }
             if ($mask -band 0x40000000) { $mask = $mask -bor 0x0116 }
-            if ($mask -band 0xD0116) { $bad += "writable:$(Split-Path $path -Leaf)" }
+            # 0xD0156, the same mask every filesystem predicate in the contract
+            # uses. This branch judges $PSScriptRoot -- a CONTAINER holding the
+            # code about to be loaded -- and 0xD0116 omits FILE_DELETE_CHILD, so
+            # a grant of 0x40 alone was accepted here while the ancestor branch
+            # four lines up refused it and Test-AccountCanWritePath called it
+            # writable. Measured on one directory: -Paths ACCEPTED,
+            # -AncestorPaths refused, predicate True.
+            if ($mask -band 0xD0156) { $bad += "writable:$(Split-Path $path -Leaf)" }
         }
     }
     if ($bad.Count) {
@@ -652,7 +659,15 @@ function Get-AuthorWritableInterpreterPaths {
     $candidates += @(Get-ChildItem -LiteralPath $buildRoot -Force -File `
                      -ErrorAction SilentlyContinue -ErrorVariable rootErrors |
                      Select-Object -ExpandProperty FullName)
-    $subErrors = $null
+    # @() AND NOT $null. This variable is only assigned by -ErrorVariable
+    # INSIDE the loop below, and the loop body is skipped entirely when neither
+    # DLLs nor Lib exists -- so it stayed $null, and @($null).Count is 1, not 0.
+    # Measured: the unlistable branch fired unconditionally, so a CPython
+    # EMBEDDABLE package (no DLLs, no Lib, stdlib in pythonXX.zip -- a realistic
+    # air-gapped build source) made both -ProvisionReviewerRuntime and
+    # -HardenInterpreter exit 2 with REVIEWER_RUNTIME_SOURCE_AUTHOR_WRITABLE, a
+    # named reason that was simply false. Fail-closed, and still wrong.
+    $subErrors = @()
     foreach ($sub in @('DLLs', 'Lib')) {
         $dir = Join-Path $buildRoot $sub
         if (-not (Test-Path -LiteralPath $dir)) { continue }

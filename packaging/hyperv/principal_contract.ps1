@@ -1166,6 +1166,22 @@ function Get-TaskRootAclViolations {
     if (Test-AccountCanWritePath -Identity $Author -Path $Root) {
         $reasons.Add('OFFLINE_TASK_ROOT_AUTHOR_WRITABLE')
     }
+    # AND ITS ANCESTORS, with the replace-the-subtree question every other
+    # ancestor walk in this increment asks. Renaming the whole task root away
+    # substitutes reviewer-bin, reviewer-runtime and reviewer\state at once, and
+    # nothing here looked above $Root. On the default C:\mr-hv this cannot fire
+    # -- measured: C:\ grants Authenticated Users only APPEND_DATA, which is
+    # outside 0xD0042 -- but -HvRoot is a parameter, and a root under a
+    # user-writable container is one flag away.
+    $rootProbe = Split-Path $Root -Parent
+    while ($rootProbe) {
+        if (Test-AccountCanWritePath -Identity $Author -Path $rootProbe -Mask 0xD0042) {
+            $reasons.Add('OFFLINE_TASK_ROOT_ANCESTOR_REPLACEABLE'); break
+        }
+        $rootParent = Split-Path $rootProbe -Parent
+        if ($rootParent -eq $rootProbe) { break }
+        $rootProbe = $rootParent
+    }
     $rootOwner = ''
     try { $rootOwner = $rootAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value }
     catch { $rootOwner = '' }
