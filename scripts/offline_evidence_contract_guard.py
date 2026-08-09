@@ -483,8 +483,10 @@ def main() -> int:
             "neutering the redundant asserter is detected")
         battery.record(
             "CT13b battery-hollowing-detected",
-            any("below the pinned minimum" in r for r in membership_reasons_for("hollow-battery")),
-            "hollowing the contract battery is detected")
+            any("does not" in r and "append a result" in r
+                for r in membership_reasons_for("hollow-battery")),
+            "rebinding the contract battery's recorder is detected, even though "
+            "the file still parses and the original method is untouched")
         battery.record(
             "CT12e principal-membership-removal-detected",
             any("does not contain audit:offline-operator-principal" in r
@@ -590,6 +592,28 @@ def main() -> int:
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
+    # A RUN-TIME FLOOR, reported directly.
+    #
+    # The principal battery got one; its counterpart did not. Appending
+    # `Battery.record = lambda self, cid, ok, detail: True` -- one syntactically
+    # valid line -- made this guard run to completion, print no check at all,
+    # emit passed=0/failed=0/total=0 and exit 0, because battery.failed was 0.
+    # Every pinned floor stayed green: the static count still saw 31 ids and the
+    # recorder check still found a method containing .append. Step 2 of
+    # audit:all could be emptied with step 1 none the wiser.
+    #
+    # Reported OUTSIDE battery.record, for the same reason the other one is: a
+    # floor must not depend on the mechanism it polices.
+    MINIMUM_CHECKS = 28
+    executed = battery.passed + battery.failed
+    if executed < MINIMUM_CHECKS:
+        print(json.dumps({
+            "guard": "offline-evidence-contract",
+            "error": "OFFLINE_CONTRACT_BATTERY_HOLLOW",
+            "detail": f"only {executed} checks executed, below the pinned "
+                      f"minimum of {MINIMUM_CHECKS}",
+        }, indent=2))
+        return 1
     summary(battery)
     return 0 if battery.failed == 0 else 1
 
@@ -682,8 +706,13 @@ def membership_reasons_for(mutation: str | None) -> list[str]:
             target = work / "scripts" / "offline_evidence_contract_guard.py"
             text = target.read_text(encoding="utf-8")
             target.write_text(
-                text.replace('battery.record("', 'pass  # ("')
-                    .replace('mutation("', 'pass  # ("'),
+                # THE EDIT AN AUTHOR WOULD MAKE, and one that still parses.
+                # Commenting the calls out left the file unparseable, so this
+                # cycle proved that count_recorded_checks returns 0 on a
+                # SyntaxError -- not that hollowing is detected. This rebinds the
+                # recorder, which is the cheapest real hollowing and the one the
+                # sibling cycle was rewritten to use.
+                text + "\n\nBattery.record = lambda self, cid, ok, detail: True\n",
                 encoding="utf-8")
         else:
             raise ValueError(f"unknown membership mutation: {mutation}")

@@ -131,12 +131,29 @@ function Get-RequestedStage {
         exit 3
     }
     $stage = [string]$doc.stage
-    # CASE-SENSITIVE, because the consumer is. PowerShell's -notcontains is
-    # case-insensitive, so `{"stage":"E1"}` passed this gate and then hit
-    # argparse's choices, which are not -- the session recorded FAILED for a
-    # stage the gate had approved. Denial either way, but the gate and the thing
-    # it gates must admit the same set.
-    if (-not (@($AllowedStages) -ccontains $stage)) {
+    # SHAPE FIRST, THEN AN ORDINAL MATCH.
+    #
+    # -ccontains is case-sensitive but still CULTURE-sensitive, so it admitted
+    # strings the consumer does not: measured, `e1` followed by a NUL, and the
+    # same with U+00AD, U+200D or U+FEFF, all compared equal to `e1` while
+    # ordinal equality said no. The NUL is the dangerous one -- it terminates the
+    # CreateProcessW command line, so every argument after --stage, including
+    # --author-account, was silently dropped from the child process. Validating
+    # run_id closed the additive direction; this closes the subtractive one.
+    if ($stage -cnotmatch '^[A-Za-z0-9_-]{1,32}$') {
+        Clear-StaleTranscripts -OutDir $OutRoot
+        New-Status -Stage 'unknown' -State 'REFUSED' `
+            -Detail 'requested stage is not a bare token' `
+            -Extra @{ reason = 'OFFLINE_STAGE_REJECTED' }
+        exit 3
+    }
+    $stageAllowed = $false
+    foreach ($candidate in @($AllowedStages)) {
+        if ([string]::Equals($candidate, $stage, [StringComparison]::Ordinal)) {
+            $stageAllowed = $true; break
+        }
+    }
+    if (-not $stageAllowed) {
         Clear-StaleTranscripts -OutDir $OutRoot
         New-Status -Stage 'unknown' -State 'REFUSED' `
             -Detail 'requested stage is not in the reviewer allowlist'

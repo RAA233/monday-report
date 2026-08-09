@@ -232,6 +232,26 @@ def recorder_records(guard: Path, name: str) -> bool:
         tree = ast.parse(guard.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return False
+    # A REBINDING IS NOT A DEFINITION, and it wins at run time.
+    #
+    # `Battery.record = lambda self, cid, ok, detail: True` appended to the file
+    # leaves the original method -- with its .append -- entirely intact, so
+    # inspecting FunctionDef nodes found a recorder that records and said so,
+    # while the object actually called recorded nothing. Any assignment that
+    # binds this name, as a bare name or as an attribute, is refused outright: a
+    # recorder is declared with def, and there is no legitimate reason to
+    # replace it afterwards.
+    for node in ast.walk(tree):
+        targets = []
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        for target in targets:
+            bound = target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")
+            if bound == name:
+                return False
+
     definitions = [node for node in ast.walk(tree)
                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                    and node.name == name]

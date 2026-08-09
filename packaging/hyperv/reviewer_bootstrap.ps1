@@ -740,7 +740,7 @@ function Assert-CapabilitiesAcceptable {
       that call this run BEFORE the task is registered, and an absent task is
       the expected state then. It is reported rather than swallowed.
     #>
-    param([string[]]$Reasons)
+    param([string[]]$Reasons, [switch]$PendingAuthorTaskGrant)
 
     # ONLY OFFLINE_TASK_ABSENT is excused, and it now means what it says.
     #
@@ -751,9 +751,33 @@ function Assert-CapabilitiesAcceptable {
     # task-ACE battery, printed "not registered yet" about a registered task,
     # and exited 0. The contract distinguishes the two states now; an unreadable
     # descriptor is a blocking reason.
+    # THE AUTHOR'S TASK ACE IS APPLIED BY A SEPARATE, LATER OPERATOR STEP.
+    #
+    # -GrantAuthorTaskRun is what gives the author read+execute on the task, and
+    # it deliberately runs after registration. So at the end of the bootstrap
+    # route the task exists with only the inherited Administrators/SYSTEM ACEs
+    # and the principal's own read ACE -- and OFFLINE_TASK_AUTHOR_CANNOT_START
+    # is the correct description of that state, not a violation of it.
+    # Measured with a non-administrative author: a freshly registered descriptor
+    # yields exactly that reason, and the same descriptor after the grant yields
+    # none. Treating it as blocking made the route that establishes the whole
+    # protocol exit 2 on a fully compliant host, with the completion guidance
+    # never printed -- and left the verdict signalless, since a compromised host
+    # and a clean one both exited 2.
+    #
+    # Excused ONLY on that route, and only these two reasons. Every other reason
+    # still blocks, and the transcript says what remains to be done.
+    $pending = if ($PendingAuthorTaskGrant) {
+        @('OFFLINE_TASK_ABSENT', 'OFFLINE_TASK_AUTHOR_CANNOT_START',
+          'OFFLINE_TASK_GRANTED_TO_OPERATOR_NOT_AUTHOR')
+    } else { @('OFFLINE_TASK_ABSENT') }
     $reasons = @($Reasons | Where-Object { $_ })
     $absent = @($reasons | Where-Object { $_ -eq 'OFFLINE_TASK_ABSENT' })
-    $blocking = @($reasons | Where-Object { $_ -ne 'OFFLINE_TASK_ABSENT' })
+    $deferred = @($reasons | Where-Object { $pending -contains $_ -and $_ -ne 'OFFLINE_TASK_ABSENT' })
+    if ($deferred.Count) {
+        Write-Fact 'author task rights' 'not granted yet (-GrantAuthorTaskRun is the next step)'
+    }
+    $blocking = @($reasons | Where-Object { $pending -notcontains $_ })
     if ($absent.Count) {
         Write-Fact 'task descriptor' 'not registered yet'
     }
@@ -1871,7 +1895,7 @@ $bootstrapMeasured = New-Object System.Collections.Generic.List[string]
 Write-PrincipalCapabilityFacts -Operator $OperatorIdentity -Author $AuthorIdentity `
     -Reviewer $ReviewerIdentity -Root $HvRoot -TaskName $TaskName `
     -Reasons ([ref]$bootstrapMeasured)
-Assert-CapabilitiesAcceptable -Reasons $bootstrapMeasured
+Assert-CapabilitiesAcceptable -Reasons $bootstrapMeasured -PendingAuthorTaskGrant
 
 Write-Output ''
 Write-Output '  Bootstrap complete. The authoring process can now run the reviewer with'

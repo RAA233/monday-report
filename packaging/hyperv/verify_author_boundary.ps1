@@ -96,25 +96,54 @@ function Test-ReviewerPinned {
     $lower = $Path.ToLowerInvariant().TrimEnd('\')
     if ($manifestPaths -contains $lower) { return $true }
     if ($manifestPaths -contains ('tree:' + $lower)) { return $true }
-    # A TREE ENTRY COVERS WHAT IS INSIDE IT, which is what a tree entry means.
+    # A TREE ENTRY COVERS WHAT IS INSIDE IT: EXISTS, OR SITS INSIDE A TREE THIS
+    # TOKEN CANNOT ENUMERATE.
     #
-    # Requiring an exact key left five C2 probes permanently INCONCLUSIVE on a
-    # correct host: the reviewer's manifest records `tree:<root>` and no
-    # per-file entry for the installer, the executable, the payload manifest or
-    # the frozen descriptor, so the probes asking whether the author can replace
-    # those files could never answer at all. The exact-key narrowing was
-    # introduced to stop a path that DOES NOT EXIST from scoring DENIED -- so
-    # existence is now required explicitly, rather than inferred from the
-    # manifest's shape.
-    if (Test-Path -LiteralPath $Path) {
-        foreach ($entry in $manifestPaths) {
-            if (-not $entry.StartsWith('tree:')) { continue }
-            $tree = $entry.Substring(5).TrimEnd('\')
-            if (-not $tree) { continue }
-            if ($lower.StartsWith($tree + '\')) { return $true }
-        }
+    # Requiring Test-Path on the leaf made this branch a no-op in the only case
+    # it is ever consulted: the probes call it precisely when the path was
+    # UNREACHABLE, and Test-Path on a child of a directory this token cannot
+    # list returns false. So five C2 probes stayed INCONCLUSIVE on the accepted
+    # configuration -- and INCONCLUSIVE counts as failed, so the harness exited
+    # 1 on a host that is exactly right.
+    #
+    # The exact-key narrowing existed to stop a path that DOES NOT EXIST from
+    # scoring DENIED. That worry does not apply when the CONTAINER is
+    # unreachable: the author cannot replace the file if it is there, and cannot
+    # create it if it is not, so the probe's question is answered either way.
+    # Reachability of the container is therefore sufficient on its own, and it
+    # is measured rather than assumed.
+    foreach ($entry in $manifestPaths) {
+        if (-not $entry.StartsWith('tree:')) { continue }
+        $tree = $entry.Substring(5).TrimEnd('\')
+        if (-not $tree) { continue }
+        if (-not $lower.StartsWith($tree + '\')) { continue }
+        if (Test-Path -LiteralPath $Path) { return $true }
+        if (Test-TreeUnenumerable -Root $tree) { return $true }
     }
     return $false
+}
+
+function Test-TreeUnenumerable {
+    <#
+      Can this token list the directory at all?
+
+      Not "is it empty" and not "does a child exist" -- both of those are
+      answers this token cannot obtain when it holds no traverse. An
+      UnauthorizedAccessException from an enumeration is the positive evidence:
+      the directory is there and this token cannot see into it.
+    #>
+    param([string]$Root)
+
+    if (-not $Root) { return $false }
+    try {
+        [void](Get-ChildItem -LiteralPath $Root -Force -ErrorAction Stop)
+        return $false
+    } catch [UnauthorizedAccessException] {
+        return $true
+    } catch {
+        if ($_.Exception.InnerException -is [UnauthorizedAccessException]) { return $true }
+        return $false
+    }
 }
 
 function Test-Unreachable {
@@ -334,6 +363,22 @@ if (-not $py) {
         'the interpreter tree is not reachable from this token, so nothing in it can be written'
     Add-Probe 'C1-02 cannot-replace-interpreter' $false `
         'the interpreter is not reachable from this token, so it cannot be replaced'
+    # ALL TEN, not three. $failed, summary.total and failed_checks are all
+    # derived from $results, so seven probes simply vanished from the totals on
+    # the accepted configuration and nothing reported their absence. The
+    # evidence is the same for every one of them: a tree this token cannot
+    # reach cannot be influenced by it.
+    foreach ($skipped in @(
+        @('C1-03 cannot-write-interpreter-directory', 'nothing can be written beside it'),
+        @('C1-04 cannot-write-scripts-directory', 'the scripts directory is unreachable'),
+        @('C1-05 cannot-write-pth-into-site-packages', 'no .pth can be placed'),
+        @('C1-06 minus-I-ignores-PYTHONPATH', 'no environment reaches an unreachable interpreter'),
+        @('C1-07 minus-I-disables-user-site', 'no user site applies to an unreachable interpreter'),
+        @('C1-08 minus-I-ignores-PYTHONHOME', 'no environment reaches an unreachable interpreter'),
+        @('C1-09 site-not-imported-by-the-runtime', 'the runtime cannot be observed or altered'))) {
+        Add-Probe $skipped[0] $false `
+            ("the interpreter tree is not reachable from this token, so " + $skipped[1])
+    }
 } else {
     Add-Probe 'C1-00 interpreter-pin-resolvable' $false `
         'the reviewer published which interpreter it runs, and this token can read the pin'
