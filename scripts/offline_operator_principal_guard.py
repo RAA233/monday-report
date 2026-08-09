@@ -1254,7 +1254,8 @@ def main() -> int:
         chain_text = raw_boot[chain_start:chain_end] if chain_start >= 0 < chain_end else ""
 
         def run_chain(state_files: list, *, recreate: bool, tag: str,
-                      make_unreadable: bool = False, existing: bool = False) -> tuple:
+                      make_unreadable: bool = False, account: bool = False,
+                      task: bool = False, weaken: str = "") -> tuple:
             """Run the shipped block against a synthetic C:\\mr-hv-shaped root.
 
             The harness reproduces the script's own error regime. Under
@@ -1262,6 +1263,11 @@ def main() -> int:
             returning $false, so a harness left on the default 'Continue'
             exercises different control flow from the shipped route and would
             certify a branch production never takes.
+
+            $User and $TaskName are synthetic names that exist nowhere, so the
+            account and task probes run for real and answer "absent" unless a
+            presence is injected. Binding them to the live reviewer would make
+            every case refuse and every check pass for the wrong reason.
             """
             root = work / f"chain-{tag}"
             state = root / "reviewer" / "state"
@@ -1276,19 +1282,29 @@ def main() -> int:
             # branch under test is the shipped one; only the failure it reacts
             # to is synthetic. Both probes are overridden, because the leaf test
             # runs first and would throw before the enumeration is reached.
-            deny = ("function Test-Path { throw 'synthetic access denial' }\n"
-                    "function Get-ChildItem { throw 'synthetic access denial' }\n"
-                    ) if make_unreadable else ""
+            inject = ""
+            if make_unreadable:
+                inject += ("function Test-Path { throw 'synthetic access denial' }\n"
+                           "function Get-ChildItem { throw 'synthetic access denial' }\n")
+            if account:
+                inject += "function Get-LocalUser { [pscustomobject]@{ Name = $User } }\n"
+            if task:
+                inject += "function Get-ScheduledTask { [pscustomobject]@{ TaskName = $TaskName } }\n"
+            body = chain_text
+            if weaken:
+                # A regression applied to the shipped text, to prove a check
+                # notices. Kept out of the tracked file: only this copy changes.
+                body = body.replace(weaken, weaken + " -ErrorAction SilentlyContinue")
             harness = work / f"chain-{tag}.ps1"
             harness.write_text(
                 "Set-StrictMode -Version 2.0\n"
                 "$ErrorActionPreference = 'Stop'\n"
-                + deny
+                "$User = 'MR-SYNTHETIC-REVIEWER-NOT-ON-THIS-HOST'\n"
+                "$TaskName = 'MR-SYNTHETIC-TASK-NOT-ON-THIS-HOST'\n"
+                + inject
                 + f"$HvRoot = '{root}'\n"
-                f"$User = 'MR-SYNTHETIC-REVIEWER'\n"
-                f"$existing = ${str(bool(existing)).lower()}\n"
-                f"$RecreateReviewerCredential = ${str(bool(recreate)).lower()}\n"
-                + chain_text
+                f"$DestroyReviewerCredentialChain = ${str(bool(recreate)).lower()}\n"
+                + body
                 + "\nWrite-Output 'CHAIN-PROCEEDED'\n", encoding="utf-8")
             try:
                 out = subprocess.run(
@@ -1332,7 +1348,7 @@ def main() -> int:
             ["review-key.dpapi"], recreate=True, tag="bypass")
         rec("OP48c the-deliberate-rebuild-switch-is-reachable",
             byp_rc == 0 and "CHAIN-PROCEEDED" in byp_text and "WARNING" in byp_text,
-            f"-RecreateReviewerCredential proceeds and says what it is destroying, "
+            f"-DestroyReviewerCredentialChain proceeds and says what it is destroying, "
             f"so a genuine rebuild is possible without editing the script "
             f"({byp_detail or 'no output'})")
 
@@ -1380,55 +1396,139 @@ def main() -> int:
         # The parser answers instead: every CommandAst resolving to the cmdlet,
         # whatever it looks like. Offsets are into the raw file, and so is the
         # marker search, so the two are comparable.
+        # Three things the first attempt at this got wrong, all in the pass
+        # direction:
+        #
+        # ONE FILE. It parsed reviewer_bootstrap.ps1 alone, but the elevated
+        # program is that file plus everything it dot-sources, and a reset added
+        # to principal_contract.ps1 would have been invisible to a check whose
+        # whole claim is "there is one reset". Every script on the trust path is
+        # parsed now.
+        #
+        # ONE SPELLING, AGAIN. GetCommandName() returns what was written, so
+        # `Microsoft.PowerShell.LocalAccounts\Set-LocalUser` is not equal to
+        # `set-localuser` and slipped through the equality that replaced the
+        # regex. Compared on the last backslash-delimited segment.
+        #
+        # TWO COORDINATE SPACES. The ordering compared raw_boot.find() -- a
+        # Python offset into text read with universal newlines -- against
+        # Extent.StartOffset, a PowerShell offset into the file. On a CRLF
+        # checkout those diverge, and they diverge by shrinking the Python side,
+        # which moves the marker EARLIER and makes the ordering assertion easier
+        # to satisfy. The marker offset is measured by the same parser now, so
+        # there is one space.
         ast_probe = work / "account-cmdlet-ast.ps1"
         ast_probe.write_text(
-            "$e = $null\n"
-            "$ast = [System.Management.Automation.Language.Parser]::ParseFile(\n"
-            "    $env:MR_BOOT_PATH, [ref]$null, [ref]$e)\n"
-            "if ($e.Count) { Write-Output '[]'; exit 0 }\n"
-            "$found = $ast.FindAll({ param($n)\n"
-            "    $n -is [System.Management.Automation.Language.CommandAst] }, $true)\n"
             "$rows = @()\n"
-            "foreach ($c in $found) {\n"
-            "    $name = $c.GetCommandName()\n"
-            "    if (-not $name) { continue }\n"
-            "    if ('set-localuser', 'new-localuser' -contains $name.ToLowerInvariant()) {\n"
-            "        $rows += [ordered]@{ name = $name.ToLowerInvariant()\n"
-            "                             offset = $c.Extent.StartOffset }\n"
+            "$parseFailed = $false\n"
+            "foreach ($p in ($env:MR_SCAN_PATHS -split ';')) {\n"
+            "    if (-not $p) { continue }\n"
+            "    $e = $null\n"
+            "    $ast = [System.Management.Automation.Language.Parser]::ParseFile(\n"
+            "        $p, [ref]$null, [ref]$e)\n"
+            "    if ($e.Count -or -not $ast) { $parseFailed = $true; continue }\n"
+            "    $leaf = Split-Path -Leaf $p\n"
+            "    foreach ($c in $ast.FindAll({ param($n)\n"
+            "            $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {\n"
+            "        $name = $c.GetCommandName()\n"
+            "        if (-not $name) { continue }\n"
+            "        $short = ($name -split '\\\\')[-1].ToLowerInvariant()\n"
+            "        if ('set-localuser', 'new-localuser' -contains $short) {\n"
+            "            # WHOSE ACCOUNT DATABASE. Two of these run inside the\n"
+            "            # Hyper-V guest, against the guest's own local account,\n"
+            "            # and touch nothing on this host. They are lexically\n"
+            "            # inside a scriptblock handed to Invoke-Command -VMName,\n"
+            "            # which is the structural difference -- not the cmdlet,\n"
+            "            # not the file, not the account name.\n"
+            "            $guest = $false\n"
+            "            $p = $c.Parent\n"
+            "            while ($p) {\n"
+            "                if ($p -is [System.Management.Automation.Language.CommandAst]) {\n"
+            "                    $pn = $p.GetCommandName()\n"
+            "                    if ($pn -and ($pn -split '\\\\')[-1].ToLowerInvariant() -eq 'invoke-command') {\n"
+            "                        foreach ($el in $p.CommandElements) {\n"
+            "                            if ($el -is [System.Management.Automation.Language.CommandParameterAst] `\n"
+            "                                -and $el.ParameterName -match '^(VMName|VMId|Session|ComputerName)$') {\n"
+            "                                $guest = $true\n"
+            "                            }\n"
+            "                        }\n"
+            "                    }\n"
+            "                }\n"
+            "                $p = $p.Parent\n"
+            "            }\n"
+            "            $rows += [ordered]@{ kind = $short; file = $leaf\n"
+            "                                 offset = $c.Extent.StartOffset\n"
+            "                                 remote = $guest }\n"
+            "        }\n"
+            "    }\n"
+            "    # The marker offset, measured by the same parser in the same\n"
+            "    # coordinate space as the invocations above.\n"
+            "    foreach ($t in $ast.Extent.Text | Select-Object -First 1) {\n"
+            "        $idx = $t.IndexOf('# ---- live credential chain')\n"
+            "        $cnt = ([regex]::Matches($t, [regex]::Escape('# ---- live credential chain'))).Count\n"
+            "        if ($idx -ge 0) {\n"
+            "            $rows += [ordered]@{ kind = 'marker'; file = $leaf\n"
+            "                                 offset = $idx; count = $cnt }\n"
+            "        }\n"
             "    }\n"
             "}\n"
-            "if (-not $rows.Count) { Write-Output '[]' }\n"
-            "else { ConvertTo-Json -InputObject @($rows) -Depth 3 -Compress }\n",
+            "$payload = [ordered]@{ parse_failed = $parseFailed; rows = @($rows) }\n"
+            "ConvertTo-Json -InputObject $payload -Depth 4 -Compress\n",
             encoding="utf-8")
-        boot_path = str(ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1")
+        scan_paths = sorted(
+            str(p) for p in (ROOT / "packaging" / "hyperv").glob("*.ps1"))
         try:
             ast_out = subprocess.run(
                 [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
                  "Bypass", "-File", str(ast_probe)],
-                capture_output=True, text=True, timeout=180,
-                env={**os.environ, "MR_BOOT_PATH": boot_path})
-            account_cmds = json.loads((ast_out.stdout or "[]").strip() or "[]")
+                capture_output=True, text=True, timeout=300,
+                env={**os.environ, "MR_SCAN_PATHS": ";".join(scan_paths)})
+            payload = json.loads((ast_out.stdout or "").strip() or "{}")
         except (OSError, subprocess.SubprocessError, ValueError):
-            account_cmds = []
-        resets = sorted(c["offset"] for c in account_cmds if c["name"] == "set-localuser")
-        creates = sorted(c["offset"] for c in account_cmds if c["name"] == "new-localuser")
+            payload = {}
+        # A probe that could not answer must not read as "nothing found". An
+        # empty result was previously indistinguishable from a clean file.
+        ast_answered = bool(payload) and payload.get("rows") is not None \
+            and not payload.get("parse_failed", True)
+        ast_rows = payload.get("rows") or []
+        # Guest-scoped invocations are counted and reported, never silently
+        # dropped: a claim of "one reset" that quietly excluded two of three
+        # would be the same kind of statement this family exists to stop.
+        resets = sorted(r["offset"] for r in ast_rows
+                        if r["kind"] == "set-localuser" and not r.get("remote"))
+        guest_resets = sorted(
+            (r["file"], r["offset"]) for r in ast_rows
+            if r["kind"] == "set-localuser" and r.get("remote"))
+        creates = sorted(r["offset"] for r in ast_rows
+                         if r["kind"] == "new-localuser" and not r.get("remote"))
+        markers = [r for r in ast_rows if r["kind"] == "marker"]
+        marker_at = markers[0]["offset"] if len(markers) == 1 else -1
+        marker_count = markers[0].get("count", 0) if len(markers) == 1 else 0
+        reset_files = {r["file"] for r in ast_rows
+                       if r["kind"] == "set-localuser" and not r.get("remote")}
 
-        guard_at = raw_boot.find("# ---- live credential chain")
         rec("OP48e the-refusal-precedes-account-creation-and-the-reset",
-            guard_at >= 0 and len(creates) == 1 and len(resets) == 1
-            and guard_at < creates[0] < resets[0]
+            ast_answered and marker_at >= 0 and marker_count == 1
+            and len(creates) == 1 and len(resets) == 1
+            and marker_at < creates[0] < resets[0]
             and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in raw_boot,
             f"the block sits above every parsed New-LocalUser and Set-LocalUser "
-            f"invocation, so a refusal cannot leave a half-created principal and "
-            f"cannot be reached after the damage (guard@{guard_at}, "
+            f"invocation across every script on the trust path, measured in one "
+            f"coordinate space, and the marker it is located by occurs once "
+            f"(answered={ast_answered}, marker@{marker_at}x{marker_count}, "
             f"creates={creates}, resets={resets})")
 
-        rec("OP48f the-account-password-still-has-a-single-invocation",
-            len(resets) == 1 and bool(account_cmds),
-            f"the parser finds exactly one Set-LocalUser invocation in the "
-            f"elevated script, in any spelling, so the guard above it covers "
-            f"the whole credential route ({len(resets)} invocation(s), "
-            f"{len(creates)} creation(s))")
+        rec("OP48f the-account-password-still-has-a-single-host-invocation",
+            ast_answered and len(resets) == 1
+            and reset_files == {"reviewer_bootstrap.ps1"},
+            f"across all {len(scan_paths)} scripts on the trust path the parser "
+            f"finds exactly one Set-LocalUser invocation against THIS host's "
+            f"account database, in any spelling and under any module "
+            f"qualification, so the guard above it covers the whole credential "
+            f"route ({len(resets)} host invocation(s) in "
+            f"{sorted(reset_files) or 'none'}; {len(guest_resets)} run inside "
+            f"the guest via Invoke-Command and touch no host account: "
+            f"{guest_resets}; answered={ast_answered})")
 
         # THE ACCOUNT IS THE SUBJECT OF THE RESET.
         #
@@ -1438,13 +1538,51 @@ def main() -> int:
         # sits under the real root. Denial keyed to one operand, damage keyed to
         # the other: the closed defect, one level along.
         acct_rc, acct_text, acct_detail = run_chain(
-            [], recreate=False, tag="acct", existing=True)
+            [], recreate=False, tag="acct", account=True)
         rec("OP48g an-existing-account-refuses-even-when-the-root-holds-nothing",
             acct_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in acct_text
             and "CHAIN-PROCEEDED" not in acct_text,
             f"an inspected root with no sealed material does not license the "
             f"reset while the account it would reset exists, so pointing the run "
             f"at another root cannot reach it ({acct_detail or 'no output'})")
+
+        # THE THIRD OPERAND. The route deletes and re-registers $TaskName, and
+        # the Task Scheduler's stored credential is the only retained copy of
+        # the operator-typed password -- so a run that keeps the account and the
+        # key can still leave the reviewer undrivable. $TaskName is independent
+        # of both $User and $HvRoot; covering two of three is how this block was
+        # bypassed twice.
+        task_rc, task_text, task_detail = run_chain(
+            [], recreate=False, tag="task", task=True)
+        rec("OP48i an-existing-task-refuses-on-its-own",
+            task_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in task_text
+            and "CHAIN-PROCEEDED" not in task_text,
+            f"the registered task is judged as its own operand, so a run with a "
+            f"fresh account name and a fresh root cannot delete the stored "
+            f"credential that drives the existing reviewer "
+            f"({task_detail or 'no output'})")
+
+        # THE FIXTURE MUST NOTICE THE OBVIOUS REGRESSION. OP48d injects throwing
+        # probes, so it passes whether or not the shipped probes are still
+        # capable of throwing -- which means the single most likely "fix" for a
+        # raw access-denied, adding -ErrorAction SilentlyContinue, would leave
+        # every check green while restoring the fail-open the block exists to
+        # remove. Applied to a copy and measured.
+        weak_rc, weak_text, weak_detail = run_chain(
+            [], recreate=False, tag="weak", make_unreadable=True,
+            weaken="Get-ChildItem -LiteralPath $credChainRoot -Force")
+        # Counted in the STRIPPED text. The first version matched the phrase
+        # wherever it appeared, including the comment that explains why the
+        # block does not use it -- so the check reported the shipped block as
+        # already weakened, on the strength of prose about not weakening it.
+        probe_calls = len(re.findall(r"-ErrorAction\s+SilentlyContinue",
+                                     strip_powershell_comments(chain_text)))
+        rec("OP48j weakening-a-probe-to-silentlycontinue-is-detected",
+            probe_calls == 0 and weak_rc != 0 and "CHAIN-PROCEEDED" not in weak_text,
+            f"the shipped block contains no SilentlyContinue probe, and a copy "
+            f"with one added does not reach the proceed path -- so the branch "
+            f"OP48d certifies cannot be disarmed while OP48d still passes "
+            f"({probe_calls} silent probe(s), weakened rc={weak_rc})")
 
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
@@ -1896,6 +2034,39 @@ def main() -> int:
             "error": "OFFLINE_PRINCIPAL_BATTERY_HOLLOW",
             "detail": f"only {len(CHECKS)} checks executed, below the pinned "
                       f"minimum of {MINIMUM_CHECKS}",
+        }, indent=2))
+        return 1
+
+    # A COUNT IS NOT A MEMBERSHIP. The floor is 69 against 82 executed, so the
+    # whole credential-chain family could be deleted and the battery would still
+    # report a clean 73/73 and exit 0 -- the checks that close two Criticals'
+    # worth of findings were the most deletable thing in the file. Families that
+    # exist because something was got wrong are pinned by id, not by census.
+    REQUIRED_FAMILIES = {
+        "OP48": ("the credential-chain refusal: without these the route that "
+                 "resets the reviewer password is unmeasured"),
+    }
+    executed_ids = {c["check_id"].split()[0] for c in CHECKS}
+    missing_family = sorted(
+        f"{fam} ({why})" for fam, why in REQUIRED_FAMILIES.items()
+        if not any(i == fam or i.startswith(fam) for i in executed_ids))
+    if missing_family:
+        print(json.dumps({
+            "guard": "offline-operator-principal",
+            "error": "OFFLINE_PRINCIPAL_BATTERY_FAMILY_MISSING",
+            "detail": "required check families did not execute: "
+                      + "; ".join(missing_family),
+        }, indent=2))
+        return 1
+    MINIMUM_CREDENTIAL_CHAIN_CHECKS = 9
+    chain_checks = sorted(i for i in executed_ids if i.startswith("OP48"))
+    if len(chain_checks) < MINIMUM_CREDENTIAL_CHAIN_CHECKS:
+        print(json.dumps({
+            "guard": "offline-operator-principal",
+            "error": "OFFLINE_PRINCIPAL_BATTERY_FAMILY_THINNED",
+            "detail": f"only {len(chain_checks)} credential-chain checks executed "
+                      f"({chain_checks}), below the pinned "
+                      f"{MINIMUM_CREDENTIAL_CHAIN_CHECKS}",
         }, indent=2))
         return 1
 
