@@ -1232,6 +1232,136 @@ def main() -> int:
             f"and the wildcard opt-outs are exactly the declared ones "
             f"({offenders[:4] or 'none'}, declared-opt-outs={declared_optouts})")
 
+        # ------------------------- the credential half of the no-switch route
+        # THE ACCOUNT BRANCH WAS GUARDED; ITS CREDENTIAL COUNTERPART WAS NOT.
+        #
+        # On a host whose reviewer already exists the route printed
+        # `account exists (reusing)` and then ran Set-LocalUser anyway, which
+        # replaces the DPAPI master key and leaves review-key.dpapi and
+        # e2-guest.cred present, correctly sized, correctly ACL'd and forever
+        # unopenable. Every earlier check in this battery read that route; none
+        # executed it, and reading it is exactly how the asymmetry survived --
+        # the guarded branch sits four lines above the unguarded one.
+        #
+        # The shipped block is lifted verbatim between its own markers and run
+        # against synthetic state directories. Lifting a REGION rather than a
+        # function has its own failure mode: a region cut mid-statement raises a
+        # ParseException that looks identical to a refusal, so the clean-host
+        # case below is what proves the region is executable at all.
+        chain_start = raw_boot.find("# ---- live credential chain")
+        chain_end = raw_boot.find("# ---- account ---", chain_start)
+        chain_text = raw_boot[chain_start:chain_end] if chain_start >= 0 < chain_end else ""
+
+        def run_chain(state_files: list, *, recreate: bool, tag: str,
+                      make_unreadable: bool = False) -> tuple:
+            """Run the shipped block against a synthetic C:\\mr-hv-shaped root."""
+            root = work / f"chain-{tag}"
+            state = root / "reviewer" / "state"
+            state.mkdir(parents=True, exist_ok=True)
+            for leaf in state_files:
+                (state / leaf).write_bytes(b"synthetic-sealed-material")
+            # Present but not enumerable is the shape a half-applied ACL leaves,
+            # and the one Test-Path reports identically to absent. It cannot be
+            # built with a DACL here: an elevated token enumerates a SYSTEM-only
+            # directory anyway -- measured, not assumed. The denial is injected
+            # at the call instead, so the branch under test is the shipped one
+            # and only the failure it reacts to is synthetic.
+            deny = ("function Get-ChildItem { throw "
+                    "'synthetic access denial' }\n") if make_unreadable else ""
+            harness = work / f"chain-{tag}.ps1"
+            harness.write_text(
+                "Set-StrictMode -Version 2.0\n"
+                + deny
+                + f"$HvRoot = '{root}'\n"
+                f"$RecreateReviewerCredential = ${str(bool(recreate)).lower()}\n"
+                + chain_text
+                + "\nWrite-Output 'CHAIN-PROCEEDED'\n", encoding="utf-8")
+            try:
+                out = subprocess.run(
+                    [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                     "Bypass", "-File", str(harness)],
+                    capture_output=True, text=True, timeout=180)
+                text = (out.stdout or "") + (out.stderr or "")
+                return (out.returncode, text, text.strip().replace("\n", " ")[:180])
+            except (OSError, subprocess.SubprocessError) as exc:
+                return (-1, "", type(exc).__name__)
+
+        key_rc, key_text, key_detail = run_chain(
+            ["review-key.dpapi"], recreate=False, tag="key")
+        rec("OP48 a-live-signing-key-stops-the-route-that-resets-the-password",
+            bool(chain_text) and key_rc == 2
+            and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in key_text
+            and "CHAIN-PROCEEDED" not in key_text,
+            f"the shipped block, run verbatim against a state directory holding "
+            f"review-key.dpapi, refuses with the named reason and does not fall "
+            f"through to the password prompt ({key_detail or 'no output'})")
+
+        cred_rc, cred_text, cred_detail = run_chain(
+            ["e2-guest.cred"], recreate=False, tag="cred")
+        rec("OP48a the-guest-credential-alone-is-also-enough-to-stop-it",
+            cred_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in cred_text,
+            f"the second sealed artifact is judged by the same block rather than "
+            f"only the signing key, so a host that holds one but not the other is "
+            f"not the unguarded counterpart ({cred_detail or 'no output'})")
+
+        # A CLEAN HOST MUST STILL BOOTSTRAP. This is also the check that proves
+        # the lifted region parses and executes -- a mis-cut region fails here.
+        clean_rc, clean_text, clean_detail = run_chain([], recreate=False, tag="clean")
+        rec("OP48b a-first-time-host-is-not-refused",
+            clean_rc == 0 and "CHAIN-PROCEEDED" in clean_text
+            and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" not in clean_text,
+            f"with no sealed material the block proceeds, so the refusal is bound "
+            f"to the material and has not simply disabled first-time bootstrap -- "
+            f"and the region is executable as lifted ({clean_detail or 'no output'})")
+
+        byp_rc, byp_text, byp_detail = run_chain(
+            ["review-key.dpapi"], recreate=True, tag="bypass")
+        rec("OP48c the-deliberate-rebuild-switch-is-reachable",
+            byp_rc == 0 and "CHAIN-PROCEEDED" in byp_text and "WARNING" in byp_text,
+            f"-RecreateReviewerCredential proceeds and says what it is destroying, "
+            f"so a genuine rebuild is possible without editing the script "
+            f"({byp_detail or 'no output'})")
+
+        # FAIL CLOSED WHEN THE ANSWER CANNOT BE ESTABLISHED. Test-Path reports
+        # "absent" and "cannot look" identically, and taking that at face value
+        # would license the reset on exactly the damaged host that most needs
+        # protecting.
+        dark_rc, dark_text, dark_detail = run_chain(
+            [], recreate=False, tag="dark", make_unreadable=True)
+        rec("OP48d an-unreadable-state-directory-refuses-rather-than-proceeds",
+            dark_rc == 2 and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in dark_text,
+            f"a state directory that exists but cannot be enumerated is treated "
+            f"as possibly holding sealed material, not as holding none "
+            f"({dark_detail or 'no output'})")
+
+        # POSITION, PINNED. Refusing after New-LocalUser would leave a fresh
+        # principal behind on the host the operator was told was untouched, and
+        # the reset itself must be downstream or the guard is decorative.
+        # Anchored on the variable, not on the reason string: reason strings
+        # live inside string literals, which boot_live has blanked, and the same
+        # literal also appears ~100 lines earlier in the -Verify remedy text --
+        # so searching for it would have located the wrong site and passed for
+        # a reason unrelated to where the guard actually sits.
+        guard_at = boot_live.find("$credChainSealed")
+        create_at = boot_live.find("New-LocalUser -Name $User")
+        reset_at = boot_live.find("Set-LocalUser -Name $User")
+        rec("OP48e the-refusal-precedes-account-creation-and-the-reset",
+            guard_at >= 0 and create_at >= 0 and reset_at >= 0
+            and guard_at < create_at < reset_at
+            and "OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE" in raw_boot,
+            f"the block sits above both New-LocalUser and Set-LocalUser, so a "
+            f"refusal cannot leave a half-created principal and cannot be "
+            f"reached after the damage (guard@{guard_at}, create@{create_at}, "
+            f"reset@{reset_at})")
+
+        # The reviewer password has exactly one site. A second one added later
+        # would be outside the guard and this check is what would say so.
+        reviewer_pw_sites = len(re.findall(r"Set-LocalUser\s+-Name\s+\$User", boot_live))
+        rec("OP48f the-reviewer-password-still-has-a-single-site",
+            reviewer_pw_sites == 1,
+            f"the guard covers the credential route because there is one route "
+            f"to cover ({reviewer_pw_sites} site(s) setting the reviewer password)")
+
         # ------------------------------ the tree the scheduled task runs from
         # THE DESTINATION TREE, NOT ONLY THE SOURCE TREE.
         #
@@ -1675,7 +1805,7 @@ def main() -> int:
     # recorded through the same no-op and vanished, and main() returned 0 with
     # zero checks executed. The floor cannot be allowed to depend on the
     # mechanism it exists to police.
-    MINIMUM_CHECKS = 60
+    MINIMUM_CHECKS = 67
     if len(CHECKS) < MINIMUM_CHECKS:
         print(json.dumps({
             "guard": "offline-operator-principal",

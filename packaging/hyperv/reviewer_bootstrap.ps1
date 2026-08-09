@@ -60,12 +60,23 @@ param(
     # The interpreter used to BUILD and VERIFY the dedicated runtime. This is an
     # operator-side, one-time resolution and it is a different thing from the
     # runtime the reviewer executes: the reviewer never discovers an interpreter
-    # at run time, it reads a pin the operator wrote. Left empty, the operator's
-    # own Python is used as the source to copy from -- which is the only local
-    # approved source, and nothing is downloaded.
+    # at run time, it reads a pin the operator wrote. Nothing is downloaded; the
+    # source is copied from a local interpreter the author cannot write.
+    #
+    # REQUIRED, and an ABSOLUTE path. Resolve-BuildPython returns $null on an
+    # empty value, so both consuming routes stop at REVIEWER_RUNTIME_NO_SOURCE
+    # -- the older wording here promised a default that does not exist. A
+    # relative value resolves but is worse than useless: the ancestor walk in
+    # Get-AuthorWritableInterpreterPaths is driven by Split-Path, so a relative
+    # root terminates it after one iteration and the interpreter's real parents
+    # are never scored for author writability.
     [string]$BuildPython = '',
     [switch]$RepinReviewerCode,
     [switch]$GrantAuthorTaskRun,
+    # Proceed with the credential half of the no-switch route even though this
+    # host already holds sealed reviewer material. Destroys the DPAPI chain --
+    # see OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE below.
+    [switch]$RecreateReviewerCredential,
     # Required on a host where the operator and the author are the same
     # Windows account. See Assert-OperatorIsNotAuthor.
     # THE AUTHOR, NAMED. Never inferred from $env:USERNAME, the running
@@ -1799,9 +1810,13 @@ if ($Verify) {
                 Write-Output ''
                 $verifyDefect = $true
                 Write-Output '  DEFECT: the task action does not target a reviewer-readable'
-                Write-Output '  installed entry point. The reviewer cannot run. Re-register with'
-                Write-Output '  reviewer_bootstrap.ps1 (the operator must re-enter the password;'
-                Write-Output '  both supported update mechanisms require the credential).'
+                Write-Output '  installed entry point. The reviewer cannot run.'
+                Write-Output '  Run -ProvisionPaths first: it reinstalls the entry point and'
+                Write-Output '  repairs the ACLs without touching the credential. Re-register'
+                Write-Output '  the task only if that leaves the action itself wrong -- on a host'
+                Write-Output '  holding sealed reviewer material that route now stops at'
+                Write-Output '  OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE, because re-registering'
+                Write-Output '  requires the password and setting it destroys the DPAPI chain.'
                 Write-Output '  verdict: OFFLINE_REVIEWER_BOOTSTRAP_OPERATOR_ACTION_REQUIRED'
             }
         }
@@ -1822,6 +1837,73 @@ if ($Verify) {
     # verdict, in the denial direction.
     if ($verifyDefect) { exit 2 }
     exit 0
+}
+
+# ---- live credential chain ----------------------------------------------
+# The account branch below is guarded by `-not $existing`. The credential half
+# of this same route was not, and that asymmetry is the whole defect: on a host
+# whose reviewer was already bootstrapped, the route prints
+# `account exists (reusing)` and then resets the password anyway.
+#
+# An administrative `Set-LocalUser -Password` supplies no old password, so
+# Windows cannot re-encrypt the existing DPAPI master key -- it issues a new one
+# and the old one is gone. review-key.dpapi and e2-guest.cred remain on disk at
+# their original size with their original ACLs; only the ability to open them is
+# destroyed. Nothing downstream notices, because nothing downstream opens them
+# until an attestation is attempted, by which time the signing identity that
+# would have to produce it no longer exists. There is no recovery: the reviewer
+# key is the reviewer, and it cannot be re-derived from anything the operator
+# still holds.
+#
+# Gated on the MATERIAL, not on the account, because the counterpart case is
+# just as fatal and reads as the safe one: with the account deleted out from
+# under its own sealed state, `-not $existing` is true, New-LocalUser mints a
+# fresh principal with a fresh master key, and the route completes cleanly over
+# blobs that no principal will ever open again.
+$credChainRoot = Join-Path $HvRoot 'reviewer\state'
+$credChainSealed = @()
+foreach ($leaf in @('review-key.dpapi', 'e2-guest.cred')) {
+    if (Test-Path -LiteralPath (Join-Path $credChainRoot $leaf)) { $credChainSealed += $leaf }
+}
+# Test-Path answers "absent" and "present but I cannot look" with the same
+# $false. Taking that at face value would let an unreadable state directory --
+# the very shape a half-applied ACL leaves behind -- report no material and
+# license the reset. Enumerated explicitly so the two are distinguishable.
+$credChainUnreadable = $false
+if (Test-Path -LiteralPath $credChainRoot) {
+    try { Get-ChildItem -LiteralPath $credChainRoot -Force -ErrorAction Stop | Out-Null }
+    catch { $credChainUnreadable = $true }
+}
+if (($credChainSealed.Count -or $credChainUnreadable) -and -not $RecreateReviewerCredential) {
+    Write-Output ''
+    if ($credChainUnreadable) {
+        Write-Output '  STOP: the reviewer state directory exists but cannot be enumerated,'
+        Write-Output '  so whether sealed reviewer material is present cannot be established.'
+    } else {
+        Write-Output ('  STOP: this host already holds sealed reviewer material (' +
+                      ($credChainSealed -join ', ') + ').')
+    }
+    Write-Output '  This route resets the reviewer password, which destroys the DPAPI'
+    Write-Output '  chain those files are sealed under. The loss is permanent.'
+    Write-Output ''
+    Write-Output '  To update an already-bootstrapped host, use the routes that do not'
+    Write-Output '  touch the credential:'
+    Write-Output '    -ProvisionPaths      directories, ACLs, ownership, author identity'
+    Write-Output '    -ExportSource        reviewer source copy'
+    Write-Output '    -ProvisionReviewerRuntime / -HardenInterpreter   dedicated runtime'
+    Write-Output '    -RepinReviewerCode   re-pin after any of the above'
+    Write-Output '    -GrantAuthorTaskRun  author control channel'
+    Write-Output '    -Verify              read-only check'
+    Write-Output ''
+    Write-Output '  If the reviewer identity is genuinely being rebuilt from nothing and'
+    Write-Output '  the loss is intended, pass -RecreateReviewerCredential.'
+    Write-Output '  reason: OFFLINE_REVIEWER_CREDENTIAL_CHAIN_LIVE'
+    exit 2
+}
+if ($credChainSealed.Count -and $RecreateReviewerCredential) {
+    Write-Output ''
+    Write-Output ('  WARNING: -RecreateReviewerCredential given; the DPAPI chain sealing ' +
+                  ($credChainSealed -join ', ') + ' is being destroyed.')
 }
 
 # ---- account -------------------------------------------------------------
