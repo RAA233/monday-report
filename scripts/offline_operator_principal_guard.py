@@ -605,13 +605,34 @@ def main() -> int:
             "OFFLINE_SOURCE_ROOT_ABSENT" in src_reasons,
             f"a source root that does not exist is refused ({src_reasons})")
 
-        no_identity = probe({"action": "trusted-source", "root": str(work),
+        # A STRUCTURALLY CLEAN ROOT, so the missing-pin property is isolated.
+        #
+        # Assert-TrustedSourceRoot now returns before git the moment any
+        # structural blocker (author-writable, inheriting, reparse, unenumerable)
+        # is present -- correct, because running git against such a tree executes
+        # author-named config programs at High integrity. The guard's own scratch
+        # dir is inheriting and Authenticated-Users-writable, so it would refuse
+        # for those structural reasons and never reach the missing-pin clause.
+        # This fixture is made protected (no inheritance) and admin/SYSTEM only,
+        # so no structural reason fires and EXPECTED_IDENTITY_MISSING is what a
+        # missing pin produces.
+        clean_root = work / "op25-clean"
+        clean_root.mkdir(exist_ok=True)
+        _icacls = str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                      / "System32" / "icacls.exe")
+        for args in (["/inheritance:r"],
+                     ["/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"],
+                     ["/setowner", "*S-1-5-32-544"]):
+            subprocess.run([_icacls, str(clean_root)] + args,
+                           capture_output=True, text=True, timeout=60)
+        no_identity = probe({"action": "trusted-source", "root": str(clean_root),
                              "author": identity("AUTHOR", SID_AUTHOR),
                              "expected_commit": "", "expected_tree": ""}, work)["reasons"]
         rec("OP25 missing-expected-identity-refused",
             "OFFLINE_SOURCE_ROOT_EXPECTED_IDENTITY_MISSING" in no_identity,
-            f"a source root with no externally supplied commit/tree is refused "
-            f"rather than trusted on its own account ({no_identity})")
+            f"a structurally clean source root with no externally supplied "
+            f"commit/tree is refused rather than trusted on its own account "
+            f"({no_identity})")
 
         # The author-writable case, measured against a real directory the author
         # genuinely can write -- the scratch dir this guard is running in.
@@ -2267,10 +2288,10 @@ def main() -> int:
 
         # Pinned. Update deliberately, in the same commit as any intended change
         # to either file, and never to make a run go green.
-        PINNED_PROLOGUE = "43dcd7bd84ddb478"
-        PINNED_BOOT_CHARS = 120894
-        PINNED_CONTRACT_CHARS = 61510
-        PINNED_RUNTIME_CHARS = 25344
+        PINNED_PROLOGUE = "0800ba7ae4d9ff0c"
+        PINNED_BOOT_CHARS = 128379
+        PINNED_CONTRACT_CHARS = 64068
+        PINNED_RUNTIME_CHARS = 26139
         rec("OP48v every-file-the-elevated-session-executes-is-pinned-whole",
             bool(prologue_digest) and prologue_count == PINNED_BOOT_CHARS
             and contract_count == PINNED_CONTRACT_CHARS
@@ -2744,6 +2765,254 @@ def main() -> int:
             f"route die on a raw VariableIsUndefined under StrictMode "
             f"(mutation-applied={reordered != boot_text}, detected={caught})")
 
+        # ============ PRE-TRUST ELEVATED EXECUTION SURFACE ============
+        # Four defects where author-controlled code, config or input could
+        # execute or be consumed at High integrity before the relevant trust
+        # boundary. Each check drives the shipped code behaviourally.
+        _boot = (ROOT / "packaging" / "hyperv" / "reviewer_bootstrap.ps1").read_text(encoding="utf-8")
+        _git = str(Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+                   / "Git" / "cmd" / "git.exe")
+
+        # ---- OP49a: PSModulePath is pinned before the first autoloadable cmdlet
+        # A module planted on $env:PSModulePath and exporting Get-LocalUser runs
+        # its body when the engine autoloads that name -- arbitrary code at High
+        # integrity before any gate. The shipped hardening block is lifted and
+        # run in a poisoned environment; the poison must neither resolve nor run.
+        _pm_start = _boot.find("# ==== PSMODULEPATH")
+        _pm_end = _boot.find("$env:PSModulePath = ($__moduleRoots -join ';')")
+        _pm_block = _boot[_pm_start:_pm_end] + "$env:PSModulePath = ($__moduleRoots -join ';')\n" \
+            if (_pm_start >= 0 and _pm_end > _pm_start) else ""
+        pm_root = work / "op49a"
+        (pm_root / "poison" / "EvilAcct").mkdir(parents=True, exist_ok=True)
+        pm_marker = pm_root / "ran.txt"
+        (pm_root / "poison" / "EvilAcct" / "EvilAcct.psm1").write_text(
+            "Set-Content -LiteralPath '" + str(pm_marker).replace("\\", "\\\\")
+            + "' -Value 'POISON BODY RAN'\n"
+            "function Get-LocalUser { [pscustomobject]@{ Name='ATTACKER' } }\n"
+            "Export-ModuleMember -Function Get-LocalUser\n", encoding="utf-8")
+        (pm_root / "poison" / "EvilAcct" / "EvilAcct.psd1").write_text(
+            "@{ ModuleVersion='9.9.9'; GUID='eeeeeeee-0000-0000-0000-0000000049a1';"
+            " RootModule='EvilAcct.psm1'; FunctionsToExport=@('Get-LocalUser') }\n",
+            encoding="utf-8")
+        pm_harness = work / "op49a.ps1"
+        pm_harness.write_text(
+            "$ErrorActionPreference='Continue'\n"
+            "$env:PSModulePath = '" + str(pm_root / "poison").replace("\\", "\\\\")
+            + "' + ';' + $env:PSModulePath\n"
+            + _pm_block +
+            "$c = Get-Command Get-LocalUser -ErrorAction SilentlyContinue\n"
+            "Write-Output ('SOURCE=' + $c.Source)\n"
+            "Write-Output ('POISON_ON_PATH=' + ($env:PSModulePath -like '*poison*'))\n"
+            "Write-Output ('MARKER=' + (Test-Path -LiteralPath '"
+            + str(pm_marker).replace("\\", "\\\\") + "'))\n", encoding="utf-8")
+        try:
+            pm_out = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                 "Bypass", "-File", str(pm_harness)],
+                capture_output=True, text=True, timeout=180).stdout or ""
+        except (OSError, subprocess.SubprocessError):
+            pm_out = ""
+        pm_source = re.search(r"SOURCE=(\S+)", pm_out)
+        pm_on_path = "POISON_ON_PATH=True" not in pm_out
+        pm_ran = "MARKER=True" not in pm_out
+        rec("OP49a psmodulepath-is-pinned-before-the-first-autoloadable-cmdlet",
+            bool(_pm_block) and pm_ran and pm_on_path
+            and pm_source is not None
+            and pm_source.group(1).lower() == "microsoft.powershell.localaccounts",
+            f"the shipped hardening block drops the poison directory from the "
+            f"module path and Get-LocalUser resolves to the real module, so a "
+            f"planted module neither shadows the cmdlet nor runs its body "
+            f"(source={pm_source.group(1) if pm_source else 'NONE'}, "
+            f"poison-gone={pm_on_path}, body-ran={not pm_ran})")
+
+        # ---- OP49b: privileged git does not run author-config programs pre-trust
+        # git executes core.fsmonitor (among hooks/filters). Assert-TrustedSourceRoot
+        # must (a) return before git when the tree is author-writable, and
+        # (b) run git config-hermetically otherwise. Both cases: the fsmonitor
+        # program must never run.
+        def _make_repo(dest, marker, protected):
+            dest.mkdir(parents=True, exist_ok=True)
+            for cmd in (["init", "-q"],
+                        ["-c", "user.email=a@b.c", "-c", "user.name=a",
+                         "commit", "-q", "--allow-empty", "-m", "init"]):
+                subprocess.run([_git, "-C", str(dest)] + cmd,
+                               capture_output=True, text=True, timeout=60)
+            sh = dest.parent / (dest.name + "-fsmon.sh")
+            sh.write_text("#!/bin/sh\necho x > '"
+                          + str(marker).replace("\\", "/") + "'\nexit 1\n",
+                          encoding="utf-8")
+            for kv in (("core.fsmonitor", str(sh).replace("\\", "/")),
+                       ("core.fsmonitorHookVersion", "2")):
+                subprocess.run([_git, "-C", str(dest), "config", kv[0], kv[1]],
+                               capture_output=True, text=True, timeout=60)
+            if protected:
+                for a in (["/inheritance:r"],
+                          ["/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"],
+                          ["/setowner", "*S-1-5-32-544"]):
+                    subprocess.run([str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                                        / "System32" / "icacls.exe"), str(dest)] + a,
+                                   capture_output=True, text=True, timeout=60)
+
+        git_ok = os.path.exists(_git)
+        # Case E -- structurally untrusted: early-return, git must not run. A
+        # junction inside the repo is a reparse escape, detected by the attribute
+        # scan independently of any ACL/SID resolution, and it is one of the
+        # structural blockers the early return covers. A SYNTHETIC author is used
+        # so trusted git RESOLVES (the real admin author could never resolve it,
+        # which would mask whether the early return is what stops git), meaning
+        # git would run and produce WRONG_COMMIT absent the early return.
+        repoE = work / "op49b-e"
+        markerE = work / "op49b-e-marker.txt"
+        _make_repo(repoE, markerE, protected=False)
+        subprocess.run(["cmd", "/c", "mklink", "/J",
+                        str(repoE / "escape"), str(work / "op49a")],
+                       capture_output=True, text=True, timeout=60)
+        reasonsE = probe({"action": "trusted-source", "root": str(repoE),
+                          "author": identity("AUTHOR", SID_AUTHOR),
+                          "expected_commit": "a" * 40, "expected_tree": "b" * 40},
+                         work)["reasons"]
+        _structural = {"OFFLINE_SOURCE_ROOT_REPARSE_ESCAPE",
+                       "OFFLINE_SOURCE_ROOT_REPARSE_INSIDE",
+                       "OFFLINE_SOURCE_ROOT_UNENUMERABLE",
+                       "OFFLINE_SOURCE_ROOT_AUTHOR_WRITABLE",
+                       "OFFLINE_SOURCE_ROOT_REVIEWER_WRITABLE",
+                       "OFFLINE_SOURCE_ROOT_INHERITS"}
+        # Case H -- protected (synthetic author not writable): hermetic git runs.
+        repoH = work / "op49b-h"
+        markerH = work / "op49b-h-marker.txt"
+        _make_repo(repoH, markerH, protected=True)
+        reasonsH = probe({"action": "trusted-source", "root": str(repoH),
+                          "author": identity("SYNTH", SID_AUTHOR),
+                          "expected_commit": "a" * 40, "expected_tree": "b" * 40},
+                         work)["reasons"]
+        # git ran only if it produced a commit/tree verdict. Its absence, with a
+        # structural blocker present, is the early return; the fsmonitor never
+        # firing is the property. Reverting the early return makes git run and
+        # WRONG_COMMIT appear, tripping this.
+        e_early = (bool(_structural.intersection(reasonsE))
+                   and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsE
+                   and "OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY" not in reasonsE
+                   and not markerE.exists())
+        h_herm = (not markerH.exists()
+                  and ("OFFLINE_SOURCE_ROOT_WRONG_COMMIT" in reasonsH
+                       or "OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY" in reasonsH))
+        rec("OP49b privileged-git-never-runs-author-config-programs",
+            git_ok and e_early and h_herm,
+            f"an author-writable source returns before git runs (early-return, "
+            f"no WRONG_COMMIT, fsmonitor did not fire) and a protected source "
+            f"runs git hermetically (WRONG_COMMIT present, fsmonitor still did "
+            f"not fire) (E={reasonsE}, markerE={markerE.exists()}, "
+            f"H={reasonsH}, markerH={markerH.exists()})")
+
+        # ---- OP49c: the reviewer runtime is not executed while it is untrusted
+        # verify() spawned <runtime-root>\python.exe even after structural
+        # refusal reasons; the interpreter runs only when none stand.
+        rt_text = (ROOT / "scripts" / "offline_reviewer_runtime.py").read_text(encoding="utf-8")
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_loader("rt_op49c", loader=None)
+        _rt = _ilu.module_from_spec(_spec)
+        exec(compile(rt_text, "rt_op49c", "exec"), _rt.__dict__)
+        _rt_calls = []
+        _orig_run = _rt.subprocess.run
+
+        def _rec_run(cmd, *a, **k):
+            _rt_calls.append(list(cmd) if isinstance(cmd, (list, tuple)) else [cmd])
+
+            class _R:
+                returncode = 0
+                stdout = "3.10.0\n"
+                stderr = ""
+            return _R()
+        _rt.subprocess.run = _rec_run
+        rt_work = work / "op49c"
+        (rt_work / "mr-hv" / "reviewer-runtime").mkdir(parents=True, exist_ok=True)
+        (rt_work / "plant").mkdir(parents=True, exist_ok=True)
+        rt_exe = rt_work / "plant" / "python.exe"
+        rt_exe.write_bytes(b"MZ")
+        rt_reasons = _rt.verify(rt_exe, task_root=rt_work / "mr-hv",
+                                runtime_root=rt_work / "mr-hv" / "reviewer-runtime",
+                                run_probe=True)
+        _rt.subprocess.run = _orig_run
+        rt_ran = any(str(rt_exe) == c[0] for c in _rt_calls)
+        rec("OP49c the-reviewer-runtime-is-not-run-while-untrusted",
+            bool(rt_reasons) and not rt_ran,
+            f"verify() on a runtime with structural refusal reasons does not "
+            f"spawn the interpreter -- a detector must not execute the bytes it "
+            f"judges (reasons={len(rt_reasons)}, interpreter-executed={rt_ran})")
+
+        # ---- OP49c2: -HardenInterpreter checks the task root BEFORE it runs the
+        # runtime verifier (structural ordering, parallel to OP38).
+        # Bounded to the -HardenInterpreter route so it cannot be satisfied by
+        # the identically-named gate on the -ProvisionReviewerRuntime route.
+        _h_block = _boot.find("if ($HardenInterpreter)")
+        _h_exec = _boot.find("& $BuildPython -I $verifier --action verify", _h_block)
+        _h_gate = _boot.find("Assert-TaskRootProtected", _h_block)
+        rec("OP49c2 harden-interpreter-gates-the-task-root-before-execution",
+            _h_block >= 0 and _h_gate >= 0 and _h_exec >= 0
+            and _h_block < _h_gate < _h_exec,
+            f"within the -HardenInterpreter route Assert-TaskRootProtected "
+            f"precedes the '& $BuildPython -I verifier' call, so a planted "
+            f"runtime is refused before a byte of it runs "
+            f"(block@{_h_block}, gate@{_h_gate}, exec@{_h_exec})")
+
+        # ---- OP49d: privileged secedit input is not taken from $env:TEMP
+        # The .inf secedit imports at High integrity must not sit in an
+        # author-controllable directory where it can be swapped between write
+        # and read. New-ProtectedWorkDir builds an admin-only, non-inheriting,
+        # non-reparse directory off the machine Windows\Temp instead.
+        _bodies = function_bodies(_boot)
+        _sec_uses_temp = any("$env:TEMP" in _bodies.get(fn, "")
+                             for fn in ("Get-BatchLogonHolders", "Grant-BatchLogon"))
+        _npwd = ("function New-ProtectedWorkDir " + _bodies["New-ProtectedWorkDir"]
+                 if "New-ProtectedWorkDir" in _bodies else "")
+        sd_harness = work / "op49d.ps1"
+        sd_out_file = work / "op49d-result.json"
+        sd_harness.write_text(
+            "$ErrorActionPreference='Stop'\n"
+            "$icacls = (Join-Path $env:SystemRoot 'System32\\icacls.exe')\n"
+            + _npwd +
+            "\n$d = New-ProtectedWorkDir\n"
+            "$sec = [System.IO.DirectoryInfo]::new($d).GetAccessControl()\n"
+            "$owner = $sec.GetOwner([Security.Principal.SecurityIdentifier]).Value\n"
+            "$trusted = @('S-1-5-32-544','S-1-5-18',"
+            "'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')\n"
+            "$untrusted = $false\n"
+            "foreach ($a in $sec.GetAccessRules($true,$false,[Security.Principal.SecurityIdentifier])) {\n"
+            "  if ($a.AccessControlType -ne 'Allow') { continue }\n"
+            "  if ($trusted -notcontains $a.IdentityReference.Value) { $untrusted = $true }\n"
+            "}\n"
+            "$reparse = [bool]([System.IO.File]::GetAttributes($d) -band [System.IO.FileAttributes]::ReparsePoint)\n"
+            "$underTemp = $d.StartsWith($env:TEMP, [StringComparison]::OrdinalIgnoreCase)\n"
+            "[pscustomobject]@{ protected=$sec.AreAccessRulesProtected; owner=$owner;"
+            " untrusted_ace=$untrusted; reparse=$reparse; under_env_temp=$underTemp;"
+            " path=$d } | ConvertTo-Json -Compress |"
+            " Set-Content -LiteralPath '" + str(sd_out_file).replace("\\", "\\\\")
+            + "' -Encoding utf8\n"
+            "$ErrorActionPreference='Continue'\n"
+            "takeown /F $d /R /D Y 2>&1 | Out-Null; & $icacls $d /reset /T /C /Q 2>&1 | Out-Null\n"
+            "Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue\n",
+            encoding="utf-8")
+        sd = {}
+        try:
+            subprocess.run([str(SHELL), "-NoProfile", "-NonInteractive",
+                            "-ExecutionPolicy", "Bypass", "-File", str(sd_harness)],
+                           capture_output=True, text=True, timeout=180)
+            if sd_out_file.exists():
+                sd = json.loads(sd_out_file.read_text(encoding="utf-8-sig"))
+        except (OSError, subprocess.SubprocessError, ValueError):
+            sd = {}
+        rec("OP49d privileged-secedit-input-is-not-author-controllable",
+            bool(_npwd) and not _sec_uses_temp and bool(sd)
+            and sd.get("protected") is True
+            and sd.get("owner") == "S-1-5-32-544"
+            and sd.get("untrusted_ace") is False
+            and sd.get("reparse") is False
+            and sd.get("under_env_temp") is False,
+            f"the secedit functions no longer read $env:TEMP and the transient "
+            f"directory is admin-owned, inheritance-stripped, reparse-free and "
+            f"outside the author-controllable temp (uses-temp={_sec_uses_temp}, "
+            f"dir={sd})")
+
         print()
     finally:
         # THE FIXTURES ARE SYSTEM-OWNED AND PROTECTED, so rmtree cannot remove
@@ -2777,7 +3046,7 @@ def main() -> int:
     # recorded through the same no-op and vanished, and main() returned 0 with
     # zero checks executed. The floor cannot be allowed to depend on the
     # mechanism it exists to police.
-    MINIMUM_CHECKS = 75
+    MINIMUM_CHECKS = 80
     if len(CHECKS) < MINIMUM_CHECKS:
         print(json.dumps({
             "guard": "offline-operator-principal",
@@ -2796,6 +3065,9 @@ def main() -> int:
     # against what actually ran, so drift shows up as a failure rather than as
     # slack.
     REQUIRED_FAMILIES = {
+        "OP49": ("the pre-trust elevated execution-surface checks: without these "
+                 "the module-path, git-config, runtime-ordering and secedit-input "
+                 "fixes are unmeasured"),
         "OP48": ("the credential-chain refusal: without these the route that "
                  "resets the reviewer password is unmeasured"),
     }

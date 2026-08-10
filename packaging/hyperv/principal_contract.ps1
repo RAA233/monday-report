@@ -1049,6 +1049,27 @@ function Assert-TrustedSourceRoot {
         $reasons.Add('OFFLINE_SOURCE_ROOT_INHERITS')
     }
 
+    # DO NOT RUN GIT AGAINST A TREE ALREADY KNOWN UNTRUSTED.
+    #
+    # git reads .git\config when it runs, and core.fsmonitor -- among hooks,
+    # filter drivers, credential helpers, aliases and external diff/textconv --
+    # names a program git EXECUTES. Measured: `git status --porcelain` launched a
+    # configured fsmonitor program. So reaching git to learn the commit of an
+    # author-writable tree runs author code at High integrity to establish that
+    # the tree is author-writable. The recursive scan above already sets
+    # OFFLINE_SOURCE_ROOT_AUTHOR_WRITABLE when .git\config carries a file-level
+    # author ACE; returning here is what stops git being reached before that
+    # verdict is acted on. The git calls below are additionally config-hermetic,
+    # but this return is the guarantee, not that.
+    foreach ($__blocker in @('OFFLINE_SOURCE_ROOT_REPARSE_ESCAPE',
+                             'OFFLINE_SOURCE_ROOT_REPARSE_INSIDE',
+                             'OFFLINE_SOURCE_ROOT_UNENUMERABLE',
+                             'OFFLINE_SOURCE_ROOT_AUTHOR_WRITABLE',
+                             'OFFLINE_SOURCE_ROOT_REVIEWER_WRITABLE',
+                             'OFFLINE_SOURCE_ROOT_INHERITS')) {
+        if ($reasons -contains $__blocker) { return $reasons }
+    }
+
     # git runs FIRST, so OFFLINE_SOURCE_ROOT_DIRTY is evaluated even when no
     # expected identity was supplied. Returning here meant one acknowledgement
     # waived two properties: the missing pin AND the untracked .ps1 or .py
@@ -1065,16 +1086,38 @@ function Assert-TrustedSourceRoot {
     # error -- so the whole verification threw instead of returning the reason
     # it had already established. Native output is captured, never trusted to
     # be silent.
+    # CONFIG-HERMETIC. Even past the structural return above, git must not run a
+    # program named by configuration the operator does not control. The system
+    # and author-global configs are dropped through the environment
+    # (GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL -> the null device, which carry the
+    # author's aliases, credential helpers and global filter/textconv drivers),
+    # and the one execution-capable key a repo-local config can reach on these
+    # commands, core.fsmonitor, is emptied on the command line, which overrides
+    # repo config; hooks are pointed at a path that does not exist. Measured:
+    # with core.fsmonitor emptied here the configured program does not run.
+    $gitHermetic = @('-c', 'core.fsmonitor=',
+                     '-c', 'core.hooksPath=C:\mr-offline-no-such-hooks-dir')
     $head = ''; $tree = ''; $dirty = ''
     $prevPref = $ErrorActionPreference
+    $prevNoSystem = $env:GIT_CONFIG_NOSYSTEM
+    $prevGlobal   = $env:GIT_CONFIG_GLOBAL
+    $prevPrompt   = $env:GIT_TERMINAL_PROMPT
     $ErrorActionPreference = 'Continue'
+    $env:GIT_CONFIG_NOSYSTEM = '1'
+    $env:GIT_CONFIG_GLOBAL   = 'NUL'
+    $env:GIT_TERMINAL_PROMPT = '0'
     try {
-        $head  = (& $git -C $Root rev-parse HEAD 2>&1 | Out-String).Trim()
-        $tree  = (& $git -C $Root rev-parse 'HEAD^{tree}' 2>&1 | Out-String).Trim()
-        $dirty = (& $git -C $Root status --porcelain 2>&1 | Out-String).Trim()
+        $head  = (& $git @gitHermetic -C $Root rev-parse HEAD 2>&1 | Out-String).Trim()
+        $tree  = (& $git @gitHermetic -C $Root rev-parse 'HEAD^{tree}' 2>&1 | Out-String).Trim()
+        $dirty = (& $git @gitHermetic -C $Root status --porcelain 2>&1 | Out-String).Trim()
     } catch {
         $head = ''
-    } finally { $ErrorActionPreference = $prevPref }
+    } finally {
+        $ErrorActionPreference   = $prevPref
+        $env:GIT_CONFIG_NOSYSTEM = $prevNoSystem
+        $env:GIT_CONFIG_GLOBAL   = $prevGlobal
+        $env:GIT_TERMINAL_PROMPT = $prevPrompt
+    }
     if ($head -notmatch '^[0-9a-f]{40}$') {
         $reasons.Add('OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY'); return $reasons
     }

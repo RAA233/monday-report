@@ -519,7 +519,18 @@ def verify(candidate_exe: Path, *, task_root: Path = TASK_ROOT,
         if tree_digest(root, exclude=frozenset({MANIFEST_NAME})) != recorded:
             reasons.append("REVIEWER_RUNTIME_TREE_DIGEST_MISMATCH")
 
-    if run_probe:
+    # NEVER EXECUTE A TREE ALREADY KNOWN UNTRUSTWORTHY.
+    #
+    # interpreter_version() and site_is_disabled() spawn <runtime-root>\python.exe
+    # -- author-supplied bytes at the caller's integrity. Running them after a
+    # structural refusal (outside the task root, a reparse escape, a digest
+    # mismatch, a missing/traversed path) meant the planted interpreter executed
+    # anyway, hundreds of lines above the point the caller acts on the verdict.
+    # A detector that runs the bytes it is judging is not a boundary. If any
+    # structural reason already stands, the interpreter is not run; the caller
+    # (Assert-TaskRootProtected, moved ahead of this invocation) has in any case
+    # already established the tree is non-author-writable before we are reached.
+    if run_probe and not reasons:
         expected_version = str(manifest.get("interpreter_version", "") or "")
         reported = interpreter_version(resolved)
         if not reported:

@@ -142,6 +142,76 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# ==== PSMODULEPATH, PINNED BEFORE THE FIRST AUTO-LOADABLE CMDLET ====
+#
+# Get-LocalUser, Get-ScheduledTask, Get-Acl and their siblings are resolved by
+# NAME. In `powershell.exe -NoProfile -File` -- the documented operator
+# invocation -- those live in modules that are not preloaded, so the engine
+# scans $env:PSModulePath and imports the first module that exports the name,
+# running that module's body. The first entry on an inherited path is the user
+# profile module directory, writable without elevation, and HKCU\Environment
+# lets an ordinary author prepend any directory. Measured on this host: a module
+# planted on the path and exporting Get-LocalUser executed arbitrary code as the
+# running identity and shadowed the cmdlet, at High integrity, before any gate.
+# This is the module-path counterpart of the PATH pinning the native-command
+# resolver already does for icacls/takeown/schtasks/secedit/git.
+#
+# Written with .NET and language primitives only, and placed before every other
+# statement that could trigger auto-loading, because the thing being defended is
+# exactly a cmdlet call. The path is set to the trusted machine module roots and
+# nothing else; the user profile and any prepended directory are dropped.
+function Test-TrustedModuleRoot {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    if (-not [System.IO.Directory]::Exists($Path)) { return $false }
+    $trusted = @('S-1-5-32-544', 'S-1-5-18',
+                 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    try {
+        if ([System.IO.File]::GetAttributes($Path) -band [System.IO.FileAttributes]::ReparsePoint) {
+            return $false
+        }
+        $sec = [System.IO.DirectoryInfo]::new($Path).GetAccessControl()
+        $owner = $sec.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+        if ($trusted -notcontains $owner) { return $false }
+        foreach ($ace in $sec.GetAccessRules($true, $true,
+                         [System.Security.Principal.SecurityIdentifier])) {
+            if ($ace.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+            if ($ace.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            if ($trusted -contains $ace.IdentityReference.Value) { continue }
+            $rights = [int]$ace.FileSystemRights
+            if ($rights -band 0x10000000) { $rights = $rights -bor 0x1F01FF }  # GENERIC_ALL
+            if ($rights -band 0x40000000) { $rights = $rights -bor 0x40116 }   # GENERIC_WRITE
+            # write set + delete-child -- what it takes to plant or replace a module
+            if ($rights -band 0xD0156) { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+$__sysModules = [System.IO.Path]::Combine(
+    [Environment]::GetEnvironmentVariable('SystemRoot'),
+    'System32', 'WindowsPowerShell', 'v1.0', 'Modules')
+$__pfModules = [System.IO.Path]::Combine(
+    [Environment]::GetEnvironmentVariable('ProgramFiles'),
+    'WindowsPowerShell', 'Modules')
+# The System32 module directory is the one that MUST be trusted -- it supplies
+# LocalAccounts, ScheduledTasks, Management and Security, every module this
+# script resolves. If it is missing, a reparse point, or writable by a
+# non-privileged principal, there is no trusted module environment and the
+# elevated session must not proceed.
+if (-not (Test-TrustedModuleRoot $__sysModules)) {
+    Write-Output ''
+    Write-Output '  STOP: the system PowerShell module directory is missing, a reparse'
+    Write-Output '  point, or writable by a non-privileged principal, so a trusted module'
+    Write-Output '  environment cannot be established. The elevated session will not run.'
+    Write-Output '  reason: OFFLINE_TRUSTED_MODULE_PATH_UNAVAILABLE'
+    exit 2
+}
+$__moduleRoots = @()
+foreach ($__r in @($__sysModules, $__pfModules)) {
+    if (Test-TrustedModuleRoot $__r) { $__moduleRoots += $__r }
+}
+$env:PSModulePath = ($__moduleRoots -join ';')
+
 # $PSScriptRoot IS populated here, in the body. Both defaults are resolved now
 # rather than in the param block, where an advanced function launched with -File
 # sees an empty string.
@@ -1239,9 +1309,36 @@ function Test-Elevated {
         [Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function New-ProtectedWorkDir {
+    # A transient directory for privileged inputs -- here a secedit .inf that is
+    # written and then re-read by secedit at High integrity. NOT under $env:TEMP:
+    # an elevated process launched from the author's session inherits the
+    # author's TEMP, whose ACL the author controls through HKCU, and a watcher
+    # can substitute the .inf between the write and secedit's read, applying an
+    # author-chosen machine-wide privilege policy. The base is the machine
+    # Windows\Temp resolved from the OS (GetFolderPath), not from the
+    # environment; the GUID leaf is unpredictable; and the leaf's inheritance is
+    # stripped and its owner and DACL set to Administrators and SYSTEM only
+    # BEFORE any content is written, so no non-privileged principal can read,
+    # write or watch it. Freshly created (no -Force), so it is provably ours.
+    $winDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+    $base = [System.IO.Path]::Combine($winDir, 'Temp')
+    $work = [System.IO.Path]::Combine($base, 'mrsec-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $work | Out-Null
+    if ([System.IO.File]::GetAttributes($work) -band [System.IO.FileAttributes]::ReparsePoint) {
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+        throw 'protected work directory resolved to a reparse point'
+    }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    & $icacls $work /inheritance:r /q | Out-Null
+    & $icacls $work /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /q | Out-Null
+    & $icacls $work /setowner "*S-1-5-32-544" /q | Out-Null
+    $ErrorActionPreference = $prev
+    return $work
+}
+
 function Get-BatchLogonHolders {
-    $work = Join-Path $env:TEMP ('mrsec-' + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force -Path $work | Out-Null
+    $work = New-ProtectedWorkDir
     $cfg = Join-Path $work 'export.inf'
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $secedit /export /areas USER_RIGHTS /cfg $cfg /quiet | Out-Null
@@ -1261,8 +1358,7 @@ function Grant-BatchLogon {
     if ($line -and ($line -match [regex]::Escape($Sid) -or $line -match [regex]::Escape($Name))) {
         return $true
     }
-    $work = Join-Path $env:TEMP ('mrsec-' + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Force -Path $work | Out-Null
+    $work = New-ProtectedWorkDir
     $exp = Join-Path $work 'export.inf'; $imp = Join-Path $work 'import.inf'
     $db  = Join-Path $work 'local.sdb'
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -1570,6 +1666,20 @@ if ($HardenInterpreter) {
         exit 2
     }
 
+    # TRUST THE TREE BEFORE RUNNING ANYTHING OUT OF IT.
+    #
+    # This gate used to sit AFTER the verifier had already launched
+    # <runtime-root>\python.exe. C:\ grants Authenticated Users create-folder, so
+    # an unprivileged author can pre-create C:\mr-hv\reviewer-runtime and plant a
+    # python.exe; the verifier then executed the author's binary at High
+    # integrity, and only then was the tree checked -- and the script printed
+    # "Nothing was changed" on exactly the path where the author's code had run.
+    # -ProvisionReviewerRuntime already runs this gate before its own execution;
+    # this is the missing half of the pair. It refuses an unprotected task root or
+    # an author-writable runtime, so a planted tree is rejected before a byte of
+    # it runs.
+    Assert-TaskRootProtected -Root $HvRoot -Runtime $runtimeRoot
+
     # The verifier decides, not this script. Same code the guard drives through
     # seventeen mutation cycles, so the refusal reasons are the tested ones.
     $BuildPython = Resolve-BuildPython -Supplied $BuildPython
@@ -1600,6 +1710,10 @@ if ($HardenInterpreter) {
         exit 2
     }
 
+    # Task-root protection was asserted above, before the verifier ran, so a
+    # planted runtime never reached execution. Re-assert here as well: the ACLs
+    # applied just below are what LOCK the tree, and confirming the root is still
+    # protected immediately before locking it costs nothing.
     Assert-TaskRootProtected -Root $HvRoot -Runtime $runtimeRoot
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     & $icacls $runtimeRoot /reset /T /C /Q | Out-Null
@@ -1693,8 +1807,19 @@ if ($ExportSource) {
     #
     # Administrative only: no credential is involved and none is prompted for.
     $dest = "$HvRoot\reviewer-src"
-    $head = (& $gitExe -C $SourceRepo rev-parse HEAD).Trim()
-    $tree = (& $gitExe -C $SourceRepo rev-parse 'HEAD^{tree}').Trim()
+    # CONFIG-HERMETIC, like the source verifier. The source is already validated
+    # non-author-writable by Assert-TrustedOperatorSource before this route runs,
+    # and the destination is a fresh clone, but a privileged git invocation must
+    # never run a program named by author configuration regardless. Same flags
+    # and environment the contract uses.
+    $ghArgs = @('-c', 'core.fsmonitor=',
+                '-c', 'core.hooksPath=C:\mr-offline-no-such-hooks-dir')
+    $prevNoSystem = $env:GIT_CONFIG_NOSYSTEM
+    $prevGlobal   = $env:GIT_CONFIG_GLOBAL
+    $env:GIT_CONFIG_NOSYSTEM = '1'
+    $env:GIT_CONFIG_GLOBAL   = 'NUL'
+    $head = (& $gitExe @ghArgs -C $SourceRepo rev-parse HEAD).Trim()
+    $tree = (& $gitExe @ghArgs -C $SourceRepo rev-parse 'HEAD^{tree}').Trim()
     Write-Fact 'exporting head' $head
     # Reclaim before replacing. A previous export leaves the tree owned by the
     # reviewer with no author-user rights, so even an administrator cannot
@@ -1710,12 +1835,14 @@ if ($ExportSource) {
     if (Test-Path -LiteralPath "$dest\.git") { Remove-Item -LiteralPath $dest -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    & $gitExe clone --local --no-hardlinks --quiet $SourceRepo $dest | Out-Null
-    & $gitExe -C $dest checkout --quiet --detach $head | Out-Null
+    & $gitExe @ghArgs clone --local --no-hardlinks --quiet $SourceRepo $dest | Out-Null
+    & $gitExe @ghArgs -C $dest checkout --quiet --detach $head | Out-Null
     $ErrorActionPreference = $prev
 
-    $exportedHead = (& $gitExe -C $dest rev-parse HEAD).Trim()
-    $exportedTree = (& $gitExe -C $dest rev-parse 'HEAD^{tree}').Trim()
+    $exportedHead = (& $gitExe @ghArgs -C $dest rev-parse HEAD).Trim()
+    $exportedTree = (& $gitExe @ghArgs -C $dest rev-parse 'HEAD^{tree}').Trim()
+    $env:GIT_CONFIG_NOSYSTEM = $prevNoSystem
+    $env:GIT_CONFIG_GLOBAL   = $prevGlobal
     Write-Fact 'exported head matches' ($exportedHead -eq $head)
     Write-Fact 'exported tree matches' ($exportedTree -eq $tree)
     if ($exportedHead -ne $head -or $exportedTree -ne $tree) {
