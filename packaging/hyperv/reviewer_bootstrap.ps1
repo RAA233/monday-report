@@ -620,6 +620,31 @@ function Assert-TaskRootProtected {
         Write-Output '  remedy: run -ProvisionPaths first, which breaks that inheritance.'
         exit 2
     }
+    # THE ROOT ITSELF, NOT ONLY ITS INHERITANCE FLAG. "Protected" (non-inheriting)
+    # is satisfiable by a non-admin author who owns C:\mr-hv -- C:\ grants
+    # Authenticated Users create-folder, so the author can pre-create the root,
+    # set it protected, own it, and grant itself an inheritable Modify ACE that
+    # every child (including a freshly built reviewer-runtime) then inherits.
+    # The build route calls this with Runtime='', so without an owner and
+    # author-writability check on the root the recursive check below never runs
+    # and the author's tree is accepted, then executed. Owner and author-write
+    # are checked here, always, regardless of Runtime.
+    $rootOwner = ''
+    try { $rootOwner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { }
+    $trustedTaskOwners = @('S-1-5-32-544', 'S-1-5-18',
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    if (-not $rootOwner -or ($trustedTaskOwners -notcontains $rootOwner)) {
+        Write-Output '  STOP: the task root is not owned by a privileged principal.'
+        Write-Output '  reason: OFFLINE_TASK_ROOT_OWNER_UNTRUSTED'
+        Write-Output '  An owner holds implicit WRITE_DAC and can grant itself the rest.'
+        exit 2
+    }
+    if (Test-AuthorWritable -Path $Root) {
+        Write-Output '  STOP: the task root is writable by the author identity.'
+        Write-Output '  reason: OFFLINE_TASK_ROOT_AUTHOR_WRITABLE'
+        Write-Output '  A child built or locked under it would inherit that access.'
+        exit 2
+    }
     if ($Runtime -and (Test-Path -LiteralPath $Runtime)) {
         # Recursive: the leaf's own DACL says nothing about an inherited ACE on
         # a subdirectory, and ownership anywhere inside is a write right.
@@ -1581,14 +1606,18 @@ if ($ProvisionReviewerRuntime) {
     }
     Assert-InterpreterSourceTrusted -Interpreter $BuildPython `
         -Route '-ProvisionReviewerRuntime'
-    Assert-TaskRootProtected -Root $HvRoot -Runtime ''
+    # $runtimeRoot is passed so that when a runtime already exists (a re-provision)
+    # its subtree is checked too; and the strengthened root owner/author-write
+    # check now runs regardless, so build() writes into and executes from an
+    # admin-owned, non-author-writable tree.
+    $runtimeRoot = Join-Path $HvRoot 'reviewer-runtime'
+    Assert-TaskRootProtected -Root $HvRoot -Runtime $runtimeRoot
     $builder = Join-Path $SourceRepo 'scripts\offline_reviewer_runtime.py'
     if (-not (Test-Path -LiteralPath $builder)) {
         Write-Output '  STOP: the runtime builder is missing from the source repository.'
         Write-Output '  reason: REVIEWER_RUNTIME_BUILDER_ABSENT'
         exit 2
     }
-    $runtimeRoot = Join-Path $HvRoot 'reviewer-runtime'
 
     # Reclaim first: a previous run leaves the tree owned by Administrators with
     # no author ACE, so replacing it in place would fail partway and leave a
@@ -1812,8 +1841,17 @@ if ($ExportSource) {
     # and the destination is a fresh clone, but a privileged git invocation must
     # never run a program named by author configuration regardless. Same flags
     # and environment the contract uses.
-    $ghArgs = @('-c', 'core.fsmonitor=',
-                '-c', 'core.hooksPath=C:\mr-offline-no-such-hooks-dir')
+    # hooksPath UNDER the OS Windows directory, which a non-administrator cannot
+    # write. clone and checkout RUN the post-checkout hook from core.hooksPath;
+    # the earlier value sat directly under C:\ (Authenticated Users can create a
+    # folder there), so the author could create the "nonexistent" hooks
+    # directory and plant post-checkout, running author code at High integrity
+    # from a documented route even against a perfectly trusted source. Measured:
+    # from a hooksPath the author cannot populate, no hook fires.
+    $hooksDeny = [System.IO.Path]::Combine(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows),
+        'mr-offline-no-such-hooks')
+    $ghArgs = @('-c', 'core.fsmonitor=', '-c', "core.hooksPath=$hooksDeny")
     $prevNoSystem = $env:GIT_CONFIG_NOSYSTEM
     $prevGlobal   = $env:GIT_CONFIG_GLOBAL
     $env:GIT_CONFIG_NOSYSTEM = '1'

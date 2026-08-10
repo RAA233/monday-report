@@ -2288,9 +2288,9 @@ def main() -> int:
 
         # Pinned. Update deliberately, in the same commit as any intended change
         # to either file, and never to make a run go green.
-        PINNED_PROLOGUE = "0800ba7ae4d9ff0c"
-        PINNED_BOOT_CHARS = 128379
-        PINNED_CONTRACT_CHARS = 64068
+        PINNED_PROLOGUE = "2436febdfa6fcd7e"
+        PINNED_BOOT_CHARS = 130898
+        PINNED_CONTRACT_CHARS = 65948
         PINNED_RUNTIME_CHARS = 26139
         rec("OP48v every-file-the-elevated-session-executes-is-pinned-whole",
             bool(prologue_digest) and prologue_count == PINNED_BOOT_CHARS
@@ -2826,41 +2826,42 @@ def main() -> int:
             f"poison-gone={pm_on_path}, body-ran={not pm_ran})")
 
         # ---- OP49b: privileged git does not run author-config programs pre-trust
-        # git executes core.fsmonitor (among hooks/filters). Assert-TrustedSourceRoot
-        # must (a) return before git when the tree is author-writable, and
-        # (b) run git config-hermetically otherwise. Both cases: the fsmonitor
-        # program must never run.
-        def _make_repo(dest, marker, protected):
+        # git executes programs named by config (core.fsmonitor, filter drivers,
+        # hooks). Assert-TrustedSourceRoot must return before git for any
+        # structurally untrusted tree, refuse a tree whose repo-local config
+        # carries an execution-capable directive, and run git config-hermetically
+        # on a clean tree. In every case an author-named program must not run.
+        _icacls_exe = str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                          / "System32" / "icacls.exe")
+
+        def _make_repo(dest, marker, protected, with_fsmon=True):
             dest.mkdir(parents=True, exist_ok=True)
             for cmd in (["init", "-q"],
                         ["-c", "user.email=a@b.c", "-c", "user.name=a",
                          "commit", "-q", "--allow-empty", "-m", "init"]):
                 subprocess.run([_git, "-C", str(dest)] + cmd,
                                capture_output=True, text=True, timeout=60)
-            sh = dest.parent / (dest.name + "-fsmon.sh")
-            sh.write_text("#!/bin/sh\necho x > '"
-                          + str(marker).replace("\\", "/") + "'\nexit 1\n",
-                          encoding="utf-8")
-            for kv in (("core.fsmonitor", str(sh).replace("\\", "/")),
-                       ("core.fsmonitorHookVersion", "2")):
-                subprocess.run([_git, "-C", str(dest), "config", kv[0], kv[1]],
-                               capture_output=True, text=True, timeout=60)
+            if with_fsmon:
+                sh = dest.parent / (dest.name + "-fsmon.sh")
+                sh.write_text("#!/bin/sh\necho x > '"
+                              + str(marker).replace("\\", "/") + "'\nexit 1\n",
+                              encoding="utf-8")
+                for kv in (("core.fsmonitor", str(sh).replace("\\", "/")),
+                           ("core.fsmonitorHookVersion", "2")):
+                    subprocess.run([_git, "-C", str(dest), "config", kv[0], kv[1]],
+                                   capture_output=True, text=True, timeout=60)
             if protected:
                 for a in (["/inheritance:r"],
                           ["/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"],
                           ["/setowner", "*S-1-5-32-544"]):
-                    subprocess.run([str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
-                                        / "System32" / "icacls.exe"), str(dest)] + a,
+                    subprocess.run([_icacls_exe, str(dest)] + a,
                                    capture_output=True, text=True, timeout=60)
 
         git_ok = os.path.exists(_git)
-        # Case E -- structurally untrusted: early-return, git must not run. A
-        # junction inside the repo is a reparse escape, detected by the attribute
-        # scan independently of any ACL/SID resolution, and it is one of the
-        # structural blockers the early return covers. A SYNTHETIC author is used
-        # so trusted git RESOLVES (the real admin author could never resolve it,
-        # which would mask whether the early return is what stops git), meaning
-        # git would run and produce WRONG_COMMIT absent the early return.
+        # Case E -- structurally untrusted: a junction (reparse escape, detected
+        # by the attribute scan, ahead of the config scan and git) with a
+        # SYNTHETIC author for whom trusted git RESOLVES (the real admin author
+        # never could, masking whether the early return is what stops git).
         repoE = work / "op49b-e"
         markerE = work / "op49b-e-marker.txt"
         _make_repo(repoE, markerE, protected=False)
@@ -2877,32 +2878,154 @@ def main() -> int:
                        "OFFLINE_SOURCE_ROOT_AUTHOR_WRITABLE",
                        "OFFLINE_SOURCE_ROOT_REVIEWER_WRITABLE",
                        "OFFLINE_SOURCE_ROOT_INHERITS"}
-        # Case H -- protected (synthetic author not writable): hermetic git runs.
+        # Case H -- protected, but .git/config carries core.fsmonitor: the config
+        # scan refuses before git; the fsmonitor program never runs.
         repoH = work / "op49b-h"
         markerH = work / "op49b-h-marker.txt"
-        _make_repo(repoH, markerH, protected=True)
+        _make_repo(repoH, markerH, protected=True, with_fsmon=True)
         reasonsH = probe({"action": "trusted-source", "root": str(repoH),
                           "author": identity("SYNTH", SID_AUTHOR),
                           "expected_commit": "a" * 40, "expected_tree": "b" * 40},
                          work)["reasons"]
-        # git ran only if it produced a commit/tree verdict. Its absence, with a
-        # structural blocker present, is the early return; the fsmonitor never
-        # firing is the property. Reverting the early return makes git run and
-        # WRONG_COMMIT appear, tripping this.
+        # Case C -- protected, clean config: git runs hermetically -> WRONG_COMMIT.
+        repoC = work / "op49b-c"
+        markerC = work / "op49b-c-marker.txt"
+        _make_repo(repoC, markerC, protected=True, with_fsmon=False)
+        reasonsC = probe({"action": "trusted-source", "root": str(repoC),
+                          "author": identity("SYNTH", SID_AUTHOR),
+                          "expected_commit": "a" * 40, "expected_tree": "b" * 40},
+                         work)["reasons"]
         e_early = (bool(_structural.intersection(reasonsE))
                    and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsE
                    and "OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY" not in reasonsE
                    and not markerE.exists())
-        h_herm = (not markerH.exists()
-                  and ("OFFLINE_SOURCE_ROOT_WRONG_COMMIT" in reasonsH
-                       or "OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY" in reasonsH))
+        h_config = ("OFFLINE_SOURCE_ROOT_GIT_CONFIG_EXECUTABLE" in reasonsH
+                    and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsH
+                    and not markerH.exists())
+        c_herm = (not markerC.exists()
+                  and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" in reasonsC)
         rec("OP49b privileged-git-never-runs-author-config-programs",
-            git_ok and e_early and h_herm,
-            f"an author-writable source returns before git runs (early-return, "
-            f"no WRONG_COMMIT, fsmonitor did not fire) and a protected source "
-            f"runs git hermetically (WRONG_COMMIT present, fsmonitor still did "
-            f"not fire) (E={reasonsE}, markerE={markerE.exists()}, "
-            f"H={reasonsH}, markerH={markerH.exists()})")
+            git_ok and e_early and h_config and c_herm,
+            f"a structurally untrusted source returns before git (no "
+            f"WRONG_COMMIT, no marker); a source whose repo-local config carries "
+            f"an execution-capable directive is refused before git "
+            f"(GIT_CONFIG_EXECUTABLE, no marker); a clean protected source runs "
+            f"git hermetically (WRONG_COMMIT, no marker) "
+            f"(E={reasonsE} m={markerE.exists()}, H={reasonsH} m={markerH.exists()}, "
+            f"C={reasonsC} m={markerC.exists()})")
+
+        # ---- OP49e: privileged git hooks come from a directory the author
+        # cannot create. clone/checkout run post-checkout from core.hooksPath;
+        # a value directly under C:\ (Authenticated Users can create-folder) let
+        # the author populate the "nonexistent" hooks dir. The shipped value is
+        # under the OS Windows directory, which a non-admin cannot write.
+        _hp = re.search(r"GetFolderPath\(\[Environment\+SpecialFolder\]::Windows\),\s*"
+                        r"'mr-offline-no-such-hooks'", _boot.replace("\n", " "))
+        hook_marker = work / "op49e-hook.txt"
+        hook_plant = work / "op49e-hooks"
+        hook_plant.mkdir(parents=True, exist_ok=True)
+        (hook_plant / "post-checkout").write_text(
+            "#!/bin/sh\necho x > '" + str(hook_marker).replace("\\", "/") + "'\n",
+            encoding="utf-8")
+        hook_src = work / "op49e-src"
+        _make_repo(hook_src, work / "unused", protected=False, with_fsmon=False)
+        shipped_hooks = str(Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                            / "mr-offline-no-such-hooks")
+        _env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "NUL"}
+
+        def _clone_with_hooks(hp, dst):
+            subprocess.run([_git, "-c", "core.fsmonitor=", "-c", f"core.hooksPath={hp}",
+                            "clone", "--local", "--no-hardlinks", "--quiet",
+                            str(hook_src), str(dst)],
+                           capture_output=True, text=True, timeout=60, env=_env)
+        # positive control: an author-populated hooks dir DOES fire.
+        _clone_with_hooks(str(hook_plant), work / "op49e-ctl")
+        ctl_fired = hook_marker.exists()
+        if hook_marker.exists():
+            hook_marker.unlink()
+        # shipped: a hooks dir under Windows\, which the author cannot populate.
+        _clone_with_hooks(shipped_hooks, work / "op49e-shipped")
+        shipped_fired = hook_marker.exists()
+        # the Windows dir denies a non-admin create -- proven by the ACL not
+        # granting Users/Authenticated-Users an add-subdirectory right.
+        win_acl = subprocess.run(
+            [_icacls_exe, str(Path(os.environ.get("SystemRoot", r"C:\Windows")))],
+            capture_output=True, text=True, timeout=60).stdout or ""
+        win_denies_create = not re.search(
+            r"(Users|Authenticated Users):\([^)]*\b(W|AD|WD)\b", win_acl)
+        rec("OP49e privileged-git-hooks-come-from-a-non-author-creatable-dir",
+            bool(_hp) and ctl_fired and not shipped_fired and win_denies_create,
+            f"clone runs post-checkout from an author-populated hooks dir "
+            f"(control fired={ctl_fired}) but not from the shipped hooks path "
+            f"under the OS Windows directory, which denies a non-admin the right "
+            f"to create it (shipped fired={shipped_fired}, "
+            f"windows-denies-create={win_denies_create}, uses-windir={bool(_hp)})")
+
+        # ---- OP49f: the task-root gate checks the ROOT's owner and author-
+        # writability, so the build route (which passes Runtime='') cannot be
+        # satisfied by an author-owned, protected root granting itself Modify.
+        _atrp = ("function Assert-TaskRootProtected "
+                 + _bodies_boot["Assert-TaskRootProtected"]
+                 if "Assert-TaskRootProtected" in (_bodies_boot := function_bodies(_boot))
+                 else "")
+        # The build route must pass the runtime, not the empty string.
+        _prr_block = _boot.find("if ($ProvisionReviewerRuntime)")
+        _prr_gate_empty = _boot.find("Assert-TaskRootProtected -Root $HvRoot -Runtime ''",
+                                     _prr_block) if _prr_block >= 0 else -1
+
+        _real_author_name = os.environ.get("USERNAME", "")
+
+        def _run_atrp(dst, author_writable, use_real_author):
+            dst.mkdir(parents=True, exist_ok=True)
+            acls = [["/inheritance:r"],
+                    ["/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"]]
+            if author_writable:
+                # Authenticated Users Modify -- the real author (an admin here)
+                # is authenticated, so Test-AccountCanWritePath matches it
+                # deterministically, unlike a synthetic SID.
+                acls.append(["/grant:r", "*S-1-5-11:(OI)(CI)M"])
+            acls.append(["/setowner", "*S-1-5-32-544"])
+            for a in acls:
+                subprocess.run([_icacls_exe, str(dst)] + a,
+                               capture_output=True, text=True, timeout=60)
+            # Real author (an admin here) for the author-writable case; a
+            # synthetic non-admin for the clean-passes control, since on this
+            # single-admin host the real author is a member of Administrators and
+            # would read as writable against any admin-only tree.
+            if use_real_author:
+                ident = ("$AuthorIdentity = Resolve-PrincipalIdentity -Account '"
+                         + _real_author_name + "'\n")
+            else:
+                ident = ("$AuthorIdentity = [pscustomobject]@{ Name='SYNTH'; Sid='"
+                         + SID_AUTHOR + "'; Exists=$true; Resolved=$true }\n")
+            h = work / (dst.name + "-atrp.ps1")
+            h.write_text(
+                "$ErrorActionPreference='Continue'\n"
+                "$icacls = (Join-Path $env:SystemRoot 'System32\\icacls.exe')\n"
+                ". '" + str(ROOT / "packaging" / "hyperv" / "principal_contract.ps1")
+                + "'\n" + ident
+                + "function Test-AuthorWritable { param([string]$Path)\n"
+                "  Test-AccountCanWritePath -Identity $AuthorIdentity -Path $Path }\n"
+                + _atrp
+                + "\nAssert-TaskRootProtected -Root '" + str(dst) + "' -Runtime ''\n"
+                "Write-Output 'ATRP-PASSED'\n", encoding="utf-8")
+            out = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                 "Bypass", "-File", str(h)], capture_output=True, text=True, timeout=180)
+            return out.returncode, (out.stdout or "") + (out.stderr or "")
+        f_rc, f_text = _run_atrp(work / "op49f-writable", author_writable=True,
+                                 use_real_author=True)
+        g_rc, g_text = _run_atrp(work / "op49f-clean", author_writable=False,
+                                 use_real_author=False)
+        rec("OP49f task-root-gate-checks-owner-and-author-writability",
+            bool(_atrp) and _prr_gate_empty < 0
+            and f_rc == 2 and "OFFLINE_TASK_ROOT_AUTHOR_WRITABLE" in f_text
+            and g_rc == 0 and "ATRP-PASSED" in g_text,
+            f"a protected root granting the author Modify is refused even with "
+            f"Runtime='' (so the build route is covered), while a protected "
+            f"admin-only root passes for a non-author; and the build route no "
+            f"longer calls the gate with an empty Runtime (writable-rc={f_rc}, "
+            f"clean-rc={g_rc}, build-empty-call={_prr_gate_empty})")
 
         # ---- OP49c: the reviewer runtime is not executed while it is untrusted
         # verify() spawned <runtime-root>\python.exe even after structural
@@ -3046,7 +3169,7 @@ def main() -> int:
     # recorded through the same no-op and vanished, and main() returned 0 with
     # zero checks executed. The floor cannot be allowed to depend on the
     # mechanism it exists to police.
-    MINIMUM_CHECKS = 80
+    MINIMUM_CHECKS = 82
     if len(CHECKS) < MINIMUM_CHECKS:
         print(json.dumps({
             "guard": "offline-operator-principal",

@@ -1081,22 +1081,50 @@ function Assert-TrustedSourceRoot {
     $git = Resolve-TrustedGit -Explicit $GitPath -Author $Author
     if (-not $git) { $reasons.Add('OFFLINE_TRUSTED_GIT_UNRESOLVED'); return $reasons }
 
+    # REPO-LOCAL CONFIG MUST CARRY NO EXECUTION-CAPABLE DIRECTIVE.
+    #
+    # The environment drops the system and author-global configs, but not the
+    # repo's own .git\config, and core.fsmonitor is only ONE of the keys there
+    # that name a program git runs: a filter driver (filter.<x>.clean/smudge/
+    # process, attached by .gitattributes or the untracked .git\info\attributes)
+    # executes on `git status`, and sshCommand, credential helpers, external
+    # diff/textconv and pagers execute on other commands. .git\config and
+    # .git\info\attributes are untracked, so the commit/tree pin cannot see them,
+    # and a lock-in-place source copy preserves whatever the author authored. So
+    # before git runs at all, the repo-local config and attributes are scanned
+    # for any execution-capable directive and the tree is refused if one is
+    # present -- author code is never reached to be neutralised.
+    foreach ($cfgLeaf in @('.git\config', '.git\info\attributes')) {
+        $cfgPath = Join-Path $Root $cfgLeaf
+        if (-not (Test-Path -LiteralPath $cfgPath)) { continue }
+        $cfgText = ''
+        try { $cfgText = [System.IO.File]::ReadAllText($cfgPath) } catch { $cfgText = 'UNREADABLE' }
+        if ($cfgText -match '(?im)fsmonitor|hooksPath|\[\s*filter|\bfilter\s*=|\.clean\b|\.smudge\b|\.process\b|sshCommand|\bhelper\s*=|\.textconv\b|\.external\b|\bpager\s*=|\[\s*alias|manpath') {
+            $reasons.Add('OFFLINE_SOURCE_ROOT_GIT_CONFIG_EXECUTABLE'); return $reasons
+        }
+    }
+
     # git writes to stderr for an ordinary "not a repository", and under
     # ErrorActionPreference=Stop a native stderr write becomes a terminating
     # error -- so the whole verification threw instead of returning the reason
     # it had already established. Native output is captured, never trusted to
     # be silent.
-    # CONFIG-HERMETIC. Even past the structural return above, git must not run a
+    # CONFIG-HERMETIC. Even past the structural returns above, git must not run a
     # program named by configuration the operator does not control. The system
     # and author-global configs are dropped through the environment
     # (GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL -> the null device, which carry the
-    # author's aliases, credential helpers and global filter/textconv drivers),
-    # and the one execution-capable key a repo-local config can reach on these
-    # commands, core.fsmonitor, is emptied on the command line, which overrides
-    # repo config; hooks are pointed at a path that does not exist. Measured:
-    # with core.fsmonitor emptied here the configured program does not run.
-    $gitHermetic = @('-c', 'core.fsmonitor=',
-                     '-c', 'core.hooksPath=C:\mr-offline-no-such-hooks-dir')
+    # author's aliases, credential helpers and global drivers), core.fsmonitor is
+    # emptied on the command line (which overrides repo config), and hooks are
+    # pointed at a path UNDER the OS Windows directory that does not exist and
+    # that a non-administrator cannot create -- the earlier value sat directly
+    # under C:\, which grants Authenticated Users create-folder, so the author
+    # could create the "nonexistent" hooks directory and plant a hook. Measured:
+    # with core.fsmonitor emptied the configured program does not run, and
+    # post-checkout does not fire from a hooksPath the author cannot populate.
+    $hooksDeny = [System.IO.Path]::Combine(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows),
+        'mr-offline-no-such-hooks')
+    $gitHermetic = @('-c', 'core.fsmonitor=', '-c', "core.hooksPath=$hooksDeny")
     $head = ''; $tree = ''; $dirty = ''
     $prevPref = $ErrorActionPreference
     $prevNoSystem = $env:GIT_CONFIG_NOSYSTEM
