@@ -2168,9 +2168,22 @@ def main() -> int:
             "# same session and belongs in the same pin, also whole.",
             "$contract = [IO.File]::ReadAllText($env:MR_CONTRACT_PATH,",
             "    [Text.Encoding]::UTF8) -replace \"`r`n\", \"`n\"",
+            "# THE THIRD EXECUTED FILE. offline_reviewer_runtime.py is run by",
+            "# `& $BuildPython` on -ProvisionReviewerRuntime and",
+            "# -HardenInterpreter, both of which exit hundreds of lines above",
+            "# the refusal, and the script says so itself: 'runs author-supplied",
+            "# bytes at High integrity'. It is not a .ps1, so it fell outside a",
+            "# pin that named files by extension -- a payload inserted into it",
+            "# produced 93/93 with the PASS lines byte-identical to pristine.",
+            "# The reference to it already lives inside the pinned bytes, so no",
+            "# new reference is created and nothing else trips.",
+            "$runtime = [IO.File]::ReadAllText($env:MR_RUNTIME_PATH,",
+            "    [Text.Encoding]::UTF8) -replace \"`r`n\", \"`n\"",
             "$sha = [Security.Cryptography.SHA256]::Create()",
             "try {",
-            "    $bytes = [Text.Encoding]::UTF8.GetBytes($prefix + \"`n<<CONTRACT>>`n\" + $contract)",
+            "    $bytes = [Text.Encoding]::UTF8.GetBytes(",
+            "        $prefix + \"`n<<CONTRACT>>`n\" + $contract +",
+            "        \"`n<<RUNTIME>>`n\" + $runtime)",
             "    $digest = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join ''",
             "} finally { $sha.Dispose() }",
             "$dyn = [bool]$ast.DynamicParamBlock",
@@ -2210,6 +2223,7 @@ def main() -> int:
             "    digest = $digest",
             "    boot_chars = $prefix.Length",
             "    contract_chars = $contract.Length",
+            "    runtime_chars = $runtime.Length",
             "    dynamicparam = [bool]$dyn",
             "    using_count = [int]$using",
             "    findings = @($reqs)",
@@ -2230,6 +2244,8 @@ def main() -> int:
                                          / "reviewer_bootstrap.ps1"),
                      "MR_CONTRACT_PATH": str(ROOT / "packaging" / "hyperv"
                                              / "principal_contract.ps1"),
+                     "MR_RUNTIME_PATH": str(ROOT / "scripts"
+                                            / "offline_reviewer_runtime.py"),
                      "MR_SCAN_PATHS": ";".join(scan_paths)})
             prologue = json.loads((p_out.stdout or "{}").strip() or "{}")
             if not isinstance(prologue, dict):
@@ -2239,6 +2255,7 @@ def main() -> int:
         prologue_digest = str(prologue.get("digest") or "")
         prologue_count = prologue.get("boot_chars", -1)
         contract_count = prologue.get("contract_chars", -1)
+        runtime_count = prologue.get("runtime_chars", -1)
         prologue_dyn = prologue.get("dynamicparam")
         prologue_using = prologue.get("using_count", -1)
         prologue_reqs = prologue.get("findings")
@@ -2250,22 +2267,25 @@ def main() -> int:
 
         # Pinned. Update deliberately, in the same commit as any intended change
         # to either file, and never to make a run go green.
-        PINNED_PROLOGUE = "44f59a16e14754b2"
-        PINNED_BOOT_CHARS = 120120
+        PINNED_PROLOGUE = "43dcd7bd84ddb478"
+        PINNED_BOOT_CHARS = 120894
         PINNED_CONTRACT_CHARS = 61510
-        rec("OP48v both-elevated-files-are-pinned-whole",
+        PINNED_RUNTIME_CHARS = 25344
+        rec("OP48v every-file-the-elevated-session-executes-is-pinned-whole",
             bool(prologue_digest) and prologue_count == PINNED_BOOT_CHARS
             and contract_count == PINNED_CONTRACT_CHARS
+            and runtime_count == PINNED_RUNTIME_CHARS
             and prologue_digest.startswith(PINNED_PROLOGUE)
             and prologue_dyn is False and prologue_using == 0
             and prologue_reqs == [],
-            f"the elevated script and the contract it dot-sources are digested "
-            f"whole -- not to a boundary -- so an edit anywhere in either, "
+            f"the elevated script, the contract it dot-sources and the Python "
+            f"it runs at High integrity are digested "
+            f"whole -- not to a boundary -- so an edit anywhere in any of them, "
             f"before or after the refusal, in any construct including one that "
             f"executes ahead of the body, moves the pin; and no script on the "
             f"trust path declares a requirement, a dynamicparam, a using "
             f"statement or a named begin/process block "
-            f"({prologue_count} + {contract_count} chars, "
+            f"({prologue_count} + {contract_count} + {runtime_count} chars, "
             f"dynamicparam={prologue_dyn}, using={prologue_using}, "
             f"structural-findings-across-all-ten={prologue_reqs or 'none'}, "
             f"digest={prologue_digest[:16] or 'UNAVAILABLE'})")

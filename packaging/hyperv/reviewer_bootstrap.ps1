@@ -1506,7 +1506,14 @@ if ($ProvisionReviewerRuntime) {
         $ErrorActionPreference = $prev
     }
 
-    & $BuildPython $builder --action build --source-interpreter $BuildPython `
+    # -I: ISOLATED. Running `python <script>` puts the SCRIPT'S DIRECTORY on
+    # sys.path[0], so any file added beside it that shadows a module it imports
+    # -- re, json, shutil, subprocess, hashlib -- executes here, at High
+    # integrity, on a route that exits long before the credential refusal.
+    # Isolated mode drops that entry and ignores PYTHONPATH and user site.
+    # Measured: sys.path[0] is the script directory without it and is not with
+    # it. The script imports only the standard library, so nothing else changes.
+    & $BuildPython -I $builder --action build --source-interpreter $BuildPython `
         --runtime-root $runtimeRoot
     if ($LASTEXITCODE -ne 0) {
         Write-Output "  STOP: the runtime build failed ($LASTEXITCODE)."
@@ -1579,7 +1586,10 @@ if ($HardenInterpreter) {
     # weaker reason -- it only COPIES from it. Resolve-BuildPython tested that
     # the path exists and nothing else.
     Assert-InterpreterSourceTrusted -Interpreter $BuildPython -Route '-HardenInterpreter'
-    $probe = & $BuildPython $verifier --action verify --runtime-root $runtimeRoot 2>&1 | Out-String
+    # -I for the same reason as the build route: this is the second site that
+    # runs author-supplied bytes at High integrity, and covering one of a pair
+    # is the defect shape this file has been corrected for repeatedly.
+    $probe = & $BuildPython -I $verifier --action verify --runtime-root $runtimeRoot 2>&1 | Out-String
     $verdict = $null
     try { $verdict = $probe | ConvertFrom-Json } catch { $verdict = $null }
     if (-not $verdict -or -not $verdict.accepted) {
