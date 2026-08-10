@@ -24,6 +24,7 @@ disposable temporary directory.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -2087,6 +2088,95 @@ def main() -> int:
         reassigned = route.get("reassigned") or []
         alt = route.get("alt") or []
 
+        # ---------------------------------------- the prologue, pinned whole
+        # ENUMERATING ATTACKS DOES NOT TERMINATE.
+        #
+        # OP48q-u each name a mechanism -- an assignment, a conjunct, a cmdlet,
+        # a door -- and a review found fourteen spellings that none of them see:
+        # Set-Variable and New-Variable and $script: and an assignment nested in
+        # `if ($true)` and a param default, all of which rebind an operand; a
+        # conjunct with no $ sigil; a helper called above the refusal whose body
+        # holds the task deletion; `& $sch /Delete` after aliasing the binary;
+        # `& $c -Name ...` after putting the cmdlet name in a variable; ADSI
+        # reached by string concatenation. Every one is a different spelling of
+        # "something happened above the refusal", and pattern-matching them one
+        # at a time is a race the checks keep losing.
+        #
+        # So the question is inverted. Instead of asking which statements above
+        # the refusal are dangerous, this pins WHICH STATEMENTS ARE THERE. Any
+        # insertion, deletion or edit in the prologue -- in any spelling, by any
+        # mechanism, including ones nobody has thought of -- changes the digest.
+        # Comments and whitespace are normalised out, so prose is free and code
+        # is not. A deliberate change to this region is then an explicit act
+        # that updates the pin and shows up as one line of the diff.
+        prologue_probe = work / "prologue.ps1"
+        prologue_probe.write_text("\n".join([
+            "$e = $null",
+            "$ast = [System.Management.Automation.Language.Parser]::ParseFile(",
+            "    $env:MR_BOOT_PATH, [ref]$null, [ref]$e)",
+            "if ($e.Count -or -not $ast) { Write-Output 'PARSE-FAILED'; exit 0 }",
+            "# The refusal, located the same way OP48q locates it.",
+            "$stop = -1",
+            "foreach ($i in $ast.FindAll({ param($n)",
+            "        $n -is [System.Management.Automation.Language.IfStatementAst] }, $true)) {",
+            "    $c = $i.Clauses[0].Item1.Extent.Text",
+            "    if ($c -notmatch 'credChainLive') { continue }",
+            "    $x = @($i.Clauses[0].Item2.FindAll({ param($n)",
+            "        $n -is [System.Management.Automation.Language.ExitStatementAst] }, $true))",
+            "    if ($x.Count) { $stop = $i.Extent.EndOffset }",
+            "}",
+            "if ($stop -lt 0) { Write-Output 'NO-REFUSAL'; exit 0 }",
+            "# Top-level statements only: a nested statement is inside one of",
+            "# these, so its text is already covered.",
+            "$parts = @()",
+            "foreach ($blk in @($ast.BeginBlock, $ast.ProcessBlock, $ast.EndBlock)) {",
+            "    if (-not $blk) { continue }",
+            "    foreach ($s in $blk.Statements) {",
+            "        if ($s.Extent.StartOffset -lt $stop) { $parts += $s.Extent.Text }",
+            "    }",
+            "}",
+            "# The param block is a statement's attribute, not a statement, so it",
+            "# is added explicitly -- a default value is a way to arm the bypass.",
+            "if ($ast.ParamBlock) { $parts = @($ast.ParamBlock.Extent.Text) + $parts }",
+            "Write-Output ('STATEMENTS=' + $parts.Count)",
+            "Write-Output '---PROLOGUE---'",
+            "$parts -join \"`n<<STMT>>`n\"",
+        ]), encoding="utf-8-sig")
+        prologue_digest, prologue_count = "", -1
+        try:
+            p_out = subprocess.run(
+                [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                 "Bypass", "-File", str(prologue_probe)],
+                capture_output=True, text=True, timeout=300,
+                env={**os.environ,
+                     "MR_BOOT_PATH": str(ROOT / "packaging" / "hyperv"
+                                         / "reviewer_bootstrap.ps1")})
+            raw = p_out.stdout or ""
+            if "---PROLOGUE---" in raw:
+                head, body = raw.split("---PROLOGUE---", 1)
+                m = re.search(r"STATEMENTS=(\d+)", head)
+                prologue_count = int(m.group(1)) if m else -1
+                # Comments out, whitespace collapsed: prose is free, code is not.
+                normalised = re.sub(
+                    r"\s+", " ", strip_powershell_comments(body)).strip()
+                prologue_digest = hashlib.sha256(
+                    normalised.encode("utf-8")).hexdigest()
+        except (OSError, subprocess.SubprocessError, ValueError):
+            prologue_digest = ""
+
+        # Pinned. Update deliberately, in the same commit as any intended change
+        # to the statements above the refusal, and never to make a run go green.
+        PINNED_PROLOGUE = "44af89451299ba70"
+        PINNED_PROLOGUE_STATEMENTS = 67
+        rec("OP48v the-statements-above-the-refusal-are-pinned-whole",
+            bool(prologue_digest) and prologue_count == PINNED_PROLOGUE_STATEMENTS
+            and prologue_digest.startswith(PINNED_PROLOGUE),
+            f"every top-level statement before the refusal, plus the parameter "
+            f"block, digests to the pinned value -- so an insertion or edit "
+            f"above the refusal is caught whatever mechanism it uses, without "
+            f"the check having to know the mechanism "
+            f"({prologue_count} statements, digest={prologue_digest[:16] or 'UNAVAILABLE'})")
+
         rec("OP48q the-refusal-is-not-nested-inside-anything",
             route_ok and bool(refusal) and route.get("refusal_count") == 1
             and not (refusal.get("enclosers") or []),
@@ -2574,7 +2664,7 @@ def main() -> int:
     # recorded through the same no-op and vanished, and main() returned 0 with
     # zero checks executed. The floor cannot be allowed to depend on the
     # mechanism it exists to police.
-    MINIMUM_CHECKS = 74
+    MINIMUM_CHECKS = 75
     if len(CHECKS) < MINIMUM_CHECKS:
         print(json.dumps({
             "guard": "offline-operator-principal",
@@ -2608,7 +2698,7 @@ def main() -> int:
                       + "; ".join(missing_family),
         }, indent=2))
         return 1
-    MINIMUM_CREDENTIAL_CHAIN_CHECKS = 22
+    MINIMUM_CREDENTIAL_CHAIN_CHECKS = 23
     chain_checks = sorted(i for i in executed_ids if i.startswith("OP48"))
     if len(chain_checks) < MINIMUM_CREDENTIAL_CHAIN_CHECKS:
         print(json.dumps({
