@@ -645,19 +645,39 @@ function Assert-TaskRootProtected {
         Write-Output '  A child built or locked under it would inherit that access.'
         exit 2
     }
+    # A reparse point at the root redirects takeown /R and the build copy at the
+    # target, not here. The owner check above already refuses an author-created
+    # junction (it is author-owned), but the reparse is refused explicitly for
+    # consistency with the source-root and interpreter gates, which all treat a
+    # link as an escape rather than a directory.
+    if ((Get-Item -LiteralPath $Root -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        Write-Output '  STOP: the task root is a reparse point.'
+        Write-Output '  reason: OFFLINE_TASK_ROOT_REPARSE_ESCAPE'
+        exit 2
+    }
     if ($Runtime -and (Test-Path -LiteralPath $Runtime)) {
         # Recursive: the leaf's own DACL says nothing about an inherited ACE on
         # a subdirectory, and ownership anywhere inside is a write right.
         $runtimeErrors = $null
-        $writable = @(Get-ChildItem -LiteralPath $Runtime -Recurse -Force `
-                      -ErrorAction SilentlyContinue -ErrorVariable runtimeErrors |
+        $children = @(Get-ChildItem -LiteralPath $Runtime -Recurse -Force `
+                      -ErrorAction SilentlyContinue -ErrorVariable runtimeErrors)
+        $writable = @($children |
                       Where-Object { Test-AuthorWritable -Path $_.FullName } |
                       Select-Object -First 1)
+        # Get-ChildItem -Recurse does NOT descend a junction, so a reparse point
+        # inside the runtime would hide its target's contents from the write
+        # scan while takeown /R would still traverse it. Any reparse point in the
+        # subtree is refused.
+        $link = @($children |
+                  Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+                  Select-Object -First 1)
         # An unlistable subtree is reported, not skipped.
         if ((Test-AuthorWritable -Path $Runtime) -or $writable.Count -or
-            @($runtimeErrors).Count) {
-            Write-Output '  STOP: the runtime is writable by the author identity.'
-            Write-Output '  reason: REVIEWER_RUNTIME_AUTHOR_WRITABLE'
+            $link.Count -or @($runtimeErrors).Count) {
+            $reason = if ($link.Count) { 'REVIEWER_RUNTIME_REPARSE_ESCAPE' }
+                      else { 'REVIEWER_RUNTIME_AUTHOR_WRITABLE' }
+            Write-Output '  STOP: the runtime is writable by the author identity or contains a link.'
+            Write-Output "  reason: $reason"
             Write-Output '  Locking it now would pin bytes the author could still have chosen.'
             exit 2
         }

@@ -1081,25 +1081,53 @@ function Assert-TrustedSourceRoot {
     $git = Resolve-TrustedGit -Explicit $GitPath -Author $Author
     if (-not $git) { $reasons.Add('OFFLINE_TRUSTED_GIT_UNRESOLVED'); return $reasons }
 
-    # REPO-LOCAL CONFIG MUST CARRY NO EXECUTION-CAPABLE DIRECTIVE.
+    # THE REPOSITORY MUST BE A PLAIN, SELF-CONTAINED, EXECUTION-FREE .git.
     #
-    # The environment drops the system and author-global configs, but not the
-    # repo's own .git\config, and core.fsmonitor is only ONE of the keys there
-    # that name a program git runs: a filter driver (filter.<x>.clean/smudge/
-    # process, attached by .gitattributes or the untracked .git\info\attributes)
-    # executes on `git status`, and sshCommand, credential helpers, external
-    # diff/textconv and pagers execute on other commands. .git\config and
-    # .git\info\attributes are untracked, so the commit/tree pin cannot see them,
-    # and a lock-in-place source copy preserves whatever the author authored. So
-    # before git runs at all, the repo-local config and attributes are scanned
-    # for any execution-capable directive and the tree is refused if one is
-    # present -- author code is never reached to be neutralised.
-    foreach ($cfgLeaf in @('.git\config', '.git\info\attributes')) {
+    # git executes programs named by configuration -- core.fsmonitor, a hook, a
+    # filter driver (filter.<x>.clean/smudge/process, attached by .gitattributes
+    # or the untracked .git\info\attributes and run on `git status`), sshCommand,
+    # a credential helper, external diff/textconv, a pager -- and the environment
+    # drops only the system and author-global configs, not the repo's own. The
+    # commit/tree pin cannot see .git\config or .git\info\attributes (untracked),
+    # and a lock-in-place source copy preserves whatever the author authored.
+    #
+    # A first version scanned .git\config and .git\info\attributes for a fixed
+    # list of directives. That could not cover git's config INDIRECTION: an
+    # `[include]`/`[includeIf]` line, or core.attributesFile, points git at an
+    # author file OUTSIDE the repo (never scanned, never dirty-checked); and when
+    # .git is a `gitdir:` POINTER FILE rather than a directory, the config lives
+    # somewhere the scan never reads at all. Both were shown to run an author
+    # filter during the status. So the shape itself is constrained: .git must be
+    # a real directory, must carry no indirection (include/includeIf/
+    # attributesFile), and no execution-capable directive -- in .git\config, its
+    # worktree companion, and .git\info\attributes. With indirection refused and
+    # .git a real directory, those three files are the whole config surface git
+    # can reach on these commands, so the scan is then complete.
+    $dotGit = Join-Path $Root '.git'
+    if (-not (Test-Path -LiteralPath $dotGit)) {
+        $reasons.Add('OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY'); return $reasons
+    }
+    if (-not (Get-Item -LiteralPath $dotGit -Force).PSIsContainer) {
+        # A `gitdir:` pointer file redirects the config to a location outside the
+        # scanned tree. The operator source is a plain clone, whose .git is a
+        # directory; anything else is refused rather than followed.
+        $reasons.Add('OFFLINE_SOURCE_ROOT_GITDIR_INDIRECT'); return $reasons
+    }
+    $execDirective = '(?im)fsmonitor|hooksPath|\[\s*filter|\bfilter\s*=|' +
+                     '\.clean\b|\.smudge\b|\.process\b|sshCommand|\bhelper\s*=|' +
+                     '\.textconv\b|\.external\b|\bpager\s*=|\[\s*alias|manpath'
+    $indirection = '(?im)^\s*\[\s*include|includeIf|attributesFile'
+    foreach ($cfgLeaf in @('.git\config', '.git\config.worktree', '.git\info\attributes')) {
         $cfgPath = Join-Path $Root $cfgLeaf
         if (-not (Test-Path -LiteralPath $cfgPath)) { continue }
-        $cfgText = ''
-        try { $cfgText = [System.IO.File]::ReadAllText($cfgPath) } catch { $cfgText = 'UNREADABLE' }
-        if ($cfgText -match '(?im)fsmonitor|hooksPath|\[\s*filter|\bfilter\s*=|\.clean\b|\.smudge\b|\.process\b|sshCommand|\bhelper\s*=|\.textconv\b|\.external\b|\bpager\s*=|\[\s*alias|manpath') {
+        # Unreadable is refused, not skipped: a config the operator cannot read
+        # is a config the operator cannot trust.
+        $cfgText = $null
+        try { $cfgText = [System.IO.File]::ReadAllText($cfgPath) } catch { $cfgText = $null }
+        if ($null -eq $cfgText) {
+            $reasons.Add('OFFLINE_SOURCE_ROOT_GIT_CONFIG_UNREADABLE'); return $reasons
+        }
+        if (($cfgText -match $execDirective) -or ($cfgText -match $indirection)) {
             $reasons.Add('OFFLINE_SOURCE_ROOT_GIT_CONFIG_EXECUTABLE'); return $reasons
         }
     }
@@ -1124,7 +1152,11 @@ function Assert-TrustedSourceRoot {
     $hooksDeny = [System.IO.Path]::Combine(
         [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows),
         'mr-offline-no-such-hooks')
-    $gitHermetic = @('-c', 'core.fsmonitor=', '-c', "core.hooksPath=$hooksDeny")
+    # core.attributesFile emptied as well, so that even past the scan no external
+    # attributes file can attach a filter to a path; the scan already refuses a
+    # repo that sets it, this is the command-line backstop.
+    $gitHermetic = @('-c', 'core.fsmonitor=', '-c', "core.hooksPath=$hooksDeny",
+                     '-c', 'core.attributesFile=')
     $head = ''; $tree = ''; $dirty = ''
     $prevPref = $ErrorActionPreference
     $prevNoSystem = $env:GIT_CONFIG_NOSYSTEM

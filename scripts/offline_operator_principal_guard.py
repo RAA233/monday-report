@@ -2288,9 +2288,9 @@ def main() -> int:
 
         # Pinned. Update deliberately, in the same commit as any intended change
         # to either file, and never to make a run go green.
-        PINNED_PROLOGUE = "2436febdfa6fcd7e"
-        PINNED_BOOT_CHARS = 130898
-        PINNED_CONTRACT_CHARS = 65948
+        PINNED_PROLOGUE = "afe70f7a93bc2397"
+        PINNED_BOOT_CHARS = 132137
+        PINNED_CONTRACT_CHARS = 67905
         PINNED_RUNTIME_CHARS = 26139
         rec("OP48v every-file-the-elevated-session-executes-is-pinned-whole",
             bool(prologue_digest) and prologue_count == PINNED_BOOT_CHARS
@@ -2895,6 +2895,45 @@ def main() -> int:
                           "author": identity("SYNTH", SID_AUTHOR),
                           "expected_commit": "a" * 40, "expected_tree": "b" * 40},
                          work)["reasons"]
+        # Case I -- the indirection: a repo config that pulls an author FILTER
+        # in via [include] -> an external config, with the attribute in an
+        # external attributes file. The scan must refuse the indirection itself,
+        # because it cannot read what the include points at.
+        repoI = work / "op49b-i"
+        markerI = work / "op49b-i-marker.txt"
+        _make_repo(repoI, markerI, protected=True, with_fsmon=False)
+        _evil = work / "op49b-i-evil.cfg"
+        _clean = work / "op49b-i-clean.sh"
+        _clean.write_text("#!/bin/sh\necho x > '" + str(markerI).replace("\\", "/")
+                          + "'\ncat\n", encoding="utf-8")
+        _evil.write_text('[filter "x"]\n\tclean = sh \''
+                         + str(_clean).replace("\\", "/") + "'\n", encoding="utf-8")
+        with (repoI / ".git" / "config").open("a", encoding="utf-8") as _fh:
+            _fh.write("[include]\n\tpath = " + str(_evil).replace("\\", "/") + "\n")
+        reasonsI = probe({"action": "trusted-source", "root": str(repoI),
+                          "author": identity("SYNTH", SID_AUTHOR),
+                          "expected_commit": "a" * 40, "expected_tree": "b" * 40},
+                         work)["reasons"]
+        # Case G -- a gitdir-pointer .git FILE, whose config lives outside the
+        # scanned tree entirely. The shape must be refused, not followed.
+        repoG = work / "op49b-g"
+        repoG.mkdir(parents=True, exist_ok=True)
+        gdir = work / "op49b-g-gitdir"
+        gdir.mkdir(parents=True, exist_ok=True)
+        subprocess.run([_git, "--git-dir", str(gdir), "--work-tree", str(repoG),
+                        "init", "-q"], capture_output=True, text=True, timeout=60)
+        (repoG / ".git").write_text("gitdir: " + str(gdir).replace("\\", "/") + "\n",
+                                    encoding="utf-8")
+        for a in (["/inheritance:r"],
+                  ["/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"],
+                  ["/setowner", "*S-1-5-32-544"]):
+            subprocess.run([_icacls_exe, str(repoG)] + a,
+                           capture_output=True, text=True, timeout=60)
+        reasonsG = probe({"action": "trusted-source", "root": str(repoG),
+                          "author": identity("SYNTH", SID_AUTHOR),
+                          "expected_commit": "a" * 40, "expected_tree": "b" * 40},
+                         work)["reasons"]
+
         e_early = (bool(_structural.intersection(reasonsE))
                    and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsE
                    and "OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY" not in reasonsE
@@ -2904,15 +2943,21 @@ def main() -> int:
                     and not markerH.exists())
         c_herm = (not markerC.exists()
                   and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" in reasonsC)
+        i_include = ("OFFLINE_SOURCE_ROOT_GIT_CONFIG_EXECUTABLE" in reasonsI
+                     and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsI
+                     and not markerI.exists())
+        g_gitdir = ("OFFLINE_SOURCE_ROOT_GITDIR_INDIRECT" in reasonsG
+                    and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsG)
         rec("OP49b privileged-git-never-runs-author-config-programs",
-            git_ok and e_early and h_config and c_herm,
-            f"a structurally untrusted source returns before git (no "
-            f"WRONG_COMMIT, no marker); a source whose repo-local config carries "
-            f"an execution-capable directive is refused before git "
-            f"(GIT_CONFIG_EXECUTABLE, no marker); a clean protected source runs "
-            f"git hermetically (WRONG_COMMIT, no marker) "
+            git_ok and e_early and h_config and c_herm and i_include and g_gitdir,
+            f"a structurally untrusted source returns before git; a repo-local "
+            f"config with a direct execution-capable directive, an [include] to "
+            f"an external filter, or a gitdir-pointer .git file are each refused "
+            f"before git and run no author program; a clean protected source "
+            f"runs git hermetically "
             f"(E={reasonsE} m={markerE.exists()}, H={reasonsH} m={markerH.exists()}, "
-            f"C={reasonsC} m={markerC.exists()})")
+            f"C={reasonsC} m={markerC.exists()}, I={reasonsI} m={markerI.exists()}, "
+            f"G={reasonsG})")
 
         # ---- OP49e: privileged git hooks come from a directory the author
         # cannot create. clone/checkout run post-checkout from core.hooksPath;
