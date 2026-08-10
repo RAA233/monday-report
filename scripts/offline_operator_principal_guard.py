@@ -24,7 +24,6 @@ disposable temporary directory.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -2111,9 +2110,18 @@ def main() -> int:
         # that updates the pin and shows up as one line of the diff.
         prologue_probe = work / "prologue.ps1"
         prologue_probe.write_text("\n".join([
+            "# DECODED ONCE, EXPLICITLY. ParseFile lets Windows PowerShell 5.1",
+            "# decode a BOM-less .ps1 with the host ANSI code page, so the one",
+            "# non-ASCII byte sequence in this file became three characters",
+            "# under cp1252 and one under UTF-8 -- the pin was a property of the",
+            "# host that computed it, and re-saving with a BOM reddened it. The",
+            "# text is read as UTF-8 and PARSED FROM THAT STRING, so the offset",
+            "# and the slice share one coordinate space and the digest is the",
+            "# same on any host.",
             "$e = $null",
-            "$ast = [System.Management.Automation.Language.Parser]::ParseFile(",
-            "    $env:MR_BOOT_PATH, [ref]$null, [ref]$e)",
+            "$text = [IO.File]::ReadAllText($env:MR_BOOT_PATH, [Text.Encoding]::UTF8)",
+            "$ast = [System.Management.Automation.Language.Parser]::ParseInput(",
+            "    $text, [ref]$null, [ref]$e)",
             "if ($e.Count -or -not $ast) { Write-Output 'PARSE-FAILED'; exit 0 }",
             "# The refusal, located the same way OP48q locates it.",
             "$stop = -1",
@@ -2143,11 +2151,11 @@ def main() -> int:
             "# The prefix of the file is taken instead. Only line endings are",
             "# normalised, so the pin is stable across checkouts and blind to",
             "# nothing else.",
-            "$text = $ast.Extent.Text",
             "$prefix = $text.Substring(0, $stop) -replace \"`r`n\", \"`n\"",
             "# principal_contract.ps1 is DOT-SOURCED above the refusal, so all of",
             "# it runs first too and belongs in the same pin.",
-            "$contract = [IO.File]::ReadAllText($env:MR_CONTRACT_PATH) -replace \"`r`n\", \"`n\"",
+            "$contract = [IO.File]::ReadAllText($env:MR_CONTRACT_PATH,",
+            "    [Text.Encoding]::UTF8) -replace \"`r`n\", \"`n\"",
             "$sha = [Security.Cryptography.SHA256]::Create()",
             "try {",
             "    $bytes = [Text.Encoding]::UTF8.GetBytes($prefix + \"`n<<CONTRACT>>`n\" + $contract)",
@@ -2155,6 +2163,26 @@ def main() -> int:
             "} finally { $sha.Dispose() }",
             "$dyn = [bool]$ast.DynamicParamBlock",
             "$using = @($ast.UsingStatements).Count",
+            "# #requires -Modules IMPORTS AND EXECUTES during pre-flight, ahead",
+            "# of the first body statement and therefore ahead of every gate --",
+            "# and it is a tokenizer directive honoured wherever it appears in",
+            "# the file, so a copy of it past the pinned prefix left the digest",
+            "# byte-identical. It cannot be covered by extending the prefix; it",
+            "# has to be asserted structurally, and on every script, not just",
+            "# the two that are digested.",
+            "$reqs = @()",
+            "foreach ($p in ($env:MR_SCAN_PATHS -split ';')) {",
+            "    if (-not $p) { continue }",
+            "    $se = $null",
+            "    $stext = [IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)",
+            "    $sast = [System.Management.Automation.Language.Parser]::ParseInput(",
+            "        $stext, [ref]$null, [ref]$se)",
+            "    if ($se.Count -or -not $sast) { $reqs += ('unparseable:' + (Split-Path -Leaf $p)); continue }",
+            "    if ($sast.ScriptRequirements) { $reqs += (Split-Path -Leaf $p) }",
+            "    if ($sast.DynamicParamBlock) { $reqs += ('dynamicparam:' + (Split-Path -Leaf $p)) }",
+            "    if (@($sast.UsingStatements).Count) { $reqs += ('using:' + (Split-Path -Leaf $p)) }",
+            "}",
+            "Write-Output ('REQUIREMENTS=' + (($reqs -join ',') -replace '^$', 'none'))",
             "Write-Output ('PREFIXCHARS=' + $prefix.Length)",
             "Write-Output ('DYNAMICPARAM=' + $dyn)",
             "Write-Output ('USINGCOUNT=' + $using)",
@@ -2162,6 +2190,7 @@ def main() -> int:
         ]), encoding="utf-8-sig")
         prologue_digest, prologue_count = "", -1
         prologue_dyn, prologue_using = None, -1
+        prologue_reqs = "UNAVAILABLE"
         try:
             p_out = subprocess.run(
                 [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
@@ -2171,7 +2200,8 @@ def main() -> int:
                      "MR_BOOT_PATH": str(ROOT / "packaging" / "hyperv"
                                          / "reviewer_bootstrap.ps1"),
                      "MR_CONTRACT_PATH": str(ROOT / "packaging" / "hyperv"
-                                             / "principal_contract.ps1")})
+                                             / "principal_contract.ps1"),
+                     "MR_SCAN_PATHS": ";".join(scan_paths)})
             raw = p_out.stdout or ""
             # Hashed by the same parser that located the boundary, so there is
             # one coordinate space and no chance of slicing different text than
@@ -2184,24 +2214,29 @@ def main() -> int:
             prologue_dyn = (m.group(1) == "True") if m else None
             m = re.search(r"USINGCOUNT=(\d+)", raw)
             prologue_using = int(m.group(1)) if m else -1
+            m = re.search(r"REQUIREMENTS=(\S+)", raw)
+            prologue_reqs = m.group(1) if m else "UNAVAILABLE"
         except (OSError, subprocess.SubprocessError, ValueError):
             prologue_digest = ""
 
         # Pinned. Update deliberately, in the same commit as any intended change
         # to the statements above the refusal, and never to make a run go green.
-        PINNED_PROLOGUE = "9415d374c6478f61"
-        PINNED_PROLOGUE_CHARS = 112976
+        PINNED_PROLOGUE = "c8b65c815c44d664"
+        PINNED_PROLOGUE_CHARS = 112974
         rec("OP48v everything-that-runs-before-the-refusal-is-pinned-whole",
             bool(prologue_digest) and prologue_count == PINNED_PROLOGUE_CHARS
             and prologue_digest.startswith(PINNED_PROLOGUE)
-            and prologue_dyn is False and prologue_using == 0,
+            and prologue_dyn is False and prologue_using == 0
+            and prologue_reqs == "none",
             f"every byte of the elevated script up to the refusal, plus the "
             f"whole of the contract it dot-sources above that point, digests to "
             f"the pinned value -- so anything that executes first is covered "
             f"whatever form it takes, including a dynamicparam block, a using "
             f"statement, a script attribute or a change inside a string literal "
-            f"({prologue_count} chars, dynamicparam={prologue_dyn}, "
-            f"using={prologue_using}, digest={prologue_digest[:16] or 'UNAVAILABLE'})")
+            f"({prologue_count} chars of prefix plus the whole contract, "
+            f"dynamicparam={prologue_dyn}, using={prologue_using}, "
+            f"requirements-across-all-ten={prologue_reqs}, "
+            f"digest={prologue_digest[:16] or 'UNAVAILABLE'})")
 
         rec("OP48q the-refusal-is-not-nested-inside-anything",
             route_ok and bool(refusal) and route.get("refusal_count") == 1
