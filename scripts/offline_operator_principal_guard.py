@@ -2148,12 +2148,24 @@ def main() -> int:
             "# filler, so a same-length change to a SID, a rights mask or a path",
             "# inside a literal did not move the digest either.",
             "#",
-            "# The prefix of the file is taken instead. Only line endings are",
-            "# normalised, so the pin is stable across checkouts and blind to",
-            "# nothing else.",
-            "$prefix = $text.Substring(0, $stop) -replace \"`r`n\", \"`n\"",
-            "# principal_contract.ps1 is DOT-SOURCED above the refusal, so all of",
-            "# it runs first too and belongs in the same pin.",
+            "# AND THE BOUNDARY ITSELF WAS THE DEFECT.",
+            "#",
+            "# Pinning a prefix invites the question 'what executes before the",
+            "# refusal from after it', which had three answers in three rounds:",
+            "# dynamicparam binds first, #requires imports first at any offset,",
+            "# and begin{} runs before end{} whatever the textual order -- after",
+            "# which its body is a permanent free-edit zone. The boundary has a",
+            "# second face too: the damage runs BELOW the refusal, so",
+            "# substituting $HvRoot or $TaskName between the decision and the",
+            "# damage defeats it without touching a byte above it.",
+            "#",
+            "# So there is no boundary. The whole file is digested, and",
+            "# 'before' and 'after' stop being different questions. $stop is",
+            "# still computed, because a file with no exiting refusal must not",
+            "# pass, but it no longer bounds anything.",
+            "$prefix = $text -replace \"`r`n\", \"`n\"",
+            "# principal_contract.ps1 is DOT-SOURCED by it, so it runs in the",
+            "# same session and belongs in the same pin, also whole.",
             "$contract = [IO.File]::ReadAllText($env:MR_CONTRACT_PATH,",
             "    [Text.Encoding]::UTF8) -replace \"`r`n\", \"`n\"",
             "$sha = [Security.Cryptography.SHA256]::Create()",
@@ -2178,19 +2190,36 @@ def main() -> int:
             "    $sast = [System.Management.Automation.Language.Parser]::ParseInput(",
             "        $stext, [ref]$null, [ref]$se)",
             "    if ($se.Count -or -not $sast) { $reqs += ('unparseable:' + (Split-Path -Leaf $p)); continue }",
-            "    if ($sast.ScriptRequirements) { $reqs += (Split-Path -Leaf $p) }",
+            "    if ($sast.ScriptRequirements) { $reqs += ('requires:' + (Split-Path -Leaf $p)) }",
             "    if ($sast.DynamicParamBlock) { $reqs += ('dynamicparam:' + (Split-Path -Leaf $p)) }",
             "    if (@($sast.UsingStatements).Count) { $reqs += ('using:' + (Split-Path -Leaf $p)) }",
+            "    # begin{} and process{} EXECUTE AHEAD OF end{} whatever the",
+            "    # textual order, so a named-block conversion reorders execution",
+            "    # in a way no offset comparison can show. The whole-file digest",
+            "    # already covers the two pinned files; this names the shape,",
+            "    # and covers the other eight.",
+            "    if ($sast.BeginBlock) { $reqs += ('begin:' + (Split-Path -Leaf $p)) }",
+            "    if ($sast.ProcessBlock) { $reqs += ('process:' + (Split-Path -Leaf $p)) }",
             "}",
-            "Write-Output ('REQUIREMENTS=' + (($reqs -join ',') -replace '^$', 'none'))",
-            "Write-Output ('PREFIXCHARS=' + $prefix.Length)",
-            "Write-Output ('DYNAMICPARAM=' + $dyn)",
-            "Write-Output ('USINGCOUNT=' + $using)",
-            "Write-Output ('DIGEST=' + $digest)",
+            "# MARSHALLED, NOT PRINTED. These were labelled lines recovered with",
+            "# unanchored regexes, and one line carried FILE NAMES from the tree",
+            "# under review -- so a decoy file named to contain 'PREFIXCHARS=...",
+            "# DIGEST=...' supplied the values the consumer read, and a real",
+            "# statement inserted above the refusal passed 93/93 clean.",
+            "$payload = [ordered]@{",
+            "    digest = $digest",
+            "    boot_chars = $prefix.Length",
+            "    contract_chars = $contract.Length",
+            "    dynamicparam = [bool]$dyn",
+            "    using_count = [int]$using",
+            "    findings = @($reqs)",
+            "}",
+            "ConvertTo-Json -InputObject $payload -Depth 4 -Compress",
         ]), encoding="utf-8-sig")
-        prologue_digest, prologue_count = "", -1
-        prologue_dyn, prologue_using = None, -1
-        prologue_reqs = "UNAVAILABLE"
+        # Parsed as JSON, like the two sibling probes in this block. Recovering
+        # labelled lines with unanchored regexes let a value the tree controls
+        # -- a file name -- masquerade as the measurement.
+        prologue = {}
         try:
             p_out = subprocess.run(
                 [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
@@ -2202,40 +2231,43 @@ def main() -> int:
                      "MR_CONTRACT_PATH": str(ROOT / "packaging" / "hyperv"
                                              / "principal_contract.ps1"),
                      "MR_SCAN_PATHS": ";".join(scan_paths)})
-            raw = p_out.stdout or ""
-            # Hashed by the same parser that located the boundary, so there is
-            # one coordinate space and no chance of slicing different text than
-            # the offset was measured in.
-            m = re.search(r"DIGEST=([0-9a-f]{64})", raw)
-            prologue_digest = m.group(1) if m else ""
-            m = re.search(r"PREFIXCHARS=(\d+)", raw)
-            prologue_count = int(m.group(1)) if m else -1
-            m = re.search(r"DYNAMICPARAM=(\w+)", raw)
-            prologue_dyn = (m.group(1) == "True") if m else None
-            m = re.search(r"USINGCOUNT=(\d+)", raw)
-            prologue_using = int(m.group(1)) if m else -1
-            m = re.search(r"REQUIREMENTS=(\S+)", raw)
-            prologue_reqs = m.group(1) if m else "UNAVAILABLE"
+            prologue = json.loads((p_out.stdout or "{}").strip() or "{}")
+            if not isinstance(prologue, dict):
+                prologue = {}
         except (OSError, subprocess.SubprocessError, ValueError):
-            prologue_digest = ""
+            prologue = {}
+        prologue_digest = str(prologue.get("digest") or "")
+        prologue_count = prologue.get("boot_chars", -1)
+        contract_count = prologue.get("contract_chars", -1)
+        prologue_dyn = prologue.get("dynamicparam")
+        prologue_using = prologue.get("using_count", -1)
+        prologue_reqs = prologue.get("findings")
+        if prologue_reqs is None:
+            prologue_reqs = ["UNAVAILABLE"]
+        elif isinstance(prologue_reqs, str):
+            # ConvertTo-Json unrolls a one-element array to a bare value.
+            prologue_reqs = [prologue_reqs]
 
         # Pinned. Update deliberately, in the same commit as any intended change
-        # to the statements above the refusal, and never to make a run go green.
-        PINNED_PROLOGUE = "c8b65c815c44d664"
-        PINNED_PROLOGUE_CHARS = 112974
-        rec("OP48v everything-that-runs-before-the-refusal-is-pinned-whole",
-            bool(prologue_digest) and prologue_count == PINNED_PROLOGUE_CHARS
+        # to either file, and never to make a run go green.
+        PINNED_PROLOGUE = "44f59a16e14754b2"
+        PINNED_BOOT_CHARS = 120120
+        PINNED_CONTRACT_CHARS = 61510
+        rec("OP48v both-elevated-files-are-pinned-whole",
+            bool(prologue_digest) and prologue_count == PINNED_BOOT_CHARS
+            and contract_count == PINNED_CONTRACT_CHARS
             and prologue_digest.startswith(PINNED_PROLOGUE)
             and prologue_dyn is False and prologue_using == 0
-            and prologue_reqs == "none",
-            f"every byte of the elevated script up to the refusal, plus the "
-            f"whole of the contract it dot-sources above that point, digests to "
-            f"the pinned value -- so anything that executes first is covered "
-            f"whatever form it takes, including a dynamicparam block, a using "
-            f"statement, a script attribute or a change inside a string literal "
-            f"({prologue_count} chars of prefix plus the whole contract, "
+            and prologue_reqs == [],
+            f"the elevated script and the contract it dot-sources are digested "
+            f"whole -- not to a boundary -- so an edit anywhere in either, "
+            f"before or after the refusal, in any construct including one that "
+            f"executes ahead of the body, moves the pin; and no script on the "
+            f"trust path declares a requirement, a dynamicparam, a using "
+            f"statement or a named begin/process block "
+            f"({prologue_count} + {contract_count} chars, "
             f"dynamicparam={prologue_dyn}, using={prologue_using}, "
-            f"requirements-across-all-ten={prologue_reqs}, "
+            f"structural-findings-across-all-ten={prologue_reqs or 'none'}, "
             f"digest={prologue_digest[:16] or 'UNAVAILABLE'})")
 
         rec("OP48q the-refusal-is-not-nested-inside-anything",
