@@ -1113,6 +1113,26 @@ function Assert-TrustedSourceRoot {
         # directory; anything else is refused rather than followed.
         $reasons.Add('OFFLINE_SOURCE_ROOT_GITDIR_INDIRECT'); return $reasons
     }
+    # THE REPOSITORY MUST BE SELF-CONTAINED, not just a directory .git.
+    #
+    # Enumerating git's config-indirection mechanisms one at a time is a losing
+    # game -- after include/includeIf/attributesFile and the gitdir pointer came
+    # `commondir`, a plain FILE inside a directory .git that redirects git's
+    # COMMON dir (config, info\attributes, objects, refs) to a subtree the scan
+    # never reads; and `objects\info\alternates` borrows objects from elsewhere.
+    # Both let author config or objects live outside the three scanned files
+    # while .git stays a directory. So the requirement is inverted: the source
+    # must borrow nothing and link nowhere -- config, attributes, objects and
+    # refs all inside this .git. A plain `git clone --local --no-hardlinks` (the
+    # operator source) satisfies this; a worktree link or a shared/borrowed
+    # object store does not. GIT_COMMON_DIR is additionally forced to this .git
+    # in the hermetic environment below, so even an unforeseen redirect file is
+    # ignored rather than followed.
+    foreach ($linkLeaf in @('.git\commondir', '.git\objects\info\alternates')) {
+        if (Test-Path -LiteralPath (Join-Path $Root $linkLeaf)) {
+            $reasons.Add('OFFLINE_SOURCE_ROOT_GITDIR_INDIRECT'); return $reasons
+        }
+    }
     $execDirective = '(?im)fsmonitor|hooksPath|\[\s*filter|\bfilter\s*=|' +
                      '\.clean\b|\.smudge\b|\.process\b|sshCommand|\bhelper\s*=|' +
                      '\.textconv\b|\.external\b|\bpager\s*=|\[\s*alias|manpath'
@@ -1157,15 +1177,23 @@ function Assert-TrustedSourceRoot {
     # repo that sets it, this is the command-line backstop.
     $gitHermetic = @('-c', 'core.fsmonitor=', '-c', "core.hooksPath=$hooksDeny",
                      '-c', 'core.attributesFile=')
+    # GIT_COMMON_DIR is forced to this .git so that even a redirect file the scan
+    # above did not foresee cannot move the common dir (config, attributes,
+    # objects, refs) somewhere else: git reads the environment value and ignores
+    # any in-repo `commondir`. The scan refuses such a file outright; this is the
+    # command-line backstop for the same property, matching core.attributesFile.
+    $commonDir = Join-Path $Root '.git'
     $head = ''; $tree = ''; $dirty = ''
     $prevPref = $ErrorActionPreference
     $prevNoSystem = $env:GIT_CONFIG_NOSYSTEM
     $prevGlobal   = $env:GIT_CONFIG_GLOBAL
     $prevPrompt   = $env:GIT_TERMINAL_PROMPT
+    $prevCommon   = $env:GIT_COMMON_DIR
     $ErrorActionPreference = 'Continue'
     $env:GIT_CONFIG_NOSYSTEM = '1'
     $env:GIT_CONFIG_GLOBAL   = 'NUL'
     $env:GIT_TERMINAL_PROMPT = '0'
+    $env:GIT_COMMON_DIR      = $commonDir
     try {
         $head  = (& $git @gitHermetic -C $Root rev-parse HEAD 2>&1 | Out-String).Trim()
         $tree  = (& $git @gitHermetic -C $Root rev-parse 'HEAD^{tree}' 2>&1 | Out-String).Trim()
@@ -1177,6 +1205,7 @@ function Assert-TrustedSourceRoot {
         $env:GIT_CONFIG_NOSYSTEM = $prevNoSystem
         $env:GIT_CONFIG_GLOBAL   = $prevGlobal
         $env:GIT_TERMINAL_PROMPT = $prevPrompt
+        $env:GIT_COMMON_DIR      = $prevCommon
     }
     if ($head -notmatch '^[0-9a-f]{40}$') {
         $reasons.Add('OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY'); return $reasons

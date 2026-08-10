@@ -2288,9 +2288,9 @@ def main() -> int:
 
         # Pinned. Update deliberately, in the same commit as any intended change
         # to either file, and never to make a run go green.
-        PINNED_PROLOGUE = "afe70f7a93bc2397"
+        PINNED_PROLOGUE = "6efe91490d1ff874"
         PINNED_BOOT_CHARS = 132137
-        PINNED_CONTRACT_CHARS = 67905
+        PINNED_CONTRACT_CHARS = 69784
         PINNED_RUNTIME_CHARS = 26139
         rec("OP48v every-file-the-elevated-session-executes-is-pinned-whole",
             bool(prologue_digest) and prologue_count == PINNED_BOOT_CHARS
@@ -2933,6 +2933,53 @@ def main() -> int:
                           "author": identity("SYNTH", SID_AUTHOR),
                           "expected_commit": "a" * 40, "expected_tree": "b" * 40},
                          work)["reasons"]
+        # Case J -- the commondir escape: .git is an ordinary DIRECTORY and the
+        # in-tree .git/config is clean, so the config scan and the gitdir-pointer
+        # check both pass it. But .git/commondir redirects git's COMMON dir --
+        # where it actually reads config, objects and refs -- to an external copy
+        # whose config defines a filter driver. A committed .gitattributes assigns
+        # that filter to a worktree file, so `git status` runs the author program
+        # from config the scan never saw. The shape must be refused (a repository
+        # that borrows its common dir is not self-contained), before git.
+        repoJ = work / "op49b-j"
+        markerJ = work / "op49b-j-marker.txt"
+        _make_repo(repoJ, markerJ, protected=False, with_fsmon=False)
+        (repoJ / ".gitattributes").write_text("* filter=x\n", encoding="utf-8")
+        # SAME LENGTH, different bytes, below. git's ie_modified reports a
+        # SIZE change as modified WITHOUT running the filter, so an orig->dirty
+        # pair left the clean driver unexecuted and the no-marker clause proved
+        # nothing. An equal-size edit forces the content comparison that runs it:
+        # measured, the redirected filter executes under the contract's own
+        # elevated git invocation when the shape is not refused.
+        (repoJ / "f.txt").write_text("aaaaa\n", encoding="utf-8")
+        for _cmd in (["add", "-A"],
+                     ["-c", "user.email=a@b.c", "-c", "user.name=a",
+                      "commit", "-q", "-m", "attrs"]):
+            subprocess.run([_git, "-C", str(repoJ)] + _cmd,
+                           capture_output=True, text=True, timeout=60)
+        # A functioning external common dir: a copy of this .git, with a poisoned
+        # filter appended to ITS config. git reads config/objects/refs from here.
+        commonJ = work / "op49b-j-common"
+        shutil.copytree(repoJ / ".git", commonJ)
+        _cleanJ = work / "op49b-j-clean.sh"
+        _cleanJ.write_text("#!/bin/sh\necho x > '" + str(markerJ).replace("\\", "/")
+                           + "'\ncat\n", encoding="utf-8")
+        with (commonJ / "config").open("a", encoding="utf-8") as _fh:
+            _fh.write('[filter "x"]\n\tclean = sh \''
+                      + str(_cleanJ).replace("\\", "/") + "'\n")
+        (repoJ / ".git" / "commondir").write_text(
+            str(commonJ).replace("\\", "/") + "\n", encoding="utf-8")
+        # Dirty the filtered file so `git status` must run the clean filter.
+        (repoJ / "f.txt").write_text("bbbbb\n", encoding="utf-8")
+        for a in (["/inheritance:r"],
+                  ["/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"],
+                  ["/setowner", "*S-1-5-32-544"]):
+            subprocess.run([_icacls_exe, str(repoJ)] + a,
+                           capture_output=True, text=True, timeout=60)
+        reasonsJ = probe({"action": "trusted-source", "root": str(repoJ),
+                          "author": identity("SYNTH", SID_AUTHOR),
+                          "expected_commit": "a" * 40, "expected_tree": "b" * 40},
+                         work)["reasons"]
 
         e_early = (bool(_structural.intersection(reasonsE))
                    and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsE
@@ -2948,16 +2995,21 @@ def main() -> int:
                      and not markerI.exists())
         g_gitdir = ("OFFLINE_SOURCE_ROOT_GITDIR_INDIRECT" in reasonsG
                     and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsG)
+        j_commondir = ("OFFLINE_SOURCE_ROOT_GITDIR_INDIRECT" in reasonsJ
+                       and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsJ
+                       and not markerJ.exists())
         rec("OP49b privileged-git-never-runs-author-config-programs",
-            git_ok and e_early and h_config and c_herm and i_include and g_gitdir,
+            git_ok and e_early and h_config and c_herm and i_include and g_gitdir
+            and j_commondir,
             f"a structurally untrusted source returns before git; a repo-local "
             f"config with a direct execution-capable directive, an [include] to "
-            f"an external filter, or a gitdir-pointer .git file are each refused "
-            f"before git and run no author program; a clean protected source "
-            f"runs git hermetically "
+            f"an external filter, a gitdir-pointer .git file, or a .git/commondir "
+            f"redirecting the common dir to an external filter config are each "
+            f"refused before git and run no author program; a clean protected "
+            f"source runs git hermetically "
             f"(E={reasonsE} m={markerE.exists()}, H={reasonsH} m={markerH.exists()}, "
             f"C={reasonsC} m={markerC.exists()}, I={reasonsI} m={markerI.exists()}, "
-            f"G={reasonsG})")
+            f"G={reasonsG}, J={reasonsJ} m={markerJ.exists()})")
 
         # ---- OP49e: privileged git hooks come from a directory the author
         # cannot create. clone/checkout run post-checkout from core.hooksPath;
