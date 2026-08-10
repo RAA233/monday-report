@@ -330,7 +330,15 @@ def runtime_concurrency(db, br):
         f"max observed active handlers = {conc['max_observed']} == configured 4")
     rec("CC02 never-exceeds-bound", conc["within_bound"] and conc["max_observed"] <= 4,
         "active handlers never exceed the configured worker_concurrency under any path")
-    stop.set(); [t.join(timeout=3) for t in pool["_threads"]]
+    stop.set()
+    # Drain deadline must cover the handler barrier's own 10s timeout: when the
+    # tail of the 24 messages lands unevenly across workers, the final handlers
+    # sit in barrier.wait() until it breaks, THEN finish. A 3s join raced that
+    # 10s timeout and failed intermittently. The assertion itself is unchanged
+    # and still requires every handler to have drained with none newly started.
+    drain_deadline = time.time() + 15
+    for t in pool["_threads"]:
+        t.join(timeout=max(0.1, drain_deadline - time.time()))
     rec("CC03 shutdown-launches-no-new-handlers", qa.status()["concurrency"]["active"] == 0,
         "after stop, no handler remains active (shutdown launches no new work)")
     qa.shutdown()
