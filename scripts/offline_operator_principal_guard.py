@@ -2126,23 +2126,42 @@ def main() -> int:
             "    if ($x.Count) { $stop = $i.Extent.EndOffset }",
             "}",
             "if ($stop -lt 0) { Write-Output 'NO-REFUSAL'; exit 0 }",
-            "# Top-level statements only: a nested statement is inside one of",
-            "# these, so its text is already covered.",
-            "$parts = @()",
-            "foreach ($blk in @($ast.BeginBlock, $ast.ProcessBlock, $ast.EndBlock)) {",
-            "    if (-not $blk) { continue }",
-            "    foreach ($s in $blk.Statements) {",
-            "        if ($s.Extent.StartOffset -lt $stop) { $parts += $s.Extent.Text }",
-            "    }",
-            "}",
-            "# The param block is a statement's attribute, not a statement, so it",
-            "# is added explicitly -- a default value is a way to arm the bypass.",
-            "if ($ast.ParamBlock) { $parts = @($ast.ParamBlock.Extent.Text) + $parts }",
-            "Write-Output ('STATEMENTS=' + $parts.Count)",
-            "Write-Output '---PROLOGUE---'",
-            "$parts -join \"`n<<STMT>>`n\"",
+            "# EVERY BYTE THAT RUNS FIRST, not a reconstruction of it.",
+            "#",
+            "# Enumerating Begin/Process/End statements missed anything that is",
+            "# not one: a `dynamicparam` block executes during PARAMETER BINDING,",
+            "# ahead of the first body statement and therefore ahead of every",
+            "# gate, and its text appeared in no statement -- a mutant that",
+            "# deleted the reviewer task from a dynamicparam produced a",
+            "# byte-identical digest. `using` statements and script-level",
+            "# attributes were outside it for the same reason. Reassembling from",
+            "# parts also meant normalisation ran over the parts: comments were",
+            "# stripped and string literals were blanked to length-preserving",
+            "# filler, so a same-length change to a SID, a rights mask or a path",
+            "# inside a literal did not move the digest either.",
+            "#",
+            "# The prefix of the file is taken instead. Only line endings are",
+            "# normalised, so the pin is stable across checkouts and blind to",
+            "# nothing else.",
+            "$text = $ast.Extent.Text",
+            "$prefix = $text.Substring(0, $stop) -replace \"`r`n\", \"`n\"",
+            "# principal_contract.ps1 is DOT-SOURCED above the refusal, so all of",
+            "# it runs first too and belongs in the same pin.",
+            "$contract = [IO.File]::ReadAllText($env:MR_CONTRACT_PATH) -replace \"`r`n\", \"`n\"",
+            "$sha = [Security.Cryptography.SHA256]::Create()",
+            "try {",
+            "    $bytes = [Text.Encoding]::UTF8.GetBytes($prefix + \"`n<<CONTRACT>>`n\" + $contract)",
+            "    $digest = ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join ''",
+            "} finally { $sha.Dispose() }",
+            "$dyn = [bool]$ast.DynamicParamBlock",
+            "$using = @($ast.UsingStatements).Count",
+            "Write-Output ('PREFIXCHARS=' + $prefix.Length)",
+            "Write-Output ('DYNAMICPARAM=' + $dyn)",
+            "Write-Output ('USINGCOUNT=' + $using)",
+            "Write-Output ('DIGEST=' + $digest)",
         ]), encoding="utf-8-sig")
         prologue_digest, prologue_count = "", -1
+        prologue_dyn, prologue_using = None, -1
         try:
             p_out = subprocess.run(
                 [str(SHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
@@ -2150,32 +2169,39 @@ def main() -> int:
                 capture_output=True, text=True, timeout=300,
                 env={**os.environ,
                      "MR_BOOT_PATH": str(ROOT / "packaging" / "hyperv"
-                                         / "reviewer_bootstrap.ps1")})
+                                         / "reviewer_bootstrap.ps1"),
+                     "MR_CONTRACT_PATH": str(ROOT / "packaging" / "hyperv"
+                                             / "principal_contract.ps1")})
             raw = p_out.stdout or ""
-            if "---PROLOGUE---" in raw:
-                head, body = raw.split("---PROLOGUE---", 1)
-                m = re.search(r"STATEMENTS=(\d+)", head)
-                prologue_count = int(m.group(1)) if m else -1
-                # Comments out, whitespace collapsed: prose is free, code is not.
-                normalised = re.sub(
-                    r"\s+", " ", strip_powershell_comments(body)).strip()
-                prologue_digest = hashlib.sha256(
-                    normalised.encode("utf-8")).hexdigest()
+            # Hashed by the same parser that located the boundary, so there is
+            # one coordinate space and no chance of slicing different text than
+            # the offset was measured in.
+            m = re.search(r"DIGEST=([0-9a-f]{64})", raw)
+            prologue_digest = m.group(1) if m else ""
+            m = re.search(r"PREFIXCHARS=(\d+)", raw)
+            prologue_count = int(m.group(1)) if m else -1
+            m = re.search(r"DYNAMICPARAM=(\w+)", raw)
+            prologue_dyn = (m.group(1) == "True") if m else None
+            m = re.search(r"USINGCOUNT=(\d+)", raw)
+            prologue_using = int(m.group(1)) if m else -1
         except (OSError, subprocess.SubprocessError, ValueError):
             prologue_digest = ""
 
         # Pinned. Update deliberately, in the same commit as any intended change
         # to the statements above the refusal, and never to make a run go green.
-        PINNED_PROLOGUE = "44af89451299ba70"
-        PINNED_PROLOGUE_STATEMENTS = 67
-        rec("OP48v the-statements-above-the-refusal-are-pinned-whole",
-            bool(prologue_digest) and prologue_count == PINNED_PROLOGUE_STATEMENTS
-            and prologue_digest.startswith(PINNED_PROLOGUE),
-            f"every top-level statement before the refusal, plus the parameter "
-            f"block, digests to the pinned value -- so an insertion or edit "
-            f"above the refusal is caught whatever mechanism it uses, without "
-            f"the check having to know the mechanism "
-            f"({prologue_count} statements, digest={prologue_digest[:16] or 'UNAVAILABLE'})")
+        PINNED_PROLOGUE = "9415d374c6478f61"
+        PINNED_PROLOGUE_CHARS = 112976
+        rec("OP48v everything-that-runs-before-the-refusal-is-pinned-whole",
+            bool(prologue_digest) and prologue_count == PINNED_PROLOGUE_CHARS
+            and prologue_digest.startswith(PINNED_PROLOGUE)
+            and prologue_dyn is False and prologue_using == 0,
+            f"every byte of the elevated script up to the refusal, plus the "
+            f"whole of the contract it dot-sources above that point, digests to "
+            f"the pinned value -- so anything that executes first is covered "
+            f"whatever form it takes, including a dynamicparam block, a using "
+            f"statement, a script attribute or a change inside a string literal "
+            f"({prologue_count} chars, dynamicparam={prologue_dyn}, "
+            f"using={prologue_using}, digest={prologue_digest[:16] or 'UNAVAILABLE'})")
 
         rec("OP48q the-refusal-is-not-nested-inside-anything",
             route_ok and bool(refusal) and route.get("refusal_count") == 1
