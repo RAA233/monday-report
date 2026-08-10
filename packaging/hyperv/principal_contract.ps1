@@ -1070,13 +1070,23 @@ function Assert-TrustedSourceRoot {
         if ($reasons -contains $__blocker) { return $reasons }
     }
 
-    # git runs FIRST, so OFFLINE_SOURCE_ROOT_DIRTY is evaluated even when no
-    # expected identity was supplied. Returning here meant one acknowledgement
-    # waived two properties: the missing pin AND the untracked .ps1 or .py
-    # dropped beside the bootstrap, which is the case the dirty check exists for.
-    if (-not $ExpectedCommit -or -not $ExpectedTree) {
+    # THE MISSING PIN IS RECORDED, NOT RETURNED ON.
+    #
+    # This comment used to describe the behaviour below as already true while the
+    # code returned here, so one acknowledgement waived FOUR properties, not the
+    # one it is documented to waive: the .git shape checks, the config execution
+    # scan, the index-flag check and OFFLINE_SOURCE_ROOT_DIRTY all sat below the
+    # return. -AcknowledgeSharedSourceRoot treats only
+    # EXPECTED_IDENTITY_MISSING as soft, so on that route the gate was passing a
+    # tree whose shape and cleanliness had never been examined -- and the routes
+    # that follow execute bytes out of that very tree.
+    #
+    # None of those checks needs an expected identity: they compare the tree
+    # against its OWN repository. Only the commit/tree comparison needs the pin,
+    # so only that comparison is conditional, at the end.
+    $identityMissing = (-not $ExpectedCommit -or -not $ExpectedTree)
+    if ($identityMissing) {
         $reasons.Add('OFFLINE_SOURCE_ROOT_EXPECTED_IDENTITY_MISSING')
-        return $reasons
     }
     $git = Resolve-TrustedGit -Explicit $GitPath -Author $Author
     if (-not $git) { $reasons.Add('OFFLINE_TRUSTED_GIT_UNRESOLVED'); return $reasons }
@@ -1100,9 +1110,23 @@ function Assert-TrustedSourceRoot {
     # filter during the status. So the shape itself is constrained: .git must be
     # a real directory, must carry no indirection (include/includeIf/
     # attributesFile), and no execution-capable directive -- in .git\config, its
-    # worktree companion, and .git\info\attributes. With indirection refused and
-    # .git a real directory, those three files are the whole config surface git
-    # can reach on these commands, so the scan is then complete.
+    # worktree companion, and .git\info\attributes.
+    #
+    # THOSE THREE FILES ARE NOT THE WHOLE SURFACE, which is what this comment
+    # used to claim. A SUBMODULE carries a second, complete git configuration at
+    # .git\modules\<name>\config with its own info\attributes, and `git status`
+    # DESCENDS into the submodule to report its dirtiness -- running a filter
+    # driver defined in that config. It defeats every rule above it: .git stays a
+    # real directory, the superproject config gains only an inert
+    # [submodule "..."] section, and .git\modules\<name> has no commondir and no
+    # alternates of its own, so the self-containment rule passes it too.
+    # Measured: the author's clean filter executed under this function's own
+    # elevated git invocation while the tree was reported merely WRONG_COMMIT.
+    #
+    # So the shape requirement is EXACTLY ONE REPOSITORY, at the root: no nested
+    # gitdir, no submodule, no nested worktree. A plain
+    # `git clone --local --no-hardlinks` of a submodule-free project -- which is
+    # what the operator source is -- satisfies it.
     $dotGit = Join-Path $Root '.git'
     if (-not (Test-Path -LiteralPath $dotGit)) {
         $reasons.Add('OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY'); return $reasons
@@ -1133,6 +1157,30 @@ function Assert-TrustedSourceRoot {
             $reasons.Add('OFFLINE_SOURCE_ROOT_GITDIR_INDIRECT'); return $reasons
         }
     }
+    # EXACTLY ONE REPOSITORY, AT THE ROOT.
+    #
+    # .git\modules is where a superproject keeps its submodules' real gitdirs,
+    # each with its own config and info\attributes that no scan of the three
+    # files below ever reads, and which `git status` consults when it descends
+    # into the submodule. .gitmodules is the tracked declaration that causes that
+    # descent. A nested .git anywhere in the tree is the same hazard by a
+    # different name (a nested repository or a linked worktree), so it is refused
+    # rather than reasoned about. $scanned is the recursive enumeration already
+    # taken above -- a list of PATH STRINGS, not items -- so this costs no second
+    # walk, and the leaf is taken with [IO.Path] rather than a .Name property a
+    # string does not have.
+    foreach ($nestedLeaf in @('.git\modules', '.gitmodules')) {
+        if (Test-Path -LiteralPath (Join-Path $Root $nestedLeaf)) {
+            $reasons.Add('OFFLINE_SOURCE_ROOT_NESTED_REPOSITORY'); return $reasons
+        }
+    }
+    $rootDotGit = (Join-Path $Root '.git').TrimEnd('\')
+    foreach ($entry in $scanned) {
+        $entryPath = ([string]$entry).TrimEnd('\')
+        if ([System.IO.Path]::GetFileName($entryPath) -ne '.git') { continue }
+        if ($entryPath -eq $rootDotGit) { continue }
+        $reasons.Add('OFFLINE_SOURCE_ROOT_NESTED_REPOSITORY'); return $reasons
+    }
     $execDirective = '(?im)fsmonitor|hooksPath|\[\s*filter|\bfilter\s*=|' +
                      '\.clean\b|\.smudge\b|\.process\b|sshCommand|\bhelper\s*=|' +
                      '\.textconv\b|\.external\b|\bpager\s*=|\[\s*alias|manpath'
@@ -1148,6 +1196,31 @@ function Assert-TrustedSourceRoot {
             $reasons.Add('OFFLINE_SOURCE_ROOT_GIT_CONFIG_UNREADABLE'); return $reasons
         }
         if (($cfgText -match $execDirective) -or ($cfgText -match $indirection)) {
+            $reasons.Add('OFFLINE_SOURCE_ROOT_GIT_CONFIG_EXECUTABLE'); return $reasons
+        }
+    }
+    # THE UNTRACKED-FILE HALF OF THE DIRTY CHECK MUST NOT BE SUPPRESSIBLE.
+    #
+    # OFFLINE_SOURCE_ROOT_DIRTY exists for the untracked .ps1 or .py dropped
+    # beside the bootstrap, and .git\info\exclude silences exactly that: it is
+    # inside .git, untracked, invisible to the commit and tree pins, and a single
+    # `*` in it empties the untracked half of `status --porcelain`. A fresh
+    # `git clone` writes this file with COMMENTS ONLY, so refusing an effective
+    # pattern -- rather than the file's existence -- does not refuse a real
+    # operator source. (status.showUntrackedFiles and core.excludesFile reach the
+    # same result through config; both are overridden on the command line below,
+    # which beats repo config, so they need no scan rule.)
+    $excludePath = Join-Path $Root '.git\info\exclude'
+    if (Test-Path -LiteralPath $excludePath) {
+        $excludeText = $null
+        try { $excludeText = [System.IO.File]::ReadAllText($excludePath) } catch { $excludeText = $null }
+        if ($null -eq $excludeText) {
+            $reasons.Add('OFFLINE_SOURCE_ROOT_GIT_CONFIG_UNREADABLE'); return $reasons
+        }
+        foreach ($excludeLine in ($excludeText -split "`n")) {
+            $trimmed = $excludeLine.Trim()
+            if (-not $trimmed) { continue }
+            if ($trimmed.StartsWith('#')) { continue }
             $reasons.Add('OFFLINE_SOURCE_ROOT_GIT_CONFIG_EXECUTABLE'); return $reasons
         }
     }
@@ -1175,15 +1248,23 @@ function Assert-TrustedSourceRoot {
     # core.attributesFile emptied as well, so that even past the scan no external
     # attributes file can attach a filter to a path; the scan already refuses a
     # repo that sets it, this is the command-line backstop.
+    # status.showUntrackedFiles and core.excludesFile are forced here rather than
+    # scanned for: a command-line -c beats repo config, so `no`/`normal` in
+    # .git\config and an author excludes file both stop hiding the dropped .ps1
+    # the dirty check exists to catch. core.ignoreStat=false likewise stops the
+    # index being told to disbelieve stat data.
     $gitHermetic = @('-c', 'core.fsmonitor=', '-c', "core.hooksPath=$hooksDeny",
-                     '-c', 'core.attributesFile=')
+                     '-c', 'core.attributesFile=',
+                     '-c', 'status.showUntrackedFiles=all',
+                     '-c', 'core.excludesFile=',
+                     '-c', 'core.ignoreStat=false')
     # GIT_COMMON_DIR is forced to this .git so that even a redirect file the scan
     # above did not foresee cannot move the common dir (config, attributes,
     # objects, refs) somewhere else: git reads the environment value and ignores
     # any in-repo `commondir`. The scan refuses such a file outright; this is the
     # command-line backstop for the same property, matching core.attributesFile.
     $commonDir = Join-Path $Root '.git'
-    $head = ''; $tree = ''; $dirty = ''
+    $head = ''; $tree = ''; $dirty = ''; $indexFlags = ''
     $prevPref = $ErrorActionPreference
     $prevNoSystem = $env:GIT_CONFIG_NOSYSTEM
     $prevGlobal   = $env:GIT_CONFIG_GLOBAL
@@ -1198,6 +1279,18 @@ function Assert-TrustedSourceRoot {
         $head  = (& $git @gitHermetic -C $Root rev-parse HEAD 2>&1 | Out-String).Trim()
         $tree  = (& $git @gitHermetic -C $Root rev-parse 'HEAD^{tree}' 2>&1 | Out-String).Trim()
         $dirty = (& $git @gitHermetic -C $Root status --porcelain 2>&1 | Out-String).Trim()
+        # THE INDEX CAN BE TOLD TO LIE ABOUT THE WORKTREE.
+        #
+        # `git update-index --assume-unchanged` (and --skip-worktree) set bits in
+        # .git\index -- untracked, invisible to both rev-parse pins -- that make
+        # git skip the file when answering `status`. So an edited worktree file
+        # reports CLEAN at the correct commit and the correct tree, and the
+        # elevated routes then execute that very file out of $SourceRepo. ls-files
+        # -v marks assume-unchanged with a LOWERCASE tag letter and skip-worktree
+        # with S; it only reads the index and runs no filter.
+        $indexFlags = (& $git @gitHermetic -C $Root ls-files -v 2>&1 |
+                       Where-Object { $_ -cmatch '^[a-zS] ' } |
+                       Select-Object -First 1 | Out-String).Trim()
     } catch {
         $head = ''
     } finally {
@@ -1211,8 +1304,17 @@ function Assert-TrustedSourceRoot {
         $reasons.Add('OFFLINE_SOURCE_ROOT_NOT_A_REPOSITORY'); return $reasons
     }
 
-    if ($head -ne $ExpectedCommit) { $reasons.Add('OFFLINE_SOURCE_ROOT_WRONG_COMMIT') }
-    if ($tree -ne $ExpectedTree) { $reasons.Add('OFFLINE_SOURCE_ROOT_WRONG_TREE') }
+    if ($indexFlags) {
+        $reasons.Add('OFFLINE_SOURCE_ROOT_INDEX_FLAGGED'); return $reasons
+    }
+    # Only the pin comparison is conditional. Everything above answers a question
+    # the repository can answer about itself, so -AcknowledgeSharedSourceRoot no
+    # longer waives it; comparing against an expected value nobody supplied would
+    # simply report a mismatch with the empty string.
+    if (-not $identityMissing) {
+        if ($head -ne $ExpectedCommit) { $reasons.Add('OFFLINE_SOURCE_ROOT_WRONG_COMMIT') }
+        if ($tree -ne $ExpectedTree) { $reasons.Add('OFFLINE_SOURCE_ROOT_WRONG_TREE') }
+    }
     if ($dirty) {
         # Tracked modifications AND untracked files both count. An untracked
         # .ps1 or .py dropped beside the bootstrap is loadable by it, so

@@ -518,6 +518,23 @@ function Assert-AclApplied {
         exit 2
     }
     Assert-AuthorNamed
+    # A READ-BACK THROUGH A LINK CERTIFIES THE LINK, NOT THE TREE.
+    #
+    # Get-Acl on a reparse point returns the reparse point's own descriptor
+    # (measured: an ACE present on the target is invisible at the junction path),
+    # so every assertion below -- protected, admins-owned, no author ACE -- would
+    # be true of the link and say nothing about the directory that holds the
+    # files. Worse, Get-ChildItem -Recurse DOES follow into the target, so the
+    # per-child loop reports the target's correctly-inherited children as clean
+    # and never opens the target directory object, where the author's rights
+    # live. This is the function that PRINTS the guarantee, so it refuses rather
+    # than reports.
+    if ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        Write-Output "  STOP: $Path is a reparse point, not a directory."
+        Write-Output '  reason: OFFLINE_ACL_TARGET_REPARSE_ESCAPE'
+        Write-Output '  Its ACL describes the link; the directory holding the files is elsewhere.'
+        exit 2
+    }
     # Same delegation as Test-AuthorWritable: the read-back that PRINTS
     # "no author ACE" was itself blind to group ACEs and generic bits, so it
     # asserted a clean result over trees the author could still write.
@@ -533,6 +550,14 @@ function Assert-AclApplied {
                -ErrorAction SilentlyContinue -ErrorVariable itemErrors)
     if (@($itemErrors).Count) { $bad += "unlistable:$(Split-Path $Path -Leaf)" }
     foreach ($item in $items) {
+        # A link anywhere in the subtree has the same effect one level down: the
+        # ACL read here describes the link, and whatever it points at is neither
+        # permissioned nor inspected.
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            $bad += "reparse:$($item.FullName)"
+            if ($bad.Count -ge 5) { break }
+            continue
+        }
         $acl = $null
         try { $acl = Get-Acl -LiteralPath $item.FullName } catch { $bad += "unreadable:$($item.FullName)" ; continue }
         if (Test-AccountCanWritePath -Identity $AuthorIdentity -Path $item.FullName) {
@@ -1121,8 +1146,41 @@ function Initialize-ReviewerPaths {
     # the envelope. Only public or CMS-encrypted material ever lands here.
     $sharedHandoff = @("$Root\xchg\credential")
 
+    # NEVER ADOPT A DIRECTORY THAT IS ACTUALLY A LINK.
+    #
+    # `if (-not (Test-Path)) { New-Item }` silently accepts a pre-planted
+    # junction as the directory, and from then on every ACL operation and every
+    # read-back addresses the WRONG OBJECT. Measured on this host: icacls and
+    # Get-Acl applied to a junction path read and write the junction's own
+    # descriptor; /setowner /T and /grant /T reach the target's CHILDREN but
+    # never the target DIRECTORY OBJECT. So the sequence below rewrites the link
+    # into exactly the shape the verification wants -- the read-back then reports
+    # "protected, admins-owned, no author ACE" -- while the real container keeps
+    # the author's rights, including FILE_DELETE_CHILD over every file the
+    # elevated session subsequently copies in. Copy-Item then writes THROUGH the
+    # junction into the author's directory, and the reviewer's scheduled task
+    # runs an entry point the author can replace at will.
+    #
+    # $Root itself is only checked by Assert-TaskRootProtected, and only on the
+    # two runtime routes; the children are checked nowhere. Refusing at the point
+    # of creation covers every route that provisions, which is the shared
+    # function rather than one call site. A non-administrative author can create
+    # C:\mr-hv (the volume root grants Authenticated Users create-folder) and a
+    # junction needs no privilege at all, so this is reachable before the
+    # operator's first run.
     foreach ($d in @($Root) + $authorOwned + $reviewerOwned) {
-        if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+        if (-not (Test-Path -LiteralPath $d)) {
+            New-Item -ItemType Directory -Force -Path $d | Out-Null
+            continue
+        }
+        $existingDir = Get-Item -LiteralPath $d -Force
+        if ($existingDir.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            Write-Output "  STOP: $d is a reparse point, not a directory."
+            Write-Output '  reason: OFFLINE_TASK_ROOT_REPARSE_ESCAPE'
+            Write-Output '  Locking it would permission the link while the directory that'
+            Write-Output '  actually holds the files keeps its creator''s access.'
+            exit 2
+        }
     }
 
     # Directional ACLs name the AUTHOR explicitly. Every grant below used to
@@ -1871,11 +1929,30 @@ if ($ExportSource) {
     $hooksDeny = [System.IO.Path]::Combine(
         [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows),
         'mr-offline-no-such-hooks')
-    $ghArgs = @('-c', 'core.fsmonitor=', '-c', "core.hooksPath=$hooksDeny")
+    # THE SAME HERMETIC SET AS THE CONTRACT, not a subset of it. This argument
+    # list omitted core.attributesFile and the untracked-file overrides, and the
+    # environment omitted GIT_TERMINAL_PROMPT. Two routes running git over the
+    # same tree with different protection is the shape that reopened this defect
+    # once already: harden the shared property, not the one call site.
+    #
+    # GIT_COMMON_DIR is deliberately NOT set here, and that is not an omission:
+    # it names ONE repository's common directory, while this route spans two (the
+    # source and the fresh clone), so a single value would misdirect whichever it
+    # does not name. The source has already been proved self-contained by
+    # Assert-TrustedSourceRoot, which runs before this route and refuses
+    # commondir, alternates and nested gitdirs outright; the destination is
+    # created by the clone on the next lines.
+    $ghArgs = @('-c', 'core.fsmonitor=', '-c', "core.hooksPath=$hooksDeny",
+                '-c', 'core.attributesFile=',
+                '-c', 'status.showUntrackedFiles=all',
+                '-c', 'core.excludesFile=',
+                '-c', 'core.ignoreStat=false')
     $prevNoSystem = $env:GIT_CONFIG_NOSYSTEM
     $prevGlobal   = $env:GIT_CONFIG_GLOBAL
+    $prevPrompt   = $env:GIT_TERMINAL_PROMPT
     $env:GIT_CONFIG_NOSYSTEM = '1'
     $env:GIT_CONFIG_GLOBAL   = 'NUL'
+    $env:GIT_TERMINAL_PROMPT = '0'
     $head = (& $gitExe @ghArgs -C $SourceRepo rev-parse HEAD).Trim()
     $tree = (& $gitExe @ghArgs -C $SourceRepo rev-parse 'HEAD^{tree}').Trim()
     Write-Fact 'exporting head' $head
@@ -1901,6 +1978,7 @@ if ($ExportSource) {
     $exportedTree = (& $gitExe @ghArgs -C $dest rev-parse 'HEAD^{tree}').Trim()
     $env:GIT_CONFIG_NOSYSTEM = $prevNoSystem
     $env:GIT_CONFIG_GLOBAL   = $prevGlobal
+    $env:GIT_TERMINAL_PROMPT = $prevPrompt
     Write-Fact 'exported head matches' ($exportedHead -eq $head)
     Write-Fact 'exported tree matches' ($exportedTree -eq $tree)
     if ($exportedHead -ne $head -or $exportedTree -ne $tree) {

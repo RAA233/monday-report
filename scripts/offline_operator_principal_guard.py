@@ -2288,9 +2288,9 @@ def main() -> int:
 
         # Pinned. Update deliberately, in the same commit as any intended change
         # to either file, and never to make a run go green.
-        PINNED_PROLOGUE = "6efe91490d1ff874"
-        PINNED_BOOT_CHARS = 132137
-        PINNED_CONTRACT_CHARS = 69784
+        PINNED_PROLOGUE = "68659c0c1fea9eee"
+        PINNED_BOOT_CHARS = 136853
+        PINNED_CONTRACT_CHARS = 75895
         PINNED_RUNTIME_CHARS = 26139
         rec("OP48v every-file-the-elevated-session-executes-is-pinned-whole",
             bool(prologue_digest) and prologue_count == PINNED_BOOT_CHARS
@@ -3010,6 +3010,184 @@ def main() -> int:
             f"(E={reasonsE} m={markerE.exists()}, H={reasonsH} m={markerH.exists()}, "
             f"C={reasonsC} m={markerC.exists()}, I={reasonsI} m={markerI.exists()}, "
             f"G={reasonsG}, J={reasonsJ} m={markerJ.exists()})")
+
+        # ---- OP49g: a SUBMODULE carries a second, complete git configuration
+        # at .git\modules\<n>\config with its own info\attributes. `git status`
+        # descends into the submodule and runs a filter driver defined there --
+        # so the three-file config scan, the gitdir-pointer refusal and the
+        # self-containment rule all pass a tree that still executes author code.
+        # The requirement is exactly one repository, at the root.
+        repoK = work / "op49g-k"
+        markerK = work / "op49g-k-marker.txt"
+        upstreamK = work / "op49g-upstream"
+        upstreamK.mkdir(parents=True, exist_ok=True)
+        for _cmd in (["init", "-q"],):
+            subprocess.run([_git, "-C", str(upstreamK)] + _cmd,
+                           capture_output=True, text=True, timeout=60)
+        (upstreamK / "s.txt").write_text("aaaaa\n", encoding="utf-8")
+        (upstreamK / ".gitattributes").write_text("* filter=evil\n", encoding="utf-8")
+        for _cmd in (["add", "-A"],
+                     ["-c", "user.email=a@b.c", "-c", "user.name=a",
+                      "commit", "-q", "-m", "sub"]):
+            subprocess.run([_git, "-C", str(upstreamK)] + _cmd,
+                           capture_output=True, text=True, timeout=60)
+        _make_repo(repoK, markerK, protected=False, with_fsmon=False)
+        subprocess.run([_git, "-C", str(repoK), "-c", "protocol.file.allow=always",
+                        "-c", "user.email=a@b.c", "-c", "user.name=a",
+                        "submodule", "add", "-q",
+                        str(upstreamK).replace("\\", "/"), "sub"],
+                       capture_output=True, text=True, timeout=120)
+        subprocess.run([_git, "-C", str(repoK), "-c", "user.email=a@b.c",
+                        "-c", "user.name=a", "commit", "-q", "-m", "add sub"],
+                       capture_output=True, text=True, timeout=60)
+        _modK = repoK / ".git" / "modules" / "sub"
+        _setupK = _modK.exists()
+        if _setupK:
+            _cleanK = work / "op49g-clean.sh"
+            _cleanK.write_text("#!/bin/sh\necho x > '" + str(markerK).replace("\\", "/")
+                               + "'\ncat\n", encoding="utf-8")
+            with (_modK / "config").open("a", encoding="utf-8") as _fh:
+                _fh.write('[filter "evil"]\n\tclean = sh \''
+                          + str(_cleanK).replace("\\", "/") + "'\n")
+            (_modK / "info").mkdir(parents=True, exist_ok=True)
+            (_modK / "info" / "attributes").write_text("* filter=evil\n", encoding="utf-8")
+            # EQUAL SIZE: a size change is reported modified without running the
+            # filter, so it would not exercise execution at all.
+            (repoK / "sub" / "s.txt").write_text("bbbbb\n", encoding="utf-8")
+            for a in (["/inheritance:r"],
+                      ["/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"],
+                      ["/setowner", "*S-1-5-32-544"]):
+                subprocess.run([_icacls_exe, str(repoK)] + a,
+                               capture_output=True, text=True, timeout=60)
+        reasonsK = probe({"action": "trusted-source", "root": str(repoK),
+                          "author": identity("SYNTH", SID_AUTHOR),
+                          "expected_commit": "a" * 40, "expected_tree": "b" * 40},
+                         work)["reasons"] if _setupK else []
+        rec("OP49g a-submodule-gitdir-config-cannot-run-author-code",
+            git_ok and _setupK
+            and "OFFLINE_SOURCE_ROOT_NESTED_REPOSITORY" in reasonsK
+            and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsK
+            and not markerK.exists(),
+            f"a source carrying a submodule -- whose own gitdir config defines a "
+            f"filter driver that `git status` would run while descending into it "
+            f"-- is refused as a nested repository before git, and the author "
+            f"program does not run (setup={_setupK}, K={reasonsK}, "
+            f"m={markerK.exists()})")
+
+        # ---- OP49h: the INDEX can be told to lie about the worktree.
+        # `update-index --assume-unchanged` sets a bit in .git\index -- untracked,
+        # invisible to both rev-parse pins -- that makes `status` skip the file.
+        # A modified worktree file then reports CLEAN at the correct commit and
+        # tree, and the elevated routes execute that file out of $SourceRepo.
+        repoL = work / "op49h-l"
+        markerL = work / "op49h-l-marker.txt"
+        _make_repo(repoL, markerL, protected=False, with_fsmon=False)
+        (repoL / "run.ps1").write_text("# original\n", encoding="utf-8")
+        for _cmd in (["add", "-A"],
+                     ["-c", "user.email=a@b.c", "-c", "user.name=a",
+                      "commit", "-q", "-m", "payload"]):
+            subprocess.run([_git, "-C", str(repoL)] + _cmd,
+                           capture_output=True, text=True, timeout=60)
+        _headL = subprocess.run([_git, "-C", str(repoL), "rev-parse", "HEAD"],
+                                capture_output=True, text=True, timeout=60).stdout.strip()
+        _treeL = subprocess.run([_git, "-C", str(repoL), "rev-parse", "HEAD^{tree}"],
+                                capture_output=True, text=True, timeout=60).stdout.strip()
+        (repoL / "run.ps1").write_text("# SUBSTITUTED\n", encoding="utf-8")
+        subprocess.run([_git, "-C", str(repoL), "update-index",
+                        "--assume-unchanged", "run.ps1"],
+                       capture_output=True, text=True, timeout=60)
+        for a in (["/inheritance:r"],
+                  ["/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"],
+                  ["/setowner", "*S-1-5-32-544"]):
+            subprocess.run([_icacls_exe, str(repoL)] + a,
+                           capture_output=True, text=True, timeout=60)
+        reasonsL = probe({"action": "trusted-source", "root": str(repoL),
+                          "author": identity("SYNTH", SID_AUTHOR),
+                          "expected_commit": _headL, "expected_tree": _treeL},
+                         work)["reasons"]
+        rec("OP49h an-index-flagged-worktree-is-not-reported-clean",
+            git_ok and bool(_headL)
+            and "OFFLINE_SOURCE_ROOT_INDEX_FLAGGED" in reasonsL,
+            f"a tree at the EXPECTED commit and tree whose worktree file has been "
+            f"substituted and then marked assume-unchanged -- so `status` reports "
+            f"nothing -- is refused on the index flag rather than accepted as "
+            f"clean (head={_headL[:8]}, L={reasonsL})")
+
+        # ---- OP49i: -AcknowledgeSharedSourceRoot waives ONLY the missing pin.
+        # The caller treats every reason but EXPECTED_IDENTITY_MISSING as hard,
+        # so returning early on a missing pin silently waived the shape checks,
+        # the config scan and the dirty check as well -- on the one route whose
+        # whole purpose is a copy nobody pinned.
+        repoM = work / "op49i-m"
+        markerM = work / "op49i-m-marker.txt"
+        _make_repo(repoM, markerM, protected=True, with_fsmon=False)
+        (repoM / "dropped.ps1").write_text("# untracked drop\n", encoding="utf-8")
+        reasonsM = probe({"action": "trusted-source", "root": str(repoM),
+                          "author": identity("SYNTH", SID_AUTHOR),
+                          "expected_commit": "", "expected_tree": ""},
+                         work)["reasons"]
+        rec("OP49i a-missing-pin-does-not-waive-the-other-source-properties",
+            git_ok
+            and "OFFLINE_SOURCE_ROOT_EXPECTED_IDENTITY_MISSING" in reasonsM
+            and "OFFLINE_SOURCE_ROOT_DIRTY" in reasonsM
+            and "OFFLINE_SOURCE_ROOT_WRONG_COMMIT" not in reasonsM,
+            f"with no expected identity supplied the gate still evaluates the "
+            f"repository against itself -- an untracked .ps1 dropped beside the "
+            f"bootstrap is still reported DIRTY -- while the commit comparison, "
+            f"the only property that needs the pin, is the only one skipped "
+            f"(M={reasonsM})")
+
+        # ---- OP49j: a pre-planted junction under the task root must not be
+        # adopted as a directory. Two halves, because either alone is unsound:
+        # (1) the WINDOWS FACT the defect rests on, measured here rather than
+        #     assumed -- Get-Acl on a reparse point returns the LINK's descriptor,
+        #     so an ACE present on the target is invisible at the junction path,
+        #     while enumeration follows through to the target's children. That is
+        #     what let the elevated session permission a link, read it back
+        #     "protected, admins-owned, no author ACE", and then copy the
+        #     reviewer's entry point through it into an author-owned directory;
+        # (2) the shipped refusals, positioned: the adoption loop refuses a
+        #     reparse point BEFORE the copy that installs the entry point, and
+        #     the ACL read-back refuses one too, so no route can certify a link.
+        _junc = work / "op49j"
+        _junc.mkdir(parents=True, exist_ok=True)
+        _jt = _junc / "target"
+        _jt.mkdir(parents=True, exist_ok=True)
+        subprocess.run([_icacls_exe, str(_jt), "/grant", "*S-1-5-11:(OI)(CI)M"],
+                       capture_output=True, text=True, timeout=60)
+        _jl = _junc / "link"
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(_jl), str(_jt)],
+                       capture_output=True, text=True, timeout=60)
+
+        def _has_authusers(p):
+            out = subprocess.run([_icacls_exe, str(p)],
+                                 capture_output=True, text=True, timeout=60)
+            return "S-1-5-11" in (out.stdout or "") or \
+                   "Authenticated Users" in (out.stdout or "")
+
+        _link_made = _jl.exists()
+        _ace_at_target = _has_authusers(_jt) if _link_made else False
+        _ace_at_link = _has_authusers(_jl) if _link_made else True
+        _acl_reads_link = bool(_ace_at_target and not _ace_at_link)
+
+        _boot_text = (ROOT / "packaging" / "hyperv" /
+                      "reviewer_bootstrap.ps1").read_text(encoding="utf-8")
+        _adopt = _boot_text.find("foreach ($d in @($Root) + $authorOwned + $reviewerOwned)")
+        _adopt_refusal = _boot_text.find(
+            "$existingDir.Attributes -band [IO.FileAttributes]::ReparsePoint")
+        _install_copy = _boot_text.find("Get-InstalledSessionScript -Root $Root")
+        _readback_refusal = _boot_text.find("OFFLINE_ACL_TARGET_REPARSE_ESCAPE")
+        _ordered = (0 <= _adopt < _adopt_refusal < _install_copy
+                    and _readback_refusal > 0)
+        rec("OP49j a-planted-junction-is-refused-not-adopted",
+            _link_made and _acl_reads_link and _ordered,
+            f"Get-Acl on a junction reports the link's own DACL and not the "
+            f"target's (ace-at-target={_ace_at_target}, ace-at-link={_ace_at_link}), "
+            f"so the shipped code refuses a reparse point where it adopts an "
+            f"existing directory -- before the copy that installs the reviewer "
+            f"entry point -- and again in the ACL read-back that prints the "
+            f"guarantee (adopt@{_adopt}, refusal@{_adopt_refusal}, "
+            f"copy@{_install_copy}, readback-refusal@{_readback_refusal})")
 
         # ---- OP49e: privileged git hooks come from a directory the author
         # cannot create. clone/checkout run post-checkout from core.hooksPath;
