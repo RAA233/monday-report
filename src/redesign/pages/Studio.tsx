@@ -513,10 +513,8 @@ export function Studio() {
             >
               Exports
             </Link>
-            {/* Labelled as pending: this destination renders the not-implemented
-                page, and the landing copy now names it among the six. */}
             <Link className="btn btn-secondary" to="/app/well">
-              Well schematics (next increment)
+              Well schematics
             </Link>
           </>
         }
@@ -872,7 +870,7 @@ export function Studio() {
             </div>
 
             {/* Casing list. The handoff's preview sheet carries the casing program;
-                the mini deviated-schematic SVG ports with the Stage 2 generators. */}
+                the drawn schematic lives on the Well schematics view. */}
             {draft && draft.casing_strings && draft.casing_strings.length > 0 ? (
               <div style={{ border: "1px solid var(--color-divider)", padding: "9px 10px" }}>
                 {/* Wraps at narrow widths: as one non-wrapping row the link
@@ -896,7 +894,7 @@ export function Studio() {
                     to="/app/well"
                     style={{ minHeight: 0, padding: "0 4px", fontSize: 11.5, whiteSpace: "normal", textAlign: "start" }}
                   >
-                    Well schematics — next increment →
+                    Open in Well schematics →
                   </Link>
                 </div>
                 <div

@@ -36,7 +36,9 @@ const TITLES: Array<[RegExp, string]> = [
   [/^\/app\/benchmarking\/?$/, "Benchmarking"],
   [/^\/app\/failures\/?$/, "Failures"],
   [/^\/app\/audit\/?$/, "Audit chain"],
-  [/^\/app\/settings\/?$/, "Settings"]
+  [/^\/app\/settings\/?$/, "Settings"],
+  [/^\/app\/tracker\/?$/, "Project tracker"],
+  [/^\/app\/roadmap\/?$/, "Product roadmap"]
 ];
 
 function titleFor(pathname: string): string {

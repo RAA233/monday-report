@@ -646,10 +646,11 @@ export function Landing() {
                   color: BODY_TEXT
                 }}
               >
-                This increment runs on demo data: draft a DDR from parsed evidence, clear the
+                This workspace runs on demo data: draft a DDR from parsed evidence, clear the
                 validation queue, and issue a checksummed, gated export. Well schematics, upload,
-                benchmarking, the failure explorer, the audit-chain view and settings arrive in the
-                next increment and say so on their own pages.
+                benchmarking, the failure explorer, the audit-chain view and read-only settings are
+                implemented in this redesign, alongside the ported project tracker and product
+                roadmap — two committed program records, labelled as such on their own pages.
               </p>
             </div>
             <Link className="btn btn-primary" to="/app" style={{ textDecoration: "none" }}>

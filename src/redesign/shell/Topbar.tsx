@@ -351,7 +351,7 @@ export function Topbar() {
                   navigate("/app/settings");
                 }}
               >
-                Settings &amp; session (next increment)
+                Settings &amp; session
               </button>
               <button
                 type="button"

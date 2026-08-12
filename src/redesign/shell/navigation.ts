@@ -5,7 +5,9 @@ import {
   ClipboardCheck,
   Download,
   FileText,
+  ListChecks,
   MessageSquare,
+  Route,
   SearchCheck,
   ShieldCheck,
   SlidersHorizontal,
@@ -14,20 +16,18 @@ import {
 } from "lucide-react";
 
 /**
- * The application navigation, grouped Operate / Review / Trust exactly as the
- * handoff specifies.
+ * The application navigation.
  *
- * `stage` records which increment owns a destination. Stage 2 entries are listed
- * here on purpose: the handoff's information architecture is the whole three-group
- * rail, and hiding half of it would misrepresent the product's shape. Those routes
- * render an explicitly labelled implementation-pending surface instead of a
- * workflow that does not exist yet.
+ * The first three groups — Operate / Review / Trust — are the handoff's
+ * information architecture, unchanged. The fourth group, Program, carries the
+ * two surfaces ported from the v1 interface on the owner's instruction: the
+ * committed project-tracker and product-roadmap records. Every destination
+ * listed here is implemented; none renders a placeholder.
  */
 export interface NavItem {
   path: string;
   label: string;
   icon: LucideIcon;
-  stage: 1 | 2;
   /** Set for the item whose badge shows the open validation count. */
   showsValidationCount?: boolean;
 }
@@ -41,33 +41,39 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Operate",
     items: [
-      { path: "/app", label: "Ask", icon: MessageSquare, stage: 1 },
-      { path: "/app/reports", label: "Monday reports", icon: Calendar, stage: 1 },
-      { path: "/app/studio", label: "Report Studio", icon: FileText, stage: 1 },
-      { path: "/app/well", label: "Well schematics", icon: Activity, stage: 2 },
-      { path: "/app/upload", label: "Upload", icon: UploadCloud, stage: 2 }
+      { path: "/app", label: "Ask", icon: MessageSquare },
+      { path: "/app/reports", label: "Monday reports", icon: Calendar },
+      { path: "/app/studio", label: "Report Studio", icon: FileText },
+      { path: "/app/well", label: "Well schematics", icon: Activity },
+      { path: "/app/upload", label: "Upload", icon: UploadCloud }
     ]
   },
   {
     label: "Review",
     items: [
-      { path: "/app/benchmarking", label: "Benchmarking", icon: BarChart3, stage: 2 },
+      { path: "/app/benchmarking", label: "Benchmarking", icon: BarChart3 },
       {
         path: "/app/validation",
         label: "Validation",
         icon: ClipboardCheck,
-        stage: 1,
         showsValidationCount: true
       },
-      { path: "/app/failures", label: "Failures", icon: SearchCheck, stage: 2 }
+      { path: "/app/failures", label: "Failures", icon: SearchCheck }
     ]
   },
   {
     label: "Trust",
     items: [
-      { path: "/app/audit", label: "Audit chain", icon: ShieldCheck, stage: 2 },
-      { path: "/app/exports", label: "Exports", icon: Download, stage: 1 },
-      { path: "/app/settings", label: "Settings", icon: SlidersHorizontal, stage: 2 }
+      { path: "/app/audit", label: "Audit chain", icon: ShieldCheck },
+      { path: "/app/exports", label: "Exports", icon: Download },
+      { path: "/app/settings", label: "Settings", icon: SlidersHorizontal }
+    ]
+  },
+  {
+    label: "Program",
+    items: [
+      { path: "/app/tracker", label: "Tracker", icon: ListChecks },
+      { path: "/app/roadmap", label: "Roadmap", icon: Route }
     ]
   }
 ];
@@ -101,7 +107,7 @@ export function isCurrent(item: NavItem, pathname: string): boolean {
   return pathname === item.path || pathname.startsWith(`${item.path}/`);
 }
 
-/** Stage-2 destinations, so the pending page can name itself accurately. */
+/** The nav item owning a path, so a view can name itself consistently. */
 export function navItemForPath(pathname: string): NavItem | undefined {
   return ALL_ITEMS.find((item) => isCurrent(item, pathname));
 }
