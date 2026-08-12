@@ -1,10 +1,13 @@
 node_modules/
 dist/
+dist-redesign/
 .local_data/
 output/
 tmp/
 __pycache__/
 *.pyc
 .env
+.env.local
+.env.*.local
 *_Daily_Reports/
 .DS_Store
