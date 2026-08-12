@@ -522,13 +522,18 @@ async function main() {
       const read = (sel) => getComputedStyle(document.querySelector(sel), "::placeholder").color;
       return { inert: read("#t-input-inert"), live: read("#t-input-live") };
     });
-    const placeholderChanged = ph.inert !== ph.live;
+    // The PLACEHOLDER is the text this state actually renders — the field is empty for
+    // the whole in-flight window — so it is what must clear 4.5:1. Measuring the value
+    // ink alone passes while the only glyph on screen is unreadable; requiring merely
+    // that the placeholder "changed" passes when it changed for the WORSE.
+    const phC = contrast(parseRgb(ph.inert), inertInBg);
+    const phLiveC = contrast(parseRgb(ph.live), liveInBg);
     check(
       "d3-text-input-inert-covered",
-      fillChanged && placeholderChanged && inkC >= 4.5,
+      fillChanged && inkC >= 4.5 && phC >= 4.5 && phC >= phLiveC,
       `aria-disabled input vs LIVE input: fill ${inertIn.bg} vs ${liveIn.bg} ` +
-        `(${contrast(inertInBg, liveInBg).toFixed(3)}:1), placeholder ${ph.inert} vs ${ph.live}, ` +
-        `ink contrast ${inkC.toFixed(2)}:1`
+        `(${contrast(inertInBg, liveInBg).toFixed(3)}:1); placeholder ${phC.toFixed(2)}:1 ` +
+        `(live ${phLiveC.toFixed(2)}:1, must not regress); value ink ${inkC.toFixed(2)}:1`
     );
     await page.close();
   }

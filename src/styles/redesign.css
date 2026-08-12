@@ -362,6 +362,14 @@ html {
   background-color: var(--color-neutral-300) !important;
   cursor: not-allowed;
 }
+/* The placeholder carries the SAME ink as the value, not a dimmer one. Dimming is the
+   convention for a natively disabled field, which WCAG exempts — but this control stays
+   focusable and tabbable, and because submitting clears the field the placeholder is the
+   ONLY glyph on screen for the whole in-flight window. neutral-600 on this fill is
+   2.89:1, i.e. going inert would drop the sole visible text below even the 3:1 non-text
+   floor; neutral-800 keeps it at 6.78:1. The state is carried by the fill and the
+   cursor, never by making text harder to read. */
 :is(input, textarea, select)[aria-disabled="true"]::placeholder {
-  color: var(--color-neutral-600) !important;
+  color: var(--color-neutral-800) !important;
+  opacity: 1;
 }

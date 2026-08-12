@@ -133,7 +133,12 @@ export function Validation() {
       document.querySelector<HTMLElement>("[data-page-heading]")?.focus();
     } catch (caught) {
       showToast(
-        "Not recorded",
+        // The HEADLINE has to agree with the branch below: it is the largest, loudest
+        // part of the toast and it auto-dismisses, so "Not recorded" on an unknown
+        // outcome is exactly the claim the fail-closed branch exists to avoid — an
+        // operator who reads only the heading re-decides and appends a second audited
+        // decision for one intent.
+        isBackendRefusal(caught) ? "Not recorded" : "Outcome unknown",
         // Classify on the ORIGINAL typed error, not errorText()'s sanitized string —
         // its `^API ` rewrite erases the status, so a definite client-side refusal
         // (403 permission, 409 conflict, 423 locked) used to collapse into the
