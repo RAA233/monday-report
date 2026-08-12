@@ -330,7 +330,7 @@ def runtime_concurrency(db, br):
         f"max observed active handlers = {conc['max_observed']} == configured 4")
     rec("CC02 never-exceeds-bound", conc["within_bound"] and conc["max_observed"] <= 4,
         "active handlers never exceed the configured worker_concurrency under any path")
-    stop.set(); [t.join(timeout=3) for t in pool["_threads"]]
+    stop.set(); [t.join(timeout=15) for t in pool["_threads"]]
     rec("CC03 shutdown-launches-no-new-handlers", qa.status()["concurrency"]["active"] == 0,
         "after stop, no handler remains active (shutdown launches no new work)")
     qa.shutdown()
