@@ -87,13 +87,15 @@ EXPECTED_CHECK_IDS = [
     "FS01 runner-imports-canonical-inventory", "FS02 runner-launches-nothing",
     "FS03 capacity-gate-precedes-observation", "FS04 battery-drives-real-harness",
     "FS05 no-simulated-dispositions", "FS06 accepted-hash-pinned-literally",
+    "FS07 pg-observer-delegates-to-foundation", "FS08 execution-ga-separation-present",
+    "FS09 pg-observer-enforces-readback-workflow", "FS10 pg-readback-uses-supported-seed",
     "FZ00 completeness", "FZ01 battery-size-pinned",
 ]
 
 #: Pinned battery size. Without these, deleting a mutation TOGETHER WITH its expected-list entry
 #: leaves the completeness gate satisfied and the battery silently shrinks (the reviewer's V2 probe:
 #: 46 passed / 38 mutations, still certifying).
-EXPECTED_TOTAL_CHECKS = 58
+EXPECTED_TOTAL_CHECKS = 62
 EXPECTED_MUTATION_COUNT = 48
 
 
@@ -784,6 +786,104 @@ def run() -> int:
         "currently equals the contract's computed hash, so a contract mutation cannot certify itself",
         level="structural source check",
         extra={"pinned": R.ACCEPTED_INVENTORY_HASH[:16] + "..."})
+
+    # FS07: the PostgreSQL observer must be REAL -- it delegates the stack lifecycle to the accepted
+    # foundation (calls run_stack) and is NOT a bare `raise ExecutionUnavailable` stub. Reverting it
+    # to the declared-not-implemented stub (the original defect) makes this fail.
+    pg_obs_def = next((n for n in ast.walk(runner_ast)
+                       if isinstance(n, ast.FunctionDef) and n.name == "_observe_postgres"), None)
+    delegates = False
+    top_level_raise = True
+    if pg_obs_def is not None:
+        # Delegation to the accepted foundation may be DIRECT (run_stack) or via the shared retry seam
+        # (provision_restricted_stack, which itself runs the unchanged run_stack). Either counts.
+        calls_run_stack = any(
+            isinstance(n, ast.Call)
+            and ((isinstance(n.func, ast.Attribute) and n.func.attr in ("run_stack",
+                                                                         "provision_restricted_stack"))
+                 or (isinstance(n.func, ast.Name) and n.func.id == "provision_restricted_stack"))
+            for n in ast.walk(pg_obs_def))
+        # An UNCONDITIONAL raise at the function-body top level marks a stub that never really
+        # executes: both the bare `raise ExecutionUnavailable(...)` stub AND a
+        # `run_stack(); raise; return {}` stub carry a top-level Raise, while the real observer raises
+        # ONLY inside `if`/`try` branches. Requiring no top-level raise plus a Return closes both.
+        top_level_raise = any(isinstance(s, ast.Raise) for s in pg_obs_def.body)
+        has_return = any(isinstance(n, ast.Return) for n in ast.walk(pg_obs_def))
+        delegates = calls_run_stack and not top_level_raise and has_return
+    rec("FS07 pg-observer-delegates-to-foundation", delegates,
+        "the PostgreSQL observer delegates the stack lifecycle to the accepted foundation "
+        "(restricted_postgres_startup_guard.run_stack), has a non-raise return path, and carries NO "
+        "unconditional top-level raise -- so it is neither the declared-not-implemented "
+        "ExecutionUnavailable stub nor a run_stack()-then-always-raise stub",
+        level="structural source check", extra={"unconditional_top_level_raise": top_level_raise})
+
+    # FS08: an executed context result reports execution status, observation status and the global
+    # release blockers SEPARATELY from context-specific blockers, and keeps overall_GA_status visible.
+    # Removing the separation (hiding global GA blockers, or conflating them with a context failure)
+    # makes this fail.
+    sep = evaluated("client-postgres")
+    universal = set(R.universal_ga_blockers())
+    sep_ok = (
+        sep.get("context_execution_status") == "executed"
+        and sep.get("context_observation_status") == "observations_complete"
+        and sep.get("overall_GA_status") == "GA_BLOCKED"
+        and isinstance(sep.get("global_release_blockers"), list)
+        and isinstance(sep.get("context_specific_blockers"), list)
+        # the two blocker sets partition the blocking set and never overlap
+        and set(sep["global_release_blockers"]) == (set(sep["blocking_controls"]) & universal)
+        and set(sep["context_specific_blockers"]) == (set(sep["blocking_controls"]) - universal)
+        and not (set(sep["global_release_blockers"]) & set(sep["context_specific_blockers"])))
+    rec("FS08 execution-ga-separation-present", sep_ok,
+        "an executed context reports execution/observation status and partitions its blockers into "
+        "global-release vs context-specific, so a repository-wide GA blocker is never hidden nor "
+        "mistaken for a context-execution failure",
+        level="structural source check",
+        extra={"global": sep.get("global_release_blockers"),
+               "context_specific_count": len(sep.get("context_specific_blockers") or [])})
+
+    # FS09: the PostgreSQL observer ENFORCES the persisted read-back + workflow -- it calls
+    # _pg_workflow_readback and raises ExecutionUnavailable unless BOTH pg_persistence_verified AND
+    # workflow_verified. Reverting to not-implemented markers, or dropping either enforcement, fails.
+    pg_live = next((n for n in ast.walk(runner_ast)
+                    if isinstance(n, ast.FunctionDef) and n.name == "_observe_postgres_live"), None)
+    calls_readback = pg_live is not None and any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        and n.func.id == "_pg_workflow_readback" for n in ast.walk(pg_live))
+    pg_live_src = ast.get_source_segment(runner_src, pg_live) if pg_live is not None else ""
+    enforces_both = ("pg_persistence_verified" in (pg_live_src or "")
+                     and "workflow_verified" in (pg_live_src or "")
+                     and (pg_live_src or "").count("raise ExecutionUnavailable") >= 2)
+    rec("FS09 pg-observer-enforces-readback-workflow", bool(calls_readback and enforces_both),
+        "the PostgreSQL observer calls _pg_workflow_readback and fails closed unless both the "
+        "persisted read-back and the workflow verify -- not the not-implemented markers",
+        level="structural source check",
+        extra={"calls_readback": calls_readback, "enforces_both": enforces_both})
+
+    # FS10: the PG read-back seeds via SUPPORTED wrapped mutations and reads back through an
+    # INDEPENDENT store -- never direct-dict assignment to normalized collections, ad-hoc SQL, or a
+    # superuser. The validation task comes from the real critical-benchmark workflow.
+    pg_rb = next((n for n in ast.walk(runner_ast)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_pg_workflow_readback"), None)
+    rb_src = ast.get_source_segment(runner_src, pg_rb) if pg_rb is not None else ""
+    calls = {n.func.attr for n in ast.walk(pg_rb) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)} if pg_rb is not None else set()
+    supported_seed = {"create_workspace", "record_benchmark_measurement", "create_monday_report",
+                      "mark_report_export_blocked", "update_validation_task",
+                      "export_monday_report"} <= calls
+    independent_reader = "create_store" in (rb_src or "") and "read_back_source" in (rb_src or "")
+    no_raw_sql = not any(k in (rb_src or "") for k in (".execute(", "psycopg.connect", "BYPASSRLS",
+                                                       "superuser"))
+    no_direct_normalized = (".monday_reports[" not in (rb_src or "")
+                            and ".validation_tasks[" not in (rb_src or ""))
+    rec("FS10 pg-readback-uses-supported-seed",
+        bool(pg_rb is not None and supported_seed and independent_reader and no_raw_sql
+             and no_direct_normalized),
+        "the PG read-back seeds only via supported wrapped mutations (the validation task via the "
+        "critical-benchmark workflow), reads back through an independent store, and uses no ad-hoc "
+        "SQL / superuser / direct normalized-collection assignment",
+        level="structural source check",
+        extra={"supported_seed": supported_seed, "independent_reader": independent_reader,
+               "no_raw_sql": no_raw_sql, "no_direct_normalized": no_direct_normalized})
 
     run_contexts_def = next((n for n in runner_ast.body
                              if isinstance(n, ast.FunctionDef) and n.name == "run_contexts"), None)

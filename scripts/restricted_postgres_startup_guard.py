@@ -198,6 +198,86 @@ def _http(method: str, url: str, headers: dict | None = None, data: bytes | None
         return None, str(e).encode()
 
 
+#: Connection-establishment substrings that are TRANSIENT (the TCP server is not yet stably accepting
+#: connections). Matched case-insensitively. These are the ONLY classes the SQL-readiness probe retries.
+_TRANSIENT_CONNECT_MARKERS = (
+    "server closed the connection",
+    "connection refused",
+    "the database system is starting up",
+    "the database system is not yet accepting connections",
+    "connection reset",
+    "could not connect",
+    "connection timed out",
+    "timeout expired",        # libpq application-level connect_timeout expiry during slow bring-up
+    "operation timed out",
+    "eof detected",
+)
+#: Non-transient connection classes that must NEVER be retried by the probe.
+_NONTRANSIENT_CONNECT_MARKERS = (
+    "authentication failed",
+    "password authentication",
+    "role \"",
+    "does not exist",
+    "permission denied",
+    "database \"",
+)
+
+
+def _classify_connect_error(message: str) -> str:
+    """Classify a connection error message (redacted) as 'transient' | 'auth' | 'other'."""
+    low = (message or "").lower()
+    if any(m in low for m in _NONTRANSIENT_CONNECT_MARKERS):
+        return "auth"
+    if any(m in low for m in _TRANSIENT_CONNECT_MARKERS):
+        return "transient"
+    return "other"
+
+
+def wait_for_stable_sql_connection(dsn: str, *, deadline_seconds: float = 30.0,
+                                   poll_seconds: float = 0.5, connect_timeout: int = 5) -> list[dict]:
+    """LAYER 1 connection-level readiness: after ``pg_isready`` (an initial in-container signal), do
+    NOT declare the database ready until a REAL TCP SQL connection succeeds. Opens a psycopg connection
+    with the bootstrap identity, runs ``SELECT 1``, and closes it cleanly. Retries ONLY recognised
+    TRANSIENT connection-establishment failures (server-closed / refused / starting-up / reset) within
+    a bounded DEADLINE and bounded poll interval, strictly BEFORE any semantic bootstrap action. Never
+    retries an authentication / permission / missing-object / unknown failure -- those fail closed
+    immediately. Returns a REDACTED attempt history (no DSN/role/port/path). Raises RuntimeError on a
+    non-transient failure or deadline exhaustion."""
+    import psycopg
+
+    start = time.monotonic()
+    history: list[dict] = []
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            conn = psycopg.connect(dsn, autocommit=True, connect_timeout=connect_timeout)
+            try:
+                conn.execute("select 1")
+            finally:
+                conn.close()   # close cleanly whether the probe query succeeded or raised
+            history.append({"attempt": attempt, "outcome": "connected",
+                            "elapsed_s": round(time.monotonic() - start, 2)})
+            return history
+        except Exception as exc:  # noqa: BLE001 - classify by message, never leak the DSN
+            klass = _classify_connect_error(str(exc))
+            elapsed = time.monotonic() - start
+            history.append({"attempt": attempt, "outcome": klass, "exception": exc.__class__.__name__,
+                            "elapsed_s": round(elapsed, 2)})
+            if klass != "transient":
+                # authentication / permission / missing-object / unknown -> fail closed, no retry
+                raise RuntimeError(
+                    f"non-transient SQL-connect failure before bootstrap (class={klass}, "
+                    f"{exc.__class__.__name__})")
+            if elapsed + poll_seconds >= deadline_seconds:
+                # bounded deadline exhausted: fail closed. The message carries a recognised transient
+                # marker so the OUTER stack-retry contract may (narrowly) try a fresh stack.
+                raise RuntimeError(
+                    "transient: could not connect a stable SQL session before the readiness deadline "
+                    f"({deadline_seconds:g}s); connection failed to stabilize after {attempt} attempt(s)")
+            time.sleep(poll_seconds)
+
+
 class _FaultInjected(RuntimeError):
     """Raised by run_stack at a named lifecycle stage when fault injection is active.
     Test-only; used by scripts/restricted_postgres_startup_fault_guard.py."""
@@ -211,6 +291,7 @@ class _FaultInjected(RuntimeError):
 _ACTIVE_FAULT: str | None = None
 _BEFORE_CLEANUP = None   # callable(ledger, run_hash) invoked at the top of cleanup
 _ON_LIVE = None          # callable(ctx) invoked with the live stack just before cleanup
+_STABLE_SQL_PROBE = None  # callable(dsn)->history: overrides the Layer-1 SQL-readiness probe (tests)
 
 # The canonical, closed set of injectable stage markers.
 FAULT_STAGES = (
@@ -333,6 +414,7 @@ def run_stack() -> dict:
                 "--label", f"verification-run={run_hash}", "--label", f"resource={kind}"]
 
     cleanup_issues: list[str] = []   # hoisted so it survives into the return past finally
+    sql_readiness_history: list[dict] = []   # LAYER 1 connection-stability probe history (redacted)
     api_log = None                   # hoisted so the finally can close + remove the scratch
     try:
         import psycopg
@@ -417,6 +499,16 @@ def run_stack() -> dict:
         external_dsn = "postgresql://attacker:x@10.9.9.9:5432/prod"
         record("D02 externally supplied DSN is rejected",
                vb._loopback_tcp_dsn(external_dsn) is False, "dsn")
+
+        # -- LAYER 1: stable SQL readiness BEFORE any semantic bootstrap ------
+        # pg_isready above is an in-container (unix-socket) signal; the runner connects over TCP, which
+        # the image's first-init phase can lag. Do NOT begin bootstrap (role/migration SQL) until a real
+        # TCP SQL session is stable, absorbing short-lived connection instability inside THIS fresh stack
+        # (bounded deadline), so it need not cost an outer fresh-stack retry. A non-transient or
+        # deadline-exhausted failure fails closed here.
+        sql_readiness_history.extend(
+            _STABLE_SQL_PROBE(boot_dsn) if _STABLE_SQL_PROBE is not None
+            else wait_for_stable_sql_connection(boot_dsn))
 
         # -- roles + migrations + RLS + attestation --------------------------
         import backend.app.migrations as M
@@ -757,6 +849,7 @@ def run_stack() -> dict:
     return {"run_hash": run_hash, "cleanup_issues": cleanup_issues,
             "container_created": ledger["container"]["created"],
             "volume_created": ledger["volume"]["created"],
+            "sql_readiness_history": sql_readiness_history,
             "aborted_stage": _ACTIVE_FAULT}
 
 
