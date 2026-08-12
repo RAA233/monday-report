@@ -10,14 +10,24 @@ import {
 } from "react";
 import {
   getAuditIntegrity,
+  getAuditLogs,
+  getDocuments,
   getFailures,
   getLocalAiStatus,
+  getProcessingJobs,
+  getRuntimeBackends,
   getSession,
   getValidationTasks,
   getWorkspaceBenchmarking,
   getWorkspaces,
   type ApiAuditIntegrityStatus,
+  type ApiAuditLog,
+  type ApiBenchmarkingStatus,
+  type ApiFailureRecord,
   type ApiLocalAiStatus,
+  type ApiParsedDocument,
+  type ApiProcessingJob,
+  type ApiRuntimeBackendStatus,
   type ApiSession,
   type ApiValidationTask,
   type ApiWorkspace
@@ -140,6 +150,39 @@ export interface WorkspaceContextValue {
    */
   auditIntegrity: Loadable<ApiAuditIntegrityStatus>;
   localAi: Loadable<ApiLocalAiStatus>;
+  /**
+   * Shared, permission-gated reads for the Stage 2 surfaces. One provider-owned
+   * read per surface class, never a per-page fetch: a refused GET appends a
+   * `permission_denied` event to the hash-chained audit log, so every one of these
+   * checks the session's permission map BEFORE issuing the request and reports
+   * `unauthorized` (naming no outage) when the grant is absent. While the probe is
+   * still resolving they are `loading`; when the API is degraded they are `error`
+   * with the shared unread reason, never an empty list.
+   *
+   *   auditLogs        — GET /audit-logs            needs view_audit_history
+   *   processingJobs   — GET /processing-jobs       needs view_processing_status
+   *   documents        — GET /documents             needs view_source_documents
+   *   failures         — GET /failures              needs view_source_documents
+   *   benchmarking     — GET /workspaces/{id}/benchmarking  needs view_benchmarks
+   *   runtimeBackends  — GET /runtime/backends      needs view_runtime_status
+   *
+   * `benchmarking` is DELIBERATELY independent of the export-gate effect below:
+   * the gate can only read benchmarking after the validation queue resolved, and a
+   * session without view_validation_queue (ENGINEER) would starve a surface its
+   * view_benchmarks grant entitles it to read.
+   */
+  auditLogs: Loadable<ApiAuditLog[]>;
+  reloadAuditLogs: () => void;
+  processingJobs: Loadable<ApiProcessingJob[]>;
+  reloadProcessingJobs: () => void;
+  documents: Loadable<ApiParsedDocument[]>;
+  reloadDocuments: () => void;
+  failures: Loadable<ApiFailureRecord[]>;
+  reloadFailures: () => void;
+  benchmarking: Loadable<ApiBenchmarkingStatus>;
+  reloadBenchmarking: () => void;
+  runtimeBackends: Loadable<ApiRuntimeBackendStatus>;
+  reloadRuntimeBackends: () => void;
   /** True when nothing can mutate at all (API unreachable / still probing). */
   readOnly: boolean;
   /**
@@ -305,6 +348,80 @@ export function errorText(error: unknown): string {
     return error.message.replace(/^API\s/, "Request failed: ");
   }
   return "The request did not complete.";
+}
+
+/**
+ * One shared, permission-gated read.
+ *
+ * The order of refusals matters and none of them issues a request:
+ *
+ *   1. `checking`      → loading  (assert nothing while the probe is in flight)
+ *   2. degraded API    → error    (the shared unread reason; retry is the shell's)
+ *   3. missing grant   → unauthorized (a retry cannot help; no audited refusal)
+ *   4. `blocked` set   → error    (a precondition such as "no workspace" holds)
+ *
+ * Only when all four pass is the request issued. A 403 arriving anyway (the map
+ * and the route disagreeing) still lands as `unauthorized`, not as an outage.
+ * Tokened so a slow response for an earlier state cannot overwrite a newer one.
+ */
+function useGatedRead<T>(params: {
+  apiStatus: ApiStatus;
+  session: ApiSession | null;
+  permission: string;
+  /** Non-null: a precondition beyond permission/connectivity is not met. */
+  blocked?: string | null;
+  load: () => Promise<T>;
+  /** Values that change WHAT would be read (e.g. the active workspace id). */
+  deps?: unknown[];
+}): { value: Loadable<T>; reload: () => void } {
+  const { apiStatus, session, permission, blocked = null } = params;
+  const [value, setValue] = useState<Loadable<T>>({ state: "loading" });
+  const [tick, setTick] = useState(0);
+  const loadRef = useRef(params.load);
+  loadRef.current = params.load;
+  const token = useRef(0);
+  const permitted = session?.permissions?.[permission] === true;
+
+  useEffect(() => {
+    const mine = ++token.current;
+    if (apiStatus === "checking") {
+      setValue({ state: "loading" });
+      return;
+    }
+    if (apiStatus !== "connected") {
+      setValue({
+        state: "error",
+        message: `${apiUnreadReason(apiStatus)}, so this surface was not read.`
+      });
+      return;
+    }
+    if (!permitted) {
+      setValue({ state: "unauthorized" });
+      return;
+    }
+    if (blocked) {
+      setValue({ state: "error", message: blocked });
+      return;
+    }
+    setValue({ state: "loading" });
+    void loadRef.current()
+      .then((data) => {
+        if (mine === token.current) setValue({ state: "ready", data });
+      })
+      .catch((error: unknown) => {
+        if (mine !== token.current) return;
+        if (requestStatus(error) === 403) {
+          setValue({ state: "unauthorized" });
+          return;
+        }
+        setValue({ state: "error", message: errorText(error) });
+      });
+    // `load` is read through a ref; `deps` carries what should retrigger it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiStatus, permitted, blocked, tick, ...(params.deps ?? [])]);
+
+  const reload = useCallback(() => setTick((n) => n + 1), []);
+  return { value, reload };
 }
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
@@ -539,6 +656,51 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [workspaces, activeId]
   );
 
+  // Shared Stage 2 reads — see the WorkspaceContextValue doc block. Each checks the
+  // permission map BEFORE issuing anything, so no navigation appends an audited
+  // permission_denied refusal for a surface the session cannot read.
+  const auditLogsRead = useGatedRead({
+    apiStatus,
+    session,
+    permission: "view_audit_history",
+    load: () => getAuditLogs(100)
+  });
+  const processingJobsRead = useGatedRead({
+    apiStatus,
+    session,
+    permission: "view_processing_status",
+    load: getProcessingJobs
+  });
+  const documentsRead = useGatedRead({
+    apiStatus,
+    session,
+    permission: "view_source_documents",
+    load: () => getDocuments()
+  });
+  const failuresRead = useGatedRead({
+    apiStatus,
+    session,
+    permission: "view_source_documents",
+    load: getFailures
+  });
+  const benchmarkWorkspaceId = activeWorkspace?.id ?? null;
+  const benchmarkingRead = useGatedRead({
+    apiStatus,
+    session,
+    permission: "view_benchmarks",
+    blocked: benchmarkWorkspaceId
+      ? null
+      : "No workspace is resolved, so there is no benchmarking scope to read.",
+    load: () => getWorkspaceBenchmarking(benchmarkWorkspaceId as string),
+    deps: [benchmarkWorkspaceId]
+  });
+  const runtimeBackendsRead = useGatedRead({
+    apiStatus,
+    session,
+    permission: "view_runtime_status",
+    load: getRuntimeBackends
+  });
+
   // Reconstruct the gate with the backend's own predicate, from READ-ONLY reads.
   // Tokened so a slow read for a previous workspace cannot publish over a newer one.
   const gateToken = useRef(0);
@@ -648,6 +810,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       reloadValidationTasks: () => void loadValidationTasks(),
       auditIntegrity,
       localAi,
+      auditLogs: auditLogsRead.value,
+      reloadAuditLogs: auditLogsRead.reload,
+      processingJobs: processingJobsRead.value,
+      reloadProcessingJobs: processingJobsRead.reload,
+      documents: documentsRead.value,
+      reloadDocuments: documentsRead.reload,
+      failures: failuresRead.value,
+      reloadFailures: failuresRead.reload,
+      benchmarking: benchmarkingRead.value,
+      reloadBenchmarking: benchmarkingRead.reload,
+      runtimeBackends: runtimeBackendsRead.value,
+      reloadRuntimeBackends: runtimeBackendsRead.reload,
       readOnly,
       can,
       roles,
@@ -670,6 +844,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       loadValidationTasks,
       auditIntegrity,
       localAi,
+      auditLogsRead.value,
+      auditLogsRead.reload,
+      processingJobsRead.value,
+      processingJobsRead.reload,
+      documentsRead.value,
+      documentsRead.reload,
+      failuresRead.value,
+      failuresRead.reload,
+      benchmarkingRead.value,
+      benchmarkingRead.reload,
+      runtimeBackendsRead.value,
+      runtimeBackendsRead.reload,
       readOnly,
       can,
       roles,
