@@ -301,17 +301,224 @@ def _tenant_authorization_probe() -> tuple[str, str]:
     if reasons:
         # Even the API-layer half is not fully wired; still BLOCKED.
         return "BLOCKED", "Tenant authorization enforcement incomplete: " + "; ".join(reasons) + "."
+
+    # API-layer half is fully enforced. The resolution condition ALSO requires
+    # "Postgres RLS active for the normalized store", proven by committed evidence
+    # from a real, non-superuser runtime role on the current clean tree. Anything
+    # absent/stale/dirty/mismatched/failed/skipped keeps the control BLOCKED.
+    rls_reasons = _tenant_rls_evidence_reasons()
+    if rls_reasons:
+        return (
+            "BLOCKED",
+            "API-layer per-request tenant ownership enforcement is implemented and verified, but "
+            "database-enforced tenant isolation is not proven: " + "; ".join(rls_reasons) + ".",
+        )
+    # Tenant-authorization evidence v3 (fail-closed): beyond the RLS sub-proof the control now requires
+    # a v3 artifact bound to this exact clean commit/tree that carries the ACCEPTED client-mode
+    # functional runtime matrix, the ACCEPTED demo-mode dual-backend UI certification (recorded as
+    # consistency-only, never as authentication proof), the runtime-role/RLS/audit/privacy proof, and the
+    # SHA-256 of every accepted proof implementation. v1/v2 artifacts are rejected outright.
+    v3_reasons = _tenant_authorization_v3_reasons()
+    if v3_reasons:
+        return (
+            "BLOCKED",
+            "API-layer enforcement and database-enforced isolation are proven, but tenant-authorization "
+            "evidence v3 is not: " + "; ".join(v3_reasons[:6]) + ".",
+        )
     return (
-        "BLOCKED",
-        "API-layer per-request tenant ownership enforcement is implemented and verified: every "
-        "resource-scoped route proves a tenant-ownership dependency (tenant_ownership_fully_enforced), "
-        "the ownership graph fails closed on a contradictory resource->parent->tenant chain, cross-tenant "
-        "access is an existence-hiding 404, list/aggregate reads are tenant-filtered before counting, and "
-        "signed capabilities bind the owning tenant (behavior proven by scripts/tenant_authorization_guard.py). "
-        "The control remains BLOCKED because its resolution ALSO requires Postgres RLS active over the "
-        "normalized multi-tenant store, which is not implemented: the process serves one configured tenant "
-        "via the local JSON snapshot and RLS is inactive.",
+        "PASS",
+        "Tenant is resolved from the authenticated request and enforced at the API layer (every "
+        "resource-scoped route proves a tenant-ownership dependency; cross-tenant access is an "
+        "existence-hiding 404; signed capabilities bind the owning tenant), AND Postgres RLS is "
+        "active over the normalized store: forced row level security on the normalized + parent + "
+        "operational tables is enforced against a real non-superuser, non-BYPASSRLS runtime role "
+        "(missing/wrong/malformed tenant context denies; WITH CHECK blocks cross-tenant writes; "
+        "connection reuse retains no context), proven by real-PostgreSQL evidence bound to the "
+        "current clean tree (scripts/tenant_rls_enforcement_guard.py).",
     )
+
+
+def _tenant_authorization_v3_reasons() -> list[str]:
+    """Fail-closed validation of the tenant-authorization evidence **v3** artifact.
+
+    Delegates to the versioned contract module. A missing, unreadable, malformed, stale, dirty,
+    hash-tampered, scope-overclaiming, or superseded (v1/v2) artifact yields reasons -> BLOCKED. A
+    malformed artifact never raises: the control degrades to BLOCKED, it does not crash the evaluator.
+    """
+    try:
+        from . import tenant_authorization_evidence as _tae
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return [f"tenant-authorization evidence contract unavailable: {exc.__class__.__name__}"]
+    try:
+        return _tae.load_and_validate(TENANT_AUTHORIZATION_EVIDENCE_PATH)
+    except Exception as exc:  # noqa: BLE001 - fail closed, never crash the evaluator
+        return [f"tenant-authorization evidence could not be evaluated: {exc.__class__.__name__}"]
+
+
+def _production_database_adapter_reasons() -> list[str]:
+    """Fail-closed validation of the production database-adapter evidence artifact.
+
+    Delegates to the versioned contract module. A missing, unreadable, malformed, stale, dirty,
+    hash-tampered, test-scoped or parity-false artifact yields reasons -> BLOCKED. Nothing here
+    raises: a malformed artifact degrades the control, it does not crash the evaluator.
+    """
+    try:
+        from . import production_database_adapter_evidence as _pdae
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return [f"production database-adapter contract unavailable: {exc.__class__.__name__}"]
+    try:
+        return _pdae.load_and_validate(PRODUCTION_DATABASE_ADAPTER_EVIDENCE_PATH)
+    except Exception as exc:  # noqa: BLE001 - fail closed, never crash the evaluator
+        return [f"production database-adapter evidence could not be evaluated: "
+                f"{exc.__class__.__name__}"]
+
+
+def _postgres_adapter_probe() -> tuple[str, str]:
+    """Evidence-driven probe for the production-database-adapter control.
+
+    This control previously delegated to the client-data readiness check ``postgres_repository``,
+    which passes whenever the requested and active repository backend are both PostgreSQL and a
+    database URL is set. That is satisfied by a runner-owned DISPOSABLE Docker container reached over
+    loopback -- so the accepted restricted-runtime proof could promote a *production* adapter control.
+    It now requires a valid production database-adapter evidence artifact, and nothing else can
+    satisfy it: not the restricted runtime, not tenant evidence v3, not the demo-mode UI proof.
+    """
+    reasons = _production_database_adapter_reasons()
+    if not reasons:
+        return "PASS", ("Production database-adapter evidence "
+                        f"({_PRODUCTION_ADAPTER_SCHEMA}) is present, exact-head and independently "
+                        "valid across every required proof domain.")
+    shown = "; ".join(reasons[:3])
+    more = f" (+{len(reasons) - 3} more)" if len(reasons) > 3 else ""
+    return "BLOCKED", (
+        "No valid production database-adapter evidence. A functional PostgreSQL runtime in "
+        f"disposable test infrastructure does not establish a production adapter: {shown}{more}")
+
+
+def _production_queue_adapter_reasons() -> list[str]:
+    """Fail-closed validation of the production queue-adapter evidence artifact.
+
+    Delegates to the versioned contract module. Never raises: a malformed artifact degrades the
+    control to BLOCKED rather than crashing the evaluator.
+    """
+    try:
+        from . import production_queue_adapter_evidence as _pqae
+    except Exception as exc:  # pragma: no cover - defensive import guard
+        return [f"production queue-adapter contract unavailable: {exc.__class__.__name__}"]
+    try:
+        return _pqae.load_and_validate(PRODUCTION_QUEUE_ADAPTER_EVIDENCE_PATH)
+    except Exception as exc:  # noqa: BLE001 - fail closed, never crash the evaluator
+        return [f"production queue-adapter evidence could not be evaluated: "
+                f"{exc.__class__.__name__}"]
+
+
+def _queue_adapter_probe() -> tuple[str, str]:
+    """Evidence-driven probe for the production-queue-adapter control.
+
+    This control previously delegated to the client-data readiness check ``redis_queue``, which
+    passes when the requested and active queue backend are both Redis with a URL configured -- and
+    ``detect_active_queue_backend()`` decides "active" from a successful **PING**. A disposable Docker
+    Redis answering PING therefore promoted a *production* queue-adapter control, the same defect
+    class already closed for the database adapter.
+
+    Reachability is not durability. It now requires a valid production queue-adapter artifact, and
+    nothing else can satisfy it: not ``redis_queue``, not the worker functional proof, not tenant
+    evidence v3, not the UI proof, and not the production DATABASE artifact.
+    """
+    reasons = _production_queue_adapter_reasons()
+    if not reasons:
+        return "PASS", ("Production queue-adapter evidence "
+                        f"({_PRODUCTION_QUEUE_SCHEMA}) is present, exact-head and independently "
+                        "valid across every required proof domain.")
+    shown = "; ".join(reasons[:3])
+    more = f" (+{len(reasons) - 3} more)" if len(reasons) > 3 else ""
+    return "BLOCKED", (
+        "No valid production queue-adapter evidence. A reachable queue in disposable test "
+        f"infrastructure does not establish a production queue adapter: {shown}{more}")
+
+
+def _tenant_rls_evidence_reasons() -> list[str]:
+    """Fail-closed validation of the tenant-RLS-enforcement evidence artifact.
+
+    Returns an empty list ONLY when committed evidence from a real PostgreSQL run
+    on the current clean tree proves forced RLS is enforced against a non-superuser,
+    non-BYPASSRLS runtime role. Any absence/staleness/mismatch/failure/skip is a
+    reason the control stays BLOCKED.
+    """
+    if not TENANT_RLS_EVIDENCE_PATH.exists():
+        return ["no tenant-RLS-enforcement evidence artifact"]
+    try:
+        payload = json.loads(TENANT_RLS_EVIDENCE_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return [f"tenant-RLS evidence unreadable: {exc.__class__.__name__}"]
+    if not isinstance(payload, dict):
+        return ["tenant-RLS evidence malformed"]
+
+    reasons: list[str] = []
+    if payload.get("schema_version") != TENANT_RLS_EVIDENCE_SCHEMA:
+        reasons.append(f"evidence schema is {payload.get('schema_version')!r}")
+    if payload.get("status") != "passed":
+        reasons.append(f"status is {payload.get('status')!r}, not 'passed'")
+    stored = payload.get("payload_sha256")
+    if not stored:
+        reasons.append("no payload hash")
+    else:
+        recomputed = payload_sha256({k: v for k, v in payload.items() if k != "payload_sha256"})
+        if recomputed != stored:
+            reasons.append("payload hash does not verify")
+    if not payload.get("worktree_clean"):
+        reasons.append("evidence was not captured from a clean worktree")
+    if payload.get("repository_mode") != "postgres":
+        reasons.append("evidence was not generated in PostgreSQL mode")
+    if not payload.get("postgres_server_version") or not payload.get("postgres_image_digest"):
+        reasons.append("evidence lacks a real PostgreSQL server version or image digest")
+    reasons.extend(_commit_binding_reasons(payload))
+    # Runtime role must genuinely be unable to bypass RLS.
+    if payload.get("runtime_role_is_superuser"):
+        reasons.append("evidence runtime role is a superuser (would bypass RLS)")
+    if payload.get("runtime_role_has_bypassrls"):
+        reasons.append("evidence runtime role has BYPASSRLS")
+    if payload.get("runtime_role_owner_bypass"):
+        reasons.append("evidence runtime role owns a protected table without FORCE (owner bypass)")
+    def _as_int(value: object) -> int:
+        # Malformed (non-integer) evidence must fail closed to 0 -> BLOCKED, never crash.
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+    if _as_int(payload.get("rls_forced_normalized_count")) < 4:
+        reasons.append("fewer than four normalized tables have FORCE row level security")
+    if _as_int(payload.get("rls_forced_table_count")) < 8:
+        reasons.append("fewer than eight protected tables have FORCE row level security")
+    for field in ("schema_result", "roles_result", "direct_sql_result", "routes_result",
+                  "worker_pool_result", "import_admin_result", "idempotency_result"):
+        if payload.get(field) != "passed":
+            reasons.append(f"{field} is not 'passed'")
+    if payload.get("tenant_context_mechanism") != "transaction_local_guc:app.tenant_slug":
+        reasons.append("evidence does not declare the transaction-local tenant-context mechanism")
+    # The runtime principal must be a real LOGIN role that inherits the app group,
+    # never the NOLOGIN group misreported as the DSN login principal.
+    if not payload.get("runtime_role_can_login"):
+        reasons.append("evidence runtime principal is not a LOGIN role")
+    if not payload.get("runtime_role_is_login_not_group"):
+        reasons.append("evidence runtime principal is the NOLOGIN group, not a distinct login role")
+    if "monday_report_app" not in (payload.get("runtime_group_membership") or []):
+        reasons.append("evidence runtime login does not inherit the monday_report_app group")
+    # Exact policy inventory (not a count) + digest must be present.
+    if not payload.get("policy_inventory") or not payload.get("policy_inventory_digest"):
+        reasons.append("evidence lacks an exact RLS policy inventory + digest")
+    # The GUC trust model must be disclosed honestly (limitation stated).
+    guc = str(payload.get("guc_trust_model") or "")
+    if "compromise" not in guc.lower():
+        reasons.append("evidence does not disclose the GUC trust-model limitation")
+    if not payload.get("guard_inventory_ok"):
+        reasons.append("guard check inventory is not fail-closed")
+    totals = payload.get("totals") or {}
+    if totals.get("failed") != 0:
+        reasons.append("evidence records failed checks")
+    if totals.get("skipped") != 0:
+        reasons.append("evidence records skipped checks")
+    return reasons
 
 
 def _audit_keyed_integrity_probe() -> tuple[str, str]:
@@ -723,6 +930,28 @@ PERSISTENCE_EVIDENCE_PATH = ROOT / "output" / "persistence" / "persistence-atomi
 PERSISTENCE_EVIDENCE_SCHEMA = "persistence-atomicity-evidence.v4"
 NORMALIZED_EVIDENCE_PATH = ROOT / "output" / "persistence" / "normalized-correction-persistence-evidence.v4.json"
 NORMALIZED_EVIDENCE_SCHEMA = "normalized-correction-persistence-evidence.v4"
+TENANT_RLS_EVIDENCE_PATH = ROOT / "output" / "tenant-rls" / "tenant-rls-enforcement-evidence.v2.json"
+# Tenant-authorization evidence v3 lives at its OWN path with its OWN schema id; the v2 artifact above
+# remains the RLS sub-proof only and can never satisfy the control by itself (see
+# backend/app/tenant_authorization_evidence.py). Patchable for hermetic guard runs.
+TENANT_AUTHORIZATION_EVIDENCE_PATH = (
+    ROOT / "output" / "tenant-authorization" / "tenant-authorization-evidence.v3.json"
+)
+TENANT_RLS_EVIDENCE_SCHEMA = "tenant-rls-enforcement-evidence.v2"
+# Production database-adapter evidence lives at its OWN path with its OWN schema id. The restricted
+# runtime proof cannot satisfy it (see backend/app/production_database_adapter_evidence.py).
+# Patchable for hermetic guard runs.
+_PRODUCTION_ADAPTER_SCHEMA = "production-database-adapter-evidence.v1"
+PRODUCTION_DATABASE_ADAPTER_EVIDENCE_PATH = (
+    ROOT / "output" / "production-database-adapter" / f"{_PRODUCTION_ADAPTER_SCHEMA}.json"
+)
+# Production QUEUE-adapter evidence: its own path, its own schema id, its own consumer. Kept separate
+# from the database artifact so neither adapter's evidence can move the other's control.
+# Patchable for hermetic guard runs.
+_PRODUCTION_QUEUE_SCHEMA = "production-queue-adapter-evidence.v1"
+PRODUCTION_QUEUE_ADAPTER_EVIDENCE_PATH = (
+    ROOT / "output" / "production-queue-adapter" / f"{_PRODUCTION_QUEUE_SCHEMA}.json"
+)
 
 
 def _correction_atomicity_probe() -> tuple[str, str]:
@@ -1039,9 +1268,9 @@ def evaluate_blockers(
         check_id = entry["check_id"]
         evidence_reference: str | None = None
         if check_id == "ga_postgres_adapter":
-            disposition, detail = _delegate(readiness_by_id, ("postgres_repository",))
+            disposition, detail = _postgres_adapter_probe()
         elif check_id == "ga_redis_adapter":
-            disposition, detail = _delegate(readiness_by_id, ("redis_queue",))
+            disposition, detail = _queue_adapter_probe()
         elif check_id == "ga_local_ai_runtime":
             disposition, detail = _delegate(readiness_by_id, ("local_llm_runtime",))
         elif check_id == "ga_production_configuration":

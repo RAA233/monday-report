@@ -25,13 +25,18 @@ measured failure would be incorrect, so each entry carries an explicit
 ``measurement_class``.
 
 Run: ``python scripts/build_ga_gap_assessment.py``
-Writes: ``docs/GA_GAP_ASSESSMENT.v1.json``
+Writes: ``docs/GA_GAP_ASSESSMENT.v2.json``
 
 The artifact contains no credentials, DSNs, absolute paths, or client data.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import pathlib
+import os
+import shutil
+import tempfile
 import subprocess
 import sys
 from pathlib import Path
@@ -42,9 +47,16 @@ if str(ROOT) not in sys.path:
 
 REGISTRY_PATH = ROOT / "evals" / "ga" / "blocker_registry.v1.json"
 EVIDENCE_PATH = ROOT / "output" / "migrations" / "migration-evidence.v1.json"
-OUTPUT_PATH = ROOT / "docs" / "GA_GAP_ASSESSMENT.v1.json"
+OUTPUT_PATH = ROOT / "docs" / "GA_GAP_ASSESSMENT.v2.json"
+#: Legacy path. It must NOT exist: two files either of which could be read as current is
+#: exactly the ambiguity this increment removes.
+LEGACY_ARTIFACT_PATH = ROOT / "docs" / "GA_GAP_ASSESSMENT.v1.json"
 
-SCHEMA_VERSION = "ga-gap-assessment.v1"
+SCHEMA_VERSION = "ga-gap-assessment.v2"
+#: v1 is superseded: it carried no source bindings, no canonical hash and no artifact
+#: classification, so a reader could not tell a generated status report from evidence. Exported for
+#: the drift guard rather than duplicated there.
+SUPERSEDED_SCHEMA_VERSIONS = ("ga-gap-assessment.v1",)
 
 # Measurement classes -- how a disposition was actually arrived at.
 BEHAVIOURALLY_PROVEN = "BEHAVIORALLY_PROVEN"
@@ -202,27 +214,51 @@ _ASSESSMENT: dict[str, dict] = {
                "requires NORMALIZED persistence, so a transactional snapshot cannot close it."),
     ),
     "ga_postgres_adapter": dict(
-        probe_type=PROBE_DELEGATED, probe_location=f"{_EVAL} -> _delegate(postgres_repository)",
-        measurement_class=NOT_EVALUABLE, effort="SMALL",
+        probe_type=PROBE_EVIDENCE,
+        probe_location=f"{_EVAL} -> _postgres_adapter_probe -> "
+                       "backend/app/production_database_adapter_evidence.py",
+        measurement_class=ABSENT, effort="LARGE",
         implemented_capability=(
-            "A functional PostgresStateStore exists with RLS enabled/forced on the snapshot table "
-            "and a tenant_slug GUC policy."),
+            "An ACCEPTED static evidence contract (production-database-adapter-evidence.v1) with a "
+            "fail-closed validator and an isolated readiness consumer. A functional PostgresStateStore "
+            "exists with RLS enabled and forced, proven on the accepted restricted runtime."),
         missing_capability=(
-            "Requires a reachable PostgreSQL configured as the ACTIVE adapter to evaluate at all. "
-            "Two latent defects: readiness reads boot-time store attributes, so the 'live probe' is "
-            "live only at process construction; and the Postgres SQL path has no test coverage -- "
-            "no guard ever instantiates PostgresStateStore against a database."),
-        technical_dependencies=[], external_dependencies=["provisioned PostgreSQL"], sequence=4,
-        notes="",
+            "No production database-adapter evidence artifact exists at any commit. The control now "
+            "requires one: a named production target that is not loopback/docker-bridge, not a "
+            "test/staging/development environment and not ephemeral storage, with verified TLS, "
+            "credential rotation, least-privilege runtime roles, executed backup/restore and "
+            "failover drills, monitoring and capacity thresholds. A disposable PostgreSQL, the "
+            "restricted runtime functional matrix, tenant-authorization evidence and the "
+            "dual-backend UI proof are each explicitly non-qualifying."),
+        technical_dependencies=[],
+        external_dependencies=["provisioned PRODUCTION PostgreSQL", "operational evidence collection"],
+        sequence=4,
+        notes=("Static contract ACCEPTED; production execution NOT accepted. Contract acceptance is "
+               "not adapter acceptance."),
     ),
     "ga_redis_adapter": dict(
-        probe_type=PROBE_DELEGATED, probe_location=f"{_EVAL} -> _delegate(redis_queue)",
-        measurement_class=NOT_EVALUABLE, effort="SMALL",
-        implemented_capability="A Redis queue backend exists as an advisory filter over the snapshot.",
+        probe_type=PROBE_EVIDENCE,
+        probe_location=f"{_EVAL} -> _queue_adapter_probe -> "
+                       "backend/app/production_queue_adapter_evidence.py",
+        measurement_class=ABSENT, effort="LARGE",
+        implemented_capability=(
+            "An ACCEPTED static evidence contract (production-queue-adapter-evidence.v1) with a "
+            "fail-closed validator and an isolated readiness consumer. The queue itself is a "
+            "best-effort index over authoritative store state."),
         missing_capability=(
-            "Requires a reachable Redis to evaluate. No ack, visibility timeout, retry or DLQ "
-            "semantics, so it does not mitigate the lost-update problem."),
-        technical_dependencies=[], external_dependencies=["provisioned Redis"], sequence=8, notes="",
+            "No production queue-adapter evidence artifact exists at any commit, and the present "
+            "queue cannot satisfy the contract: delivery is at-most-once, enqueue is a non-atomic "
+            "SADD+RPUSH, dequeue is an LPOP with no lease or acknowledgement, the loss window is "
+            "PERMANENT because the dedupe-set entry blocks re-derivation, and there is no retry "
+            "counter, dead-letter queue or per-tenant namespace in the queue keys. Queue "
+            "reachability (a liveness ping), a disposable Docker Redis, the restricted worker "
+            "matrix, tenant-authorization evidence, the dual-backend UI proof and production "
+            "DATABASE-adapter evidence are each explicitly non-qualifying."),
+        technical_dependencies=[],
+        external_dependencies=["provisioned PRODUCTION queue service", "operational evidence collection"],
+        sequence=8,
+        notes=("Static contract ACCEPTED; production execution NOT accepted. Contract acceptance is "
+               "not adapter acceptance."),
     ),
     "ga_backup_restore_drill": dict(
         probe_type=PROBE_NONE, probe_location=f"{_EVAL} default branch",
@@ -362,6 +398,29 @@ def _git(args: list[str]) -> str:
         return "unknown"
 
 
+def _all_evidence_paths() -> list:
+    """Every gitignored ``output/`` artifact the evaluator consults.
+
+    Hiding only the migration artifact made the "fresh checkout" context a lie: an independent
+    review showed at least three other local artifacts leaking into the generated prose, and at
+    exact head they would move dispositions themselves. Read from the evaluator module so a newly
+    added evidence path cannot be silently omitted.
+    """
+    import backend.app.ga_readiness as _g
+    paths, seen = [], set()
+    for name in dir(_g):
+        if not name.endswith("_PATH") and "EVIDENCE" not in name:
+            continue
+        value = getattr(_g, name, None)
+        if isinstance(value, Path) and "output" in value.as_posix() and value not in seen:
+            seen.add(value)
+            paths.append(value)
+    for extra in (EVIDENCE_PATH,):
+        if extra not in seen:
+            paths.append(extra)
+    return paths
+
+
 def _dispositions() -> tuple[dict[str, str], dict[str, str], str, str, bool]:
     """Return (fresh, verified, ga_fresh, ga_verified, evidence_present).
 
@@ -374,28 +433,332 @@ def _dispositions() -> tuple[dict[str, str], dict[str, str], str, str, bool]:
     """
     import backend.app.ga_readiness as G
 
-    def snap() -> tuple[dict[str, str], str]:
-        checks = G.evaluate_blockers({})
+    _CAPTURED.clear()
+
+    def snap(hermetic_env: bool = False) -> tuple[dict[str, str], str]:
+        """Evaluate the registry. ``hermetic_env`` additionally hides MONDAY_REPORT_* variables.
+
+        The artifact asserts that the fresh-checkout context "is reproducible from the TRACKED
+        repository alone". That was FALSE while only local FILES were hidden: an exact-head review
+        showed that exporting MONDAY_REPORT_AUDIT_HMAC_KEY/_ID/_VERSION flips
+        ga_audit_keyed_integrity from BLOCKED to PASS, so the authoritative context silently
+        depended on the operator's shell. Environment is machine-local state exactly as the
+        gitignored artifacts are, so the fresh snapshot hides both.
+        """
+        saved = {}
+        if hermetic_env:
+            for key in [k for k in os.environ if k.startswith("MONDAY_REPORT_")]:
+                saved[key] = os.environ.pop(key)
+        try:
+            checks = G.evaluate_blockers({})
+        finally:
+            os.environ.update(saved)
+        _CAPTURED["reasons"] = {c["id"]: str(c.get("detail") or "") for c in checks}
         status, _ = G.decide_ga(mode="client", parity_ok=True, checks=checks,
                                 commands_skipped=False, commands_passed=True, worktree_clean=True)
         return {c["id"]: c["disposition"] for c in checks}, status
 
-    hidden = EVIDENCE_PATH.with_suffix(".json.gap-assessment-hidden")
-    had = EVIDENCE_PATH.exists()
-    if had:
-        EVIDENCE_PATH.rename(hidden)
+    # Move every local evidence artifact into a private temp directory, not to a fixed sibling
+    # name: a fixed target raises FileExistsError on a leftover from an interrupted run, and an
+    # interrupted run would otherwise strand the developer's real artifacts.
+    stash = Path(tempfile.mkdtemp(prefix="gap-assessment-hidden-"))
+    moved = []
     try:
-        fresh, ga_fresh = snap()
+        for index, path in enumerate(_all_evidence_paths()):
+            if path.exists():
+                target = stash / f"{index}-{path.name}"
+                os.replace(path, target)
+                moved.append((path, target))
+        fresh, ga_fresh = snap(hermetic_env=True)
     finally:
-        if had:
-            hidden.rename(EVIDENCE_PATH)
-    verified, ga_verified = snap() if had else (fresh, ga_fresh)
+        for path, target in moved:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(target, path)
+        shutil.rmtree(stash, ignore_errors=True)
+    # The blocking reasons that go into the canonical body are the HERMETIC ones, captured while
+    # every local artifact was hidden. Capturing them afterwards made the canonical hash a function
+    # of an untracked file's CONTENTS -- an independent review changed the hash by planting garbage.
+    _CAPTURED["hermetic_reasons"] = dict(_CAPTURED.get("reasons") or {})
+    had = bool(moved)
+    # Hermetic in env for BOTH halves. _promotion_map hides MONDAY_REPORT_* while this snapshot
+    # did not, so the two measured different populations -- the same "different populations" defect
+    # just fixed for the presence flags, one field over. With the project's own documented
+    # MONDAY_REPORT_AUDIT_HMAC_KEY exported, ga_audit_keyed_integrity flipped here but got no
+    # promoter entry, and the generator's honest output was refused by its own guard.
+    verified, ga_verified = snap(hermetic_env=True) if had else (fresh, ga_fresh)
     return fresh, verified, ga_fresh, ga_verified, had
 
 
-def build() -> dict:
+#: Scratch space for the hermetic snapshot's blocking reasons.
+_CAPTURED: dict = {}
+
+#: Controls whose disposition is driven by an evidence artifact that must be bound to the CURRENT
+#: head. Absent or stale evidence keeps them BLOCKED; nothing here may report otherwise.
+_EVIDENCE_DRIVEN = {
+    "ga_postgres_adapter", "ga_redis_adapter", "ga_tenant_authorization",
+    "ga_migration_runner", "ga_migration_validity", "ga_persistence_locking",
+    "ga_correction_cross_process_atomicity", "ga_audit_keyed_integrity",
+    "ga_verified_reviewer_identity", "ga_rbac_role_separation",
+}
+
+
+def _promotion_map(fresh: dict) -> dict:
+    """Per-control evidence attribution, conjunction-aware.
+
+    Returns ``{check_id: {"required": [...], "present": [...], "missing": [...],
+    "conjunction": bool}}`` for every control whose machine-local disposition improves on the
+    authoritative one.
+
+    The previous version kept ONE artifact visible at a time and recorded whichever single file
+    moved the control. That cannot attribute a control gated on a CONJUNCTION:
+    ga_tenant_authorization requires tenant-rls v2 AND tenant-authorization v3, so neither artifact
+    alone moves it and the honest output was a null promoter beside a changed disposition -- which
+    the guard then refused. The requirement now comes from the evaluator's own call graph, so a
+    conjunction is represented as one and every component is named.
+    """
+    import backend.app.ga_readiness as G
+    import ga_gap_assessment_coupling as _coupling
+
+    graph = _coupling.evaluator_graph(
+        (ROOT / "backend" / "app" / "ga_readiness.py").read_text(encoding="utf-8"))
+    # Resolve by basename, but let an EXISTING path win a collision. _all_evidence_paths() can
+    # list the same filename twice -- the generator's own EVIDENCE_PATH and the evaluator's
+    # MIGRATION_EVIDENCE_PATH are distinct constants naming the same artifact -- and a plain dict
+    # comprehension let whichever came last win. When one of them had been repointed and the other
+    # had not, `present` came out empty for a control that HAD genuinely been promoted, the
+    # promoter was recorded as null, and the guard refused the generator's own honest output.
+    by_name: dict = {}
+    for candidate in _all_evidence_paths():
+        current = by_name.get(candidate.name)
+        if current is None or (candidate.exists() and not current.exists()):
+            by_name[candidate.name] = candidate
+
+    saved_env = {k: os.environ.pop(k) for k in
+                 [k for k in os.environ if k.startswith("MONDAY_REPORT_")]}
+    try:
+        verified = {c["id"]: c["disposition"] for c in G.evaluate_blockers({})}
+    finally:
+        os.environ.update(saved_env)
+
+    promoted: dict[str, dict] = {}
+    for cid, disposition in verified.items():
+        if disposition == fresh.get(cid) or cid not in graph:
+            continue
+        required = list(graph[cid]["artifacts"])
+        present = sorted(n for n in required if n in by_name and by_name[n].exists())
+        promoted[cid] = {
+            "required": required,
+            "present": present,
+            "missing": sorted(set(required) - set(present)),
+            "conjunction": graph[cid]["conjunction"],
+        }
+    return promoted
+
+
+def _evidence_status(check_id: str, probe_type: str | None, fresh_disposition: str | None) -> str:
+    """How this control's evidence stands AT THE CURRENT HEAD.
+
+    ``absent`` is the honest answer for every evidence-driven control here: no exact-head artifact
+    exists in the tracked repository. A locally present, gitignored artifact is NOT repository state
+    and never yields ``present`` -- see ``local_evidence_artifact`` in the payload.
+    """
+    # Only an EVIDENCE-DRIVEN probe can have an artifact at all. A behavioural probe that passes has
+    # no evidence artifact, and reporting present_exact_head for it was false -- an independent
+    # review found two such controls in the shipped artifact.
+    if probe_type != PROBE_EVIDENCE:
+        return "not_evidence_driven"
+    return "present_exact_head" if fresh_disposition == "PASS" else "absent"
+
+
+#: The only notes ``_local_evidence_binding`` may emit. Hoisted to a closed set because the block is
+#: excluded from the canonical hash: a review replaced the note with "Production adapter evidence
+#: collected and accepted at this head." and the forgery still collided with the honest hash.
+LOCAL_EVIDENCE_NOTES = (
+    "no local migration evidence artifact on this machine",
+    "local artifact unreadable",
+    "This artifact is gitignored and is NOT repository state. It is bound to a different commit "
+    "than the current head, so the verified-environment context it produces is a MACHINE-LOCAL "
+    "observation, not a repository fact.",
+    "Local artifact is bound to the current head.",
+)
+
+#: The only notes the verified-environment context may carry, for the same reason.
+VERIFIED_CONTEXT_NOTES = (
+    "Measured against the local evidence artifact.",
+    "NOT MEASURED: this checkout has no local evidence artifact, so this context is identical to "
+    "the fresh-checkout context. Regenerate evidence to measure it.",
+)
+
+#: Verbatim disclosure of what the curated prose is and is not. See ``_ASSESSMENT``.
+CURATED_PROSE_DISCLOSURE = (
+    "implemented_capability, missing_capability, estimated_effort, technical_dependencies, "
+    "external_dependencies and notes are AUTHOR-SUPPLIED commentary. They are not derived from any "
+    "evaluator and no guard can verify them, because there is no source of truth to check them "
+    "against. The authoritative, machine-derived fields are current_disposition_fresh_checkout and "
+    "blocking_reason, both produced by ga_readiness.evaluate_blockers; where the commentary and "
+    "those fields disagree, the derived fields govern."
+)
+
+#: Exact key set of the local-evidence block.
+LOCAL_EVIDENCE_KEYS = frozenset({"describes", "present", "tracked", "bound_to_commit",
+                                 "matches_current_head", "note"})
+
+
+def _local_evidence_binding() -> dict:
+    """Disclose the machine-local migration artifact's binding, if one is present.
+
+    It is gitignored, so it is NOT part of the repository state this assessment describes. Recording
+    its commit binding makes a stale local artifact visible instead of silently flipping a control.
+    """
+    if not EVIDENCE_PATH.exists():
+        return {"describes": EVIDENCE_PATH.name,
+                "present": False, "tracked": False, "bound_to_commit": None,
+                "matches_current_head": False,
+                "note": LOCAL_EVIDENCE_NOTES[0]}
+    try:
+        payload = json.loads(EVIDENCE_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {"describes": EVIDENCE_PATH.name,
+                "present": True, "tracked": False, "bound_to_commit": None,
+                "matches_current_head": False, "note": LOCAL_EVIDENCE_NOTES[1]}
+    bound = payload.get("git_commit")
+    head = _git(["rev-parse", "HEAD"])
+    return {
+        # This block describes ONE artifact. Naming it stops a reader -- and a check -- treating it
+        # as a statement about all seven evidence paths.
+        "describes": EVIDENCE_PATH.name,
+        "present": True,
+        "tracked": False,
+        "bound_to_commit": bound,
+        "matches_current_head": bound == head,
+        "note": LOCAL_EVIDENCE_NOTES[2] if bound != head else LOCAL_EVIDENCE_NOTES[3],
+    }
+
+
+def _source_bindings(registry_bytes: bytes) -> dict:
+    """Hashes of the sources this assessment is derived from, so drift is detectable."""
+    bindings = {"registry_sha256": hashlib.sha256(registry_bytes).hexdigest()}
+    try:
+        from backend.app import readiness_contexts as _rc
+        bindings["readiness_context_inventory_hash"] = _rc.canonical_hash()
+    except Exception:  # noqa: BLE001
+        bindings["readiness_context_inventory_hash"] = None
+    for name, module_path in (("production_database_adapter_contract_hash",
+                               "production_database_adapter_evidence"),
+                              ("production_queue_adapter_contract_hash",
+                               "production_queue_adapter_evidence")):
+        try:
+            module = __import__(f"backend.app.{module_path}", fromlist=["contract_hash"])
+            bindings[name] = module.contract_hash()
+        except Exception:  # noqa: BLE001
+            bindings[name] = None
+    return bindings
+
+
+#: Excluded from the canonical hash: the hash itself, and the MACHINE-LOCAL observations. Everything
+#: else -- including the fresh-checkout context and its tallies -- is covered.
+#:
+#: `contexts` was previously excluded wholesale, which let a GA_BLOCKED artifact and a GA_READY /
+#: 28-PASS artifact share a canonical hash. Only the verified-environment half, which depends on
+#: gitignored local artifacts, is excluded now.
+# ``local_evidence_paths_present`` counts GITIGNORED artifacts, so it is machine-local exactly like
+# the two fields beside it. Admitting it to the canonical body made the hash a function of untracked
+# state: a pristine checkout computed 0 where the author's machine computed 5, so the tracked
+# artifact was green on one machine and RED everywhere else, with the fault battery reporting zero
+# mutations. That is the defect this whole increment exists to prevent.
+NON_CANONICAL_KEYS = frozenset({"canonical_payload_hash", "local_evidence_artifact",
+                                "local_evidence_artifact_present",
+                                "local_evidence_paths_present"})
+NON_CANONICAL_CONTEXT_KEYS = frozenset({"verified_environment_with_evidence"})
+NON_CANONICAL_CONTROL_KEYS = frozenset({"current_disposition_verified_environment",
+                                        "verified_promoted_by",
+                                        "verified_promotion_detail"})
+
+
+def canonical_body(payload: dict) -> dict:
+    """The hermetic, tracked-repository-only content of the assessment."""
+    body = {k: v for k, v in payload.items() if k not in NON_CANONICAL_KEYS}
+    if isinstance(body.get("contexts"), dict):
+        body["contexts"] = {k: v for k, v in body["contexts"].items()
+                            if k not in NON_CANONICAL_CONTEXT_KEYS}
+    if isinstance(body.get("controls"), list):
+        body["controls"] = [{k: v for k, v in c.items() if k not in NON_CANONICAL_CONTROL_KEYS}
+                            for c in body["controls"] if isinstance(c, dict)]
+    return body
+
+
+def canonical_json(payload: dict) -> str:
+    return json.dumps(canonical_body(payload), sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True)
+
+
+def canonical_hash(payload: dict) -> str:
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def assessment_keys() -> set:
+    """Check ids the curated ``_ASSESSMENT`` block covers.
+
+    Exposed so the guard can require it to equal the registry's check-id set exactly: silently
+    dropping a control from ``_ASSESSMENT`` blanked that control's whole assessment and went
+    undetected.
+    """
+    return set(_ASSESSMENT)
+
+
+def registry_inventory() -> dict:
+    """``{registry id: check id}`` loaded from the REAL registry.
+
+    The single authority for which controls exist. Nothing in this repository maintains a second
+    hand-authored list of the 28, and no editable constant may redefine the expected set.
+    """
     registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    return {entry["id"]: entry["check_id"] for entry in registry["blockers"]}
+
+
+def registry_inventory_fingerprint() -> str:
+    """A REPORTING fingerprint derived from the loaded registry.
+
+    Emitted for humans and diffs. It is computed from the registry, never compared against a stored
+    literal, and it does not define the expected set -- a pin that can be edited alongside the thing
+    it protects is not an authority.
+    """
+    inventory = registry_inventory()
+    return hashlib.sha256(
+        json.dumps(sorted(inventory.items()), separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def source_file_hashes() -> dict:
+    """SHA-256 of every file this assessment is derived from, so drift is detectable per file."""
+    sources = {
+        # The generator carries the curated _ASSESSMENT prose -- implemented/missing capability,
+        # measurement class, effort. An independent review edited it to claim an executed
+        # backup/restore drill with approved RPO/RTO and BOTH guards certified, because this file
+        # was absent from the hash set. It is the most important source of all.
+        "scripts/build_ga_gap_assessment.py": pathlib.Path(__file__).resolve(),
+        "evals/ga/blocker_registry.v1.json": REGISTRY_PATH,
+        "backend/app/ga_readiness.py": ROOT / "backend" / "app" / "ga_readiness.py",
+        "backend/app/readiness_contexts.py": ROOT / "backend" / "app" / "readiness_contexts.py",
+        "backend/app/production_database_adapter_evidence.py":
+            ROOT / "backend" / "app" / "production_database_adapter_evidence.py",
+        "backend/app/production_queue_adapter_evidence.py":
+            ROOT / "backend" / "app" / "production_queue_adapter_evidence.py",
+    }
+    out = {}
+    for label, path in sources.items():
+        try:
+            out[label] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except Exception:  # noqa: BLE001
+            out[label] = None
+    return out
+
+
+def build() -> dict:
+    registry_bytes = REGISTRY_PATH.read_bytes()
+    registry = json.loads(registry_bytes.decode("utf-8"))
     fresh, verified, ga_fresh, ga_verified, evidence_present = _dispositions()
+    promoted_by = _promotion_map(fresh)
+    blocking_reasons = dict(_CAPTURED.get("hermetic_reasons") or {})
 
     controls = []
     for entry in sorted(registry["blockers"], key=lambda b: b["check_id"]):
@@ -406,7 +769,11 @@ def build() -> dict:
         # checkout. When the live disposition is not PASS the control was not
         # actually measured here (its evidence artifact is absent), so downgrade
         # rather than overstate.
-        live = verified.get(cid)
+        # Downgrade against the AUTHORITATIVE fresh context, not the machine-local verified one:
+        # a curated BEHAVIORALLY_PROVEN class must not survive on the strength of a gitignored
+        # artifact. This left migration-runner recorded PROVEN while its fresh disposition was
+        # BLOCKED.
+        live = fresh.get(cid)
         if klass == BEHAVIOURALLY_PROVEN and live != "PASS":
             klass = NOT_EVALUABLE
         controls.append({
@@ -418,10 +785,19 @@ def build() -> dict:
             "resolution_condition": entry["resolution_condition"],
             "current_disposition_fresh_checkout": fresh.get(cid),
             "current_disposition_verified_environment": verified.get(cid),
+            # The SPECIFIC artifact that moves this control, or null. Machine-local, so it is
+            # excluded from the canonical body -- it exists to make the machine-local bound
+            # per-control instead of a global count.
+            # Conjunction-aware: EVERY artifact that authorizes this control, not whichever single
+            # file happened to move it. Machine-local, so it stays out of the canonical body.
+            "verified_promoted_by": (promoted_by.get(cid) or {}).get("present") or None,
+            "verified_promotion_detail": promoted_by.get(cid),
             "probe_type": a.get("probe_type", PROBE_NONE),
             "probe_location": a.get("probe_location", f"{_EVAL} default branch"),
             "measurement_class": klass,
             "behaviorally_measured": a.get("probe_type") in {PROBE_BEHAVIOURAL, PROBE_EVIDENCE},
+            "evidence_status": _evidence_status(cid, a.get("probe_type"), fresh.get(cid)),
+            "blocking_reason": (blocking_reasons.get(cid) or "")[:400],
             "implemented_capability": a.get("implemented_capability", ""),
             "missing_capability": a.get("missing_capability", ""),
             "technical_dependencies": a.get("technical_dependencies", []),
@@ -441,10 +817,57 @@ def build() -> dict:
         "schema_version": SCHEMA_VERSION,
         "generated_from_commit": _git(["rev-parse", "HEAD"]),
         "generated_from_tree": _git(["rev-parse", "HEAD^{tree}"]),
-        "worktree_clean": _git(["status", "--porcelain"]) == "",
+        # TRACKED-only. Bare porcelain counts untracked files, so the untracked partner documents
+        # made this permanently false -- the artifact accused itself of a dirty tree on a clean
+        # checkout.
+        "worktree_clean": _git(["status", "--porcelain", "--untracked-files=no"]) == "",
         "registry_version": registry.get("registry_version"),
         "registry_path": "evals/ga/blocker_registry.v1.json",
         "control_count": len(controls),
+        # What this artifact IS. It carries source bindings and a canonical hash, but it is a
+        # generated STATUS REPORT derived from current code and registry state -- not an acceptance
+        # artifact and not evidence of anything.
+        "artifact_class": "generated_status_assessment",
+        "is_acceptance_artifact": False,
+        "is_evidence": False,
+        "authoritative_context": "fresh_checkout_no_local_evidence",
+        "authoritative_context_note": (
+            "The fresh-checkout context is authoritative because it is reproducible from the TRACKED "
+            "repository alone. The verified-environment context depends on a gitignored machine-local "
+            "artifact and is disclosed, not relied upon."),
+        # A tracked artifact cannot contain the commit that first introduces it: writing it changes
+        # the tree. The model is therefore explicit -- the recorded commit is the immediate PARENT of
+        # the commit that carries this artifact, and the per-file source hashes below are what
+        # actually detect drift.
+        "artifact_generation_model": "tracked-derived-assessment",
+        "source_commit_relationship": "immediate-parent-of-artifact-commit",
+        "source_bindings": _source_bindings(registry_bytes),
+        "source_file_hashes": source_file_hashes(),
+        "registry_inventory_fingerprint": registry_inventory_fingerprint(),
+        "registry_inventory_fingerprint_note": (
+            "Derived from the loaded registry for reporting and diffing only. It does NOT define the "
+            "expected control set; the registry itself does."),
+        "local_evidence_artifact": _local_evidence_binding(),
+        "execution_verdicts": {
+            "production_database_adapter": "PRODUCTION_DATABASE_ADAPTER_NOT_ACCEPTED",
+            "production_queue_adapter": "PRODUCTION_QUEUE_ADAPTER_NOT_ACCEPTED",
+            "four_readiness_contexts": "FOUR_READINESS_CONTEXTS_NOT_ACCEPTED",
+        },
+        "static_contracts_accepted": {
+            "production_database_adapter_contract": True,
+            "production_queue_adapter_contract": True,
+            "readiness_context_contract": True,
+            "readiness_context_execution_harness": True,
+            "tenant_authorization_evidence_contract": True,
+        },
+        "static_contract_acceptance_is_not_execution_acceptance": True,
+        "exact_head_tenant_evidence_present": False,
+        "four_contexts_executed_at_this_head": False,
+        "capacity_gate": "blocked",
+        "client_data_ready": False,
+        "release_candidate_ready": False,
+        "ga_ready": False,
+        "release_recommendation": "GA_BLOCKED",
         "measurement_class_legend": {
             BEHAVIOURALLY_PROVEN: "A probe executed and the control's condition was met.",
             BEHAVIOURALLY_FAILED: "A probe executed and the control's condition was NOT met.",
@@ -455,19 +878,40 @@ def build() -> dict:
             NOT_EVALUABLE: "A prerequisite (service, evidence artifact, configuration) is unavailable.",
             EXTERNAL: "Resolution is owned outside engineering and must never be self-approved.",
         },
+        # An author who edits the curated block and regenerates produces a self-consistent
+        # artifact: there is no oracle for authored commentary, so no guard can verify it. A review
+        # proved this by rewording a claim to evade the phrase floor. The limitation is therefore
+        # DISCLOSED in the artifact rather than papered over.
+        "curated_prose_disclosure": CURATED_PROSE_DISCLOSURE,
+        # Kept consistent with local_evidence_artifact.present by construction. A review set this
+        # to false / to prose / to null / to {"ga": "GA_READY"} and every variant certified green
+        # with a BYTE-IDENTICAL canonical hash, because no check read it at all.
         "local_evidence_artifact_present": evidence_present,
+        # How many of the gitignored evidence artifacts actually exist here. The single boolean
+        # above reflects only the MIGRATION artifact, which is why GA47f could neither bound the
+        # verified half honestly nor refuse a forged one: seven paths drive that half.
+        "local_evidence_paths_present": sum(1 for p in _all_evidence_paths() if p.exists()),
         "contexts": {
-            "fresh_checkout_no_local_evidence": {"ga": ga_fresh, "tally": tally(fresh)},
+            "fresh_checkout_no_local_evidence": {
+                "ga": ga_fresh,
+                "tally": tally(fresh),
+                # The only context reproducible from the tracked repository alone -- now genuinely
+                # so, since the fresh snapshot hides MONDAY_REPORT_* as well as the local files.
+                "informational_only": False,
+                "authoritative_for_release": True,
+            },
             "verified_environment_with_evidence": {
                 "ga": ga_verified,
                 "tally": tally(verified),
                 "measured": evidence_present,
-                "note": (
-                    "Measured against the local evidence artifact."
-                    if evidence_present else
-                    "NOT MEASURED: this checkout has no local evidence artifact, so this context is "
-                    "identical to the fresh-checkout context. Regenerate evidence to measure it."
-                ),
+                # Machine-local observation, NOT repository state and NOT exact-head evidence.
+                # Declared in machine-readable form: the distinction previously lived only in a
+                # prose note, so a consumer reading the structure could mistake this for the
+                # authoritative context.
+                "informational_only": True,
+                "authoritative_for_release": False,
+                "note": (VERIFIED_CONTEXT_NOTES[0] if evidence_present
+                         else VERIFIED_CONTEXT_NOTES[1]),
             },
         },
         "controls": controls,
@@ -476,6 +920,7 @@ def build() -> dict:
 
 def main() -> int:
     payload = build()
+    payload["canonical_payload_hash"] = canonical_hash(payload)
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -488,6 +933,10 @@ def main() -> int:
     print(f"verified env    : {payload['contexts']['verified_environment_with_evidence']['ga']} "
           f"{payload['contexts']['verified_environment_with_evidence']['tally']}")
     print("measurement     :", dict(sorted(counts.items())))
+    print(f"canonical hash  : {payload['canonical_payload_hash']}")
+    print(f"registry sha256 : {payload['source_bindings']['registry_sha256']}")
+    print(f"artifact class  : {payload['artifact_class']} "
+          f"(is_evidence={payload['is_evidence']})")
     print(f"wrote           : {OUTPUT_PATH.relative_to(ROOT).as_posix()}")
     return 0
 

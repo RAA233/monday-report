@@ -83,6 +83,7 @@ from .corrections_registry import (
 )
 from . import idempotency
 from .readiness import client_data_mode, evaluate_client_data_readiness
+from .verification_boundary import verification_context, verification_run_fingerprint
 from .runtime_backends import runtime_backend_status
 from .signed_urls import create_signed_token, signing_secret_configured, verify_signed_token
 from .store import store, IdempotencyConflict, ReviewerNotVerified, SnapshotConflict
@@ -183,10 +184,21 @@ async def _idempotency_conflict_handler(request: Request, exc: IdempotencyConfli
 async def _snapshot_conflict_handler(request: Request, exc: SnapshotConflict) -> JSONResponse:
     # A durable mutation lost a compare-and-swap race or timed out on the snapshot
     # lock. Nothing partial was committed (rollback discards both state and audit).
-    # Retryable conflicts (lock timeout, serialization) map to 503 so a client may
-    # retry; a definite stale-revision loss maps to 409. No DSN/driver detail leaks.
-    status_code = 503 if exc.retryable else 409
-    return JSONResponse(status_code=status_code, content={"detail": "Snapshot write conflict; please retry"})
+    # Retryable conflicts (lock timeout, serialization) map to 503 and DO invite a
+    # retry -- the same request may succeed once contention clears. A definite
+    # non-retryable loss (stale revision, idempotency-key conflict) maps to 409 and
+    # must NOT invite a retry: replaying the identical request cannot change the
+    # outcome, and telling the caller to "please retry" is misleading. Neither
+    # message leaks a DSN, driver, role, revision number, SQL, or filesystem path.
+    if exc.retryable:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Snapshot write conflict; please retry"},
+        )
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "Snapshot write conflict"},
+    )
 
 
 def _best_effort_audit(*args, **kwargs) -> None:
@@ -381,6 +393,38 @@ def require_client_data_ready(operation: str, resource_type: str, resource_id: U
         return
     readiness = evaluate_client_data_readiness(store)
     if readiness.ready:
+        return
+    verification = verification_context()
+    if verification["verification_isolation_active"]:
+        # Provably-isolated disposable verification stack (see verification_boundary):
+        # allow the real client-mode request path to EXECUTE so tenant isolation,
+        # authentication, RBAC, verified-reviewer enforcement, forced RLS on the
+        # restricted runtime role, and the idempotency contract can be proven.
+        # Readiness is NOT certified (readiness.ready stays False) and NO GA control
+        # is made to pass -- this only skips the unrelated release-readiness 423
+        # lock, only here, only under the full isolation conjunction plus the
+        # database-side attestation.
+        #
+        # A readiness relaxation MUST be durably audited. Use the FAIL-CLOSED audit
+        # primitive (never best-effort): if the event cannot be committed -- missing
+        # audit key, HMAC failure, snapshot/transaction failure, or a store that
+        # cannot durably record it -- do NOT relax the gate.
+        try:
+            store.audit(
+                "client_data.verification_isolation_execution",
+                resource_type,
+                resource_id,
+                {
+                    "operation": operation,
+                    "readiness_status": readiness.status,
+                    # A safe short fingerprint of the run id (never the raw value),
+                    # binding this boundary use to the specific verification run.
+                    "verification_run": verification_run_fingerprint(),
+                    **verification,
+                },
+            )
+        except Exception:  # noqa: BLE001 - any audit failure fails the relaxation closed
+            raise HTTPException(status_code=503, detail="Client data readiness checks are failing")
         return
     blocking_checks = [check.id for check in readiness.checks if check.status == "fail"]
     warning_checks = [check.id for check in readiness.checks if check.status == "warn"]
@@ -1069,6 +1113,13 @@ async def create_direct_upload(
             },
         )
         raise HTTPException(status_code=413, detail=f"Upload exceeds {max_upload_bytes()} byte limit")
+    # Persist durably inside create_uploaded_file's own mutation boundary (save=True)
+    # rather than following it with a bare store.save(). On the transactional
+    # PostgreSQL backend a direct store.save() outside a snapshot transaction fails
+    # closed (SnapshotConflict), and the blocked record + upload.blocked audit are
+    # already committed by this call's wrapper regardless of the branch taken -- so a
+    # trailing save() was both redundant and fatal (a non-retryable 409). The clean
+    # branch commits again in complete_upload; a second durable commit is harmless.
     upload, file_record, signed_url = store.create_uploaded_file(
         workspace_id=workspace_id,
         file_name=original_name,
@@ -1076,10 +1127,10 @@ async def create_direct_upload(
         source_type=source_type,
         content=content,
         refresh=False,
-        save=False,
+        save=True,
     )
     if file_record.malware_status == "blocked":
-        store.save()
+        # The block and its upload.blocked audit are already durable; reject.
         raise HTTPException(status_code=422, detail="Upload blocked by malware scanner")
     upload = store.complete_upload(upload.id, [file_record.id], refresh=False)
     return UploadCreateResponse(
@@ -2061,22 +2112,14 @@ def export_monday_report(
     require_client_data_ready("monday_report.export", "monday_report", report_id)
     open_tasks = store.report_open_validation_tasks(report_id)
     if open_tasks and (not allow_unresolved_validation or client_data_mode() == "client"):
-        report.status = "review"
-        if isinstance(report.report_json, dict):
-            report.report_json["validation"] = {
-                "open_tasks": len(open_tasks),
-                "status": "requires_review",
-            }
-        store.audit(
-            "monday_report.export_blocked",
-            "monday_report",
+        # The review transition and the export_blocked audit event persist together
+        # or roll back together (one wrapped snapshot transaction) -- a 409 refusal
+        # never leaves one without the other, even under a concurrent writer.
+        store.mark_report_export_blocked(
             report_id,
-            {
-                "format": export_format,
-                "open_validation_tasks": len(open_tasks),
-                "override_requested": allow_unresolved_validation,
-                "validation_task_ids": [str(task.id) for task in open_tasks],
-            },
+            export_format,
+            allow_unresolved_validation,
+            [task.id for task in open_tasks],
         )
         raise HTTPException(status_code=409, detail="Report has unresolved validation tasks")
     if open_tasks and allow_unresolved_validation:

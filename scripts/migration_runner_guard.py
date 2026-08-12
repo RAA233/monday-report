@@ -674,6 +674,9 @@ def main() -> int:
            'relation "projects" does not exist' in M._redact('relation "projects" does not exist'), True)
 
     import backend.app.ga_readiness as G
+    # Hermetic: no tenant-RLS evidence here, so tenant-authorization stays in the
+    # still-blocked set regardless of any stray local evidence artifact.
+    G.TENANT_RLS_EVIDENCE_PATH = G.ROOT / "output" / "tenant-rls" / "__guard_absent__.json"
 
     run_disp, run_detail = G._migration_runner_probe()
     val_disp, val_detail = G._migration_validity_probe()

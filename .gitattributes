@@ -1,10 +1,79 @@
-# Migration checksums are computed over RAW FILE BYTES (see
-# backend/app/migrations.py: discover_migrations -> hashlib.sha256(path.read_bytes())),
-# and those checksums are persisted in schema_migrations and compared on every
-# subsequent run. Line endings must therefore be byte-identical on every platform.
+# ---------------------------------------------------------------------------
+# Repository-controlled line endings. Two independent reasons this file exists:
 #
-# Without this, core.autocrlf=true smudges LF -> CRLF on Windows checkout, so a
-# database migrated on Windows records different checksums than the same commit
-# checked out on Linux/CI/containers. The next run from the other platform sees
-# checksum drift on every applied migration and refuses to apply anything.
+# 1. MIGRATION CHECKSUMS (original rule, below). Migration checksums are computed
+#    over RAW FILE BYTES (see backend/app/migrations.py: discover_migrations ->
+#    hashlib.sha256(path.read_bytes())), and those checksums are persisted in
+#    schema_migrations and compared on every subsequent run. Line endings must
+#    therefore be byte-identical on every platform.
+#
+#    Without this, core.autocrlf=true smudges LF -> CRLF on Windows checkout, so a
+#    database migrated on Windows records different checksums than the same commit
+#    checked out on Linux/CI/containers. The next run from the other platform sees
+#    checksum drift on every applied migration and refuses to apply anything.
+#
+# 2. EVIDENCE-BOUND PROOF FILES. The accepted restricted-PostgreSQL runtime
+#    manifest freezes a SHA-256 per accepted child guard, and tenant-authorization
+#    evidence v3 binds the SHA-256 of every accepted proof implementation. Those
+#    digests are computed over raw file bytes too, so under core.autocrlf=true a
+#    fresh checkout materializes CRLF and the digests legitimately fail closed --
+#    which made evidence unreproducible outside one developer working tree.
+#
+#    Pinning eol=lf for the source formats makes checkout materialization
+#    byte-identical to the committed blob on every platform and for any value of
+#    core.autocrlf, so accepted proofs and evidence verify from a pristine
+#    checkout. No repository content changes: every tracked blob is already LF.
+#
+# Binary formats are explicitly marked -text so they can never be smudged.
+# ---------------------------------------------------------------------------
+
+# --- migrations (original rule; byte-stable checksums) ---
 *.sql text eol=lf
+
+# --- source formats bound by accepted proof / evidence digests ---
+*.py   text eol=lf
+*.json text eol=lf
+*.mjs  text eol=lf
+*.js   text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.md   text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.sh   text eol=lf
+
+# --- remaining tracked text files (independent review F4: these resolved eol=unspecified and
+#     still materialized CRLF on a fresh autocrlf=true checkout; none is digest-bound today, but
+#     covering them removes the latent recurrence risk if one ever becomes bound) ---
+*.txt  text eol=lf
+*.svg  text eol=lf
+*.cfg  text eol=lf
+*.ini  text eol=lf
+*.example text eol=lf
+.gitignore    text eol=lf
+.gitattributes text eol=lf
+.npmrc        text eol=lf
+
+# --- binary formats: never treat as text, never smudge ---
+*.pdf   -text
+*.png   -text
+*.jpg   -text
+*.jpeg  -text
+*.webp  -text
+*.gif   -text
+*.ico   -text
+*.zip   -text
+*.gz    -text
+*.woff  -text
+*.woff2 -text
+*.xlsx  -text
+*.docx  -text
+
+# No intentional CRLF fixture exists in this repository: at the commit that
+# introduced this policy, zero tracked blobs contained CRLF, so pinning eol=lf
+# cannot alter any fixture's meaning. Should a CRLF-significant fixture ever be
+# added, give it an explicit path rule here (e.g. `path/to/fixture.txt -text`)
+# and state why, rather than relaxing the rules above.

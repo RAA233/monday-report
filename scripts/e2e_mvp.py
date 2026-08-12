@@ -11,7 +11,7 @@ from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlparse
 
-from phase_audit import API_BASE, ROOT, WEB_BASE, build_zip_fixture, create_test_workspace, request_json, request_multipart
+from phase_audit import API_BASE, ROOT, WEB_BASE, build_zip_fixture, create_test_workspace, idempotency_key, request_json, request_multipart
 
 
 def main() -> int:
@@ -186,6 +186,16 @@ def run_e2e() -> list[dict[str, object]]:
                 "status": "validated",
                 "resolution_note": "E2E accepted cited failure extraction for official export.",
             },
+            # The PostgreSQL store requires an Idempotency-Key on validation-task
+            # transitions; supply the required header (contract unchanged) with a
+            # deterministic per-task key so an exact replay reconstructs the result.
+            idempotency_key=idempotency_key(
+                scenario="e2e-mvp",
+                operation="validation_task.update",
+                tenant="e2e",
+                actor="e2e-admin",
+                target=str(task["id"]),
+            ),
         )
         for task in open_workspace_tasks
     ]
