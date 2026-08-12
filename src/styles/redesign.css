@@ -338,6 +338,18 @@ html {
   cursor: not-allowed;
 }
 
+/* A control's LABEL is not always a text node. The Ask command dock renders each cell
+   as `<strong style={{color:accent-700}}>` + `<span style={{color:neutral-700}}>`, and
+   an `!important` declaration on the parent does not reach a child that sets its own
+   colour — inheritance never runs for it. The ink was therefore byte-identical live and
+   inert, leaving only a 1.10:1 fill difference, i.e. a cell that reads as live while
+   `submit()` swallows every click (and `cursor` is mouse-only, so a keyboard operator
+   got nothing at all). Re-assert the inert ink on the descendants too, which beats a
+   child's inline non-important declaration. */
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"] * {
+  color: var(--color-neutral-700) !important;
+}
+
 /* Text-entry controls marked aria-disabled (Ask's question field while a question is
    in flight, which is `readOnly` at the same time) must read exactly like a natively
    disabled field, so this reuses `.input:disabled`'s own tokens rather than the button

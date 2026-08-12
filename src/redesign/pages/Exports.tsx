@@ -24,6 +24,7 @@ import {
   errorText,
   exportGateMessage,
   gateIsClosed,
+  isBackendRefusal,
   newestReport,
   useLoadable,
   useWorkspace,
@@ -411,8 +412,20 @@ export function Exports() {
           live.state === "ready" && live.openTasks > 0
             ? exportGateMessage(live.openTasks)
             : "Export refused: the backend reports unresolved validation tasks for this report. Re-reading the gate — open Validation to resolve them.";
-      } else {
+      } else if (isBackendRefusal(caught)) {
+        // A 4xx PROVES the backend rejected the request before writing anything, so
+        // naming it a refusal is honest and re-pressing Export is safe.
         text = `Export refused. ${errorText(caught)}`;
+      } else {
+        // Everything else — a dropped connection, a timeout, a 500 raised after the
+        // artifact was written, a 502/504 minted by a proxy that never received the
+        // backend's answer — leaves the outcome UNKNOWN. Calling that "refused" is the
+        // one claim that must never be made here: an export writes a checksummed
+        // artifact and appends it to the hash-chained audit log, and every retry mints
+        // a fresh Idempotency-Key, so an operator who believes nothing happened creates
+        // a second audited artifact for one intent. Same posture as a validation
+        // decision, for a strictly more consequential mutation.
+        text = `Export outcome unknown — the request did not complete or the backend's answer was lost, so this export may or may not have been issued. Reload this panel and check the export list before pressing Export again. ${errorText(caught)}`;
       }
       setStatuses((current) => ({ ...current, [format]: { tone: "bad", text } }));
     } finally {

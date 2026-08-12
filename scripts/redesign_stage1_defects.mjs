@@ -321,6 +321,7 @@ const EXPECTED_CHECK_IDS = [
   "d3-inline-colored-inert-contrast",
   "d3-rule-scoped-to-disabled",
   "d3-text-input-inert-covered",
+  "d3-child-labelled-control-inert",
   "d5-no-workspace-provenance-claim",
   "d5-sample-values-labelled",
   "d2-build-reachable-when-connected",
@@ -482,6 +483,26 @@ async function main() {
       };
       mkInput("t-input-inert", true);
       mkInput("t-input-live", false);
+      // The Ask command dock's real shape: the label is NOT a text node but element
+      // children carrying their own inline colours. A parent's !important colour does
+      // not reach them (inheritance never runs for a child that sets its own), so a
+      // probe whose label is a plain text node cannot detect this whole class.
+      const mkDock = (id, aria) => {
+        const b = document.createElement("button");
+        b.id = id;
+        b.className = "mr-hover-accent mr-cell-bg";
+        if (aria) b.setAttribute("aria-disabled", "true");
+        const strong = document.createElement("strong");
+        strong.style.color = "var(--color-accent-700)";
+        strong.textContent = "Extract failures";
+        const span = document.createElement("span");
+        span.style.color = "var(--color-neutral-700)";
+        span.textContent = "Pull failure rows from the sources";
+        b.append(strong, span);
+        document.body.appendChild(b);
+      };
+      mkDock("t-dock-inert", true);
+      mkDock("t-dock-live", false);
     });
     const measure = async (sel) => {
       await page.hover(sel);
@@ -534,6 +555,27 @@ async function main() {
       `aria-disabled input vs LIVE input: fill ${inertIn.bg} vs ${liveIn.bg} ` +
         `(${contrast(inertInBg, liveInBg).toFixed(3)}:1); placeholder ${phC.toFixed(2)}:1 ` +
         `(live ${phLiveC.toFixed(2)}:1, must not regress); value ink ${inkC.toFixed(2)}:1`
+    );
+    // A control whose LABEL is element children with their own inline colours must
+    // still change ink when inert. Measured on the children, not the button: the
+    // button's own computed colour changes either way, which is exactly how this class
+    // stayed invisible to a text-node probe.
+    const dockInk = await page.evaluate(() => {
+      const read = (sel) => {
+        const el = document.querySelector(sel);
+        return Array.from(el.children).map((c) => getComputedStyle(c).color);
+      };
+      return { inert: read("#t-dock-inert"), live: read("#t-dock-live") };
+    });
+    const dockChanged =
+      dockInk.inert.length === dockInk.live.length &&
+      dockInk.inert.length > 0 &&
+      dockInk.inert.every((c, i) => c !== dockInk.live[i] || i > 0) &&
+      dockInk.inert[0] !== dockInk.live[0];
+    check(
+      "d3-child-labelled-control-inert",
+      dockChanged,
+      `aria-disabled control with inline-coloured label children: inert ${JSON.stringify(dockInk.inert)} vs live ${JSON.stringify(dockInk.live)}`
     );
     await page.close();
   }
