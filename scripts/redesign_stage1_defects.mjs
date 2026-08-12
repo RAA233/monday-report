@@ -320,6 +320,7 @@ const EXPECTED_CHECK_IDS = [
   "d3-inflight-hover-contrast",
   "d3-inline-colored-inert-contrast",
   "d3-rule-scoped-to-disabled",
+  "d3-text-input-inert-covered",
   "d5-no-workspace-provenance-claim",
   "d5-sample-values-labelled",
   "d2-build-reachable-when-connected",
@@ -461,6 +462,17 @@ async function main() {
       mkBtn("t-primary-inert", "btn btn-primary", true, null);
       mkBtn("t-inline-inert", "btn btn-secondary", true, "var(--color-neutral-400)");
       mkBtn("t-primary-live", "btn btn-primary", false, null);
+      // A TEXT-ENTRY control, not a button: Ask's question field carries aria-disabled
+      // while a question is in flight. Scoping the inert rule to a selector list is
+      // exactly how a control type silently drops out of it, so measure one here.
+      const input = document.createElement("input");
+      input.id = "t-input-inert";
+      input.className = "input";
+      input.type = "text";
+      input.readOnly = true;
+      input.setAttribute("aria-disabled", "true");
+      input.value = "in flight";
+      document.body.appendChild(input);
     });
     const measure = async (sel) => {
       await page.hover(sel);
@@ -484,6 +496,20 @@ async function main() {
     const inertBg = parseRgb(prim.bg);
     const scoped = !(liveBg.r === inertBg.r && liveBg.g === inertBg.g && liveBg.b === inertBg.b);
     check("d3-rule-scoped-to-disabled", scoped, `live hover bg ${live.bg} != inert bg ${prim.bg}`);
+
+    // The scoping must not drop a control TYPE. A text input marked aria-disabled has
+    // to take the same inert fill/ink as an inert button, or an in-flight field looks
+    // live while silently discarding keystrokes.
+    const inp = await measure("#t-input-inert");
+    const inpC = contrast(parseRgb(inp.color), parseRgb(inp.bg));
+    const inertFill = parseRgb(prim.bg);
+    const inpBg = parseRgb(inp.bg);
+    const sameInertFill = inpBg.r === inertFill.r && inpBg.g === inertFill.g && inpBg.b === inertFill.b;
+    check(
+      "d3-text-input-inert-covered",
+      sameInertFill && inpC >= 4.5,
+      `aria-disabled input on hover: bg ${inp.bg} (inert fill ${prim.bg}), contrast ${inpC.toFixed(2)}:1`
+    );
     await page.close();
   }
 
