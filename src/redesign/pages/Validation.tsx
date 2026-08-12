@@ -14,6 +14,7 @@ import {
 import {
   apiUnreadReason,
   errorText,
+  isBackendRefusal,
   isOpenValidationTask,
   useLoadable,
   useWorkspace
@@ -131,11 +132,21 @@ export function Validation() {
       // instead of on <body>, and the change is announced.
       document.querySelector<HTMLElement>("[data-page-heading]")?.focus();
     } catch (caught) {
+      // Classify on the RAW typed error. The previous test ran against errorText()'s
+      // output, whose `^API ` rewrite erases the status, so the regex matched nothing
+      // and every outcome — including a definite 403/409/423 refusal — fell through.
+      // Only a 4xx proves the decision was rejected before it was applied; a 5xx can be
+      // raised after a commit and a gateway status can be minted by a proxy that never
+      // reached the backend, so both leave the effect unknown. The HEADLINE moves with
+      // the branch: "Not recorded" is a definite claim and must not lead an unknown
+      // outcome, which an operator reading only the heading would act on by deciding
+      // again — appending a second audited decision for one intent.
+      const refused = isBackendRefusal(caught);
       showToast(
-        "Not recorded",
-        /^API \d{3}\b/.test(errorText(caught))
+        refused ? "Not recorded" : "Outcome unknown",
+        refused
           ? `The decision was not recorded, so the gate is unchanged. ${errorText(caught)}`
-          : `The request did not complete, so whether it reached the backend is unknown — reload the queue before deciding again. ${errorText(caught)}`
+          : `The request did not complete, so whether the decision reached the backend is unknown — reload the queue and check this task before deciding again. ${errorText(caught)}`
       );
     } finally {
       setBusyId(null);

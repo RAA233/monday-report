@@ -300,12 +300,52 @@ html {
  * them the inert appearance the attribute would have. `disabled` remains correct for
  * STANDING conditions, where nothing is focused when it is applied.
  */
-[aria-disabled="true"] {
-  /* NOT `opacity`. Group opacity fades the focus ring with the control, taking the
-     indicator to ~1.9:1 - defeating the focus contract this rule exists to serve,
-     since the whole point is that these controls STAY focusable. Dim the ink and the
-     fill instead, and leave the outline at full strength. */
-  color: var(--color-neutral-700);
-  background-color: var(--color-neutral-200);
+/* Scoped to FORM CONTROLS rather than every element that happens to carry the
+   attribute, so composite widgets that mark themselves disabled for assistive
+   technology keep their own palette.
+
+   The tokens are chosen by measured LUMINANCE, not by eye. neutral-200 is 1.10:1
+   against `.mr-cell-bg` and 1.02:1 against a text field's own surface — "no visible
+   change at all", which is exactly what tokens.css says of the same trap for
+   `.input:disabled`. neutral-400 is >= 1.5:1 against every live fill in this sheet,
+   including the composited `color-mix` accent washes (the nav aria-current wash is
+   1.19:1 from neutral-300 but 1.61:1 from neutral-400), and neutral-800 on it is
+   5.01:1 — required because, unlike a natively disabled control, these stay focusable
+   and keyboard-reachable, so WCAG's disabled exemption does not apply.
+
+   `!important` and the interaction-state variants are load-bearing: `.btn-primary:hover`
+   (0,2,0) outranks a bare attribute selector, so a hovered in-flight button repainted
+   its accent fill while the ink stayed dim; and an inline `style={{ color }}` outranks
+   any selector, so an inline-coloured control had no inert state at all.
+
+   NOT `opacity`: group opacity fades the focus ring with the control (~1.9:1), which
+   would defeat the focus contract this rule exists to serve. The outline is untouched. */
+:is(button, a, [role="button"], .btn, .mr-hover-accent, .mr-hover-text, input, textarea, select)[aria-disabled="true"],
+:is(button, a, [role="button"], .btn, .mr-hover-accent, .mr-hover-text, input, textarea, select)[aria-disabled="true"]:hover,
+:is(button, a, [role="button"], .btn, .mr-hover-accent, .mr-hover-text, input, textarea, select)[aria-disabled="true"]:active,
+:is(button, a, [role="button"], .btn, .mr-hover-accent, .mr-hover-text, input, textarea, select)[aria-disabled="true"]:focus,
+:is(button, a, [role="button"], .btn, .mr-hover-accent, .mr-hover-text, input, textarea, select)[aria-disabled="true"]:focus-visible {
+  color: var(--color-neutral-800) !important;
+  background-color: var(--color-neutral-400) !important;
   cursor: not-allowed;
+}
+
+/* A control's LABEL is not always a text node. The Ask command dock renders each cell
+   as `<strong style={{color:accent-700}}>` + `<span style={{color:neutral-700}}>`, and
+   an `!important` declaration on the parent never reaches a child that sets its own
+   colour — inheritance does not run for it. Left alone the ink was identical live and
+   inert (accent-700 → neutral-700 is a 1.01:1 hue shift at constant luminance), so the
+   cell read as live while its handler swallowed every click. */
+:is(button, a, [role="button"], .btn, .mr-hover-accent, .mr-hover-text)[aria-disabled="true"] * {
+  color: var(--color-neutral-800) !important;
+}
+
+/* The placeholder carries the SAME ink as the value, never a dimmer one: submitting
+   CLEARS Ask's question field, so for the whole in-flight window the placeholder is the
+   only glyph on screen. Dimming it — the convention for a natively disabled field,
+   which WCAG exempts — would take the sole visible text below even the 3:1 non-text
+   floor on a control that stays focusable. */
+:is(input, textarea, select)[aria-disabled="true"]::placeholder {
+  color: var(--color-neutral-800) !important;
+  opacity: 1;
 }

@@ -270,8 +270,35 @@ function compareTimestamp(a: string, b: string): number {
   return a === b ? 0 : a < b ? -1 : 1;
 }
 
+/** The HTTP status embedded in a thrown request error, or null when the request never
+ *  produced a response (network failure, abort, timeout, CORS).
+ *
+ *  Reads the ORIGINAL typed message the api client throws (`API <status>: …`), never
+ *  `errorText()`'s output: that sanitizer rewrites the `^API ` prefix, which erases the
+ *  status, so a classifier tested against it matched nothing and a definite client-side
+ *  refusal (403 permission, 409 conflict, 423 locked) read as an incomplete request. */
+export function requestStatus(error: unknown): number | null {
+  if (error instanceof Error && error.message) {
+    const match = /^API (\d{3})\b/.exec(error.message);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+/** True only when the backend returned a 4xx — the one class that PROVES the request
+ *  reached the server and was rejected before it was applied, so the caller may say the
+ *  mutation did not happen. Everything else (5xx, which can be raised after a commit; a
+ *  gateway 502/504 from a proxy that never received the answer; a timeout; a dropped
+ *  connection; a non-Error throw) is fail-closed: the effect is genuinely unknown. */
+export function isBackendRefusal(error: unknown): boolean {
+  const status = requestStatus(error);
+  return status !== null && status >= 400 && status < 500;
+}
+
 /** Short, sanitized form of a thrown request error. Exported so every user-facing
- *  string goes through one sanitizer instead of interpolating `API 409: …` raw. */
+ *  string goes through one sanitizer instead of interpolating `API 409: …` raw.
+ *  Classification must use `requestStatus`/`isBackendRefusal` on the RAW error, not
+ *  this string, whose `^API ` rewrite deliberately erases the typed status. */
 export function errorText(error: unknown): string {
   // Surfaced to users, so keep it short and never leak a raw stack or a URL.
   if (error instanceof Error && error.message) {
