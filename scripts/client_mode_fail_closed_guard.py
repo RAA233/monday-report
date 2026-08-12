@@ -26,13 +26,23 @@ M2  A runtime role that OWNS a protected table must be rejected in client mode
 
 Checks 01-05 are hermetic (no database; the unreachable-postgres scenarios use
 a closed loopback port). Checks 06-08 require a REAL disposable PostgreSQL via
-``MONDAY_REPORT_TEST_DATABASE_URL`` and SKIP honestly (recorded, not failed)
-without it; a passing pre-merge run has FAIL=0 and SKIP=0.
+``MONDAY_REPORT_TEST_DATABASE_URL``.
 
-Run:  python scripts/client_mode_fail_closed_guard.py
+Strict foundation mode (``--require-db``): checks 06-08 MUST execute -- a
+missing ``MONDAY_REPORT_TEST_DATABASE_URL`` records each of them as a FAILING
+check (never a skip) and the guard exits non-zero, so an aggregate chain that
+consumes only the return code (``audit:all``) cannot report success for the
+M1/M2 foundation proof without the database-backed checks having run. The
+``audit:client-mode-fail-closed`` entry and the ``audit:all`` chain invoke this
+mode. Without the flag, the ordinary honest-skip convention applies (recorded
+skips, exit 0) for intentionally DSN-less environments; a passing pre-merge
+run has FAIL=0 and SKIP=0 either way.
+
+Run:  python scripts/client_mode_fail_closed_guard.py [--require-db]
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -306,12 +316,31 @@ DB_CHECK_IDS = ("06", "07", "08")
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--require-db", action="store_true",
+        help="strict foundation mode: the DB-backed M1/M2 checks (06-08) MUST "
+             "execute; a missing MONDAY_REPORT_TEST_DATABASE_URL records them "
+             "as FAILING checks and the guard exits non-zero (never a skip).")
+    args = parser.parse_args()
+
     hermetic_checks()
     url = test_database_url()
     if not url:
-        for cid in DB_CHECK_IDS:
-            skip(f"{cid} real-PostgreSQL scenario",
-                 "no MONDAY_REPORT_TEST_DATABASE_URL provided")
+        if args.require_db:
+            # Strict foundation mode: a required check that cannot execute is a
+            # FAILURE, not a skip, so a return-code-only consumer (audit:all)
+            # can never report success for the M1/M2 proof without the
+            # database-backed checks having run.
+            for cid in DB_CHECK_IDS:
+                check(f"{cid} real-PostgreSQL scenario", False,
+                      "strict foundation mode (--require-db): "
+                      "MONDAY_REPORT_TEST_DATABASE_URL is required and the "
+                      "DB-backed M1/M2 checks must execute; refusing to skip")
+        else:
+            for cid in DB_CHECK_IDS:
+                skip(f"{cid} real-PostgreSQL scenario",
+                     "no MONDAY_REPORT_TEST_DATABASE_URL provided")
     else:
         database_checks(url)
 
