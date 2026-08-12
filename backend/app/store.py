@@ -8465,9 +8465,23 @@ class PostgresStateStore(LocalStateStore):
                     connection, migration_role=migration_role)
         except tenant_rls.TenantRuntimeRoleError:
             raise
-        except Exception:
+        except Exception as exc:
             if tenant_rls.enforce_runtime_role():
-                raise
+                # Fail closed on the MEASUREMENT itself: the server is reachable
+                # (schema verification already succeeded) but the role-safety
+                # measurement could not complete, so the runtime role is
+                # UNVERIFIED. Re-raising the raw exception here used to be
+                # swallowed by create_store's generic degrade path, silently
+                # serving local JSON in client mode despite this docstring.
+                # Raising TenantRuntimeRoleError instead rides create_store's
+                # existing refusal branch. Redacted: exception class only,
+                # never the DSN/host/message.
+                raise tenant_rls.TenantRuntimeRoleError(
+                    "refusing to start the protected PostgreSQL store: the runtime "
+                    "role safety measurement failed in client mode "
+                    f"({exc.__class__.__name__}), so the role cannot be verified "
+                    "to enforce tenant isolation"
+                ) from exc
             self._runtime_role_measurement = None
 
 

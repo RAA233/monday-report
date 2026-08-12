@@ -229,6 +229,22 @@ def runtime_role_violations(measurement: dict, *, migration_role: str | None = N
             f"runtime database role owns a protected table without FORCE row level "
             f"security (owner bypass): {table}"
         )
+    # Ownership itself is disqualifying even WITH FORCE row level security: the
+    # owner can revoke FORCE (or drop the policies) with plain DDL at any time,
+    # so a runtime that owns a protected table is the migration/owner principal
+    # regardless of which DSN environment variable it arrived through. This is
+    # measured from pg_class, so it covers every documented DB-connection
+    # fallback path that the env-derived migration-role comparison below misses
+    # (e.g. migrations applied via the DATABASE_URL fallback with
+    # MONDAY_REPORT_MIGRATIONS_DATABASE_URL unset).
+    for table, meta in sorted((measurement.get("tables") or {}).items()):
+        if meta.get("owned") and not meta.get("forced"):
+            continue  # already reported as owner bypass above
+        if meta.get("owned"):
+            reasons.append(
+                f"runtime database role owns a protected table (the owner can "
+                f"disable row level security with DDL): {table}"
+            )
     for table in measurement.get("missing_forced_tables", []):
         reasons.append(f"protected table is missing FORCE row level security: {table}")
     if migration_role and measurement.get("current_user") == migration_role:
