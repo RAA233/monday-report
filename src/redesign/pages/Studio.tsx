@@ -25,6 +25,7 @@ import {
 } from "../components/primitives";
 import {
   apiUnreadReason,
+  describeMutationFailure,
   errorText,
   exportGateMessage,
   gateIsClear,
@@ -260,7 +261,14 @@ export function Studio() {
     } catch (caught) {
       if (askedFor !== workspaceIdRef.current) return;
       setState("error");
-      setMessage(`The draft was not built. ${errorText(caught)}`);
+      // Drafting is audited (`report_draft.generate`), and the Retry beside this
+      // message re-issues it, so an unknown outcome must not be stated as "not built".
+      const outcome = describeMutationFailure(caught, {
+        noun: "draft",
+        refused: "The draft was not built.",
+        next: "Reload the report before drafting again."
+      });
+      setMessage(outcome.proven ? `${outcome.headline} ${outcome.body}` : outcome.body);
     } finally {
       // Release only OUR request. A later draft for a different workspace may already
       // own the flag; clearing it unconditionally would let a second request through

@@ -317,11 +317,9 @@ const EXPECTED_CHECK_IDS = [
   "d1-status-matrix",
   "d1-unknown-fail-closed",
   "d1-sanitized-string-would-misclassify",
-  "d3-inflight-hover-contrast",
-  "d3-inline-colored-inert-contrast",
-  "d3-rule-scoped-to-disabled",
-  "d3-text-input-inert-covered",
-  "d3-child-labelled-control-inert",
+  "d3-inert-contract-fill-luminance",
+  "d3-inert-contract-label-ink",
+  "d3-inert-contract-focus-preserved",
   "d5-no-workspace-provenance-claim",
   "d5-sample-values-labelled",
   "d2-build-reachable-when-connected",
@@ -441,141 +439,116 @@ async function main() {
     }
   }
 
-  // ── Defect 3: inert visual state (hover/inline cannot defeat it; contrast; inert) ──
+  // ── Defect 3: the INERT-STATE CONTRACT, measured on the RENDERED APP ─────────────
+  //
+  // Earlier rounds asserted this against nodes the suite constructed itself. Synthetic
+  // probes cannot fail the way the app fails: a probe whose label is a text node hides
+  // the whole class where a control's label is element CHILDREN carrying their own
+  // inline colours, and a probe compared against a sibling probe hides a fill that is
+  // luminance-identical to that control's own live fill. So this walks the app's OWN
+  // controls on the app's OWN routes, measures each one live, then marks it inert and
+  // measures again, asserting NUMERIC luminance/contrast deltas — never string
+  // inequality, which passes on a hue shift that no one can see.
   {
     const page = await context.newPage();
-    await stub(page, { workspaces: [] });
-    await page.goto(`${WEB}/`, { waitUntil: "domcontentloaded" });
-    await page.evaluate(() => {
-      // Probe controls for the APPEARANCE contract only: this block measures computed
-      // colour under hover, which is all the CSS rule owns. Activation being blocked is
-      // the handler's job and is asserted for real against the app's own closed-gate
-      // export button in the d4 block below (by counting issued requests).
-      const mkBtn = (id, cls, aria, inlineColor) => {
-        const b = document.createElement("button");
-        b.id = id;
-        b.className = cls;
-        if (aria) b.setAttribute("aria-disabled", "true");
-        if (inlineColor) b.style.color = inlineColor;
-        b.textContent = "Building draft…";
-        document.body.appendChild(b);
-      };
-      mkBtn("t-primary-inert", "btn btn-primary", true, null);
-      mkBtn("t-inline-inert", "btn btn-secondary", true, "var(--color-neutral-400)");
-      mkBtn("t-primary-live", "btn btn-primary", false, null);
-      // A TEXT-ENTRY control, not a button: Ask's question field carries aria-disabled
-      // while a question is in flight. Scoping the inert rule to a selector list is
-      // exactly how a control type silently drops out of it, so measure one here.
-      const mkInput = (id, aria) => {
-        const el = document.createElement("input");
-        el.id = id;
-        el.className = "input";
-        el.type = "text";
-        el.placeholder = "Ask about this workspace";
-        if (aria) {
-          el.readOnly = true;
+    await stub(page, { workspaces: [WS] });
+    const contract = { checked: 0, fill: [], ink: [], focus: [] };
+    for (const route of ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"]) {
+      await page.goto(`${WEB}${route}`, { waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(400);
+      const measured = await page.evaluate(() => {
+        const SELECTOR = 'button, a[href], [role="button"], input, textarea, select';
+        const parse = (str) => {
+          const m = /rgba?\(([^)]+)\)/i.exec(str || "");
+          if (!m) return null;
+          const p = m[1].split(",").map((x) => parseFloat(x.trim()));
+          return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+        };
+        // The EFFECTIVE background: a transparent control shows its ancestor's fill,
+        // and comparing against rgba(0,0,0,0) would invent a black baseline.
+        const effectiveBg = (el) => {
+          let node = el;
+          while (node) {
+            const c = parse(getComputedStyle(node).backgroundColor);
+            if (c && c.a > 0) return c;
+            node = node.parentElement;
+          }
+          return { r: 255, g: 255, b: 255, a: 1 };
+        };
+        const inkOf = (el) => {
+          // Every text-bearing descendant, plus the control itself: this is exactly
+          // where an inline-coloured child escapes an !important rule on the parent.
+          const nodes = [el, ...el.querySelectorAll("*")].filter((n) =>
+            Array.from(n.childNodes).some((c) => c.nodeType === 3 && c.textContent.trim())
+          );
+          return (nodes.length ? nodes : [el]).map((n) => getComputedStyle(n).color);
+        };
+        const snap = (el) => ({
+          bg: getComputedStyle(el).backgroundColor,
+          effBg: effectiveBg(el),
+          ink: inkOf(el),
+          outlineWidth: getComputedStyle(el).outlineWidth,
+          outlineStyle: getComputedStyle(el).outlineStyle
+        });
+        const out = [];
+        for (const el of Array.from(document.querySelectorAll(SELECTOR))) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 2 || rect.height < 2) continue; // not rendered
+          if (el.hasAttribute("aria-disabled") || el.disabled) continue; // already inert
+          const before = snap(el);
           el.setAttribute("aria-disabled", "true");
+          const after = snap(el);
+          el.removeAttribute("aria-disabled");
+          out.push({
+            tag: el.tagName.toLowerCase(),
+            cls: el.className?.toString().slice(0, 60) ?? "",
+            before,
+            after
+          });
         }
-        // EMPTY on purpose: submitting clears the field, so the in-flight state shows
-        // the placeholder only — which is where an undimmed placeholder hides an
-        // otherwise-inert control.
-        document.body.appendChild(el);
-      };
-      mkInput("t-input-inert", true);
-      mkInput("t-input-live", false);
-      // The Ask command dock's real shape: the label is NOT a text node but element
-      // children carrying their own inline colours. A parent's !important colour does
-      // not reach them (inheritance never runs for a child that sets its own), so a
-      // probe whose label is a plain text node cannot detect this whole class.
-      const mkDock = (id, aria) => {
-        const b = document.createElement("button");
-        b.id = id;
-        b.className = "mr-hover-accent mr-cell-bg";
-        if (aria) b.setAttribute("aria-disabled", "true");
-        const strong = document.createElement("strong");
-        strong.style.color = "var(--color-accent-700)";
-        strong.textContent = "Extract failures";
-        const span = document.createElement("span");
-        span.style.color = "var(--color-neutral-700)";
-        span.textContent = "Pull failure rows from the sources";
-        b.append(strong, span);
-        document.body.appendChild(b);
-      };
-      mkDock("t-dock-inert", true);
-      mkDock("t-dock-live", false);
-    });
-    const measure = async (sel) => {
-      await page.hover(sel);
-      return page.evaluate((s) => {
-        const el = document.querySelector(s);
-        const cs = getComputedStyle(el);
-        return { color: cs.color, bg: cs.backgroundColor };
-      }, sel);
-    };
-    const prim = await measure("#t-primary-inert");
-    const primC = contrast(parseRgb(prim.color), parseRgb(prim.bg));
-    check("d3-inflight-hover-contrast", primC >= 4.5, `aria-disabled .btn-primary on hover = ${primC.toFixed(2)}:1 (was 1.51:1)`);
-
-    const inl = await measure("#t-inline-inert");
-    const inlC = contrast(parseRgb(inl.color), parseRgb(inl.bg));
-    check("d3-inline-colored-inert-contrast", inlC >= 4.5, `inline-coloured aria-disabled on hover = ${inlC.toFixed(2)}:1 (was 1.62:1)`);
-
-    // The rule must be SCOPED: a normal primary button still reacts to hover.
-    const live = await measure("#t-primary-live");
-    const liveBg = parseRgb(live.bg);
-    const inertBg = parseRgb(prim.bg);
-    const scoped = !(liveBg.r === inertBg.r && liveBg.g === inertBg.g && liveBg.b === inertBg.b);
-    check("d3-rule-scoped-to-disabled", scoped, `live hover bg ${live.bg} != inert bg ${prim.bg}`);
-
-    // The scoping must not drop a control TYPE — and "covered by the selector" is NOT
-    // the property that matters. Baseline against the SAME control type in its LIVE
-    // state: an aria-disabled text field must look different from a live one, or the
-    // rule is cosmetically inert (the button inert fill is a 1.01:1 no-op against a
-    // field's own surface). Submitting clears the field, so the placeholder must also
-    // change — it is the only ink on screen while the question is in flight.
-    const inertIn = await measure("#t-input-inert");
-    const liveIn = await measure("#t-input-live");
-    const inertInBg = parseRgb(inertIn.bg);
-    const liveInBg = parseRgb(liveIn.bg);
-    const fillChanged = contrast(inertInBg, liveInBg) >= 1.1;
-    const inkC = contrast(parseRgb(inertIn.color), inertInBg);
-    const ph = await page.evaluate(() => {
-      const read = (sel) => getComputedStyle(document.querySelector(sel), "::placeholder").color;
-      return { inert: read("#t-input-inert"), live: read("#t-input-live") };
-    });
-    // The PLACEHOLDER is the text this state actually renders — the field is empty for
-    // the whole in-flight window — so it is what must clear 4.5:1. Measuring the value
-    // ink alone passes while the only glyph on screen is unreadable; requiring merely
-    // that the placeholder "changed" passes when it changed for the WORSE.
-    const phC = contrast(parseRgb(ph.inert), inertInBg);
-    const phLiveC = contrast(parseRgb(ph.live), liveInBg);
+        return out;
+      });
+      for (const m of measured) {
+        contract.checked += 1;
+        const liveBg = m.before.effBg;
+        const inertBg = m.after.effBg;
+        const fillRatio = contrast(liveBg, inertBg);
+        if (fillRatio < 1.2) {
+          contract.fill.push(`${route} ${m.tag}.${m.cls} fill ${fillRatio.toFixed(3)}:1`);
+        }
+        for (const [i, colour] of m.after.ink.entries()) {
+          const c = parseRgb(colour);
+          if (!c) continue;
+          const inkRatio = contrast(c, inertBg);
+          if (inkRatio < 4.5) {
+            contract.ink.push(`${route} ${m.tag}.${m.cls} child#${i} ink ${inkRatio.toFixed(2)}:1`);
+          }
+        }
+        // Focus must survive: the whole reason these use aria-disabled instead of
+        // `disabled` is that they stay focusable, so the ring may not be suppressed.
+        if (m.after.outlineStyle === "none" && m.before.outlineStyle !== "none") {
+          contract.focus.push(`${route} ${m.tag}.${m.cls} lost its outline`);
+        }
+      }
+    }
     check(
-      "d3-text-input-inert-covered",
-      fillChanged && inkC >= 4.5 && phC >= 4.5 && phC >= phLiveC,
-      `aria-disabled input vs LIVE input: fill ${inertIn.bg} vs ${liveIn.bg} ` +
-        `(${contrast(inertInBg, liveInBg).toFixed(3)}:1); placeholder ${phC.toFixed(2)}:1 ` +
-        `(live ${phLiveC.toFixed(2)}:1, must not regress); value ink ${inkC.toFixed(2)}:1`
+      "d3-inert-contract-fill-luminance",
+      contract.checked > 0 && contract.fill.length === 0,
+      contract.fill.length
+        ? `${contract.fill.length} control(s) whose inert fill is not luminance-distinct: ${contract.fill.slice(0, 4).join("; ")}`
+        : `${contract.checked} rendered control(s): every inert fill differs from its own live fill by >= 1.2:1`
     );
-    // A control whose LABEL is element children with their own inline colours must
-    // still change ink when inert. Measured on the children, not the button: the
-    // button's own computed colour changes either way, which is exactly how this class
-    // stayed invisible to a text-node probe.
-    const dockInk = await page.evaluate(() => {
-      const read = (sel) => {
-        const el = document.querySelector(sel);
-        return Array.from(el.children).map((c) => getComputedStyle(c).color);
-      };
-      return { inert: read("#t-dock-inert"), live: read("#t-dock-live") };
-    });
-    const dockChanged =
-      dockInk.inert.length === dockInk.live.length &&
-      dockInk.inert.length > 0 &&
-      dockInk.inert.every((c, i) => c !== dockInk.live[i] || i > 0) &&
-      dockInk.inert[0] !== dockInk.live[0];
     check(
-      "d3-child-labelled-control-inert",
-      dockChanged,
-      `aria-disabled control with inline-coloured label children: inert ${JSON.stringify(dockInk.inert)} vs live ${JSON.stringify(dockInk.live)}`
+      "d3-inert-contract-label-ink",
+      contract.checked > 0 && contract.ink.length === 0,
+      contract.ink.length
+        ? `${contract.ink.length} label part(s) below 4.5:1 when inert: ${contract.ink.slice(0, 4).join("; ")}`
+        : `every text-bearing part of every inert control clears 4.5:1 on the inert fill`
+    );
+    check(
+      "d3-inert-contract-focus-preserved",
+      contract.focus.length === 0,
+      contract.focus.length ? contract.focus.slice(0, 3).join("; ") : "no control loses its focus outline when inert"
     );
     await page.close();
   }

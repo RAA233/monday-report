@@ -299,6 +299,47 @@ export function isBackendRefusal(error: unknown): boolean {
   return status !== null && status >= 400 && status < 500;
 }
 
+/** The one place that turns a failed AUDITED MUTATION into operator-facing words.
+ *
+ *  Every mutating call site in the redesign routes its catch through this instead of
+ *  writing its own string, because the distinction is not a wording preference — it is
+ *  a safety claim. A 4xx PROVES the backend rejected the request before applying it, so
+ *  naming the mutation "refused"/"not recorded"/"not built" is honest and repeating the
+ *  action is safe. Everything else — a 5xx (which can be raised after a commit), a
+ *  gateway 502/504 minted by a proxy that never received the backend's answer, a
+ *  timeout, an aborted or dropped connection — leaves the outcome UNKNOWN. Claiming
+ *  "nothing happened" there is the one statement that must never be made: the api
+ *  client mints a FRESH Idempotency-Key per call, so an operator who believes the
+ *  mutation did not land repeats it and creates a second audited effect for one intent.
+ *
+ *  @param noun     what the operator tried to do, e.g. "export", "decision".
+ *  @param refused  the headline for a PROVEN refusal, e.g. "Not recorded".
+ *  @param next     optional next action, appended to BOTH branches — a useful action
+ *                  does not require a false certainty claim to be worth offering.
+ */
+export function describeMutationFailure(
+  error: unknown,
+  { noun, refused, next }: { noun: string; refused: string; next?: string }
+): { headline: string; body: string; proven: boolean } {
+  const detail = errorText(error);
+  const tail = next ? ` ${next}` : "";
+  if (isBackendRefusal(error)) {
+    return {
+      headline: refused,
+      body: `${detail}${tail}`,
+      proven: true
+    };
+  }
+  return {
+    headline: "Outcome unknown",
+    body:
+      `The backend's answer was lost, so this ${noun} may or may not have been applied — ` +
+      `do not repeat it until you have re-read the current state, because a repeat that ` +
+      `lands twice is recorded twice. ${detail}${tail}`,
+    proven: false
+  };
+}
+
 /** Short, sanitized form of a thrown request error. Exported so every user-facing
  *  string goes through one sanitizer instead of interpolating `API 409: …` raw.
  *  Classification must use `requestStatus`/`isBackendRefusal` on the raw error, not

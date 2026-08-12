@@ -21,6 +21,7 @@ import {
 } from "../components/primitives";
 import {
   apiUnreadReason,
+  describeMutationFailure,
   errorText,
   exportGateMessage,
   gateIsClosed,
@@ -412,20 +413,13 @@ export function Exports() {
           live.state === "ready" && live.openTasks > 0
             ? exportGateMessage(live.openTasks)
             : "Export refused: the backend reports unresolved validation tasks for this report. Re-reading the gate — open Validation to resolve them.";
-      } else if (isBackendRefusal(caught)) {
-        // A 4xx PROVES the backend rejected the request before writing anything, so
-        // naming it a refusal is honest and re-pressing Export is safe.
-        text = `Export refused. ${errorText(caught)}`;
       } else {
-        // Everything else — a dropped connection, a timeout, a 500 raised after the
-        // artifact was written, a 502/504 minted by a proxy that never received the
-        // backend's answer — leaves the outcome UNKNOWN. Calling that "refused" is the
-        // one claim that must never be made here: an export writes a checksummed
-        // artifact and appends it to the hash-chained audit log, and every retry mints
-        // a fresh Idempotency-Key, so an operator who believes nothing happened creates
-        // a second audited artifact for one intent. Same posture as a validation
-        // decision, for a strictly more consequential mutation.
-        text = `Export outcome unknown — the request did not complete or the backend's answer was lost, so this export may or may not have been issued. Reload this panel and check the export list before pressing Export again. ${errorText(caught)}`;
+        const outcome = describeMutationFailure(caught, {
+          noun: "export",
+          refused: "Export refused.",
+          next: "Re-read the export list below before pressing Export again."
+        });
+        text = outcome.proven ? `${outcome.headline} ${outcome.body}` : `${outcome.headline} — ${outcome.body}`;
       }
       setStatuses((current) => ({ ...current, [format]: { tone: "bad", text } }));
     } finally {
@@ -459,7 +453,17 @@ export function Exports() {
       // Same guard as the success path: after a workspace switch this row is gone,
       // and the toast would attribute the failure to the workspace now on screen.
       if (forWorkspace !== workspaceIdRef.current) return;
-      showToast("No URL issued", `A signed reference was not issued. ${errorText(caught)}`);
+      // Minting a signed URL is itself audit-logged, so the same rule applies: only a
+      // 4xx proves none was issued.
+      const outcome = describeMutationFailure(caught, {
+        noun: "signed reference",
+        refused: "No URL issued",
+        next: "Re-read this row before minting another."
+      });
+      showToast(
+        outcome.headline,
+        outcome.proven ? `A signed reference was not issued. ${outcome.body}` : outcome.body
+      );
     } finally {
       setMinting((current) => (current === item.id ? null : current));
     }

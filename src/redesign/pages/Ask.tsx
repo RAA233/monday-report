@@ -10,6 +10,7 @@ import { formatSourceCitation } from "../../lib/citationFormat";
 import { Cells, ErrorState, Frame, PageHeader, Tag } from "../components/primitives";
 import {
   apiUnreadReason,
+  describeMutationFailure,
   errorText,
   exportGateMessage,
   gateIsClear,
@@ -248,17 +249,21 @@ export function Ask() {
               : status === "423"
                 ? "The backend is holding client-data mutations until its readiness checks pass, so this question was not processed." +
                   refusalRecorded
-                : status === "503"
-                  ? /snapshot write conflict|please retry/i.test(message)
-                    ? "The backend hit a concurrent-write conflict and did not process this question. Ask again." +
-                      nothingDrafted
-                    : "The workspace API is not configured to serve client data yet, so this question was not processed." +
-                      nothingDrafted
-                  : status
-                    ? `The workspace API refused this question: ${errorText(caught)}.` + nothingDrafted
-                    : "The workspace API did not answer, so this question was not processed." +
-                      nothingDrafted +
-                      " Whether the request reached the backend is unknown.";
+                : // A 503 carrying the backend's OWN snapshot-write-conflict contract is
+                  // the one non-4xx that still proves nothing was applied: that response
+                  // is emitted before any write and documents the retry.
+                  status === "503" && /snapshot write conflict|please retry/i.test(message)
+                  ? "The backend hit a concurrent-write conflict and did not process this question. Ask again." +
+                    nothingDrafted
+                  : // Everything else — a generic 503, any other 5xx, a gateway status, or
+                    // no status at all — leaves the outcome unknown. Only a 4xx (handled
+                    // above) proves the question was refused before it was processed, so
+                    // nothing here may claim the transcript is unaffected.
+                    describeMutationFailure(caught, {
+                      noun: "question",
+                      refused: "The workspace API refused this question.",
+                      next: "Reload the workspace before asking again."
+                    }).body;
           setTurns((current) => [...current, { id: `a-${id}`, role: "assistant", text, failed: true }]);
         })
         .finally(() => {

@@ -13,8 +13,8 @@ import {
 } from "../components/primitives";
 import {
   apiUnreadReason,
+  describeMutationFailure,
   errorText,
-  isBackendRefusal,
   isOpenValidationTask,
   useLoadable,
   useWorkspace
@@ -132,24 +132,14 @@ export function Validation() {
       // instead of on <body>, and the change is announced.
       document.querySelector<HTMLElement>("[data-page-heading]")?.focus();
     } catch (caught) {
+      const outcome = describeMutationFailure(caught, {
+        noun: "decision",
+        refused: "Not recorded",
+        next: "Reload the queue before deciding again."
+      });
       showToast(
-        // The HEADLINE has to agree with the branch below: it is the largest, loudest
-        // part of the toast and it auto-dismisses, so "Not recorded" on an unknown
-        // outcome is exactly the claim the fail-closed branch exists to avoid — an
-        // operator who reads only the heading re-decides and appends a second audited
-        // decision for one intent.
-        isBackendRefusal(caught) ? "Not recorded" : "Outcome unknown",
-        // Classify on the ORIGINAL typed error, not errorText()'s sanitized string —
-        // its `^API ` rewrite erases the status, so a definite client-side refusal
-        // (403 permission, 409 conflict, 423 locked) used to collapse into the
-        // network-unknown branch. Only a 4xx proves the server rejected the request
-        // before applying it, so only then may this say the gate is unchanged. A 5xx
-        // or gateway status (which can follow a commit, or be minted by a proxy that
-        // never reached the backend) and a null status both stay fail-closed:
-        // reconcile before deciding again.
-        isBackendRefusal(caught)
-          ? `The decision was not recorded, so the gate is unchanged. ${errorText(caught)}`
-          : `The request did not complete, so whether it reached the backend is unknown — reload the queue before deciding again. ${errorText(caught)}`
+        outcome.headline,
+        outcome.proven ? `The decision was not recorded, so the gate is unchanged. ${outcome.body}` : outcome.body
       );
     } finally {
       setBusyId(null);

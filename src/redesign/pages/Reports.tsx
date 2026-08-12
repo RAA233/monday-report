@@ -15,6 +15,7 @@ import {
 } from "../components/primitives";
 import {
   apiUnreadReason,
+  describeMutationFailure,
   errorText,
   exportGateMessage,
   gateIsClear,
@@ -115,7 +116,16 @@ export function Reports() {
       );
       reload();
     } catch (caught) {
-      showToast("Not created", `The report was not created. ${errorText(caught)}`);
+      // Creating a report is audited, so "Not created" is a claim only a 4xx supports.
+      const outcome = describeMutationFailure(caught, {
+        noun: "report",
+        refused: "Not created",
+        next: "Reload the list before creating another."
+      });
+      showToast(
+        outcome.headline,
+        outcome.proven ? `The report was not created. ${outcome.body}` : outcome.body
+      );
     } finally {
       setCreating(false);
     }
