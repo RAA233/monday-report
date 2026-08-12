@@ -22,11 +22,10 @@ import {
 import {
   apiUnreadReason,
   describeMutationFailure,
-  errorText,
   exportGateMessage,
   gateIsClosed,
-  isBackendRefusal,
   newestReport,
+  requestStatus,
   useLoadable,
   useWorkspace,
   type ApiStatus,
@@ -228,9 +227,12 @@ function sizeLabel(bytes: number): string {
  * mislabelled as a gate refusal.
  */
 function isGateRefusal(error: unknown): boolean {
+  // The TYPED status, never a substring: `includes("409")` matched any detail that
+  // happened to contain those digits. Both conditions must hold — a 409 whose detail
+  // is something else is not the gate.
   return (
+    requestStatus(error) === 409 &&
     error instanceof Error &&
-    error.message.includes("409") &&
     /unresolved validation task/i.test(error.message)
   );
 }
@@ -417,9 +419,15 @@ export function Exports() {
         const outcome = describeMutationFailure(caught, {
           noun: "export",
           refused: "Export refused.",
-          next: "Re-read the export list below before pressing Export again."
+          reread: "re-read the export list"
         });
-        text = outcome.proven ? `${outcome.headline} ${outcome.body}` : `${outcome.headline} — ${outcome.body}`;
+        if (outcome.kind === "unknown") {
+          // The safe next action, performed for the operator: re-read the report list
+          // (which carries the export inventory) so the panel shows whether the
+          // export landed, instead of leaving a stale view under an unknown outcome.
+          reload();
+        }
+        text = `${outcome.headline}${outcome.kind === "refused" ? "" : " —"} ${outcome.body}`;
       }
       setStatuses((current) => ({ ...current, [format]: { tone: "bad", text } }));
     } finally {
@@ -458,11 +466,11 @@ export function Exports() {
       const outcome = describeMutationFailure(caught, {
         noun: "signed reference",
         refused: "No URL issued",
-        next: "Re-read this row before minting another."
+        reread: "re-read this row"
       });
       showToast(
         outcome.headline,
-        outcome.proven ? `A signed reference was not issued. ${outcome.body}` : outcome.body
+        outcome.kind === "refused" ? `A signed reference was not issued. ${outcome.body}` : outcome.body
       );
     } finally {
       setMinting((current) => (current === item.id ? null : current));

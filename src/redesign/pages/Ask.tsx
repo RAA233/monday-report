@@ -94,9 +94,11 @@ interface Turn {
   role: "user" | "assistant";
   text: string;
   answer?: ApiChatResponse;
-  /** Set on an assistant turn that carries a refusal instead of an answer, so the
-   *  live region can announce the SAME classification the transcript shows. */
-  failed?: boolean;
+  /** The typed outcome kind of a failed turn — the SAME truth the transcript text was
+   *  built from, so the live region cannot re-derive its own claim. `"refused"` is a
+   *  proven 4xx (or the backend's own documented pre-write 503 conflict contract);
+   *  `"unknown"` means the question MAY have been processed. Absent on success. */
+  failed?: "refused" | "unknown";
 }
 
 const STEP_TONE: Record<string, string> = {
@@ -235,6 +237,12 @@ export function Ask() {
           // two literal backspace bytes instead of the escape `\b`, so it matched
           // nothing and even a real 403 rendered as "did not answer".
           const status = /^API (\d{3})\b/.exec(message)?.[1];
+          // The KIND drives every derived surface (transcript text AND the live region),
+          // so the announcement cannot re-derive its own claim. Anchored to the backend's
+          // exact contract string, not a loose "please retry" fragment any proxy emits.
+          const preWriteConflict = status === "503" && /snapshot write conflict/i.test(message);
+          const kind: "refused" | "unknown" =
+            (status && status.startsWith("4")) || preWriteConflict ? "refused" : "unknown";
           // Scoped to what the client can actually know. The earlier blanket "nothing
           // was recorded" was false for a refusal: a 403 appends `permission_denied`
           // and a 423 appends `client_data.operation_blocked` to the audit chain.
@@ -252,7 +260,7 @@ export function Ask() {
                 : // A 503 carrying the backend's OWN snapshot-write-conflict contract is
                   // the one non-4xx that still proves nothing was applied: that response
                   // is emitted before any write and documents the retry.
-                  status === "503" && /snapshot write conflict|please retry/i.test(message)
+                  preWriteConflict
                   ? "The backend hit a concurrent-write conflict and did not process this question. Ask again." +
                     nothingDrafted
                   : // Everything else — a generic 503, any other 5xx, a gateway status, or
@@ -262,9 +270,9 @@ export function Ask() {
                     describeMutationFailure(caught, {
                       noun: "question",
                       refused: "The workspace API refused this question.",
-                      next: "Reload the workspace before asking again."
+                      reread: "reload the workspace"
                     }).body;
-          setTurns((current) => [...current, { id: `a-${id}`, role: "assistant", text, failed: true }]);
+          setTurns((current) => [...current, { id: `a-${id}`, role: "assistant", text, failed: kind }]);
         })
         .finally(() => {
           if (askedFor === workspaceIdRef.current) setBusy(false);
@@ -292,11 +300,14 @@ export function Ask() {
     if (busy) return "Working on the answer.";
     const last = turns[turns.length - 1];
     if (!last || last.role !== "assistant") return "";
-    // Announce the SAME thing the transcript shows. Keying on `!last.answer` made the
-    // live region say "the workspace API did not answer" for a 403, a 423 and a 503 —
-    // the three cases the visible text classifies correctly.
-    if (last.failed) return `The question was not processed. ${last.text}`;
-    if (!last.answer) return "The question was not processed.";
+    // Announce the SAME truth the transcript carries — `failed` is the outcome KIND,
+    // so the live region cannot prefix a definite claim onto an unknown outcome. An
+    // earlier revision keyed on a bare boolean and announced "The question was not
+    // processed." ahead of a body saying it may have been — false certainty first,
+    // hedge second, to exactly the operator who cannot see the styling.
+    if (last.failed === "refused") return `The question was not processed. ${last.text}`;
+    if (last.failed === "unknown") return `Question outcome unknown. ${last.text}`;
+    if (!last.answer) return "No answer was returned.";
     const citations = last.answer.citations.length;
     return `Answer received with ${citations} citation${citations === 1 ? "" : "s"}.`;
   }, [busy, turns]);

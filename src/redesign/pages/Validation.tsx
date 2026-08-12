@@ -14,7 +14,6 @@ import {
 import {
   apiUnreadReason,
   describeMutationFailure,
-  errorText,
   isOpenValidationTask,
   useLoadable,
   useWorkspace
@@ -135,12 +134,23 @@ export function Validation() {
       const outcome = describeMutationFailure(caught, {
         noun: "decision",
         refused: "Not recorded",
-        next: "Reload the queue before deciding again."
+        reread: "reload the queue"
       });
       showToast(
         outcome.headline,
-        outcome.proven ? `The decision was not recorded, so the gate is unchanged. ${outcome.body}` : outcome.body
+        outcome.kind === "refused"
+          ? `The decision was not recorded, so the gate is unchanged. ${outcome.body}`
+          : outcome.body
       );
+      if (outcome.kind === "unknown") {
+        // Perform the safe next action for the operator: drop the possibly-decided
+        // card from the retained snapshot and re-read the queue, so the card is not
+        // left on screen with live Validate/Reject buttons one click away from a
+        // second audited decision for the same intent.
+        lastReadTasks.current =
+          lastReadTasks.current?.filter((candidate) => candidate.id !== task.id) ?? null;
+        reloadValidationTasks();
+      }
     } finally {
       setBusyId(null);
     }

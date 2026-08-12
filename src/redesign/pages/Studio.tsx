@@ -32,7 +32,8 @@ import {
   gateIsClosed,
   gateLabel,
   useWorkspace,
-  type GateState
+  type GateState,
+  type MutationOutcome
 } from "../lib/workspace";
 
 /**
@@ -184,6 +185,14 @@ export function Studio() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [draft, setDraft] = useState<ApiReportDraft | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  // The typed outcome of the LAST failed draft. Every derived surface — the status
+  // line, the alert card's title, and whether a direct Retry exists at all — keys on
+  // `failure.kind`, so a definite "not built" can only ever be rendered for a proven
+  // refusal. Null whenever the last draft did not fail.
+  const [failure, setFailure] = useState<MutationOutcome | null>(null);
+  // Read inside sourceDraft, which must not re-create on every failure change.
+  const failureRef = useRef<MutationOutcome | null>(null);
+  failureRef.current = failure;
   const [message, setMessage] = useState(
     "Source draft pulls parsed workspace evidence into this editable report."
   );
@@ -206,6 +215,10 @@ export function Studio() {
     // primary action became a silent no-op with the blocking message just below it
     // left unreachable. A blocked click must always announce, so this precondition
     // owns that, and the dedup guard is only meaningful once a real workspace exists.
+    // aria-disabled is appearance + semantics only, so the handler is what actually
+    // makes the control inert after an UNKNOWN outcome. Without this, Enter on the
+    // focused button would still re-issue an audited draft that may already exist.
+    if (failureRef.current?.kind === "unknown") return;
     if (!workspaceId) {
       setState("error");
       setMessage(
@@ -220,6 +233,7 @@ export function Studio() {
     const askedFor = workspaceId;
     draftInFlight.current = askedFor;
     setState("loading");
+    setFailure(null);
     setMessage("Building a source-backed draft from parsed documents, citations, and validation tasks…");
     try {
       const next = await getReportDraft(askedFor);
@@ -261,14 +275,15 @@ export function Studio() {
     } catch (caught) {
       if (askedFor !== workspaceIdRef.current) return;
       setState("error");
-      // Drafting is audited (`report_draft.generate`), and the Retry beside this
-      // message re-issues it, so an unknown outcome must not be stated as "not built".
+      // Drafting is audited (`report_draft.generate`), so the outcome object — not
+      // prose derived from it — is what enters state. Consumers key on `kind`.
       const outcome = describeMutationFailure(caught, {
         noun: "draft",
         refused: "The draft was not built.",
-        next: "Reload the report before drafting again."
+        reread: "reload this report's draft state"
       });
-      setMessage(outcome.proven ? `${outcome.headline} ${outcome.body}` : outcome.body);
+      setFailure(outcome);
+      setMessage(`${outcome.headline} ${outcome.body}`);
     } finally {
       // Release only OUR request. A later draft for a different workspace may already
       // own the flag; clearing it unconditionally would let a second request through
@@ -509,9 +524,19 @@ export function Studio() {
               className="btn btn-primary"
               onClick={() => void sourceDraft()}
               disabled={apiStatus !== "connected"}
-              aria-disabled={state === "loading" || undefined}
+              /* An UNKNOWN outcome leaves this control inert: the draft may already
+                 have been generated and audited, and each call mints a fresh
+                 Idempotency-Key, so a direct re-issue can be recorded twice. The
+                 affordance offered instead is the re-read (see the alert below).
+                 aria-disabled, not `disabled`: the operator may be standing on it. */
+              aria-disabled={state === "loading" || failure?.kind === "unknown" || undefined}
+              aria-describedby={failure?.kind === "unknown" ? "draft-outcome-unknown" : undefined}
             >
-              {state === "loading" ? "Building draft…" : "Build source-backed draft"}
+              {state === "loading"
+                ? "Building draft…"
+                : failure?.kind === "unknown"
+                  ? "Reload before drafting again"
+                  : "Build source-backed draft"}
             </button>
             {/* Carries the report id so Exports issues THIS report rather than
                 whichever happens to be newest. */}
@@ -574,7 +599,11 @@ export function Studio() {
             live regions announce it twice. */}
         <span style={{ marginInlineStart: "auto" }}>
           <StatusLine tone={state === "error" ? "alert" : "neutral"}>
-            {state === "error" ? "The draft was not built — see the message below." : message}
+            {state === "error"
+              ? failure?.kind === "unknown"
+                ? "Draft outcome unknown — see the message below."
+                : "The draft was not built — see the message below."
+              : message}
           </StatusLine>
         </span>
       </div>
@@ -588,12 +617,26 @@ export function Studio() {
       ) : null}
 
       {draftRetry.show ? (
-        <ErrorState
-          title="Draft not built"
-          message={draftRetry.retrying ? "The draft is being built again." : message}
-          onRetry={() => void sourceDraft()}
-          retrying={draftRetry.retrying}
-        />
+        failure?.kind === "unknown" ? (
+          /* UNKNOWN outcome: the draft may already be recorded (`report_draft.generate`
+             is audited and each call mints a fresh Idempotency-Key), so this card must
+             NOT offer a direct re-issue. The affordance is the re-read. */
+          <ErrorState
+            title="Draft outcome unknown"
+            messageId="draft-outcome-unknown"
+            message={message}
+            onRetry={() => window.location.reload()}
+            retryLabel="Reload this page"
+            retrying={false}
+          />
+        ) : (
+          <ErrorState
+            title="Draft not built"
+            message={draftRetry.retrying ? "The draft is being built again." : message}
+            onRetry={() => void sourceDraft()}
+            retrying={draftRetry.retrying}
+          />
+        )
       ) : null}
 
       <div

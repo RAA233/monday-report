@@ -16,7 +16,6 @@ import {
 import {
   apiUnreadReason,
   describeMutationFailure,
-  errorText,
   exportGateMessage,
   gateIsClear,
   gateIsClosed,
@@ -120,12 +119,17 @@ export function Reports() {
       const outcome = describeMutationFailure(caught, {
         noun: "report",
         refused: "Not created",
-        next: "Reload the list before creating another."
+        reread: "reload the report list"
       });
       showToast(
         outcome.headline,
-        outcome.proven ? `The report was not created. ${outcome.body}` : outcome.body
+        outcome.kind === "refused" ? `The report was not created. ${outcome.body}` : outcome.body
       );
+      if (outcome.kind === "unknown") {
+        // Safe next action, performed for the operator: re-read the list so a report
+        // that DID land is visible, instead of inviting a second creation.
+        reload();
+      }
     } finally {
       setCreating(false);
     }

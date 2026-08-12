@@ -145,12 +145,25 @@ function check(id, ok, detail) {
   process.stdout.write(`${ok ? "PASS" : "FAIL"}: ${id}${detail ? ` — ${detail}` : ""}\n`);
 }
 
-// ── WCAG relative-luminance contrast, from a computed rgb()/rgba() string ──────────
+// ── WCAG relative-luminance contrast, from a computed colour string ────────────────
+// Chromium serializes computed colours in TWO forms: `rgb()/rgba()` for named/hex
+// tokens, and `color(srgb r g b / a)` for anything that went through `color-mix()`
+// (0..1 channels). A parser that knew only the first silently returned null for every
+// wash, and the callers that did `if (!c) continue` then measured NOTHING for an entire
+// class of the app's own fills. Both forms are parsed here; an UNPARSEABLE colour
+// returns null and every caller treats null as a FAILURE, never a skip.
 function parseRgb(str) {
-  const m = /rgba?\(([^)]+)\)/i.exec(str);
-  if (!m) return null;
-  const parts = m[1].split(",").map((s) => parseFloat(s.trim()));
-  return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+  const rgb = /rgba?\(([^)]+)\)/i.exec(str);
+  if (rgb) {
+    const p = rgb[1].split(/[,\s/]+/).filter(Boolean).map((s) => parseFloat(s));
+    return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+  }
+  const srgb = /color\(\s*srgb\s+([^)]+)\)/i.exec(str);
+  if (srgb) {
+    const p = srgb[1].split(/[\s/]+/).filter(Boolean).map((s) => parseFloat(s));
+    return { r: p[0] * 255, g: p[1] * 255, b: p[2] * 255, a: p.length > 3 ? p[3] : 1 };
+  }
+  return null;
 }
 function lin(c) {
   const s = c / 255;
@@ -182,7 +195,12 @@ const PERMS = {
   resolve_validation: true,
   issue_client_reports: true,
   export_evidence: true,
-  create_client_reports: true
+  create_client_reports: true,
+  // Without these the Ask dock/composer and Studio editor render natively DISABLED
+  // under the stub session and silently drop out of the inert-contract census — the
+  // exact controls two review rounds found unmeasured.
+  generate_reports: true,
+  record_field_corrections: true
 };
 const SESSION = { tenant: TENANT, user: USER, authenticated_identity: { roles: ["operator"] }, permissions: PERMS };
 const WS = { id: "w1", tenant_id: "t1", name: "FORGE 16A", asset: "FORGE", campaign: null, status: "active" };
@@ -322,6 +340,8 @@ const EXPECTED_CHECK_IDS = [
   "d3-inert-contract-focus-preserved",
   "d5-no-workspace-provenance-claim",
   "d5-sample-values-labelled",
+  "d6-unknown-outcome-no-direct-retry",
+  "d6-unknown-outcome-announced-as-unknown",
   "d2-build-reachable-when-connected",
   "d2-no-workspace-click-announces",
   "d2-click-not-silent",
@@ -452,7 +472,13 @@ async function main() {
   {
     const page = await context.newPage();
     await stub(page, { workspaces: [WS] });
-    const contract = { checked: 0, fill: [], ink: [], focus: [] };
+    // `unparse` collects colour strings the census returned that this side could not
+    // read; any entry is a FAILURE (the fill/ink assertions cannot vouch for a fill
+    // they never measured). `focusRing` records controls whose :focus-visible ring is
+    // absent. The census FOCUSES each control before reading the ring, because the
+    // sheet only draws it under :focus-visible — reading an unfocused control's
+    // outline (an earlier bug) can never fail.
+    const contract = { checked: 0, inkChecked: 0, fill: [], ink: [], focus: [], unparse: [] };
     for (const route of ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"]) {
       await page.goto(`${WEB}${route}`, { waitUntil: "domcontentloaded" });
       await page.waitForTimeout(400);
@@ -460,99 +486,192 @@ async function main() {
       // app routes in bulk, and each mount issues reads. Asserting once at the start
       // would leave the remaining routes' reads ungated on a mis-spelled origin.
       await assertStubsIntercept(page, contactedOrigins);
-      const measured = await page.evaluate(() => {
+      const measured = await page.evaluate(async () => {
         const SELECTOR = 'button, a[href], [role="button"], input, textarea, select';
-        const parse = (str) => {
-          const m = /rgba?\(([^)]+)\)/i.exec(str || "");
-          if (!m) return null;
-          const p = m[1].split(",").map((x) => parseFloat(x.trim()));
-          return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+        // The EFFECTIVE background: the LAYER STACK composited, not the first
+        // non-transparent string. A `color-mix(... 10%, transparent)` wash computes to
+        // `color(srgb r g b / 0.1)`; returning that raw made the comparison treat a
+        // 10%-opacity tint as if it were an opaque fill — a wrong number in BOTH
+        // directions. Every layer is collected here and alpha-composited over the
+        // first fully opaque one, so what is compared is what the eye sees.
+        const readColour = (str) => {
+          const rgb = /rgba?\(([^)]+)\)/i.exec(str || "");
+          if (rgb) {
+            const p = rgb[1].split(/[,\s/]+/).filter(Boolean).map(Number);
+            return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+          }
+          const srgb = /color\(\s*srgb\s+([^)]+)\)/i.exec(str || "");
+          if (srgb) {
+            const p = srgb[1].split(/[\s/]+/).filter(Boolean).map(Number);
+            return { r: p[0] * 255, g: p[1] * 255, b: p[2] * 255, a: p.length > 3 ? p[3] : 1 };
+          }
+          return null;
         };
-        // The EFFECTIVE background: a transparent control shows its ancestor's fill,
-        // and comparing against rgba(0,0,0,0) would invent a black baseline.
         const effectiveBg = (el) => {
+          const layers = [];
           let node = el;
           while (node) {
-            const c = parse(getComputedStyle(node).backgroundColor);
-            if (c && c.a > 0) return c;
+            const c = readColour(getComputedStyle(node).backgroundColor);
+            // An UNREADABLE layer is reported as-is so the node side fails on it,
+            // rather than being skipped into a guess.
+            if (c === null) return getComputedStyle(node).backgroundColor;
+            if (c.a > 0) {
+              layers.push(c);
+              if (c.a >= 1) break;
+            }
             node = node.parentElement;
           }
-          return { r: 255, g: 255, b: 255, a: 1 };
+          let base = layers.length && layers[layers.length - 1].a >= 1
+            ? layers.pop()
+            : { r: 255, g: 255, b: 255, a: 1 };
+          for (let i = layers.length - 1; i >= 0; i -= 1) {
+            const top = layers[i];
+            base = {
+              r: top.r * top.a + base.r * (1 - top.a),
+              g: top.g * top.a + base.g * (1 - top.a),
+              b: top.b * top.a + base.b * (1 - top.a),
+              a: 1
+            };
+          }
+          return `rgb(${Math.round(base.r)}, ${Math.round(base.g)}, ${Math.round(base.b)})`;
         };
-        const inkOf = (el) => {
-          // Every text-bearing descendant, plus the control itself: this is exactly
-          // where an inline-coloured child escapes an !important rule on the parent.
-          const nodes = [el, ...el.querySelectorAll("*")].filter((n) =>
-            Array.from(n.childNodes).some((c) => c.nodeType === 3 && c.textContent.trim())
-          );
-          return (nodes.length ? nodes : [el]).map((n) => getComputedStyle(n).color);
-        };
-        const snap = (el) => ({
-          bg: getComputedStyle(el).backgroundColor,
-          effBg: effectiveBg(el),
-          ink: inkOf(el),
-          outlineWidth: getComputedStyle(el).outlineWidth,
-          outlineStyle: getComputedStyle(el).outlineStyle
-        });
+        const inkOf = (el) =>
+          [el, ...el.querySelectorAll("*")]
+            .filter((n) => Array.from(n.childNodes).some((c) => c.nodeType === 3 && c.textContent.trim()))
+            .map((n) => getComputedStyle(n).color);
         const out = [];
         for (const el of Array.from(document.querySelectorAll(SELECTOR))) {
           const rect = el.getBoundingClientRect();
           if (rect.width < 2 || rect.height < 2) continue; // not rendered
-          if (el.hasAttribute("aria-disabled") || el.disabled) continue; // already inert
-          const before = snap(el);
+          if (el.getAttribute("aria-disabled") === "true" || el.disabled) continue; // already inert
+          const liveBg = effectiveBg(el);
+          const liveInk = inkOf(el);
           el.setAttribute("aria-disabled", "true");
-          const after = snap(el);
+          const inertBg = effectiveBg(el);
+          const inertInk = inkOf(el);
+          // Focus the control (still focusable — that is the point of aria-disabled) and
+          // read the ACTUAL :focus-visible ring, not the resting outline.
+          el.focus();
+          const fs = getComputedStyle(el);
+          const ring = { style: fs.outlineStyle, width: fs.outlineWidth, color: fs.outlineColor };
+          el.blur();
           el.removeAttribute("aria-disabled");
           out.push({
             tag: el.tagName.toLowerCase(),
-            cls: el.className?.toString().slice(0, 60) ?? "",
-            before,
-            after
+            cls: (el.className?.toString() ?? "").slice(0, 40),
+            liveBg,
+            inertBg,
+            inertInk,
+            focused: el === document.activeElement, // false after blur; recorded pre-blur below
+            ring
           });
         }
         return out;
       });
       for (const m of measured) {
         contract.checked += 1;
-        const liveBg = m.before.effBg;
-        const inertBg = m.after.effBg;
-        const fillRatio = contrast(liveBg, inertBg);
-        if (fillRatio < 1.2) {
+        const live = parseRgb(m.liveBg);
+        const inert = parseRgb(m.inertBg);
+        if (!live || !inert) {
+          contract.unparse.push(`${route} ${m.tag}.${m.cls} bg ${m.liveBg} / ${m.inertBg}`);
+          continue; // unparseable => already a failure; do not measure against a guess
+        }
+        const fillRatio = contrast(live, inert);
+        if (fillRatio < 1.4) {
           contract.fill.push(`${route} ${m.tag}.${m.cls} fill ${fillRatio.toFixed(3)}:1`);
         }
-        for (const [i, colour] of m.after.ink.entries()) {
+        for (const [i, colour] of m.inertInk.entries()) {
           const c = parseRgb(colour);
-          if (!c) continue;
-          const inkRatio = contrast(c, inertBg);
+          if (!c) {
+            contract.unparse.push(`${route} ${m.tag}.${m.cls} ink#${i} ${colour}`);
+            continue;
+          }
+          contract.inkChecked += 1;
+          const inkRatio = contrast(c, inert);
           if (inkRatio < 4.5) {
-            contract.ink.push(`${route} ${m.tag}.${m.cls} child#${i} ink ${inkRatio.toFixed(2)}:1`);
+            contract.ink.push(`${route} ${m.tag}.${m.cls} ink#${i} ${inkRatio.toFixed(2)}:1`);
           }
         }
-        // Focus must survive: the whole reason these use aria-disabled instead of
-        // `disabled` is that they stay focusable, so the ring may not be suppressed.
-        if (m.after.outlineStyle === "none" && m.before.outlineStyle !== "none") {
-          contract.focus.push(`${route} ${m.tag}.${m.cls} lost its outline`);
+        // A focusable inert control MUST show a ring: a solid outline >= 1px. `none`
+        // (or 0 width) means the focus contract these controls exist to keep is gone.
+        const w = parseFloat(m.ring.width);
+        if (m.ring.style === "none" || !(w >= 1)) {
+          contract.focus.push(`${route} ${m.tag}.${m.cls} ring=${m.ring.style}/${m.ring.width}`);
         }
       }
     }
     check(
       "d3-inert-contract-fill-luminance",
-      contract.checked > 0 && contract.fill.length === 0,
-      contract.fill.length
-        ? `${contract.fill.length} control(s) whose inert fill is not luminance-distinct: ${contract.fill.slice(0, 4).join("; ")}`
-        : `${contract.checked} rendered control(s): every inert fill differs from its own live fill by >= 1.2:1`
+      contract.checked > 0 && contract.fill.length === 0 && contract.unparse.length === 0,
+      contract.fill.length || contract.unparse.length
+        ? `${contract.fill.length} below 1.4:1 (${contract.fill.slice(0, 3).join("; ")}); ${contract.unparse.length} unparseable (${contract.unparse.slice(0, 2).join("; ")})`
+        : `${contract.checked} rendered control(s): every inert fill differs from its own live fill by >= 1.4:1`
     );
     check(
       "d3-inert-contract-label-ink",
-      contract.checked > 0 && contract.ink.length === 0,
-      contract.ink.length
-        ? `${contract.ink.length} label part(s) below 4.5:1 when inert: ${contract.ink.slice(0, 4).join("; ")}`
-        : `every text-bearing part of every inert control clears 4.5:1 on the inert fill`
+      contract.inkChecked > 0 && contract.ink.length === 0 && contract.unparse.length === 0,
+      contract.ink.length || contract.unparse.length || contract.inkChecked === 0
+        ? `${contract.ink.length} label part(s) below 4.5:1 (${contract.ink.slice(0, 3).join("; ")}); inkChecked=${contract.inkChecked}; unparseable=${contract.unparse.length}`
+        : `${contract.inkChecked} text part(s): every text-bearing part of every inert control clears 4.5:1`
     );
     check(
       "d3-inert-contract-focus-preserved",
-      contract.focus.length === 0,
-      contract.focus.length ? contract.focus.slice(0, 3).join("; ") : "no control loses its focus outline when inert"
+      contract.checked > 0 && contract.focus.length === 0,
+      contract.focus.length ? `${contract.focus.length} control(s) without a focus ring: ${contract.focus.slice(0, 3).join("; ")}` : `${contract.checked} inert control(s) keep a visible focus ring`
+    );
+    await page.close();
+  }
+
+  // ── Defect 6: mutation OUTCOME is state, not copy ─────────────────────────────────
+  // An unknown outcome (5xx/gateway/disconnect) must not offer a direct re-mutation
+  // (the api client mints a fresh Idempotency-Key, so a retry can land twice) and must
+  // not be announced as a definite refusal. Both are proven on the RENDERED app by
+  // driving Studio's draft to a 502 and reading what the alert renders.
+  {
+    const page = await context.newPage();
+    await stub(page, {
+      workspaces: [WS],
+      overrides: {
+        // The audited draft fetch answers 502 — an UNKNOWN outcome (a proxy that never
+        // got the backend's answer), NOT a 4xx refusal.
+        "/report-draft": (route) => route.fulfill({ status: 502, contentType: "text/plain", body: "Bad Gateway" })
+      }
+    });
+    await page.goto(`${WEB}/app/studio`, { waitUntil: "domcontentloaded" });
+    await assertStubsIntercept(page, contactedOrigins);
+    const build = page.getByRole("button", { name: /Build source-backed draft/i });
+    await build.waitFor({ state: "visible", timeout: 15000 });
+    await build.click();
+    // Wait for the FAILED state itself — the alert region — not for the words this
+    // check is about to assert. Waiting on "outcome unknown" would make a regression
+    // that says "not built" time out as a harness error instead of failing the check
+    // that names the property.
+    await page.locator('[role="alert"]').first().waitFor({ state: "visible", timeout: 15000 });
+    const view = await page.evaluate(() => {
+      const alert = document.querySelector('[role="alert"]');
+      const bodyText = document.body.innerText;
+      // Any control offering a DIRECT re-issue of the draft. "Reload this page" is the
+      // safe re-read affordance and is allowed; a "Retry"/"Build" re-mutation is not.
+      const retryish = Array.from(document.querySelectorAll("button, [role=button]")).filter((b) =>
+        /^(retry|build source-backed draft|try again)$/i.test((b.textContent || "").trim())
+      );
+      return {
+        alertText: alert ? alert.textContent : "",
+        saysNotBuilt: /\bnot built\b/i.test(bodyText) && !/unknown/i.test(bodyText),
+        saysUnknown: /outcome unknown/i.test(bodyText),
+        saysMayHaveLanded: /may have been (applied|built)|may or may not/i.test(bodyText),
+        directRetryCount: retryish.length
+      };
+    });
+    check(
+      "d6-unknown-outcome-no-direct-retry",
+      view.directRetryCount === 0,
+      `direct re-mutation control(s) offered on an unknown outcome: ${view.directRetryCount}`
+    );
+    check(
+      "d6-unknown-outcome-announced-as-unknown",
+      view.saysUnknown && view.saysMayHaveLanded && !view.saysNotBuilt,
+      `alert=${JSON.stringify((view.alertText || "").slice(0, 90))} unknown=${view.saysUnknown} mayHaveLanded=${view.saysMayHaveLanded} notBuilt=${view.saysNotBuilt}`
     );
     await page.close();
   }

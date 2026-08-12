@@ -319,12 +319,20 @@ export function useRetryPresence(state: string): { show: boolean; retrying: bool
 export function ErrorState({
   title,
   message,
+  messageId,
   onRetry,
+  retryLabel,
   retrying = false
 }: {
   title: string;
   message: string;
+  /** Lets a control point `aria-describedby` at this explanation. */
+  messageId?: string;
   onRetry?: () => void;
+  /** Override for the affordance's label. An UNKNOWN mutation outcome must not offer
+   *  "Retry" (a direct repeat can land twice); its owner passes the safe re-read
+   *  action's name instead. */
+  retryLabel?: string;
   /**
    * The owner is re-running the request this button started.
    *
@@ -355,7 +363,7 @@ export function ErrorState({
       >
         {title}
       </strong>
-      <span style={{ fontSize: 13 }}>{message}</span>
+      <span id={messageId} style={{ fontSize: 13 }}>{message}</span>
       {onRetry ? (
         <button
           type="button"
@@ -367,7 +375,7 @@ export function ErrorState({
           }}
           aria-disabled={retrying || undefined}
         >
-          {retrying ? "Retrying…" : "Retry"}
+          {retrying ? "Retrying…" : retryLabel ?? "Retry"}
         </button>
       ) : null}
     </Frame>

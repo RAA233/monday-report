@@ -299,6 +299,32 @@ export function isBackendRefusal(error: unknown): boolean {
   return status !== null && status >= 400 && status < 500;
 }
 
+/** The typed outcome of an audited mutation — STATE, not copy.
+ *
+ *  Eight review rounds established the failure mode this type exists to end: the
+ *  refused/unknown distinction was made correctly where the error was caught, then
+ *  every piece of DERIVED UI (status line, alert title, live region, retry button)
+ *  re-derived its own version from a bare boolean and re-asserted the definite claim.
+ *  Components therefore store THIS OBJECT in state and key every derived surface on
+ *  `kind` — no consumer may hard-code "not built"/"not processed"/"not recorded"
+ *  wording or decide for itself whether a retry is safe.
+ *
+ *  `allowDirectRetry` is the load-bearing field: the api client mints a fresh
+ *  Idempotency-Key per call, so a direct re-mutation after an UNKNOWN outcome can
+ *  land twice and be audited twice. Consumers must not render a re-mutation control
+ *  when it is false — offer the re-read/reconcile action instead. */
+export interface MutationOutcome {
+  kind: "refused" | "unknown" | "success";
+  headline: string;
+  body: string;
+  /** True only for `unknown`: the mutation may have been applied server-side. */
+  mayHaveLanded: boolean;
+  /** False for `unknown`: a direct repeat is unsafe until state is re-read. */
+  allowDirectRetry: boolean;
+  /** The safe next action ("Reload the queue", …); shown instead of a retry. */
+  rereadAction: string;
+}
+
 /** The one place that turns a failed AUDITED MUTATION into operator-facing words.
  *
  *  Every mutating call site in the redesign routes its catch through this instead of
@@ -319,25 +345,35 @@ export function isBackendRefusal(error: unknown): boolean {
  */
 export function describeMutationFailure(
   error: unknown,
-  { noun, refused, next }: { noun: string; refused: string; next?: string }
-): { headline: string; body: string; proven: boolean } {
+  { noun, refused, reread }: { noun: string; refused: string; reread: string }
+): MutationOutcome {
   const detail = errorText(error);
-  const tail = next ? ` ${next}` : "";
   if (isBackendRefusal(error)) {
     return {
+      kind: "refused",
       headline: refused,
-      body: `${detail}${tail}`,
-      proven: true
+      body: `${detail}`,
+      mayHaveLanded: false,
+      allowDirectRetry: true,
+      rereadAction: reread
     };
   }
   return {
+    kind: "unknown",
     headline: "Outcome unknown",
     body:
-      `The backend's answer was lost, so this ${noun} may or may not have been applied — ` +
-      `do not repeat it until you have re-read the current state, because a repeat that ` +
-      `lands twice is recorded twice. ${detail}${tail}`,
-    proven: false
+      `The backend's answer was lost, so this ${noun} MAY have been applied. ` +
+      `Do not repeat it: ${reread} first, because a repeat that lands twice is ` +
+      `recorded twice. ${detail}`,
+    mayHaveLanded: true,
+    allowDirectRetry: false,
+    rereadAction: reread
   };
+}
+
+/** A successful mutation, so success and failure flow through ONE shape. */
+export function mutationSucceeded(headline: string, body: string): MutationOutcome {
+  return { kind: "success", headline, body, mayHaveLanded: false, allowDirectRetry: false, rereadAction: "" };
 }
 
 /** Short, sanitized form of a thrown request error. Exported so every user-facing
