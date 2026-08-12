@@ -101,7 +101,10 @@ function GateBanner({
     return (
       <div role="status" style={frame(false)}>
         <strong style={heading(false)}>Export gate closed</strong>
-        <span style={{ fontSize: 13 }}>{exportGateMessage(gate.openTasks)}</span>
+        {/* `id` is referenced by each export button's aria-describedby while the gate
+            is closed, so the REASON travels with the (focusable) control instead of
+            living only in a banner a keyboard user may never reach. */}
+        <span id="export-gate-reason" style={{ fontSize: 13 }}>{exportGateMessage(gate.openTasks)}</span>
         <Link className="btn btn-ghost" to="/app/validation" style={{ minHeight: 0, padding: "0 4px" }}>
           Open the queue →
         </Link>
@@ -345,8 +348,17 @@ export function Exports() {
   // native attribute put `disabled` on the button the operator had just pressed and
   // blurred them to <body>. Standing terms stay native; the transient one is carried
   // by aria-disabled, with `exportsBlocked` still the single predicate the handlers use.
-  const exportsStandingBlocked = readOnly || !canIssueExport || gateIsClosed(gate);
-  const exportsBlocked = exportsStandingBlocked || gateBlocksExport;
+  // A STANDING condition — read-only session, or a session without issue_client_reports
+  // — is correctly a native `disabled`: nothing is focused when it is applied and it
+  // can never change while the operator stands on the control.
+  const exportsPermissionBlocked = readOnly || !canIssueExport;
+  // A CLOSED BUSINESS GATE is different in kind: it closes because of workspace state,
+  // often while the operator is on the button, and it carries a reason and a next
+  // action. Native `disabled` would blur the control, drop it from the tab order and
+  // put its explanation out of reach, so it is aria-disabled (focusable) with an inert
+  // handler, wired by aria-describedby to the banner's reason.
+  const exportGateClosed = gateIsClosed(gate);
+  const exportsBlocked = exportsPermissionBlocked || gateBlocksExport;
 
   async function runExport(format: ApiReportExport["format"]) {
     // aria-disabled keeps these focusable, so the handler is what actually makes them
@@ -557,8 +569,11 @@ export function Exports() {
                     type="button"
                     className="btn btn-secondary"
                     onClick={() => void runExport(entry.format)}
-                    disabled={exportsStandingBlocked}
-                        aria-disabled={busy !== null || gate.state === "loading" || undefined}
+                    disabled={exportsPermissionBlocked}
+                    aria-disabled={
+                      busy !== null || gate.state === "loading" || exportGateClosed || undefined
+                    }
+                    aria-describedby={exportGateClosed ? "export-gate-reason" : undefined}
                   >
                     {busy === entry.format ? "Exporting…" : `Export ${entry.label}`}
                   </button>

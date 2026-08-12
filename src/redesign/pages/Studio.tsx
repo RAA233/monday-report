@@ -199,15 +199,23 @@ export function Studio() {
   );
 
   const sourceDraft = useCallback(async () => {
+    // The no-workspace precondition runs FIRST. The in-flight dedup below compares
+    // `draftInFlight.current` (initially null) against `workspaceId`; with no workspace
+    // BOTH are null, so `null === null` returned early and swallowed the click — the
+    // primary action became a silent no-op and the blocking message just below it was
+    // unreachable. A blocked click must always announce, so this precondition owns
+    // that, and the dedup guard is only meaningful once a real workspace exists.
+    if (!workspaceId) {
+      setState("error");
+      setMessage(
+        "No workspace is selected, so there is no evidence to draft from. Choose a workspace in the top bar to draft from its parsed evidence."
+      );
+      return;
+    }
     // The button stays focusable while drafting (aria-disabled, not `disabled`), so the
     // handler is what makes it inert. Without this a second Enter would append a second
     // report_draft.generate to the audit chain for one operator intent.
     if (draftInFlight.current === workspaceId) return;
-    if (!workspaceId) {
-      setState("error");
-      setMessage("No workspace is selected, so there is no evidence to draft from.");
-      return;
-    }
     const askedFor = workspaceId;
     draftInFlight.current = askedFor;
     setState("loading");

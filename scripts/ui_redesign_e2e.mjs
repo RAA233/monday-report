@@ -1592,6 +1592,362 @@ async function main() {
         `[${acceptedThenLost.join(", ")}] read back as open. Inherited defect in LocalStateStore ` +
         `(backend/app/store.py, byte-identical to the sealed base); not introduced by this branch.`
   );
+  // ── Stage-1 replacement: the six kept fixes, measured as EFFECTS ─────────────────
+  //
+  // Every assertion below reads something the browser DID or a pixel the browser
+  // PAINTED — a request count, a composited colour, a focused ring — rather than a
+  // string the page happens to contain. A label can be right while the behaviour is
+  // wrong, and a behaviour right while the label drifts; only the effect settles it.
+  {
+    const s1page = await context.newPage();
+
+    // ── keep 1: the refusal discriminator, against the api client's REAL throw ──────
+    // `errorText()` rewrites the `^API ` prefix, so a classifier tested against its
+    // output matches nothing and a definite 4xx reads as an incomplete request. This
+    // exercises the exported functions with the exact message shape src/lib/api.ts
+    // throws, and requires the 4xx/5xx split rather than "any status".
+    await s1page.goto(`${WEB}/`, { waitUntil: "domcontentloaded" });
+    const classified = await s1page.evaluate(async () => {
+      const m = await import("/src/redesign/lib/workspace.tsx");
+      if (typeof m.requestStatus !== "function" || typeof m.isBackendRefusal !== "function") {
+        return { missing: true };
+      }
+      const mk = (msg) => new Error(msg);
+      const four = [400, 401, 403, 404, 409, 422, 423, 429];
+      const five = [500, 502, 503, 504];
+      return {
+        missing: false,
+        fourxx: four.map((s) => m.isBackendRefusal(mk(`API ${s}: detail`))),
+        fivexx: five.map((s) => m.isBackendRefusal(mk(`API ${s}: detail`))),
+        statuses: four.concat(five).map((s) => m.requestStatus(mk(`API ${s}: detail`))),
+        unknowns: [
+          m.isBackendRefusal(new TypeError("Failed to fetch")),
+          m.isBackendRefusal(mk("The request did not complete.")),
+          m.isBackendRefusal(null),
+          m.isBackendRefusal("API 409: not an Error")
+        ],
+        sanitizedHidesStatus: !/^API /.test(m.errorText(mk("API 409: conflict")))
+      };
+    });
+    check(
+      "refusal-discriminator-4xx-only",
+      !classified.missing &&
+        classified.fourxx.every(Boolean) &&
+        classified.fivexx.every((v) => v === false) &&
+        classified.unknowns.every((v) => v === false) &&
+        classified.sanitizedHidesStatus,
+      classified.missing
+        ? "requestStatus/isBackendRefusal are not exported"
+        : `4xx=${JSON.stringify(classified.fourxx)} 5xx=${JSON.stringify(classified.fivexx)} unknown=${JSON.stringify(classified.unknowns)}`
+    );
+
+    // ── keep 4: a CLOSED BUSINESS GATE is focusable, explained — and inert ──────────
+    // The effect, not the attribute: force the gate closed with route interception and
+    // COUNT the export POSTs a forced click issues. Zero is the property; the ARIA
+    // wiring is asserted alongside it so the reason is actually reachable.
+    let exportPosts = 0;
+    const countExports = (request) => {
+      if (
+        request.method() === "POST" &&
+        /\/monday-reports\/[^/]+\/exports\b/.test(new URL(request.url()).pathname)
+      ) {
+        exportPosts += 1;
+      }
+    };
+    context.on("request", countExports);
+    // The gate is a JOIN: an OPEN task whose target_type is `failure` and whose
+    // target_id resolves to a failure IN THE ACTIVE WORKSPACE. Stubbing the task alone
+    // leaves the gate `clear`, so the whole read set this page performs is served here
+    // — on this page only — making the closed-gate state deterministic. Every branch
+    // fulfills; none continues, so nothing reaches the backend from this probe.
+    const GATE_WS = "11111111-1111-4111-8111-111111111111";
+    const GATE_FAILURE = "22222222-2222-4222-8222-222222222222";
+    const gateFixtures = async (route, url) => {
+      const p = url.pathname;
+      const json = (body) =>
+        route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+      if (/\/workspaces$/.test(p)) {
+        return json([
+          { id: GATE_WS, tenant_id: "t", name: "Gate probe", asset: "PROBE", campaign: null, status: "active" }
+        ]);
+      }
+      if (/\/validation-tasks$/.test(p)) {
+        return json([
+          {
+            id: "33333333-3333-4333-8333-333333333333",
+            tenant_id: "t",
+            target_type: "failure",
+            target_id: GATE_FAILURE,
+            reason: "Gate probe",
+            priority: "high",
+            status: "open",
+            created_at: "2026-01-01T00:00:00Z"
+          }
+        ]);
+      }
+      if (/\/failures$/.test(p)) {
+        return json([
+          {
+            id: GATE_FAILURE,
+            tenant_id: "t",
+            workspace_id: GATE_WS,
+            event_type: "Gate probe",
+            severity: "High",
+            summary: "probe",
+            company: "probe",
+            tool_type: "MWD",
+            tool_serial: "x",
+            npt_hours: 1,
+            confidence: 0.9,
+            validation_status: "open",
+            citations: []
+          }
+        ]);
+      }
+      if (/\/monday-reports$/.test(p)) {
+        return json([
+          {
+            id: "44444444-4444-4444-8444-444444444444",
+            tenant_id: "t",
+            workspace_id: GATE_WS,
+            period_start: "2026-01-01",
+            period_end: "2026-01-07",
+            status: "review",
+            report_json: {},
+            created_at: "2026-01-07T00:00:00Z"
+          }
+        ]);
+      }
+      if (/benchmarking/.test(p)) {
+        return json({
+          workspace_id: GATE_WS,
+          generated_at: "2026-01-07T00:00:00Z",
+          comparisons: [],
+          active_anomalies: [],
+          historical_anomalies: [],
+          benchmark_values: [],
+          anomaly_rules: [],
+          seven_day_trend: [],
+          likely_operational_contributors: [],
+          recommended_diagnostic_actions: [],
+          supporting_evidence_references: [],
+          ai_interpretation: [],
+          permissions: {}
+        });
+      }
+      return route.fallback();
+    };
+    await s1page.route(
+      (url) => url.origin === new URL(API).origin,
+      (route) => gateFixtures(route, new URL(route.request().url()))
+    );
+    await s1page.goto(`${WEB}/app/exports`, { waitUntil: "domcontentloaded" });
+    const closedBanner = s1page.getByText(/Export gate closed/i).first();
+    let gateProbe = null;
+    try {
+      await closedBanner.waitFor({ state: "visible", timeout: 12000 });
+      const exportBtn = s1page.getByRole("button", { name: /^Export /i }).first();
+      await exportBtn.waitFor({ state: "visible", timeout: 8000 });
+      const attrs = await exportBtn.evaluate((el) => ({
+        nativeDisabled: el.disabled,
+        ariaDisabled: el.getAttribute("aria-disabled"),
+        describedBy: el.getAttribute("aria-describedby"),
+        reasonText: document.getElementById(el.getAttribute("aria-describedby") || "")?.textContent ?? ""
+      }));
+      const before = exportPosts;
+      await exportBtn.click({ force: true });
+      await s1page.waitForTimeout(700);
+      // Keyboard too: aria-disabled keeps the control focusable, so Enter is a real
+      // activation path a click-only probe would miss.
+      await exportBtn.focus();
+      await s1page.keyboard.press("Enter");
+      await s1page.waitForTimeout(700);
+      gateProbe = { ...attrs, issued: exportPosts - before };
+    } catch (error) {
+      gateProbe = { error: String(error).slice(0, 120) };
+    }
+    check(
+      "closed-gate-export-is-inert-not-native-disabled",
+      gateProbe !== null &&
+        !gateProbe.error &&
+        gateProbe.nativeDisabled === false &&
+        gateProbe.ariaDisabled === "true" &&
+        gateProbe.describedBy === "export-gate-reason" &&
+        /validation task/i.test(gateProbe.reasonText) &&
+        gateProbe.issued === 0,
+      JSON.stringify(gateProbe)
+    );
+    context.off("request", countExports);
+    await s1page.unroute((url) => url.origin === new URL(API).origin);
+
+    // ── keep 3: the inert-state contract, on the app's OWN rendered controls ────────
+    // Measured, not asserted: each control is read live, marked inert, read again.
+    // Colours are composited through the alpha stack (a 10%-opacity wash is not an
+    // opaque fill), BOTH Chromium serializations are parsed, an unreadable colour is a
+    // FAILURE rather than a skipped item, and the focus ring is read WHILE FOCUSED —
+    // the sheet only draws it under :focus-visible, so an unfocused read can never fail.
+    const inert = { checked: 0, inkChecked: 0, fill: [], ink: [], focus: [], unparse: [] };
+    for (const route of ["/", "/app", "/app/reports", "/app/validation", "/app/exports"]) {
+      await s1page.goto(`${WEB}${route}`, { waitUntil: "domcontentloaded" });
+      await s1page.waitForTimeout(350);
+      const measured = await s1page.evaluate(() => {
+        const read = (str) => {
+          const rgb = /rgba?\(([^)]+)\)/i.exec(str || "");
+          if (rgb) {
+            const p = rgb[1].split(/[,\s/]+/).filter(Boolean).map(Number);
+            return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+          }
+          const srgb = /color\(\s*srgb\s+([^)]+)\)/i.exec(str || "");
+          if (srgb) {
+            const p = srgb[1].split(/[\s/]+/).filter(Boolean).map(Number);
+            return { r: p[0] * 255, g: p[1] * 255, b: p[2] * 255, a: p.length > 3 ? p[3] : 1 };
+          }
+          return null;
+        };
+        const composite = (el) => {
+          const layers = [];
+          let node = el;
+          while (node) {
+            const c = read(getComputedStyle(node).backgroundColor);
+            if (c === null) return null;
+            if (c.a > 0) {
+              layers.push(c);
+              if (c.a >= 1) break;
+            }
+            node = node.parentElement;
+          }
+          let base =
+            layers.length && layers[layers.length - 1].a >= 1
+              ? layers.pop()
+              : { r: 255, g: 255, b: 255, a: 1 };
+          for (let i = layers.length - 1; i >= 0; i -= 1) {
+            const t = layers[i];
+            base = {
+              r: t.r * t.a + base.r * (1 - t.a),
+              g: t.g * t.a + base.g * (1 - t.a),
+              b: t.b * t.a + base.b * (1 - t.a),
+              a: 1
+            };
+          }
+          return base;
+        };
+        const inkOf = (el) =>
+          [el, ...el.querySelectorAll("*")]
+            .filter((n) =>
+              Array.from(n.childNodes).some((c) => c.nodeType === 3 && c.textContent.trim())
+            )
+            .map((n) => getComputedStyle(n).color);
+        const out = [];
+        for (const el of Array.from(
+          document.querySelectorAll('button, a[href], [role="button"], input, textarea, select')
+        )) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 2 || rect.height < 2) continue;
+          if (el.getAttribute("aria-disabled") === "true" || el.disabled) continue;
+          const live = composite(el);
+          el.setAttribute("aria-disabled", "true");
+          const dead = composite(el);
+          const ink = inkOf(el);
+          el.focus();
+          const cs = getComputedStyle(el);
+          const ring = { style: cs.outlineStyle, width: cs.outlineWidth };
+          el.blur();
+          el.removeAttribute("aria-disabled");
+          out.push({
+            tag: el.tagName.toLowerCase(),
+            cls: (el.className?.toString() ?? "").slice(0, 36),
+            live,
+            dead,
+            ink,
+            ring
+          });
+        }
+        return out;
+      });
+      const lum = (c) => {
+        const f = (v) => {
+          const x = v / 255;
+          return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+      };
+      const ratio = (a, b) => {
+        const la = lum(a);
+        const lb = lum(b);
+        const hi = Math.max(la, lb);
+        const lo = Math.min(la, lb);
+        return (hi + 0.05) / (lo + 0.05);
+      };
+      const parse = (str) => {
+        const rgb = /rgba?\(([^)]+)\)/i.exec(str || "");
+        if (rgb) {
+          const p = rgb[1].split(/[,\s/]+/).filter(Boolean).map(Number);
+          return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+        }
+        const srgb = /color\(\s*srgb\s+([^)]+)\)/i.exec(str || "");
+        if (srgb) {
+          const p = srgb[1].split(/[\s/]+/).filter(Boolean).map(Number);
+          return { r: p[0] * 255, g: p[1] * 255, b: p[2] * 255, a: p.length > 3 ? p[3] : 1 };
+        }
+        return null;
+      };
+      for (const m of measured) {
+        inert.checked += 1;
+        if (!m.live || !m.dead) {
+          inert.unparse.push(`${route} ${m.tag}.${m.cls} background`);
+          continue;
+        }
+        const fillRatio = ratio(m.live, m.dead);
+        if (fillRatio < 1.4) inert.fill.push(`${route} ${m.tag}.${m.cls} ${fillRatio.toFixed(3)}:1`);
+        for (const [i, colour] of m.ink.entries()) {
+          const c = parse(colour);
+          if (!c) {
+            inert.unparse.push(`${route} ${m.tag}.${m.cls} ink#${i}`);
+            continue;
+          }
+          inert.inkChecked += 1;
+          const alpha = c.a ?? 1;
+          const flat = {
+            r: c.r * alpha + m.dead.r * (1 - alpha),
+            g: c.g * alpha + m.dead.g * (1 - alpha),
+            b: c.b * alpha + m.dead.b * (1 - alpha)
+          };
+          const inkRatio = ratio(flat, m.dead);
+          if (inkRatio < 4.5) {
+            inert.ink.push(`${route} ${m.tag}.${m.cls} ink#${i} ${inkRatio.toFixed(2)}:1`);
+          }
+        }
+        const w = parseFloat(m.ring.width);
+        if (m.ring.style === "none" || !(w >= 1)) {
+          inert.focus.push(`${route} ${m.tag}.${m.cls} ring=${m.ring.style}/${m.ring.width}`);
+        }
+      }
+    }
+    check(
+      "inert-fill-luminance-distinct",
+      inert.checked > 0 && inert.fill.length === 0 && inert.unparse.length === 0,
+      inert.fill.length || inert.unparse.length
+        ? `${inert.fill.length} below 1.4:1 (${inert.fill.slice(0, 3).join("; ")}); ${inert.unparse.length} unreadable`
+        : `${inert.checked} rendered control(s): every inert fill differs from its own live fill by >= 1.4:1`
+    );
+    check(
+      "inert-label-ink-readable",
+      inert.inkChecked > 0 && inert.ink.length === 0 && inert.unparse.length === 0,
+      inert.ink.length || inert.unparse.length || inert.inkChecked === 0
+        ? `${inert.ink.length} below 4.5:1 (${inert.ink.slice(0, 3).join("; ")}); inkChecked=${inert.inkChecked}; unreadable=${inert.unparse.length}`
+        : `${inert.inkChecked} text part(s) across every inert control clear 4.5:1, including inline-coloured children`
+    );
+    check(
+      "inert-focus-ring-preserved",
+      inert.checked > 0 && inert.focus.length === 0,
+      inert.focus.length
+        ? `${inert.focus.length} without a ring: ${inert.focus.slice(0, 3).join("; ")}`
+        : `${inert.checked} inert control(s) keep a visible focus ring while focused`
+    );
+
+    await s1page.close();
+  }
+
   check(
     "no-console-errors",
     consoleErrors.length === 0,
@@ -1648,6 +2004,11 @@ async function main() {
   // suite's coverage: a check that silently disappears (deleted, or skipped by a
   // conditional branch) is reported here rather than shrinking the totals unnoticed.
   const EXPECTED_CHECK_IDS = [
+    "refusal-discriminator-4xx-only",
+    "closed-gate-export-is-inert-not-native-disabled",
+    "inert-fill-luminance-distinct",
+    "inert-label-ink-readable",
+    "inert-focus-ring-preserved",
     "landing-hero",
     "landing-demo-disclosure",
     "landing-no-certification-claim",
