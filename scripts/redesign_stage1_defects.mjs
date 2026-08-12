@@ -456,6 +456,10 @@ async function main() {
     for (const route of ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"]) {
       await page.goto(`${WEB}${route}`, { waitUntil: "domcontentloaded" });
       await page.waitForTimeout(400);
+      // Gate EVERY route, not just the first: this block is the only one that visits
+      // app routes in bulk, and each mount issues reads. Asserting once at the start
+      // would leave the remaining routes' reads ungated on a mis-spelled origin.
+      await assertStubsIntercept(page, contactedOrigins);
       const measured = await page.evaluate(() => {
         const SELECTOR = 'button, a[href], [role="button"], input, textarea, select';
         const parse = (str) => {
