@@ -62,16 +62,20 @@ export function BrandMark({ size = 34, fontSize = 14 }: { size?: number; fontSiz
 
 export type TagTone = "accent" | "neutral" | "outline" | "critical";
 
-/** Status tag. `critical` inverts to a solid fill so it never reads by hue alone. */
+/** Status tag. `critical` inverts to a solid fill so it never reads by hue alone.
+ *  Rest props (aria-*, data-*) are forwarded to the span — a caller pinning a
+ *  machine-readable state onto a chip (e.g. the audit view's
+ *  `data-integrity-state`) must actually reach the DOM, not be dropped silently. */
 export function Tag({
   tone = "neutral",
   children,
-  style
+  style,
+  ...rest
 }: {
   tone?: TagTone;
   children: ReactNode;
   style?: CSSProperties;
-}) {
+} & Omit<React.HTMLAttributes<HTMLSpanElement>, "style" | "children">) {
   const toneClass =
     tone === "critical"
       ? "tag tag-critical"
@@ -81,7 +85,7 @@ export function Tag({
           ? "tag tag-outline"
           : "tag tag-neutral";
   return (
-    <span className={toneClass} style={style}>
+    <span className={toneClass} style={style} {...rest}>
       {children}
     </span>
   );

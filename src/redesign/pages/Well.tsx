@@ -60,6 +60,11 @@ export function Well() {
   const loadInFlight = useRef<string | null>(null);
 
   const loadEvidence = useCallback(async () => {
+    // Belt-and-braces on the read gate: the controls carrying this handler are
+    // already disabled for these standing conditions, but the AUDITED read must
+    // never be issued by any path while the API is degraded or the permission is
+    // absent — a refused GET would append a permission_denied audit event.
+    if (apiStatus !== "connected" || !canRead) return;
     if (!workspaceId) {
       setState("error");
       setMessage("No workspace is selected, so there is no well evidence to load.");
@@ -88,7 +93,7 @@ export function Well() {
     } finally {
       if (loadInFlight.current === askedFor) loadInFlight.current = null;
     }
-  }, [workspaceId]);
+  }, [workspaceId, apiStatus, canRead]);
 
   // The loaded evidence is workspace-scoped; a workspace change drops it rather
   // than rendering workspace A's well under workspace B's name. Same rule as the
