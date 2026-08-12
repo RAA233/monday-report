@@ -18,7 +18,7 @@ for p in (str(ROOT), str(ROOT / "scripts")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-BASE = "be2d09952cf06b70c590f34b213692221cdec13b"  # PR #28 base; PR #29 introduces the diff
+BASE = "dc68dc6c535126a0735cc29c649f6b43acf81e85"  # PR #28-v2 head; the queue PR introduces the diff
 
 # Leak categories. Each is a REAL exposure shape, not the mere mention of a word.
 LEAK_PATTERNS: dict[str, str] = {
