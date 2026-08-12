@@ -465,14 +465,23 @@ async function main() {
       // A TEXT-ENTRY control, not a button: Ask's question field carries aria-disabled
       // while a question is in flight. Scoping the inert rule to a selector list is
       // exactly how a control type silently drops out of it, so measure one here.
-      const input = document.createElement("input");
-      input.id = "t-input-inert";
-      input.className = "input";
-      input.type = "text";
-      input.readOnly = true;
-      input.setAttribute("aria-disabled", "true");
-      input.value = "in flight";
-      document.body.appendChild(input);
+      const mkInput = (id, aria) => {
+        const el = document.createElement("input");
+        el.id = id;
+        el.className = "input";
+        el.type = "text";
+        el.placeholder = "Ask about this workspace";
+        if (aria) {
+          el.readOnly = true;
+          el.setAttribute("aria-disabled", "true");
+        }
+        // EMPTY on purpose: submitting clears the field, so the in-flight state shows
+        // the placeholder only — which is where an undimmed placeholder hides an
+        // otherwise-inert control.
+        document.body.appendChild(el);
+      };
+      mkInput("t-input-inert", true);
+      mkInput("t-input-live", false);
     });
     const measure = async (sel) => {
       await page.hover(sel);
@@ -497,18 +506,29 @@ async function main() {
     const scoped = !(liveBg.r === inertBg.r && liveBg.g === inertBg.g && liveBg.b === inertBg.b);
     check("d3-rule-scoped-to-disabled", scoped, `live hover bg ${live.bg} != inert bg ${prim.bg}`);
 
-    // The scoping must not drop a control TYPE. A text input marked aria-disabled has
-    // to take the same inert fill/ink as an inert button, or an in-flight field looks
-    // live while silently discarding keystrokes.
-    const inp = await measure("#t-input-inert");
-    const inpC = contrast(parseRgb(inp.color), parseRgb(inp.bg));
-    const inertFill = parseRgb(prim.bg);
-    const inpBg = parseRgb(inp.bg);
-    const sameInertFill = inpBg.r === inertFill.r && inpBg.g === inertFill.g && inpBg.b === inertFill.b;
+    // The scoping must not drop a control TYPE — and "covered by the selector" is NOT
+    // the property that matters. Baseline against the SAME control type in its LIVE
+    // state: an aria-disabled text field must look different from a live one, or the
+    // rule is cosmetically inert (the button inert fill is a 1.01:1 no-op against a
+    // field's own surface). Submitting clears the field, so the placeholder must also
+    // change — it is the only ink on screen while the question is in flight.
+    const inertIn = await measure("#t-input-inert");
+    const liveIn = await measure("#t-input-live");
+    const inertInBg = parseRgb(inertIn.bg);
+    const liveInBg = parseRgb(liveIn.bg);
+    const fillChanged = contrast(inertInBg, liveInBg) >= 1.1;
+    const inkC = contrast(parseRgb(inertIn.color), inertInBg);
+    const ph = await page.evaluate(() => {
+      const read = (sel) => getComputedStyle(document.querySelector(sel), "::placeholder").color;
+      return { inert: read("#t-input-inert"), live: read("#t-input-live") };
+    });
+    const placeholderChanged = ph.inert !== ph.live;
     check(
       "d3-text-input-inert-covered",
-      sameInertFill && inpC >= 4.5,
-      `aria-disabled input on hover: bg ${inp.bg} (inert fill ${prim.bg}), contrast ${inpC.toFixed(2)}:1`
+      fillChanged && placeholderChanged && inkC >= 4.5,
+      `aria-disabled input vs LIVE input: fill ${inertIn.bg} vs ${liveIn.bg} ` +
+        `(${contrast(inertInBg, liveInBg).toFixed(3)}:1), placeholder ${ph.inert} vs ${ph.live}, ` +
+        `ink contrast ${inkC.toFixed(2)}:1`
     );
     await page.close();
   }

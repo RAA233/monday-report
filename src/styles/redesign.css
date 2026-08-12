@@ -306,17 +306,15 @@ html {
    would also repaint composite widgets (listboxes, grids, fieldsets) that mark
    themselves disabled for assistive technology but own their palette.
 
-   `input`/`textarea`/`select` are load-bearing members of this list, not padding: Ask's
-   question field carries `aria-disabled` while a question is in flight and is
-   `readOnly` at the same time, so without an inert appearance it looks live, keeps a
-   text cursor, and silently discards keystrokes — while the submit button beside it IS
-   painted inert, leaving the two halves of one form disagreeing about whether input is
-   accepted. */
-:is(button, a, [role="button"], .btn, .mr-hover-accent, input, textarea, select)[aria-disabled="true"],
-:is(button, a, [role="button"], .btn, .mr-hover-accent, input, textarea, select)[aria-disabled="true"]:hover,
-:is(button, a, [role="button"], .btn, .mr-hover-accent, input, textarea, select)[aria-disabled="true"]:active,
-:is(button, a, [role="button"], .btn, .mr-hover-accent, input, textarea, select)[aria-disabled="true"]:focus,
-:is(button, a, [role="button"], .btn, .mr-hover-accent, input, textarea, select)[aria-disabled="true"]:focus-visible {
+   Text-entry controls are handled by their OWN rule below rather than being added to
+   this list: neutral-200 reads as inert against a button's accent fill, but against a
+   text field's own surface fill it is a 1.01:1 difference — no visible change at all —
+   which is exactly the trap tokens.css documents for `.input:disabled`. */
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"],
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"]:hover,
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"]:active,
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"]:focus,
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"]:focus-visible {
   /* NOT `opacity`. Group opacity fades the focus ring with the control, taking the
      indicator to ~1.9:1 - defeating the focus contract this rule exists to serve,
      since the whole point is that these controls STAY focusable. Dim the ink and the
@@ -338,4 +336,32 @@ html {
   color: var(--color-neutral-700) !important;
   background-color: var(--color-neutral-200) !important;
   cursor: not-allowed;
+}
+
+/* Text-entry controls marked aria-disabled (Ask's question field while a question is
+   in flight, which is `readOnly` at the same time) must read exactly like a natively
+   disabled field, so this reuses `.input:disabled`'s own tokens rather than the button
+   inert fill:
+     - neutral-300, NOT neutral-200: tokens.css measured neutral-200 (#e7e7ea) against
+       the enabled fill (#e9e9ea) at 1.01:1 — no visible change at all. neutral-300 is
+       the fill that sheet already chose for this exact question.
+     - the placeholder is dimmed too, because submitting CLEARS the field: during the
+       whole in-flight window the control is empty, so the placeholder is the only ink
+       on screen and an undimmed one leaves the field reading as live.
+   Without both, a keyboard operator sees no state change at all (`cursor` is
+   mouse-only) while `readOnly` silently discards every keystroke. */
+:is(input, textarea, select)[aria-disabled="true"],
+:is(input, textarea, select)[aria-disabled="true"]:hover,
+:is(input, textarea, select)[aria-disabled="true"]:active,
+:is(input, textarea, select)[aria-disabled="true"]:focus,
+:is(input, textarea, select)[aria-disabled="true"]:focus-visible {
+  /* neutral-800, not the neutral-700 `.input:disabled` uses: neutral-700 on this fill
+     is 4.44:1, and unlike a natively disabled control — which WCAG exempts — this one
+     stays focusable and reachable by keyboard, so its text must clear 4.5:1. */
+  color: var(--color-neutral-800) !important;
+  background-color: var(--color-neutral-300) !important;
+  cursor: not-allowed;
+}
+:is(input, textarea, select)[aria-disabled="true"]::placeholder {
+  color: var(--color-neutral-600) !important;
 }
