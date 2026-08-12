@@ -300,11 +300,16 @@ html {
  * them the inert appearance the attribute would have. `disabled` remains correct for
  * STANDING conditions, where nothing is focused when it is applied.
  */
-[aria-disabled="true"],
-[aria-disabled="true"]:hover,
-[aria-disabled="true"]:active,
-[aria-disabled="true"]:focus,
-[aria-disabled="true"]:focus-visible {
+/* Scoped to the interactive controls this contract is about — buttons, links and the
+   hover-accent controls — rather than every element in the document that happens to
+   carry aria-disabled. An unqualified `[aria-disabled]` with `!important` would also
+   repaint composite widgets (listboxes, grids, fieldsets) that mark themselves disabled
+   for assistive technology but own their palette. */
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"],
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"]:hover,
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"]:active,
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"]:focus,
+:is(button, a, [role="button"], .btn, .mr-hover-accent)[aria-disabled="true"]:focus-visible {
   /* NOT `opacity`. Group opacity fades the focus ring with the control, taking the
      indicator to ~1.9:1 - defeating the focus contract this rule exists to serve,
      since the whole point is that these controls STAY focusable. Dim the ink and the

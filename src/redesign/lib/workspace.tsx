@@ -283,12 +283,20 @@ export function requestStatus(error: unknown): number | null {
   return null;
 }
 
-/** True when the backend produced a definite response — the request provably
- *  reached the server and was refused, so its effect on server state is KNOWN
- *  (nothing was applied). A null status is fail-closed: whether the mutation
- *  landed is genuinely unknown and the caller must reconcile before retrying. */
+/** True only when the status PROVES the server rejected the request before applying
+ *  it — a 4xx client error (validation, auth, permission, state/conflict, rate limit).
+ *  For those, and only those, is the mutation's effect KNOWN to be "nothing applied",
+ *  so the caller may safely re-decide.
+ *
+ *  A 5xx or gateway status (500/502/503/504) is deliberately NOT a refusal: a 500 can
+ *  be raised AFTER a partial write or a commit, and a 502/503/504 can be minted by a
+ *  proxy that never received the backend's answer — so whether the mutation landed is
+ *  genuinely unknown. Those, like a null status (network failure/abort/timeout/CORS),
+ *  fall through to the fail-closed branch: reconcile before retrying, never tell the
+ *  operator "nothing was applied". */
 export function isBackendRefusal(error: unknown): boolean {
-  return requestStatus(error) !== null;
+  const status = requestStatus(error);
+  return status !== null && status >= 400 && status < 500;
 }
 
 /** Short, sanitized form of a thrown request error. Exported so every user-facing

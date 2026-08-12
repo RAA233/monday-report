@@ -16,14 +16,126 @@
  *      focusable, explained, and offers a next action
  *   5. landing preview figures are labelled sample values, not workspace provenance
  *
- * Run: MONDAY_REPORT_WEB_BASE=http://127.0.0.1:5174 node scripts/redesign_stage1_defects.mjs
- * (start the redesign dev server first; VITE_API_BASE_URL is only used as the origin
- *  these stubs match, so it can point anywhere as long as it is a valid URL.)
+ * Run: MONDAY_REPORT_WEB_BASE=… MONDAY_REPORT_API_BASE=… (plus the isolated state
+ *      pointers below) node scripts/redesign_stage1_defects.mjs
+ * (start the redesign dev server first.)
+ *
+ * ISOLATION, and why this suite has the same gate as the mutating sibling suite:
+ * the stubs are installed by ORIGIN MATCH, and the app resolves its API origin from the
+ * build-time `VITE_API_BASE_URL` baked into the dev server — not from this process's
+ * environment. If those two spellings disagree AT ALL (`localhost` vs `127.0.0.1` for
+ * the very same backend), interception silently misses, requests reach the real network,
+ * and a click such as Studio "Build" issues `GET /workspaces/{id}/report-draft`, which
+ * the backend records as an AUDITED write on the hash-chained trust surface. So this
+ * suite must never be pointed at a live stack, exactly like `ui_redesign_e2e.mjs`:
+ *
+ *   1. the repository's fail-closed `verification_isolation.py` preflight, plus the same
+ *      local re-assertions that close its ALLOW_LIVE_TARGET / case-sensitivity /
+ *      relative-root gaps for a suite that can mutate;
+ *   2. `assertStubsIntercept` — proof, before any click, that interception actually
+ *      engaged: a canary request is counted, and the app's own resolved origin (read
+ *      from the served bundle) must equal the origin these stubs match. A spelling
+ *      difference is a REFUSAL, not a silent escape;
+ *   3. every route handler `fulfill`s; none calls `continue()`, so no matched request
+ *      can reach a server, and an unmatched one is caught by (2).
  */
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
-const WEB = (process.env.MONDAY_REPORT_WEB_BASE ?? "http://127.0.0.1:5174").replace(/\/$/, "");
-const API = (process.env.MONDAY_REPORT_API_BASE ?? "http://127.0.0.1:8010").replace(/\/$/, "");
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function refuseNotIsolated(reason, detail) {
+  console.error(`FAIL: verification isolation - ${reason}`);
+  if (detail) console.error(detail);
+  console.error(
+    "redesign_stage1_defects drives a real browser whose traffic can escape its stubs, " +
+      "so it refuses to run without an explicitly isolated stack."
+  );
+  process.exit(2);
+}
+
+// Layer 1: the repository's single definition of "isolated". Captured stdout (this
+// file's own summary JSON is on stdout), bounded, and an unspawnable interpreter is
+// reported as such rather than as an isolation verdict.
+try {
+  execFileSync(
+    process.env.PYTHON ?? "python",
+    [path.join(REPO_ROOT, "scripts", "verification_isolation.py"), "--context", "redesign-stage1-defects"],
+    { stdio: ["ignore", "pipe", "pipe"], timeout: 30_000, encoding: "utf8" }
+  );
+} catch (error) {
+  const stderr = (error && error.stderr) || "";
+  const stdout = (error && error.stdout) || "";
+  if (error && error.status === 2) {
+    refuseNotIsolated("the repository preflight refused this environment.", `${stdout}${stderr}`);
+  }
+  refuseNotIsolated(
+    `the preflight could not be executed (${(error && (error.code || error.message)) || "unknown"}).`,
+    `${stdout}${stderr}`.trim() || "Set PYTHON to a spawnable interpreter, or fix the preflight."
+  );
+}
+
+// Layer 2: hold regardless of any override. No default may stand in for these — a
+// defaulted API base is exactly how the origin spellings drift apart.
+{
+  const required = [
+    "MONDAY_REPORT_STATE_PATH",
+    "MONDAY_REPORT_STORAGE_ROOT",
+    "MONDAY_REPORT_EXPORT_ROOT",
+    "MONDAY_REPORT_API_BASE",
+    "MONDAY_REPORT_WEB_BASE"
+  ];
+  const unset = required.filter((name) => !(process.env[name] ?? "").trim());
+  if (unset.length > 0) {
+    refuseNotIsolated(
+      `these must be set explicitly, with no default: ${unset.join(", ")}.`,
+      "An override such as MONDAY_REPORT_ALLOW_LIVE_TARGET does not excuse them."
+    );
+  }
+  const liveState = path.resolve(REPO_ROOT, ".local_data");
+  const insideOrEqual = (candidate, root) => {
+    const rel = path.relative(root, candidate);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  };
+  for (const name of required.slice(0, 3)) {
+    const raw = process.env[name];
+    if (!path.isAbsolute(raw)) {
+      refuseNotIsolated(`${name} must be an ABSOLUTE path (got ${JSON.stringify(raw)}).`);
+    }
+    const resolved = path.resolve(raw);
+    // path.relative, not startsWith: Windows paths are case-insensitive.
+    if (insideOrEqual(resolved, liveState) || insideOrEqual(resolved, REPO_ROOT)) {
+      refuseNotIsolated(
+        `${name} points inside the repository or the live .local_data (${resolved}).`,
+        "Point every state pointer at a disposable directory outside the tree."
+      );
+    }
+  }
+  for (const [name, live] of [
+    ["MONDAY_REPORT_API_BASE", "8000"],
+    ["MONDAY_REPORT_WEB_BASE", "5173"]
+  ]) {
+    let parsed;
+    try {
+      parsed = new URL(process.env[name]);
+    } catch {
+      refuseNotIsolated(`${name} is not a valid URL (${JSON.stringify(process.env[name])}).`);
+    }
+    if (parsed.port === live) {
+      refuseNotIsolated(`${name} names the LIVE port ${live} (${parsed.origin}).`);
+    }
+  }
+}
+
+const WEB = process.env.MONDAY_REPORT_WEB_BASE.replace(/\/$/, "");
+const API = process.env.MONDAY_REPORT_API_BASE.replace(/\/$/, "");
+const API_ORIGIN = new URL(API).origin;
+
+// Counts every request the stub router actually intercepted. Zero at the point of the
+// first navigation-driven read would mean the stubs are not on the app's path.
+let intercepted = 0;
 
 const results = [];
 let failed = 0;
@@ -98,9 +210,23 @@ function json(body, status = 200) {
   return { status, contentType: "application/json", body: JSON.stringify(body) };
 }
 
-/** Install a stub router for one scenario. `overrides` maps a path suffix to a body. */
+/** Install a stub router for one scenario. `overrides` maps a path suffix to a body.
+ *
+ *  Routes are matched by PREDICATE on the parsed origin, not by a URL-pattern string:
+ *  a glob compares spellings, while `new URL(...).origin` compares what the browser
+ *  will actually connect to. Every branch fulfills; none continues, so a matched
+ *  request can never reach a server. */
 async function stub(page, { workspaces = [WS], overrides = {} } = {}) {
-  await page.route(`${API}/**`, async (route) => {
+  await page.route(
+    (url) => {
+      try {
+        return new URL(url).origin === API_ORIGIN;
+      } catch {
+        return false;
+      }
+    },
+    async (route) => {
+    intercepted += 1;
     const url = new URL(route.request().url());
     const p = url.pathname;
     const send = (b, s = 200) => route.fulfill(json(b, s));
@@ -125,8 +251,90 @@ async function stub(page, { workspaces = [WS], overrides = {} } = {}) {
     if (p.endsWith("/documents")) return send([]);
     // benign default: an empty collection never crashes a list read.
     return send([]);
-  });
+  }
+  );
 }
+
+/** Prove, BEFORE any click can reach a handler, that the stubs are on the app's path.
+ *
+ *  This observes the BROWSER'S OWN TRAFFIC rather than reading a variable out of the
+ *  bundle: what matters is not what the app was configured with but where it actually
+ *  connects. Two independent facts, both required:
+ *
+ *    - every origin the page contacted is either the web origin under test or exactly
+ *      the origin these stubs intercept. A `localhost` vs `127.0.0.1` spelling
+ *      difference shows up here as a foreign origin and is REFUSED, which is precisely
+ *      the escape route that would otherwise let a click reach a real backend;
+ *    - a CANARY request issued from the page to the stubbed API origin is provably
+ *      intercepted and answered by the stub, so the router is demonstrably on the
+ *      request path and not merely installed. The canary is `GET /auth/session`: a
+ *      read, never a mutation, so even the failure case cannot change server state.
+ *
+ *  Either failing is a hard refusal (exit 2), never a recorded check: a suite whose
+ *  isolation is unproven must not continue to the phase where it clicks things. */
+async function assertStubsIntercept(page, contactedOrigins) {
+  const webOrigin = new URL(WEB).origin;
+  const before = intercepted;
+  const canary = await page.evaluate(async (api) => {
+    try {
+      const response = await fetch(`${api}/auth/session`, { headers: { accept: "application/json" } });
+      return { ok: response.ok, body: (await response.text()).slice(0, 200) };
+    } catch (error) {
+      return { ok: false, body: `fetch failed: ${String(error)}` };
+    }
+  }, API);
+  if (intercepted === before) {
+    refuseNotIsolated(
+      "the canary request to the stubbed API origin was NOT intercepted.",
+      `the stub router did not see GET ${API}/auth/session (response: ${JSON.stringify(canary.body)}). ` +
+        "Traffic is reaching something other than these stubs; refusing to continue."
+    );
+  }
+  // The stub's own tenant slug proves the ANSWER came from the stub, not merely that a
+  // matcher fired — a real backend would not return this fixture.
+  if (!canary.ok || !canary.body.includes(`"slug":"${TENANT.slug}"`)) {
+    refuseNotIsolated(
+      "the canary response did not come from the stub fixture.",
+      `expected the stub tenant slug ${JSON.stringify(TENANT.slug)}; got ${JSON.stringify(canary.body)}.`
+    );
+  }
+  const foreign = [...contactedOrigins].filter((o) => o !== webOrigin && o !== API_ORIGIN);
+  if (foreign.length > 0) {
+    refuseNotIsolated(
+      "the browser contacted an origin these stubs do not intercept.",
+      `foreign origin(s): ${foreign.join(", ")}; stubs intercept ${API_ORIGIN}, page is ` +
+        `${webOrigin}. Requests are escaping to a real backend — most often because the ` +
+        "dev server was built with a VITE_API_BASE_URL whose host spelling differs from " +
+        "MONDAY_REPORT_API_BASE. Rebuild the dev server with the identical origin."
+    );
+  }
+}
+
+// Every check id this suite emits on a complete run. Pinned so a structurally skipped
+// block shrinks the total instead of passing silently: `coverage-complete` compares the
+// emitted set against this list in both directions.
+const EXPECTED_CHECK_IDS = [
+  "d1-status-matrix",
+  "d1-unknown-fail-closed",
+  "d1-sanitized-string-would-misclassify",
+  "d3-inflight-hover-contrast",
+  "d3-inline-colored-inert-contrast",
+  "d3-rule-scoped-to-disabled",
+  "d5-no-workspace-provenance-claim",
+  "d5-sample-values-labelled",
+  "d2-build-reachable-when-connected",
+  "d2-no-workspace-click-announces",
+  "d2-click-not-silent",
+  "d4-gate-reason-shown",
+  "d4-gate-next-action",
+  "d4-closed-gate-not-native-disabled",
+  "d4-closed-gate-aria-disabled",
+  "d4-closed-gate-describedby-reason",
+  "d4-describedby-target-exists",
+  "d4-closed-gate-activation-blocked",
+  "no-web-errors",
+  "coverage-complete"
+];
 
 async function main() {
   const browser = await chromium.launch();
@@ -134,11 +342,35 @@ async function main() {
   const errors = [];
   context.on("weberror", (e) => errors.push(String(e.error())));
 
+  // Every origin the browser contacts, recorded for the isolation assertion. A request
+  // that escaped the stubs shows up here as a third origin.
+  const contactedOrigins = new Set();
+  // Mutating API calls, counted by method+path rather than by any UI side effect, so a
+  // regressed handler is caught by the request it issued and not by a transient string.
+  const exportPosts = [];
+  context.on("request", (request) => {
+    try {
+      const url = new URL(request.url());
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        contactedOrigins.add(url.origin);
+      }
+      if (request.method() === "POST" && /\/monday-reports\/[^/]+\/exports\b/.test(url.pathname)) {
+        exportPosts.push(`${request.method()} ${url.pathname}`);
+      }
+    } catch {
+      /* non-URL request targets cannot reach a backend */
+    }
+  });
+
   // ── Defect 1: refusal discriminator — the REAL exported function, full matrix ─────
   {
     const page = await context.newPage();
     await stub(page, { workspaces: [] });
     await page.goto(`${WEB}/`, { waitUntil: "domcontentloaded" });
+    // Prove the stubs are on the request path — and that no traffic reached a foreign
+    // origin — before anything in this suite clicks a control.
+    await page.waitForTimeout(500);
+    await assertStubsIntercept(page, contactedOrigins);
     const r = await page.evaluate(async () => {
       const m = await import("/src/redesign/lib/workspace.tsx");
       // Missing exports is the pre-fix state: report it as data, not a crash, so the
@@ -147,8 +379,17 @@ async function main() {
         return { missing: true, errorText409: typeof m.errorText === "function" ? m.errorText(new Error("API 409: conflict")) : "" };
       }
       const mk = (msg) => new Error(msg);
-      const statuses = [400, 401, 403, 404, 409, 422, 423, 429, 500, 502, 503];
-      const refusal = statuses.map((s) => ({
+      // 4xx PROVE the server rejected before applying. 5xx/gateway do not: a 500 can
+      // follow a commit and a 502/504 can be minted by a proxy that never reached the
+      // backend, so they must classify as UNKNOWN (fail closed), not as refusals.
+      const proven = [400, 401, 403, 404, 409, 422, 423, 429];
+      const unproven = [500, 502, 503, 504];
+      const refusal = proven.map((s) => ({
+        s,
+        status: m.requestStatus(mk(`API ${s}: detail here`)),
+        isRefusal: m.isBackendRefusal(mk(`API ${s}: detail here`))
+      }));
+      const serverSide = unproven.map((s) => ({
         s,
         status: m.requestStatus(mk(`API ${s}: detail here`)),
         isRefusal: m.isBackendRefusal(mk(`API ${s}: detail here`))
@@ -163,6 +404,7 @@ async function main() {
       ];
       return {
         refusal,
+        serverSide,
         unknowns,
         // The OLD classifier tested errorText()'s output; prove that erases the status.
         oldClassifierOn409: /^API \d{3}\b/.test(m.errorText(mk("API 409: conflict"))),
@@ -176,8 +418,17 @@ async function main() {
       await page.close();
       // fall through to the remaining defect blocks
     } else {
-    const everyStatus = r.refusal.every((x) => x.status === x.s && x.isRefusal === true);
-    check("d1-status-matrix", everyStatus, `statuses -> ${JSON.stringify(r.refusal.map((x) => x.status))}`);
+    // 4xx parse AND classify as proven refusals; 5xx/gateway parse but must NOT, or the
+    // operator is told "nothing was applied" about a mutation that may have landed.
+    const everyStatus =
+      r.refusal.every((x) => x.status === x.s && x.isRefusal === true) &&
+      r.serverSide.every((x) => x.status === x.s && x.isRefusal === false);
+    check(
+      "d1-status-matrix",
+      everyStatus,
+      `4xx refusals -> ${JSON.stringify(r.refusal.map((x) => [x.s, x.isRefusal]))}; ` +
+        `5xx/gateway must be unknown -> ${JSON.stringify(r.serverSide.map((x) => [x.s, x.isRefusal]))}`
+    );
     check("d1-unknown-fail-closed", r.unknowns.every((x) => x === false), `unknowns -> ${JSON.stringify(r.unknowns)}`);
     check(
       "d1-sanitized-string-would-misclassify",
@@ -194,6 +445,10 @@ async function main() {
     await stub(page, { workspaces: [] });
     await page.goto(`${WEB}/`, { waitUntil: "domcontentloaded" });
     await page.evaluate(() => {
+      // Probe controls for the APPEARANCE contract only: this block measures computed
+      // colour under hover, which is all the CSS rule owns. Activation being blocked is
+      // the handler's job and is asserted for real against the app's own closed-gate
+      // export button in the d4 block below (by counting issued requests).
       const mkBtn = (id, cls, aria, inlineColor) => {
         const b = document.createElement("button");
         b.id = id;
@@ -201,8 +456,6 @@ async function main() {
         if (aria) b.setAttribute("aria-disabled", "true");
         if (inlineColor) b.style.color = inlineColor;
         b.textContent = "Building draft…";
-        b.dataset.fired = "0";
-        b.addEventListener("click", () => (b.dataset.fired = "1"));
         document.body.appendChild(b);
       };
       mkBtn("t-primary-inert", "btn btn-primary", true, null);
@@ -231,10 +484,6 @@ async function main() {
     const inertBg = parseRgb(prim.bg);
     const scoped = !(liveBg.r === inertBg.r && liveBg.g === inertBg.g && liveBg.b === inertBg.b);
     check("d3-rule-scoped-to-disabled", scoped, `live hover bg ${live.bg} != inert bg ${prim.bg}`);
-
-    // Activation blocked: an aria-disabled native button that the app renders keeps its
-    // handler inert. Here we assert the app's own contract — clicking a control the app
-    // marked aria-disabled must not run its action — using the reset button below.
     await page.close();
   }
 
@@ -269,6 +518,12 @@ async function main() {
     await btn.waitFor({ state: "visible", timeout: 15000 });
     const nativelyDisabled = await btn.isDisabled();
     check("d2-build-reachable-when-connected", !nativelyDisabled, `connected + no workspace: button disabled=${nativelyDisabled}`);
+    // Re-assert isolation HERE, on an app route that has actually issued its mount
+    // reads, and immediately before the first click. The landing page makes no API
+    // calls, so the foreign-origin half of the gate has nothing to inspect there; this
+    // is the point where an escaped request would already be visible and where the very
+    // next statement could otherwise reach a real backend.
+    await assertStubsIntercept(page, contactedOrigins);
     // A blocked click must ANNOUNCE. Before the fix the dedup guard (null===null)
     // swallowed it: no alert, no status text change.
     const before = await page.locator("body").innerText();
@@ -322,17 +577,45 @@ async function main() {
     const reasonText = await page.evaluate(() => document.getElementById("export-gate-reason")?.textContent ?? "");
     check("d4-describedby-target-exists", /validation task/i.test(reasonText), `#export-gate-reason = ${JSON.stringify(reasonText.slice(0, 80))}`);
 
-    // Activation blocked: clicking the aria-disabled export must not issue an export
-    // (no POST /monday-reports/*/exports). We assert the handler is inert by checking
-    // no status flips to "Creating…".
+    // Activation blocked, asserted on the REQUEST and not on transient UI text: a
+    // regressed non-inert handler issues POST /monday-reports/{id}/exports/{fmt}, and
+    // with an instant stub response the "Creating…" status can come and go inside any
+    // fixed wait — so absence of that string proves nothing. Count the POSTs instead.
+    // Same re-assertion before the click that could issue an export POST.
+    await assertStubsIntercept(page, contactedOrigins);
+    const postsBefore = exportPosts.length;
     await exportBtn.click({ force: true });
-    await page.waitForTimeout(300);
-    const creating = await page.evaluate(() => /Creating .* export…/i.test(document.body.innerText));
-    check("d4-closed-gate-activation-blocked", creating === false, "clicking the closed-gate export did not start an export");
+    await page.waitForTimeout(500);
+    const issued = exportPosts.slice(postsBefore);
+    check(
+      "d4-closed-gate-activation-blocked",
+      issued.length === 0,
+      issued.length === 0
+        ? "clicking the closed-gate export issued 0 export requests"
+        : `clicking the closed-gate export issued ${issued.length}: ${issued.join(", ")}`
+    );
     await page.close();
   }
 
   check("no-web-errors", errors.length === 0, errors.length ? errors.slice(0, 3).join(" || ") : "0 uncaught page errors");
+
+  // Coverage: the emitted ids must equal EXPECTED_CHECK_IDS in BOTH directions, so a
+  // structurally skipped block (or a silently renamed check) fails the run instead of
+  // shrinking the total unnoticed. Duplicates fail too.
+  {
+    const emitted = results.map((r) => r.id).filter((id) => id !== "coverage-complete");
+    const expected = EXPECTED_CHECK_IDS.filter((id) => id !== "coverage-complete");
+    const missing = expected.filter((id) => !emitted.includes(id));
+    const undeclared = emitted.filter((id) => !expected.includes(id));
+    const duplicated = emitted.filter((id, i) => emitted.indexOf(id) !== i);
+    check(
+      "coverage-complete",
+      missing.length === 0 && undeclared.length === 0 && duplicated.length === 0,
+      missing.length || undeclared.length || duplicated.length
+        ? `missing=${JSON.stringify(missing)} undeclared=${JSON.stringify(undeclared)} duplicated=${JSON.stringify(duplicated)}`
+        : `all ${expected.length} declared check(s) ran exactly once`
+    );
+  }
 
   await browser.close();
   const passed = results.filter((r) => r.ok).length;

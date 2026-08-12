@@ -135,10 +135,13 @@ export function Validation() {
       showToast(
         "Not recorded",
         // Classify on the ORIGINAL typed error, not errorText()'s sanitized string —
-        // its `^API ` rewrite erases the status, so a definite backend refusal (403
-        // permission, 409 conflict, 423 locked, 5xx) used to collapse into the
-        // network-unknown branch. A backend refusal provably left the gate unchanged;
-        // a null status stays fail-closed (reconcile before retrying).
+        // its `^API ` rewrite erases the status, so a definite client-side refusal
+        // (403 permission, 409 conflict, 423 locked) used to collapse into the
+        // network-unknown branch. Only a 4xx proves the server rejected the request
+        // before applying it, so only then may this say the gate is unchanged. A 5xx
+        // or gateway status (which can follow a commit, or be minted by a proxy that
+        // never reached the backend) and a null status both stay fail-closed:
+        // reconcile before deciding again.
         isBackendRefusal(caught)
           ? `The decision was not recorded, so the gate is unchanged. ${errorText(caught)}`
           : `The request did not complete, so whether it reached the backend is unknown — reload the queue before deciding again. ${errorText(caught)}`
