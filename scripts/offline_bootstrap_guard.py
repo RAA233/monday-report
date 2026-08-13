@@ -1255,6 +1255,27 @@ def stopped_in_source_stage(result):
             result.code is not None and result.code < 30)
 
 
+def stopped_before_owner_check(result, prefix="PARENT"):
+    """A class-level safety statement for the descriptor rows.
+
+    Test-NodeSecurity reports the OWNER problem LAST, so a refusal on the
+    descriptor itself means the descriptor was rejected before ownership was
+    considered at all.  That distinction is what turns the SCN-26/SCN-27
+    deletion experiments into observations of damage rather than changes of
+    wording: unelevated, every fixture this harness builds is owned by this
+    account, so with the descriptor gate deleted the run refuses on the OWNER -
+    and on a real, admin-owned parent the owner check would have passed and the
+    hostile descriptor would have been accepted.
+    """
+    descriptor_codes = (CODE_OF[prefix + "_DACL_ABSENT"],
+                        CODE_OF[prefix + "_ACE_UNINTERPRETABLE"])
+    return ("the run refused on the DESCRIPTOR (exit %s), not on the owner - the owner "
+            "check is reported last, so on an admin-owned parent this descriptor would "
+            "have been the only thing standing between the operator and the install"
+            % result.code,
+            result.code in descriptor_codes)
+
+
 SCENARIOS = []
 
 
@@ -2147,6 +2168,7 @@ def _no_trust_widening_parameter(base, image, work):
           mechanism="arguments are validated before anything is opened: the pin must be "
                     "64 hex characters and the root name must satisfy the bundle path "
                     "policy",
+          mutations=("args_pin",),
           reasons=("ARGS_INVALID",))
 def _args_invalid(base, image, work):
     """Two different argument faults, one row.
@@ -2211,8 +2233,11 @@ def _source_missing(base, image, work):
 
 @scenario("SCN-23",
           mechanism="the source path is opened WITHOUT following reparse points, so a "
-                    "junction NAMED as the source is refused rather than walked through",
-          mutations=("reparse_node",),
+                    "junction NAMED as the source is refused rather than walked through - "
+                    "and TWO independent gates say so, one in the canonicaliser and one "
+                    "on the root the bundle walk is handed, so the flip needs both "
+                    "removed (defence in depth, reported rather than hidden)",
+          mutations=("reparse_node", "bundle_root_reparse"),
           reasons=("SOURCE_REPARSE",))
 def _source_is_junction(base, image, work):
     """A different site from SCN-16.
@@ -2307,6 +2332,7 @@ def _parent_missing(base, image, work):
 @scenario("SCN-26",
           mechanism="a NULL DACL is not an empty DACL - it grants everyone everything - "
                     "and is refused rather than read as 'no dangerous ACEs found'",
+          mutations=("dacl_absent",),
           reasons=("PARENT_DACL_ABSENT",))
 def _parent_null_dacl(base, image, work):
     """The most dangerous DACL there is, and the one an ACE walk sees as empty.
@@ -2340,6 +2366,7 @@ def _parent_null_dacl(base, image, work):
         ("putting an ordinary DACL back changes the refusal, so the refusal was about "
          "the NULL DACL (control exit %s)" % control.code,
          control.reason != "PARENT_DACL_ABSENT"),
+        stopped_before_owner_check(result),
     ]
     return Result("SCN-26", "a NULL DACL on the parent is refused, not read as 'clean'",
                   "PARENT_DACL_ABSENT", result, checks)
@@ -2349,6 +2376,7 @@ def _parent_null_dacl(base, image, work):
           mechanism="an ACE type this bootstrap cannot decode is refused; a decoder that "
                     "skipped what it did not understand would skip exactly the ACE an "
                     "attacker chooses",
+          mutations=("ace_uninterpretable",),
           reasons=("PARENT_ACE_UNINTERPRETABLE",))
 def _parent_conditional_ace(base, image, work):
     """A CALLBACK (conditional) ACE, type 9 - not ALLOWED and not DENIED.
@@ -2389,6 +2417,7 @@ def _parent_conditional_ace(base, image, work):
         ("removing ONLY the conditional ACE changes the refusal, so the refusal was "
          "about it (control exit %s)" % control.code,
          control.reason != "PARENT_ACE_UNINTERPRETABLE"),
+        stopped_before_owner_check(result),
     ]
     return Result("SCN-27", "an ACE type the bootstrap cannot decode is refused",
                   "PARENT_ACE_UNINTERPRETABLE", result, checks)
@@ -3468,6 +3497,31 @@ MUTATIONS = {
     "enum_reparse": [(
         '                    if ($information.IsReparse) { Deny -Reason "${Phase}_REPARSE" -Detail $relative }',
         "                    if ($false) { }",
+    )],
+    # The bundle walk has its OWN reparse gate on the root it is handed, quite
+    # separate from the one in Resolve-CanonicalPath.  SCN-23 is refused by both,
+    # so both have to go before the flip can be measured - defence in depth,
+    # reported rather than hidden behind whichever gate happens to fire first.
+    # SCN-21: stop checking that the operator's pin is even a hash.
+    "args_pin": [(
+        "    if ($pin -notmatch '^[0-9a-f]{64}$') {",
+        "    if ($false) {",
+    )],
+    # SCN-26: read a NULL DACL as "no ACEs found, nothing wrong here".  It is the
+    # opposite: a NULL DACL grants every principal everything.
+    "dacl_absent": [(
+        "    if (-not $sd.DaclPresent -or $sd.DaclNull) { return @{ Kind = 'DACL_ABSENT'; Detail = $Path } }",
+        "    if ($false) { return @{ Kind = 'DACL_ABSENT'; Detail = $Path } }",
+    )],
+    # SCN-27: skip the ACE types the decoder does not understand instead of
+    # refusing them - which skips exactly the ACE an attacker would choose.
+    "ace_uninterpretable": [(
+        "        if (-not $ace.Interpretable) {",
+        "        if ($false) {",
+    )],
+    "bundle_root_reparse": [(
+        '        if ($information.IsReparse) { Deny -Reason "${Phase}_REPARSE" -Detail $Root }',
+        "        if ($false) { }",
     )],
     "git_component": [(
         "    return [string]::Equals($Component, '.git', [StringComparison]::OrdinalIgnoreCase)",
