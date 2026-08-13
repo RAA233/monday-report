@@ -357,6 +357,63 @@ if (Test-Wanted 'P1_LIVE_PROGRAM_FILES_ACCEPTED') {
     } catch { Add-Failure 'P1_LIVE_PROGRAM_FILES_ACCEPTED' 'evaluate_chain' $_.Exception.Message }
 }
 
+function New-SyntheticDescriptorHex {
+    <#  Exact descriptor bytes for cases an unprivileged process cannot put on a
+        real file (an owner it does not hold, a generic-rights ACE).  The bytes
+        are produced by the platform's own descriptor serialiser, so the kernel
+        parses the same layout it would read from disk.  #>
+    param([Parameter(Mandatory)][string]$Sddl)
+    $raw = New-Object System.Security.AccessControl.RawSecurityDescriptor($Sddl)
+    $raw.SetFlags($raw.ControlFlags -bor [System.Security.AccessControl.ControlFlags]::SelfRelative)
+    $bytes = New-Object byte[] $raw.BinaryLength
+    $raw.GetBinaryForm($bytes, 0)
+    return (-join ($bytes | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Add-SyntheticNodeScenario {
+    param([string]$Id, [string]$Sddl, [bool]$IsFinal)
+    try {
+        $hex = New-SyntheticDescriptorHex -Sddl $Sddl
+        $node = [ordered]@{
+            path = 'C:\synthetic'; exists = $true; reparse = $false
+            descriptor_hex = $hex; is_final = $IsFinal
+        }
+        $verdict = Test-KernelNode -Node ([pscustomobject]$node) -TrustedSids $script:Baseline
+        Add-Record -Id $Id -Operation 'evaluate_node' -Verdict $verdict `
+            -TwinInput ([ordered]@{ node = $node; trusted_sids = $script:Baseline }) -Evidence @{ sddl = $Sddl }
+    } catch { Add-Failure $Id 'evaluate_node' $_.Exception.Message }
+}
+
+if (Test-Wanted 'P1_NODE_OWNER_UNTRUSTED') {
+    # Owner is a principal outside the trusted set; the DACL is impeccable.
+    Add-SyntheticNodeScenario -Id 'P1_NODE_OWNER_UNTRUSTED' `
+        -Sddl 'O:S-1-5-21-9-9-9-1001G:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)' -IsFinal $false
+}
+
+if (Test-Wanted 'P1_NODE_GENERIC_ALL_ACE') {
+    # Everyone holds GENERIC_WRITE on the trust root.  The raw bit 0x40000000
+    # matches none of the specific rights the kernel screens for; only folding
+    # it into FILE_GENERIC_WRITE reveals that it carries FILE_WRITE_DATA.
+    # (GENERIC_ALL would not test the fold, because that bit is screened
+    # directly as a redirect-class right.)
+    Add-SyntheticNodeScenario -Id 'P1_NODE_GENERIC_ALL_ACE' `
+        -Sddl 'O:SYG:BAD:P(A;;FA;;;SY)(A;;GW;;;WD)' -IsFinal $true
+}
+
+if (Test-Wanted 'P1_NODE_FINAL_CONTENT_WRITE') {
+    # Write-data to Everyone matters on the trust root itself...
+    Add-SyntheticNodeScenario -Id 'P1_NODE_FINAL_CONTENT_WRITE' `
+        -Sddl 'O:SYG:BAD:P(A;;FA;;;SY)(A;;0x2;;;WD)' -IsFinal $true
+}
+
+if (Test-Wanted 'P1_NODE_NONFINAL_CONTENT_WRITE') {
+    # ...but on an ancestor it does not let anyone replace or redirect the
+    # component, so the same ACE is accepted there.  Proving both directions
+    # keeps the distinction a decision rather than an accident.
+    Add-SyntheticNodeScenario -Id 'P1_NODE_NONFINAL_CONTENT_WRITE' `
+        -Sddl 'O:SYG:BAD:P(A;;FA;;;SY)(A;;0x2;;;WD)' -IsFinal $false
+}
+
 if (Test-Wanted 'P1_NODE_NULL_DACL_PRESENT_BIT') {
     <#  Windows encodes "no DACL" two ways.  Setting D:NO_ACCESS_CONTROL through
         the managed API yields control=0x9400 - SE_DACL_PRESENT CLEAR (measured).
@@ -487,6 +544,20 @@ if (Test-Wanted 'P2_PIN_MEMBERSHIP_REMOVED') {
             expected_pin = $pin.pin; executed = @('entry.ps1')
         })
     } catch { Add-Failure 'P2_PIN_MEMBERSHIP_REMOVED' 'verify_bundle' $_.Exception.Message }
+}
+
+if (Test-Wanted 'P2_BUNDLE_REPARSE') {
+    <#  A junction inside the bundle: part of what is pinned lives elsewhere and
+        can be redirected after the pin is taken.  #>
+    try {
+        $root = New-BundleFixture 'p2-reparse'
+        $elsewhere = New-Workdir 'p2-reparse-target'
+        Set-Content -LiteralPath (Join-Path $elsewhere 'planted.psm1') -Value "function Get-Planted { 4 }`n" -Encoding UTF8 -NoNewline
+        $null = & "$([Environment]::GetFolderPath([Environment+SpecialFolder]::System))\cmd.exe" /c mklink /J "$(Join-Path $root 'linked')" "$elsewhere"
+        $pin = Get-BundlePin -Members (Get-BundleMembersFromDisk -Root $root)
+        $verdict = Test-BundlePin -Root $root -ExpectedPin $pin.pin -ExecutedPaths @((Join-Path $root 'entry.ps1'))
+        Add-Record -Id 'P2_BUNDLE_REPARSE' -Operation 'verify_bundle_live' -Verdict $verdict
+    } catch { Add-Failure 'P2_BUNDLE_REPARSE' 'verify_bundle_live' $_.Exception.Message }
 }
 
 if (Test-Wanted 'P2_PIN_MEMBER_RENAMED') {

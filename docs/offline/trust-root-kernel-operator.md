@@ -44,6 +44,14 @@ never asks whether the path exists and then creates it.
   it for what it is. <!-- witness: TRK-P1-03 -->
 - An ACE the kernel cannot interpret exactly — a callback ACE, an object ACE, an
   unknown type — is refused rather than approximated. <!-- witness: TRK-P1-04 -->
+- A component owned by a principal outside the trusted set is refused, however
+  clean its DACL looks. <!-- witness: TRK-P1-17 -->
+- Rights granted as generic bits (`GENERIC_WRITE`, `GENERIC_ALL`) are folded to
+  their file-specific meanings before being judged, so write access spelled
+  generically is not missed. <!-- witness: TRK-P1-18 -->
+- Write access to the trust root's contents is refused on the root itself, while
+  the same ACE on an ancestor — where it confers no power to replace or redirect
+  that ancestor — is accepted. The distinction is a decision, not an accident. <!-- witness: TRK-P1-19, TRK-P1-20 -->
 
 If creation succeeds, the kernel returns the root's file identity. Keep it.
 
@@ -59,7 +67,11 @@ hash list to keep in step with what actually runs.
   so the set that is hashed cannot be smaller than the set that runs. <!-- witness: TRK-P2-05 -->
 - The implementation that computes the pin is itself a pinned member. <!-- witness: TRK-P2-07 -->
 - Re-verifying after the pin check catches a member rewritten in between. <!-- witness: TRK-P2-06 -->
+- Renaming a member with identical contents changes the pin: names are pinned,
+  not just bytes. <!-- witness: TRK-P2-09 -->
 - Two members whose paths differ only in case are refused as ambiguous. <!-- witness: TRK-P2-08 -->
+- A reparse point inside the bundle is refused: part of what is pinned would
+  live elsewhere, under someone else's control, redirectable after the pin. <!-- witness: TRK-P2-10 -->
 
 Transfer the pin by a channel that is not the bundle.
 

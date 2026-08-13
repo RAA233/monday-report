@@ -714,12 +714,27 @@ function Get-BundleMembersFromDisk {
     param([Parameter(Mandatory)][string]$Root)
     $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\')
     $members = New-Object System.Collections.ArrayList
-    foreach ($file in (Get-ChildItem -LiteralPath $rootFull -Recurse -File -Force)) {
+    foreach ($file in (Get-ChildItem -LiteralPath $rootFull -Recurse -File -Force -Attributes !ReparsePoint)) {
         $relative = $file.FullName.Substring($rootFull.Length + 1)
         $sha = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
         $null = $members.Add([pscustomobject]@{ path = $relative; sha256 = $sha; size = $file.Length })
     }
     return @($members)
+}
+
+function Find-BundleReparsePoint {
+    <#
+    .SYNOPSIS
+      The first reparse point at or under the bundle root, or $null.
+    #>
+    param([Parameter(Mandatory)][string]$Root)
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $rootItem = Get-Item -LiteralPath $rootFull -Force -ErrorAction SilentlyContinue
+    if ($rootItem -and ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $rootFull }
+    foreach ($entry in (Get-ChildItem -LiteralPath $rootFull -Recurse -Force -ErrorAction SilentlyContinue)) {
+        if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $entry.FullName }
+    }
+    return $null
 }
 
 function Test-BundlePin {
@@ -736,6 +751,14 @@ function Test-BundlePin {
         [Parameter(Mandatory)][string]$ExpectedPin,
         [string[]]$ExecutedPaths = @()
     )
+
+    # A reparse point inside the bundle means some of what is pinned lives
+    # somewhere else, under someone else's control, and can be redirected after
+    # the pin is taken.  The bundle must be one tree.
+    $reparse = Find-BundleReparsePoint -Root $Root
+    if ($reparse) {
+        return New-KernelVerdict $script:R.NODE_REPARSE @{ path = $reparse; stage = 'bundle-enumeration' }
+    }
 
     $members = Get-BundleMembersFromDisk -Root $Root
     $computed = Get-BundlePin -Members $members
@@ -772,6 +795,12 @@ function Get-RuntimeExecutedPaths {
     $paths = New-Object System.Collections.ArrayList
     foreach ($module in (Get-Module)) {
         if ($module.Path -and (Test-Path -LiteralPath $module.Path)) { $null = $paths.Add($module.Path) }
+    }
+    # Loaded modules are not the whole of what ran: a dot-sourced script is not
+    # a module.  Every script file on the live call stack is added too, so the
+    # observed set is not narrower than the executing set.
+    foreach ($frame in (Get-PSCallStack)) {
+        if ($frame.ScriptName -and (Test-Path -LiteralPath $frame.ScriptName)) { $null = $paths.Add($frame.ScriptName) }
     }
     if ($PSCommandPath) { $null = $paths.Add($PSCommandPath) }
     foreach ($extra in $Additional) { if ($extra) { $null = $paths.Add($extra) } }
@@ -983,6 +1012,20 @@ function Stop-NativeTrace {
         $check = Test-NativePathAllowed -ObservedPath $launch.Path -SystemDirectory $SystemDirectory -Allowlist $Allowlist
         if ($check.verdict -ne 'ACCEPT') { $null = $findings.Add($launch.Path) }
         if ($launch.ExitCode -ne 0 -and -not $nonZero) { $nonZero = $launch }
+    }
+
+    # Any creation the wrapper did not make is checked BY IDENTITY while the
+    # process can still be opened, rather than being reconciled by count alone.
+    # A count only says how many; a path says which.
+    $instrumentedPids = @(@($script:TraceLaunches) | ForEach-Object { [int64]$_.Pid })
+    foreach ($observedPid in @($createdPids | Sort-Object -Unique)) {
+        if ($instrumentedPids -contains $observedPid) { continue }
+        $image = $null
+        try { $image = (Get-Process -Id $observedPid -ErrorAction Stop).Path } catch { $image = $null }
+        if ($image) {
+            $check = Test-NativePathAllowed -ObservedPath $image -SystemDirectory $SystemDirectory -Allowlist $Allowlist
+            if ($check.verdict -ne 'ACCEPT') { $null = $findings.Add($image) }
+        }
     }
 
     $instrumented = @($script:TraceLaunches).Count

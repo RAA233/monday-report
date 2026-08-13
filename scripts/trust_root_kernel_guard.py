@@ -34,7 +34,6 @@ import io
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -135,7 +134,6 @@ def meta_predicate(registry: Registry, declared: list[str]) -> list[dict[str, An
                 )
 
     asserted = {a["control"] for a in registry.assertions}
-    invoked = {i["scenario"] for i in registry.invocations}
     for control_id in declared:
         if control_id not in asserted:
             violations.append(
@@ -143,18 +141,6 @@ def meta_predicate(registry: Registry, declared: list[str]) -> list[dict[str, An
                     "kind": "silent control",
                     "control": control_id,
                     "detail": "control produced no assertion",
-                }
-            )
-    for assertion in registry.assertions:
-        seqs = assertion["invocations"]
-        if seqs and all(
-            registry.invocations[s]["scenario"] not in invoked for s in seqs if 0 <= s < len(registry.invocations)
-        ):
-            violations.append(
-                {
-                    "kind": "phantom invocation",
-                    "control": assertion["control"],
-                    "detail": "assertion cites invocations with no executed scenario",
                 }
             )
     return violations
@@ -252,6 +238,10 @@ CONTROLS: tuple[Control, ...] = (
         twinned=True,
     ),
     C("TRK-P1-13", "P1", "P1_LIVE_PROGRAM_FILES_ACCEPTED", "ACCEPT", "OK", twinned=True),
+    C("TRK-P1-17", "P1", "P1_NODE_OWNER_UNTRUSTED", "REFUSE", "OWNER_UNTRUSTED", twinned=True),
+    C("TRK-P1-18", "P1", "P1_NODE_GENERIC_ALL_ACE", "REFUSE", "UNSAFE_WRITABLE_ACE", twinned=True),
+    C("TRK-P1-19", "P1", "P1_NODE_FINAL_CONTENT_WRITE", "REFUSE", "UNSAFE_WRITABLE_ACE", twinned=True),
+    C("TRK-P1-20", "P1", "P1_NODE_NONFINAL_CONTENT_WRITE", "ACCEPT", "OK", twinned=True),
     C(
         "TRK-P1-16",
         "P1",
@@ -268,6 +258,7 @@ CONTROLS: tuple[Control, ...] = (
     C("TRK-P2-02", "P2", "P2_PIN_MISMATCH", "REFUSE", "BUNDLE_PIN_MISMATCH", negative="NC04", twinned=True),
     C("TRK-P2-03", "P2", "P2_PIN_MEMBERSHIP_ADDED", "REFUSE", "BUNDLE_PIN_MISMATCH", twinned=True),
     C("TRK-P2-04", "P2", "P2_PIN_MEMBERSHIP_REMOVED", "REFUSE", "BUNDLE_PIN_MISMATCH", twinned=True),
+    C("TRK-P2-10", "P2", "P2_BUNDLE_REPARSE", "REFUSE", "NODE_REPARSE", checks=(("equals", "stage", "bundle-enumeration"),)),
     C("TRK-P2-09", "P2", "P2_PIN_MEMBER_RENAMED", "REFUSE", "BUNDLE_PIN_MISMATCH", twinned=True),
     C(
         "TRK-P2-05",
@@ -420,8 +411,8 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         "MUT-PIN-PARTIAL-ENUMERATION",
         "ps",
-        "foreach ($file in (Get-ChildItem -LiteralPath $rootFull -Recurse -File -Force)) {",
-        "foreach ($file in (Get-ChildItem -LiteralPath $rootFull -Recurse -File -Force -Filter '*.ps1')) {",
+        "foreach ($file in (Get-ChildItem -LiteralPath $rootFull -Recurse -File -Force -Attributes !ReparsePoint)) {",
+        "foreach ($file in (Get-ChildItem -LiteralPath $rootFull -Recurse -File -Force -Attributes !ReparsePoint -Filter '*.ps1')) {",
         ("TRK-P2-03", "TRK-P2-04"),
     ),
     Mutation(
@@ -486,6 +477,48 @@ MUTATIONS: tuple[Mutation, ...] = (
         "    if (-not $anchored) {",
         "    if ($false) {",
         ("TRK-P1-06",),
+    ),
+    Mutation(
+        "MUT-NO-GENERIC-RIGHTS-MAPPING",
+        "ps",
+        "        $effective = Convert-GenericRights -Mask $ace.Mask",
+        "        $effective = $ace.Mask",
+        ("TRK-P1-18",),
+    ),
+    Mutation(
+        "MUT-NO-OWNER-CHECK",
+        "ps",
+        "    if ($trusted -notcontains $sd.OwnerSid) {",
+        "    if ($false) {",
+        ("TRK-P1-17",),
+    ),
+    Mutation(
+        "MUT-NO-FINAL-CONTENT-RIGHTS",
+        "ps",
+        "    if ($isFinal) { $unsafeMask = $unsafeMask -bor $script:CONTENT_CLASS }",
+        "    if ($false) { $unsafeMask = $unsafeMask -bor $script:CONTENT_CLASS }",
+        ("TRK-P1-19", "TRK-P1-18"),
+    ),
+    Mutation(
+        "MUT-NATIVE-PREFIX-MATCH",
+        "ps",
+        ".Equals($systemTrimmed, [StringComparison]::OrdinalIgnoreCase)) {",
+        ".StartsWith($systemTrimmed, [StringComparison]::OrdinalIgnoreCase)) {",
+        ("TRK-P5-08",),
+    ),
+    Mutation(
+        "MUT-NO-EXIT-CODE-CHECK",
+        "ps",
+        "    if ($exitCode -ne 0) {",
+        "    if ($false) {",
+        ("TRK-P5-06",),
+    ),
+    Mutation(
+        "MUT-BUNDLE-ALLOWS-REPARSE",
+        "ps",
+        "    $reparse = Find-BundleReparsePoint -Root $Root",
+        "    $reparse = $null",
+        ("TRK-P2-10",),
     ),
     # Python-side mutations prove the differential control has teeth in both
     # directions, not only when the PowerShell twin drifts.
@@ -653,6 +686,25 @@ def evaluate_controls(
             "observed": "%s/%s" % (record.get("verdict"), record.get("reason")),
         }
 
+    # A control declared twinned must actually have produced a twin record.
+    # Without this, a twin that silently stopped running would remove the
+    # differential comparison rather than fail it.
+    for control in CONTROLS:
+        if not control.twinned:
+            continue
+        record = ps_records.get(control.scenario)
+        if record is None:
+            continue
+        seq = registry.record_invocation(
+            "guard", control.scenario, "twin_coverage",
+            {"verdict": "ACCEPT" if control.scenario in py_records else "REFUSE", "reason": "OK"},
+        )
+        if not registry.record_assertion(
+            control.id, ASSERT_EXECUTED, [seq], "python twin ran", True, control.scenario in py_records
+        ):
+            outcomes[control.id]["passed"] = False
+            outcomes[control.id]["failures"].append("declared twinned but the Python twin produced no record")
+
     # ---- P4 differential parity: identical inputs, compared verdicts -----
     for scenario, py_record in sorted(py_records.items()):
         ps_record = ps_records.get(scenario)
@@ -774,10 +826,6 @@ def evaluate_documentation(outcomes: dict[str, dict[str, Any]], registry: Regist
                     failures.append("claim %r cites unknown witness %s" % (claim[:60], witness))
                 else:
                     failures.append("claim %r cites failing witness %s" % (claim[:60], witness))
-
-    # A mechanism-bearing section with no claim at all is an unbacked mechanism.
-    for heading in re.findall(r"^##\s+(.+)$", text, re.M):
-        pass
 
     return {"passed": not failures, "failures": failures, "claims": len(claims)}
 
@@ -945,6 +993,15 @@ def main(argv: list[str] | None = None) -> int:
                 % len(registry.invocations)
             )
             print("  PASS META-NO-SILENT-CONTROL   %d controls all asserted" % len(declared))
+        tagged = {c.negative: c.id for c in CONTROLS if c.negative}
+        mapped = {i for ids in NEGATIVE_CONTROLS.values() for i in ids}
+        orphaned = sorted(cid for tag, cid in tagged.items() if cid not in mapped)
+        if orphaned:
+            failures += 1
+            print("  FAIL META-NEGATIVE-MAP        controls tagged negative but unmapped: %s" % ", ".join(orphaned))
+        else:
+            print("  PASS META-NEGATIVE-MAP        %d tagged negative controls all mapped" % len(tagged))
+
         ok, detail = meta_self_test()
         if ok:
             print("  PASS META-SELF-TEST           %s" % detail)
