@@ -755,6 +755,39 @@ class Watcher(object):
         return extra_processes, toolchain, extra_artifacts
 
 
+def toolchain_names(mapping):
+    return sorted(set(name.lower() for name in mapping.values()))
+
+
+def confirm_machine_toolchain(watcher, relaunch):
+    """Distinguish the bootstrap's compiler from the machine's.
+
+    `beyond()` deliberately asks whether a compiler-or-shell appeared ANYWHERE on
+    the machine during the run, not just inside the bootstrap's process tree,
+    because a process started through a broker or through WMI is reparented away
+    from its real originator - the evasion that killed a previous revision.  The
+    cost of that breadth is that an unrelated cmd.exe belonging to whoever is
+    using the machine lands in the same set.
+
+    A bootstrap that starts a compiler starts it EVERY time it runs.  Ambient
+    noise does not.  So when the machine-wide set is non-empty the identical
+    launch is observed a SECOND time and only names present in both observations
+    are attributed to the bootstrap.  Both observations are reported, so a
+    reviewer sees the discrimination rather than being asked to trust it.
+
+    `relaunch` is a zero-argument callable returning a fresh Launch of the same
+    command; it is only ever called when there is something to disambiguate.
+    """
+    _, first, _ = watcher.beyond(HOST)
+    if not first:
+        return [], [], []
+    second = relaunch()
+    _, again, _ = second.watcher.beyond(HOST)
+    first_names = toolchain_names(first)
+    second_names = toolchain_names(again)
+    return (sorted(set(first_names) & set(second_names)), first_names, second_names)
+
+
 class HostBaseline(object):
     """What powershell.exe costs before the bootstrap has done anything at all.
 
@@ -1336,11 +1369,21 @@ def _no_compiler(base, image, work):
     temp = str(Path(base) / "temp-observed")
     ensure_dir(long_path(temp))
     HOST.measure_into(temp)     # paired measurement, same directory, same instant
+    def run_once():
+        HOST.measure_into(temp)
+        return launch(image, chain.args(source),
+                      env_overrides={"TEMP": temp, "TMP": temp},
+                      watch_dirs=[temp])
+
     result = launch(image, chain.args(source),
                     env_overrides={"TEMP": temp, "TMP": temp},
                     watch_dirs=[temp])
     watcher = result.watcher
     extra_processes, toolchain, extra_artifacts = watcher.beyond(HOST)
+    confirmed, first_seen, second_seen = confirm_machine_toolchain(watcher, run_once)
+    in_tree = toolchain_names(
+        dict((pid, name) for pid, name in watcher.descendants.items()
+             if name.lower() in Watcher.TOOLCHAIN_NAMES))
 
     # A static complement to the observation, over the bytes the harness already
     # hashed.  The observation is the stronger evidence - it is what actually
@@ -1365,8 +1408,14 @@ def _no_compiler(base, image, work):
          "line of the pinned bytes, taken or not (%s)" % (present or "none"), not present),
         ("harness saw NO process beyond the measured interpreter baseline (%s)"
          % (sorted(extra_processes.values()) or "none seen"), not extra_processes),
-        ("harness saw NO compiler or shell in the bootstrap's process tree (%s)"
-         % (sorted(toolchain.values()) or "none seen"), not toolchain),
+        ("harness saw NO compiler or shell in the bootstrap's own process tree (%s)"
+         % (in_tree or "none seen"), not in_tree),
+        ("harness saw no compiler or shell ANYWHERE ON THE MACHINE that this run "
+         "reproduced - the machine-wide set is what catches a broker-reparented "
+         "process, and a second identical observation is what separates the "
+         "bootstrap's doing from the machine's (run 1: %s; run 2: %s; in both: %s)"
+         % (first_seen or "none", second_seen or "not needed", confirmed or "none"),
+         not confirmed),
         ("harness saw NO file beyond the baseline ever appear in the TEMP directory it "
          "handed the run (%s)" % (extra_artifacts or "none seen"), not extra_artifacts),
         ("harness sees no root created", not exists(chain.root())),
@@ -1400,17 +1449,31 @@ def _poisoned_environment(base, image, work):
             handle.write(b"MZ-not-a-real-image")
     bait_before = sorted(os.listdir(long_path(bait)))
     HOST.measure_into(temp)     # paired measurement, same directory, same instant
-    result = launch(image, chain.args(source),
-                    env_overrides={"TEMP": temp, "TMP": temp, "PATH": bait,
-                                   "PATHEXT": ".EXE;.CMD;.BAT"},
+    poisoned = {"TEMP": temp, "TMP": temp, "PATH": bait, "PATHEXT": ".EXE;.CMD;.BAT"}
+
+    def run_once():
+        HOST.measure_into(temp)
+        return launch(image, chain.args(source), env_overrides=poisoned,
+                      watch_dirs=[temp])
+
+    result = launch(image, chain.args(source), env_overrides=poisoned,
                     watch_dirs=[temp])
     watcher = result.watcher
     extra_processes, toolchain, extra_artifacts = watcher.beyond(HOST)
+    confirmed, first_seen, second_seen = confirm_machine_toolchain(watcher, run_once)
+    in_tree = toolchain_names(
+        dict((pid, name) for pid, name in watcher.descendants.items()
+             if name.lower() in Watcher.TOOLCHAIN_NAMES))
     checks = [
         ("harness saw NO process beyond the interpreter baseline under a poisoned PATH "
          "(%s)" % (sorted(extra_processes.values()) or "none seen"), not extra_processes),
-        ("harness saw NO compiler or shell in the bootstrap's process tree (%s)"
-         % (sorted(toolchain.values()) or "none seen"), not toolchain),
+        ("harness saw NO compiler or shell in the bootstrap's own process tree (%s)"
+         % (in_tree or "none seen"), not in_tree),
+        ("harness saw no compiler or shell ANYWHERE ON THE MACHINE that this run "
+         "reproduced, under a PATH stocked with bait named csc.exe, cmd.exe and "
+         "powershell.exe (run 1: %s; run 2: %s; in both: %s)"
+         % (first_seen or "none", second_seen or "not needed", confirmed or "none"),
+         not confirmed),
         ("harness saw NO file beyond the baseline appear in the poisoned TEMP/TMP "
          "directory (%s)" % (extra_artifacts or "none seen"), not extra_artifacts),
         ("harness finds the bait executables on the poisoned PATH untouched",
