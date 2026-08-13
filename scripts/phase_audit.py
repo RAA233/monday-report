@@ -145,7 +145,9 @@ def check_required_files() -> dict[str, object]:
         "docs/PROJECT_TRACKER.md",
         "backend/app/main.py",
         "backend/app/schemas.py",
-        "src/components/ProjectTracker.tsx",
+        "index.html",
+        "src/redesign/main.tsx",
+        "src/redesign/pages/Tracker.tsx",
         "src/data/projectTracker.ts",
         "db/migrations/0001_foundation.sql",
     ]

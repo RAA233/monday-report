@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,22 +23,36 @@ from reportlab.platypus import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "output" / "qa" / "ui_quality_e2e_manifest.json"
+# The canonical UI suite (scripts/ui_redesign_e2e.mjs, `pnpm run test:ui`) writes its
+# JSON summary and full-page screenshots into MONDAY_REPORT_SHOT_DIR — a directory
+# OUTSIDE the repository (the suite refuses an in-repo path so run artifacts cannot
+# be committed). This generator therefore reads the same directory.
+SUMMARY_NAME = "ui_redesign_e2e.json"
 OUTPUT_PDF = ROOT / "output" / "pdf" / "monday_report_ui_quality_screenshots.pdf"
 
 
 def main() -> int:
-    if not MANIFEST.exists():
-        print(f"Missing UI manifest: {MANIFEST}")
+    shot_dir_raw = os.environ.get("MONDAY_REPORT_SHOT_DIR", "").strip()
+    if not shot_dir_raw:
+        print(
+            "MONDAY_REPORT_SHOT_DIR is not set. Run the canonical UI suite first with "
+            "MONDAY_REPORT_SHOT_DIR pointing at a directory outside the repository "
+            "(pnpm run test:ui), then re-run this generator with the same value."
+        )
         return 1
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    shot_dir = Path(shot_dir_raw)
+    summary_path = shot_dir / SUMMARY_NAME
+    if not summary_path.exists():
+        print(f"Missing UI suite summary: {summary_path}")
+        return 1
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
     OUTPUT_PDF.parent.mkdir(parents=True, exist_ok=True)
-    build_pdf(manifest, OUTPUT_PDF)
+    build_pdf(summary, shot_dir, OUTPUT_PDF)
     print(OUTPUT_PDF)
     return 0
 
 
-def build_pdf(manifest: dict, output_pdf: Path) -> None:
+def build_pdf(summary: dict, shot_dir: Path, output_pdf: Path) -> None:
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
         "Title",
@@ -77,24 +92,28 @@ def build_pdf(manifest: dict, output_pdf: Path) -> None:
         title="Monday Report UI Quality Screenshots",
     )
 
+    results = summary.get("results", [])
+    passed = summary.get("passed", 0)
+    checked = summary.get("checked", len(results))
     story: list = [
         Paragraph("Monday Report UI Quality Screenshots", title_style),
         Paragraph(
-            f"Generated {datetime.now(timezone.utc).isoformat(timespec='seconds')} from live browser automation against {manifest.get('web_base', 'unknown')}.",
+            f"Generated {datetime.now(timezone.utc).isoformat(timespec='seconds')} from the canonical "
+            f"UI suite (scripts/ui_redesign_e2e.mjs) run against {summary.get('web_base', 'unknown')} — "
+            f"{passed} of {checked} checks passed.",
             body_style,
         ),
         Spacer(1, 0.15 * inch),
     ]
 
-    checks = manifest.get("checks", [])
     status_rows = [["Status", "Check", "Detail"]]
-    for check in checks:
+    for entry in results:
         status_rows.append([
-            "PASS" if check.get("ok") else "FAIL",
-            str(check.get("name", "")),
-            Paragraph(escape_text(str(check.get("detail", ""))[:180]), body_style),
+            "PASS" if entry.get("status") == "pass" else "FAIL",
+            Paragraph(escape_text(str(entry.get("id", ""))), body_style),
+            Paragraph(escape_text(str(entry.get("detail", ""))[:180]), body_style),
         ])
-    status_table = Table(status_rows, colWidths=[0.6 * inch, 1.75 * inch, 4.6 * inch], repeatRows=1)
+    status_table = Table(status_rows, colWidths=[0.6 * inch, 2.35 * inch, 4.0 * inch], repeatRows=1)
     status_table.setStyle(
         TableStyle(
             [
@@ -111,17 +130,12 @@ def build_pdf(manifest: dict, output_pdf: Path) -> None:
     )
     story.append(status_table)
 
-    screenshots = []
-    seen = set()
-    for check in checks:
-        screenshot = check.get("screenshot")
-        if screenshot and screenshot not in seen and Path(screenshot).exists():
-            seen.add(screenshot)
-            screenshots.append((check.get("name", "Screenshot"), Path(screenshot)))
-
-    for index, (name, screenshot_path) in enumerate(screenshots, start=1):
+    # The suite writes screenshots only when MONDAY_REPORT_SHOT_DIR was set for its
+    # own run; whatever PNGs sit beside the summary are that run's evidence.
+    screenshots = sorted(shot_dir.glob("*.png"))
+    for index, screenshot_path in enumerate(screenshots, start=1):
         story.append(PageBreak())
-        story.append(Paragraph(f"{index}. {escape_text(str(name).replace(' screenshot', ''))}", heading_style))
+        story.append(Paragraph(f"{index}. {escape_text(screenshot_path.stem)}", heading_style))
         story.append(Paragraph(escape_text(str(screenshot_path)), body_style))
         story.append(Spacer(1, 0.1 * inch))
         story.append(scaled_image(screenshot_path, max_width=7.1 * inch, max_height=8.3 * inch))

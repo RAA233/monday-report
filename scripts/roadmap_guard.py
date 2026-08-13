@@ -7,18 +7,45 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-EXPECTED_UI_VIEWS = [
-    ("Client Home", "00-client-home.png"),
-    ("Local AI Chat", "01-chat-initial.png"),
-    ("Report Studio", "03-report-studio.png"),
-    ("Benchmarking", "04-benchmarking.png"),
-    ("Upload", "05-upload.png"),
-    ("Dashboard", "06-dashboard.png"),
-    ("Explorer", "07-explorer.png"),
-    ("Validation", "08-validation.png"),
-    ("Tracker", "09-tracker.png"),
-    ("Roadmap", "10-roadmap.png"),
-    ("Architecture", "11-architecture.png"),
+# The canonical UI suite's deterministic route table: (path, label), in order.
+# Mirrors `const ROUTES = [...]` in scripts/ui_redesign_e2e.mjs, which drives the
+# per-route heading assertions (`route-renders:<label>`), so a route that silently
+# disappears from the suite fails HERE rather than shrinking coverage unnoticed.
+EXPECTED_UI_ROUTES = [
+    ("/", "landing"),
+    ("/app/signin", "signin"),
+    ("/app", "ask"),
+    ("/app/reports", "reports"),
+    ("/app/studio", "studio"),
+    ("/app/validation", "validation"),
+    ("/app/exports", "exports"),
+    ("/app/well", "well"),
+    ("/app/upload", "upload"),
+    ("/app/benchmarking", "benchmarking"),
+    ("/app/failures", "failures"),
+    ("/app/audit", "audit"),
+    ("/app/settings", "settings"),
+    ("/app/tracker", "tracker"),
+    ("/app/roadmap", "roadmap"),
+]
+
+# The responsive/zoom sweep: landing plus every in-shell view (no /app/signin,
+# which renders outside the shell).
+EXPECTED_RESPONSIVE_ROUTES = [
+    "/",
+    "/app",
+    "/app/reports",
+    "/app/validation",
+    "/app/exports",
+    "/app/studio",
+    "/app/well",
+    "/app/upload",
+    "/app/benchmarking",
+    "/app/failures",
+    "/app/audit",
+    "/app/settings",
+    "/app/tracker",
+    "/app/roadmap",
 ]
 
 
@@ -51,41 +78,38 @@ CHECKS = [
         ],
     ),
     (
-        ROOT / "src" / "components" / "ClientLanding.tsx",
+        ROOT / "src" / "redesign" / "pages" / "Landing.tsx",
         [
-            "Advanced drilling reports without visual noise",
-            "Document hero landing / black and white",
-            "Rig MR list",
-            "Import coverage",
-            "Export package",
-            "Casing / directional schematic",
-            "ZIP",
-            "XLSX",
+            "Rig evidence in.",
+            "Audited reports out.",
+            "Open the app",
+            "MR-SCHEMA-1",
+            "Source-cited drafting",
+            "Audited exports",
+            "Import the evidence",
+            "Demo workspace, demo data. No client data is stored.",
         ],
     ),
     (
-        ROOT / "src" / "components" / "ProductRoadmap.tsx",
+        ROOT / "src" / "redesign" / "pages" / "Roadmap.tsx",
         [
             "Product roadmap",
-            "Roadmap execution board",
-            "Next controlled moves",
-            "Delivery lanes",
-            "Release train",
-            "Roadmap risk controls",
-            "Capability map",
-            "roadmap-lanes",
-            "roadmap-execution-grid",
+            "Committed record",
+            "capabilitySignals",
+            "roadmapExecutionBoard",
+            "roadmapLanes",
+            "releaseGates",
+            "roadmapRisks",
+            "src/data/productRoadmap.ts",
+            "Capability signals",
         ],
     ),
     (
-        ROOT / "src" / "App.tsx",
+        ROOT / "src" / "redesign" / "router.tsx",
         [
-            '"client"',
-            'label: "Client Home"',
-            "<ClientLanding",
-            '"roadmap"',
-            'label: "Roadmap"',
-            "<ProductRoadmap />",
+            "element={<Landing />}",
+            '<Route path="roadmap" element={<Roadmap />} />',
+            '<Route path="tracker" element={<Tracker />} />',
         ],
     ),
     (
@@ -98,16 +122,13 @@ CHECKS = [
         ],
     ),
     (
-        ROOT / "scripts" / "ui_quality_e2e.mjs",
+        ROOT / "scripts" / "ui_redesign_e2e.mjs",
         [
-            'label: "Client Home"',
-            "00-client-home.png",
-            "/Advanced drilling reports without visual noise/i",
-            'label: "Benchmarking"',
-            "04-benchmarking.png",
-            'label: "Roadmap"',
-            "10-roadmap.png",
-            "/Product roadmap/i",
+            '{ path: "/app/benchmarking", heading: "Benchmarking", label: "benchmarking" }',
+            '{ path: "/app/roadmap", heading: "Product roadmap", label: "roadmap" }',
+            '{ path: "/app/tracker", heading: "Project tracker", label: "tracker" }',
+            "roadmap-committed-record",
+            "tracker-committed-record",
         ],
     ),
     (
@@ -133,14 +154,16 @@ def main() -> int:
             if marker not in text:
                 missing.append(f"{path.relative_to(ROOT)} missing marker: {marker}")
 
-    ui_e2e_path = ROOT / "scripts" / "ui_quality_e2e.mjs"
+    ui_e2e_path = ROOT / "scripts" / "ui_redesign_e2e.mjs"
     if ui_e2e_path.exists():
-        missing.extend(validate_ui_e2e_views(ui_e2e_path.read_text(encoding="utf-8")))
+        missing.extend(validate_ui_e2e_routes(ui_e2e_path.read_text(encoding="utf-8")))
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     audit_all = package["scripts"].get("audit:all", "")
     if "python scripts/roadmap_guard.py" not in audit_all:
         missing.append("package.json audit:all missing roadmap_guard.py")
+    if package["scripts"].get("test:ui") != "node scripts/ui_redesign_e2e.mjs":
+        missing.append("package.json test:ui does not run the canonical UI suite")
 
     result = {
         "status": "fail" if missing else "pass",
@@ -152,43 +175,49 @@ def main() -> int:
     return 1 if missing else 0
 
 
-def validate_ui_e2e_views(source: str) -> list[str]:
-    issues: list[str] = []
-    block_match = re.search(r"const\s+views\s*=\s*\[(.*?)\];", source, re.DOTALL)
-    if not block_match:
-        return ["scripts/ui_quality_e2e.mjs missing deterministic views array"]
+def validate_ui_e2e_routes(source: str) -> list[str]:
+    """Deterministic check over the canonical suite's ROUTES/RESPONSIVE_ROUTES tables.
 
-    actual = re.findall(
-        r'\{\s*label:\s*"([^"]+)".*?file:\s*"([^"]+)"\s*\}',
+    Every entry must carry a heading assertion (a literal `heading` or a
+    `headingPattern`), the (path, label) inventory must match EXPECTED_UI_ROUTES in
+    order, and the responsive sweep must cover landing plus every in-shell view.
+    """
+    issues: list[str] = []
+    block_match = re.search(r"const\s+ROUTES\s*=\s*\[(.*?)\n\];", source, re.DOTALL)
+    if not block_match:
+        return ["scripts/ui_redesign_e2e.mjs missing deterministic ROUTES table"]
+
+    entries = re.findall(
+        r'\{\s*path:\s*"([^"]+)",\s*'
+        r'(?:heading:\s*"[^"]+"|headingPattern:\s*/[^\n]+?/[a-z]*),\s*'
+        r'label:\s*"([^"]+)"\s*\}',
         block_match.group(1),
         re.DOTALL,
     )
-    if actual != EXPECTED_UI_VIEWS:
+    if entries != EXPECTED_UI_ROUTES:
         issues.append(
-            "scripts/ui_quality_e2e.mjs view order/count mismatch: "
-            f"expected {EXPECTED_UI_VIEWS!r}, found {actual!r}"
+            "scripts/ui_redesign_e2e.mjs ROUTES order/count mismatch: "
+            f"expected {EXPECTED_UI_ROUTES!r}, found {entries!r}"
         )
 
-    labels = [label for label, _ in actual]
-    files = [file_name for _, file_name in actual]
+    paths = [path for path, _ in entries]
+    labels = [label for _, label in entries]
+    if len(paths) != len(set(paths)):
+        issues.append("scripts/ui_redesign_e2e.mjs ROUTES contains duplicate paths")
     if len(labels) != len(set(labels)):
-        issues.append("scripts/ui_quality_e2e.mjs contains duplicate view labels")
-    if len(files) != len(set(files)):
-        issues.append("scripts/ui_quality_e2e.mjs contains duplicate screenshot filenames")
+        issues.append("scripts/ui_redesign_e2e.mjs ROUTES contains duplicate labels")
 
-    indices: list[int] = []
-    for file_name in files:
-        index_match = re.fullmatch(r"(\d{2})-[a-z0-9-]+\.png", file_name)
-        if not index_match:
-            issues.append(f"scripts/ui_quality_e2e.mjs has invalid screenshot filename: {file_name}")
-            continue
-        indices.append(int(index_match.group(1)))
-    if len(indices) != len(set(indices)):
-        issues.append("scripts/ui_quality_e2e.mjs contains duplicate screenshot indices")
-    if indices != sorted(indices):
-        issues.append("scripts/ui_quality_e2e.mjs screenshot indices are out of order")
-    if "09-roadmap.png" in source:
-        issues.append("scripts/ui_quality_e2e.mjs contains obsolete 09-roadmap.png")
+    responsive_match = re.search(r"const\s+RESPONSIVE_ROUTES\s*=\s*\[(.*?)\n\];", source, re.DOTALL)
+    if not responsive_match:
+        issues.append("scripts/ui_redesign_e2e.mjs missing deterministic RESPONSIVE_ROUTES table")
+    else:
+        responsive = re.findall(r'"([^"]+)"', responsive_match.group(1))
+        if responsive != EXPECTED_RESPONSIVE_ROUTES:
+            issues.append(
+                "scripts/ui_redesign_e2e.mjs RESPONSIVE_ROUTES order/count mismatch: "
+                f"expected {EXPECTED_RESPONSIVE_ROUTES!r}, found {responsive!r}"
+            )
+
     return issues
 
 

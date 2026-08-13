@@ -134,7 +134,9 @@ if (!$SkipModelPull) {
 
 $api = Start-Process -FilePath $Python -ArgumentList @("-m", "uvicorn", "backend.app.main:app", "--host", "127.0.0.1", "--port", "8000") -WorkingDirectory $Root -WindowStyle Hidden -PassThru
 $worker = Start-Process -FilePath $Python -ArgumentList @("scripts\partner_worker_loop.py") -WorkingDirectory $Root -WindowStyle Hidden -PassThru
-$web = Start-Process -FilePath $Python -ArgumentList @("-m", "http.server", "5173", "--bind", "127.0.0.1", "--directory", "dist") -WorkingDirectory $Root -WindowStyle Hidden -PassThru
+# The SPA has real deep routes (/app/upload, /app/reports, ...), so the static
+# server must rewrite non-asset paths to index.html; plain http.server answers 404.
+$web = Start-Process -FilePath $Python -ArgumentList @("scripts\partner_preview_server.py", "--port", "5173", "--bind", "127.0.0.1", "--root", "dist") -WorkingDirectory $Root -WindowStyle Hidden -PassThru
 
 @{
   api = $api.Id
@@ -217,11 +219,15 @@ The launcher starts the API, static web app, and a local worker loop. It uses Ol
 
 ## Test Import
 
-Open `http://127.0.0.1:5173/`, go to Uploads, and import:
+Open `http://127.0.0.1:5173/`, choose "Open the app", then go to Upload
+(`http://127.0.0.1:5173/app/upload`) and import:
 
 `samples/monday_report_demo_package.zip`
 
-The worker loop processes queued uploads every few seconds.
+The worker loop processes queued uploads every few seconds; the processing queue
+on the same page shows each job drain. Deep links like `/app/upload` work
+directly: the bundled static server rewrites application routes to the SPA
+document.
 
 ## Test Export
 

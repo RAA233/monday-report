@@ -15,9 +15,12 @@ FORBIDDEN_TERMS = (
     "engineer@monday-report.local",
     'self.audit("state.seed"',
 )
+# The canonical frontend's shared data layer: failures (and every other surface)
+# come only from the committed API client, and each surface starts in an explicit
+# loading state rather than from any seeded dataset.
 REQUIRED_FRONTEND_TERMS = (
-    "getFailures",
-    "useState<FailureEvent[]>([])",
+    "load: getFailures",
+    'useState<Loadable<T>>({ state: "loading" })',
 )
 
 
@@ -35,10 +38,10 @@ def main() -> int:
                 if term in text:
                     findings.append(f"{path.relative_to(ROOT)} contains {term!r}")
 
-    app_text = (ROOT / "src" / "App.tsx").read_text(encoding="utf-8")
+    workspace_text = (ROOT / "src" / "redesign" / "lib" / "workspace.tsx").read_text(encoding="utf-8")
     for term in REQUIRED_FRONTEND_TERMS:
-        if term not in app_text:
-            findings.append(f"src/App.tsx missing {term!r}")
+        if term not in workspace_text:
+            findings.append(f"src/redesign/lib/workspace.tsx missing {term!r}")
 
     if findings:
         print("FAIL: Runtime mock data guard")

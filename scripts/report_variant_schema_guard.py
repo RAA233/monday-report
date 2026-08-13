@@ -8,8 +8,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "src" / "data" / "reportVariantSchemas.ts"
-STUDIO_PATH = ROOT / "src" / "components" / "ReportStudio.tsx"
-UI_E2E_PATH = ROOT / "scripts" / "ui_quality_e2e.mjs"
+STUDIO_PATH = ROOT / "src" / "redesign" / "pages" / "Studio.tsx"
+UI_E2E_PATH = ROOT / "scripts" / "ui_redesign_e2e.mjs"
 PACKAGE_PATH = ROOT / "package.json"
 OUTPUT_PATH = ROOT / "output" / "qa" / "report_variant_schema_guard.json"
 
@@ -74,8 +74,10 @@ def main() -> int:
             "UI E2E covers Directional variant",
             "Directional steering report" in ui_text
             and "Reviewed schema variants" in ui_text
-            and "DIR" in ui_text,
-            "directional tab and schema board covered",
+            and "DIR" in ui_text
+            and "studio-schema-board-covers-variants" in ui_text
+            and "studio-directional-variant-renders" in ui_text,
+            "directional variant and schema board covered by the canonical UI suite",
         )
     )
     scripts = package.get("scripts", {})

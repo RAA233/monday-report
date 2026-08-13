@@ -46,6 +46,7 @@ def main() -> int:
         "MondayReportPartnerPreview/backend/app/main.py",
         "MondayReportPartnerPreview/backend/requirements.txt",
         "MondayReportPartnerPreview/scripts/partner_worker_loop.py",
+        "MondayReportPartnerPreview/scripts/partner_preview_server.py",
         "MondayReportPartnerPreview/samples/monday_report_demo_package.zip",
         "MondayReportPartnerPreview/config/partner.env.example",
     }

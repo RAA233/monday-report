@@ -12,12 +12,15 @@ UNIQUE OS-allocated loopback ports (never 8000/5173), isolated state/storage/exp
 and an isolated browser context. Business responses come only from the real API; no TestClient, no mocked
 business API, no route interception.
 
-HONEST SCOPE. The product UI is largely read-only: the only always-present real-API mutations reachable by
-a fixed browser selector are Upload (POST /uploads/direct), benchmarking record, chat, and report-draft.
-Authentication, tenant switching, field corrections, validation-task transitions, API-export forced
-downloads, and signed-reference retrieval are NOT exposed by any UI control -- they are API-only contracts
-(already covered by the accepted functional matrix at the API layer) and are documented here as such, never
-counted as a UI PASS.
+HONEST SCOPE. The frontend under test is the CANONICAL redesign entry (router + /app shell). The
+always-present real-API mutations reachable by a fixed browser selector on a fresh demo stack are:
+Upload (POST /uploads/direct), benchmarking record, chat, report-draft, and Monday-report creation.
+Validation-task decisions ARE real API mutations in this frontend, but a fresh demo stack holds no open
+task while the browser runs (the worker drains AFTER the scenarios), so the transition path is exercised
+with a seeded task by scripts/ui_redesign_e2e.mjs and only the queue RENDER is asserted here.
+Authentication/credential entry, tenant switching, field corrections, forced API-export downloads, and the
+signed-reference denial matrix are NOT exposed by any UI control -- they are API-only contracts (already
+covered at the API layer) and are documented here as such, never counted as a UI PASS.
 
 Emits: claim_scope=dual-backend-ui-functional-only, eligible_for_tenant_evidence=false,
 eligible_for_readiness=false, production_parity=false, local_backend_certified, restricted_postgres_backend_certified.
@@ -45,23 +48,29 @@ SCEN = ROOT / "scripts" / "dual_backend_ui_scenarios.mjs"
 VITE = ROOT / "node_modules" / "vite" / "bin" / "vite.js"
 EXPECTED_SCENARIOS = ["UI01-bootstrap", "UI02-tenant-presentation", "UI03-navigation", "UI04-upload-mutation",
                       "UI05-benchmarking-mutation", "UI06-chat-real-answer", "UI07-report-draft",
-                      "UI08-draft-download", "UI09-validation-queue-render", "UI10-browser-integrity"]
+                      "UI08-report-create-mutation", "UI09-validation-queue-render", "UI10-browser-integrity"]
 
 API_ONLY_CONTRACTS = [
-    ("authentication", "No login/credential-entry/sign-out UI exists; the SPA authenticates with a build-time "
-     "shared key (VITE_MONDAY_REPORT_API_KEY). API-only; covered by audit:auth / audit:identity-rbac."),
-    ("tenant-switch / cross-tenant-URL-substitution", "No tenant/user switcher and no router/per-report URL "
-     "(ViewKey state-switch SPA); tenant is fixed server-side per key. Cross-tenant isolation is an API-only "
-     "contract covered by audit:restricted-postgres-runtime-isolation."),
-    ("field-correction create/supersede/revert", "No UI control calls the corrections API; API-only, covered by "
+    ("authentication / credential entry", "The /app/signin surface RESOLVES the session but exposes no "
+     "credential-entry field: the SPA authenticates with a build-time shared key "
+     "(VITE_MONDAY_REPORT_API_KEY) sent as X-Monday-Report-Key. API-only; covered by audit:auth / "
+     "audit:identity-rbac."),
+    ("tenant-switch / cross-tenant-URL-substitution", "No tenant/user switcher exists; tenant is fixed "
+     "server-side per key, and every route the router serves is scoped to that one tenant. Cross-tenant "
+     "isolation is an API-only contract covered by audit:restricted-postgres-runtime-isolation."),
+    ("field-correction create/supersede/revert", "No UI control calls the corrections API (the Studio "
+     "editor is disclosed as session-local); API-only, covered by "
      "audit:restricted-postgres-runtime-mutations."),
-    ("validation approve/reject/reopen", "The Validation view's buttons mutate LOCAL React state only and never "
-     "call the API; real transitions are API-only, covered by audit:restricted-postgres-runtime-mutations."),
-    ("API-export forced download (JSON/CSV/HTML/PDF/XLSX)", "Server export is reachable only inside a dynamic chat "
-     "answer and opens a signed-URL link in a new tab (not a forced browser download); API-only, covered by "
-     "audit:restricted-postgres-runtime-exports."),
-    ("signed-reference denial matrix (cross-tenant / tampered / expired)", "Signed-URL retrieval appears only on "
-     "dynamic chat citations; the denial matrix is API-only, covered by audit:restricted-postgres-runtime-exports."),
+    ("validation decisions on a task raised in-run", "The Validation view's decision controls call the "
+     "REAL validation API, but a fresh demo stack holds no open task while the browser runs (the worker "
+     "drains after the scenarios), so this certification asserts the queue render only; the transition "
+     "path is exercised with a seeded task by scripts/ui_redesign_e2e.mjs and at the API layer by "
+     "audit:restricted-postgres-runtime-mutations."),
+    ("API-export forced download (JSON/CSV/HTML/PDF/XLSX)", "The Exports view issues server exports and "
+     "signed references that open in a new tab (not a forced browser download); export/denial behaviour "
+     "is covered by audit:restricted-postgres-runtime-exports."),
+    ("signed-reference denial matrix (cross-tenant / tampered / expired)", "Signed-URL retrieval renders "
+     "as expiring links; the denial matrix is API-only, covered by audit:restricted-postgres-runtime-exports."),
 ]
 
 LEAK_TERMS: list[str] = []
@@ -236,6 +245,7 @@ def certify_local():
         uploaded = len(state.get("uploaded_files", []) or state.get("uploads", []))
         parsed = len(state.get("parsed_documents", []))
         benchmarks = len(state.get("benchmark_measurements", []) or state.get("benchmarking_measurements", []))
+        reports = len(state.get("monday_reports", []))
         rb = observe_runtime_backend(api_base)
         identity = {"store_class": "LocalStateStore(local/file JSON snapshot)",
                     "repository_backend": "local", "postgres_connection": "absent",
@@ -243,7 +253,7 @@ def certify_local():
                     "runtime_backend_observed": rb.get("observed"),
                     "state_snapshot_file_present": (scratch / "state" / "s.json").exists()}
         result["db_postconditions"] = {"uploaded_files": uploaded, "parsed_documents": parsed,
-                                       "benchmark_measurements": benchmarks}
+                                       "benchmark_measurements": benchmarks, "monday_reports": reports}
         result["identity"] = identity
         result["ports"] = {"api": api_port, "web": web_port_hint}
         return result
@@ -389,6 +399,7 @@ def _run_pg_ui(ctx):
         uploaded = snap_count("uploaded_files") or snap_count("uploads")
         parsed = snap_count("parsed_documents")
         benchmarks = snap_count("benchmark_measurements") or snap_count("benchmarking_measurements")
+        reports = snap_count("monday_reports")
         rb = observe_runtime_backend(api_base)
         # store_class is DERIVED from observation: only a PostgresStateStore opens a PG connection
         # carrying our application_name, and only it writes the tenant's JSONB snapshot row.
@@ -410,7 +421,7 @@ def _run_pg_ui(ctx):
         }
         result["identity"] = identity
         result["db_postconditions"] = {"uploaded_files": uploaded, "parsed_documents": parsed,
-                                       "benchmark_measurements": benchmarks}
+                                       "benchmark_measurements": benchmarks, "monday_reports": reports}
         result["ports"] = {"api": api_port, "web": web_port}
         _PG_RESULT.clear(); _PG_RESULT.update(result)
     finally:
@@ -455,10 +466,11 @@ def judge(local, pg, docker_ok, allow_unavailable=False):
 
     def db_backed(data):
         # UI mutation success must be backed by real database rows (UI cannot report success without a
-        # committed DB mutation): upload -> uploaded_file + parsed_document; benchmarking -> a measurement.
+        # committed DB mutation): upload -> uploaded_file + parsed_document; benchmarking -> a
+        # measurement; Monday-report creation -> a monday_reports row.
         db = data.get("db_postconditions", {})
         return (db.get("uploaded_files", 0) >= 1 and db.get("parsed_documents", 0) >= 1
-                and db.get("benchmark_measurements", 0) >= 1)
+                and db.get("benchmark_measurements", 0) >= 1 and db.get("monday_reports", 0) >= 1)
 
     local_all_pass = (not local.get("fatal") and present_local >= set(EXPECTED_SCENARIOS)
                       and all(_scn_result(local, s) == "PASS" for s in EXPECTED_SCENARIOS)
