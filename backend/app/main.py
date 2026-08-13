@@ -448,6 +448,7 @@ def _establish_idempotency(
     operation_kind: str,
     target_ids: dict[str, object],
     body: object,
+    optional: bool = False,
 ) -> object:
     """Publish a request-scoped idempotency context for the mutation about to run.
 
@@ -463,12 +464,18 @@ def _establish_idempotency(
     header is honoured when supplied and otherwise omitted, since that backend has
     no commit boundary to replay against.
 
+    ``optional=True`` relaxes the requirement for routes whose creation path is
+    ALSO driven by clients that do not send the header (e.g. the report-generation
+    UI): a missing key then preserves the pre-idempotency behaviour (the mutation
+    runs and creates a new entity) on BOTH backends, while a *supplied* key is
+    still validated and made replay-safe. It never weakens a supplied key.
+
     Returns a reset token (or ``None``). The caller MUST pass it to
     :func:`_reset_idempotency` in a ``finally`` so the context never leaks to
     another request.
     """
     header_values = list(request.headers.getlist(idempotency.HEADER_NAME))
-    if not header_values and not store.request_idempotency_required():
+    if not header_values and (optional or not store.request_idempotency_required()):
         return None
     actor = get_current_identity()
     context = idempotency.build_context(
@@ -2080,12 +2087,29 @@ def chat(payload: ChatRequest) -> ChatResponse:
 
 
 @app.post("/monday-reports", response_model=MondayReport, status_code=status.HTTP_201_CREATED)
-def create_monday_report(payload: MondayReportCreate) -> MondayReport:
+def create_monday_report(payload: MondayReportCreate, request: Request) -> MondayReport:
     store.refresh()
     require_permission("generate_reports")
     _tenant_owned(store.workspaces.get(payload.workspace_id), "workspace", payload.workspace_id, "Workspace not found")
     require_client_data_ready("monday_report.create", "workspace", payload.workspace_id)
-    return store.create_monday_report(payload)
+    # Honour an Idempotency-Key when supplied so a retried/replayed POST returns the
+    # ORIGINAL report (no duplicate row, no second monday_report.create audit event),
+    # and a same-key-different-body request fails closed (409). Established only AFTER
+    # auth/ownership/readiness pass, so a rejected request never reserves the key. The
+    # key is OPTIONAL here (unlike the reviewer-mutation routes): report generation is
+    # also driven by the UI, which does not send the header, so a missing key preserves
+    # the prior behaviour and creates a new report on both backends.
+    token = _establish_idempotency(
+        request,
+        operation_kind="monday_report.create",
+        target_ids={"workspace_id": payload.workspace_id},
+        body=payload,
+        optional=True,
+    )
+    try:
+        return store.create_monday_report(payload)
+    finally:
+        _reset_idempotency(token)
 
 
 @app.get("/monday-reports", response_model=list[MondayReport])

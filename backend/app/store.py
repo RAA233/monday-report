@@ -413,6 +413,16 @@ class LocalStateStore:
         self.anomaly_events: dict[UUID, AnomalyEvent] = {}
         self.key_decisions: dict[UUID, KeyDecision] = {}
         self.field_corrections: dict[UUID, FieldCorrection] = {}
+        # Request-boundary idempotency records for the file backend, keyed by the
+        # validated operation id. Each record pins the committed request hash,
+        # operation kind, actor and a minimal result reference so a same-key replay
+        # returns the ORIGINAL entity instead of mutating again. Persisted in the
+        # snapshot payload and written in the SAME compare-and-swap transaction as
+        # the mutation + audit event (see _wrap_local_mutation), so report row,
+        # audit event and idempotency record commit or roll back as one unit. The
+        # PostgreSQL backend uses its own transactional idempotency TABLE instead;
+        # this dict stays empty there.
+        self.idempotency_records: dict[str, dict] = {}
         # Authenticated-identity foundation: server-side user records and their
         # per-user API credentials (only hashes + fingerprints are stored).
         self.users: dict[UUID, User] = {}
@@ -864,6 +874,9 @@ class LocalStateStore:
             )
         }
         self.audit_logs = [AuditLog.model_validate(item) for item in payload.get("audit_logs", [])]
+        # Additive: old snapshots without idempotency records load as empty.
+        raw_idem = payload.get("idempotency_records") or {}
+        self.idempotency_records = {str(k): dict(v) for k, v in raw_idem.items()} if isinstance(raw_idem, dict) else {}
 
     def save(self) -> None:
         if getattr(self, "_txn", None) is not None:
@@ -1041,16 +1054,85 @@ class LocalStateStore:
     def _wrap_local_mutation(self, method):
         import functools
 
+        from . import idempotency
+
         @functools.wraps(method)
         def wrapper(*args, **kwargs):
             if self._owns_local_txn():
                 # Nested call from the owning context: one lock, one commit.
                 return method(*args, **kwargs)
+            idem = idempotency.current()
             with self.local_snapshot_transaction():
-                return method(*args, **kwargs)
+                # Inside the transaction the committed snapshot (including any prior
+                # idempotency records) has been reloaded under the file lock, so the
+                # lookup, the mutation, the audit append and the record write all
+                # commit or roll back as a single compare-and-swap unit.
+                if idem is not None:
+                    prior = self.idempotency_records.get(idem.operation_id)
+                    if prior is not None:
+                        self._assert_local_idempotency_match(prior, idem)
+                        # Replay: do NOT re-run the mutation. The transaction stays
+                        # clean (no write, no revision bump, no second audit event);
+                        # the original entity is reread by (kind, id).
+                        return self._reconstruct_idempotent_result(prior.get("result"))
+                result = method(*args, **kwargs)
+                if idem is not None and result is not None and hasattr(result, "id"):
+                    # Record a minimal result reference (never the full body) so a
+                    # future same-key replay reconstructs the original entity. This
+                    # rides the SAME transaction as the mutation above.
+                    self.idempotency_records[idem.operation_id] = {
+                        "operation_kind": idem.operation_kind,
+                        "request_hash": idem.request_hash,
+                        "actor_id": str(idem.actor_id) if idem.actor_id is not None else None,
+                        "result": {
+                            "result_kind": type(result).__name__,
+                            "result_identifier": str(result.id),
+                        },
+                    }
+                    self.save()  # mark the transaction dirty so the record is committed
+                return result
 
         wrapper._mr_local_wrapped = True  # type: ignore[attr-defined]
         return wrapper
+
+    @staticmethod
+    def _assert_local_idempotency_match(prior: dict, idem) -> None:
+        """Fail closed (409) when a reused key does not match its committed request.
+
+        Mirrors the PostgreSQL replay check: the same operation id may only replay
+        for the SAME validated request, operation kind and actor. Any divergence is
+        a conflict and rolls the transaction back before any mutation, so the key is
+        never reserved by the conflicting request.
+        """
+        if prior.get("request_hash") != idem.request_hash:
+            raise IdempotencyConflict("operation id replayed with a different request")
+        if prior.get("operation_kind") != idem.operation_kind:
+            raise IdempotencyConflict("operation id replayed with a different operation type")
+        expected_actor = str(idem.actor_id) if idem.actor_id is not None else None
+        if prior.get("actor_id") != expected_actor:
+            raise IdempotencyConflict("operation id replayed by a different actor")
+
+    # Result-reconstruction registry (shared by both backends): on an idempotent
+    # replay the mutation is NOT re-run; the committed entity is reread by
+    # (kind, id) under the current authenticated request instead.
+    def _idempotent_result_lookup(self, kind: str):
+        return {
+            "FieldCorrection": self.field_corrections,
+            "MondayReport": self.monday_reports,
+            "ValidationTask": self.validation_tasks,
+        }.get(kind)
+
+    def _reconstruct_idempotent_result(self, result: dict | None):
+        if not result:
+            return None
+        lookup = self._idempotent_result_lookup(str(result.get("result_kind")))
+        ident = result.get("result_identifier")
+        if lookup is None or not ident:
+            return None
+        try:
+            return lookup.get(UUID(str(ident)))
+        except (ValueError, KeyError):
+            return None
 
     def _state_payload(self) -> dict[str, object]:
         payload = {
@@ -1077,6 +1159,7 @@ class LocalStateStore:
                 credential.model_dump(mode="json") for credential in self.api_credentials.values()
             ],
             "audit_logs": [item.model_dump(mode="json") for item in self.audit_logs],
+            "idempotency_records": {str(k): dict(v) for k, v in self.idempotency_records.items()},
         }
         return payload
 
@@ -8009,27 +8092,6 @@ class PostgresStateStore(LocalStateStore):
             if original is None or getattr(original, "_mr_wrapped", False):
                 continue
             setattr(self, name, self._wrap_mutation(original))
-
-    # Result-reconstruction registry: on an idempotent replay the mutation is NOT
-    # re-run; the committed entity is reread by (kind, id) under the current
-    # authenticated request instead.
-    def _idempotent_result_lookup(self, kind: str):
-        return {
-            "FieldCorrection": self.field_corrections,
-            "ValidationTask": self.validation_tasks,
-        }.get(kind)
-
-    def _reconstruct_idempotent_result(self, result: dict | None):
-        if not result:
-            return None
-        lookup = self._idempotent_result_lookup(str(result.get("result_kind")))
-        ident = result.get("result_identifier")
-        if lookup is None or not ident:
-            return None
-        try:
-            return lookup.get(UUID(str(ident)))
-        except (ValueError, KeyError):
-            return None
 
     def _wrap_mutation(self, method):
         import functools
