@@ -224,22 +224,12 @@ function Invoke-ExportSource {
         throw ('OFFLINE_EXPORT_WORKSPACE_ABSENT: ' + $workspace)
     }
 
-    # THE O(1) REPOSITORY-SHAPE RULE. Exactly one repository at the workspace
-    # root (a .git directory or worktree pointer file), and none anywhere
-    # below it. This replaces every attempt to scan .git internals: the export
-    # simply carries no repository at all, so there is nothing to scan.
-    $rootGit = Join-Path $workspace '.git'
-    if (-not (Test-Path -LiteralPath $rootGit)) {
-        throw ('OFFLINE_EXPORT_SOURCE_NOT_A_REPOSITORY_ROOT: ' + $workspace + ' has no .git ' +
-               'at its root; export only a real author checkout root')
-    }
-    $nested = @(Get-ChildItem -LiteralPath $workspace -Recurse -Force -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -ceq '.git' -and $_.FullName -cne $rootGit } |
-                Select-Object -First 1)
-    if ($nested.Count) {
-        throw ('OFFLINE_EXPORT_NESTED_REPOSITORY: ' + $nested[0].FullName + ' -- the author ' +
-               'workspace must contain exactly one repository, at its root')
-    }
+    # THE O(1) REPOSITORY-SHAPE RULE (C4), evaluated by the shared pure
+    # function so the boundary-shape guard drives the SAME decision this
+    # bootstrap enforces. Exactly one repository at the workspace root, none
+    # below it: the export then carries no repository at all, so there is
+    # nothing to scan.
+    [void](Test-AuthorWorkspaceShape -WorkspaceRoot $workspace)
 
     # Fresh export tree (C3 discipline; never adopt a stale one).
     if (Test-Path -LiteralPath $SourceRoot) {

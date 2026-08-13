@@ -133,6 +133,37 @@ function Get-ExportRootHash {
     return (($digest | ForEach-Object { $_.ToString('x2') }) -join '')
 }
 
+function Test-AuthorWorkspaceShape {
+    <#
+      THE O(1) REPOSITORY-SHAPE RULE (C4), as a pure testable decision:
+      the author workspace must contain EXACTLY ONE repository, at its root
+      (a .git directory or worktree pointer file), and none anywhere below.
+      Throws a named refusal; returns the root .git path on success. This
+      constant-time structural rule replaces the unbounded .git-internals
+      scan: an export produced from a conforming workspace carries no
+      repository at all, so there is nothing to scan.
+    #>
+    param([Parameter(Mandatory = $true)][string]$WorkspaceRoot)
+
+    if (-not [IO.Directory]::Exists($WorkspaceRoot)) {
+        throw ('OFFLINE_EXPORT_WORKSPACE_ABSENT: ' + $WorkspaceRoot)
+    }
+    $rootFull = (New-Object IO.DirectoryInfo($WorkspaceRoot)).FullName.TrimEnd('\')
+    $rootGit = Join-Path $rootFull '.git'
+    if (-not (Test-Path -LiteralPath $rootGit)) {
+        throw ('OFFLINE_EXPORT_SOURCE_NOT_A_REPOSITORY_ROOT: ' + $rootFull + ' has no .git ' +
+               'at its root; export only a real author checkout root')
+    }
+    $nested = @(Get-ChildItem -LiteralPath $rootFull -Recurse -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ceq '.git' -and $_.FullName -cne $rootGit } |
+                Select-Object -First 1)
+    if ($nested.Count) {
+        throw ('OFFLINE_EXPORT_NESTED_REPOSITORY: ' + $nested[0].FullName + ' -- the author ' +
+               'workspace must contain exactly one repository, at its root')
+    }
+    return $rootGit
+}
+
 function Test-SourceExportVerified {
     <#
       Verify the ACTUAL BYTES of $ExportRoot against its manifest and, when

@@ -198,7 +198,12 @@ function New-ReviewerTaskRoot {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ContentSource,
-        [string[]]$GrantReadSids = @()
+        [string[]]$GrantReadSids = @(),
+        # TEST SEAM for the taskroot-integrity guard only: runs after the DACL
+        # is applied and verified, immediately BEFORE content copying, so the
+        # guard can deterministically inject the mid-copy junction race the
+        # module must refuse. Never passed on the operator path.
+        [scriptblock]$TestHookBeforeContent = $null
     )
 
     # 1. The path must be verified NONEXISTENT -- no adopt, no reclaim.
@@ -250,6 +255,8 @@ function New-ReviewerTaskRoot {
             throw ("TASKROOT_DACL_NOT_PROTECTED: " + $Path + " sddl=" + $sddl)
         }
     } finally { $rootHandle.Dispose() }
+
+    if ($null -ne $TestHookBeforeContent) { & $TestHookBeforeContent $Path }
 
     # 5. Content, file-by-file, from the verified export. Directories are
     #    created (never adopted) and handle-verified; files are CreateNew so a
