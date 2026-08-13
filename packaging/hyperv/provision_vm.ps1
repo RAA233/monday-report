@@ -140,7 +140,32 @@ function Save-ProtectedCredential {
     $secure = ConvertTo-SecureString -String $Plain -AsPlainText -Force
     $blob = ConvertFrom-SecureString -SecureString $secure   # no -Key => DPAPI CurrentUser
     Set-Content -LiteralPath $Path -Value $blob -Encoding ASCII -NoNewline
-    icacls $Path /inheritance:r /grant:r "$($env:USERNAME):(F)" /grant:r "SYSTEM:(F)" | Out-Null
+
+    # INVARIANT 7. Three defects lived on the single line this replaces:
+    #   * bare-name `icacls` resolved through PATH/alias -- a door around C1,
+    #     and the exact operand shape PR #30 died on;
+    #   * "$($env:USERNAME):(F)" granted to an ENVIRONMENT STRING rather than a
+    #     verified SID, so poisoning USERNAME redirected the grant;
+    #   * output to Out-Null with $LASTEXITCODE never checked while
+    #     $PSNativeCommandUseErrorActionPreference = $false, so a FAILED icacls
+    #     left /inheritance:r unapplied and the function returned success --
+    #     a DPAPI blob sitting under inherited permissions.
+    # Resolved through C1, granted to the current process's actual SID, and the
+    # exit code of every invocation is checked.
+    $icacls = Get-TrustedNative -Name icacls
+    $meSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    foreach ($argv in @(
+            @($Path, '/inheritance:r'),
+            @($Path, '/grant:r', ('*' + $meSid + ':(F)')),
+            @($Path, '/grant:r', '*S-1-5-18:(F)'))) {
+        & $icacls @argv | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            $secure.Dispose()
+            throw ("HYPERV_CREDENTIAL_ACL_NOT_APPLIED: icacls " + ($argv[1]) +
+                   " failed with exit " + $LASTEXITCODE + " on " + $Path +
+                   "; the credential blob is NOT protected")
+        }
+    }
     $secure.Dispose()
 }
 
@@ -257,7 +282,13 @@ function Invoke-MediaVerify {
     $servedLength = 0
     $resolveError = ""
     try {
-        $head = & curl.exe -sS -I -L --max-redirs 8 --max-time 120 "https://go.microsoft.com/fwlink/?linkid=$SourceLinkId" 2>&1
+        # INVARIANT 7: curl.exe is the SOLE witness for the HM08/HM09 media
+        # provenance facts, so it must not be a bare name resolved through PATH
+        # (an author-planted curl on PATH would author the provenance record it
+        # is supposed to witness). Resolved from the verified System directory
+        # through C1.
+        $curl = Get-TrustedNative -Name curl
+        $head = & $curl -sS -I -L --max-redirs 8 --max-time 120 "https://go.microsoft.com/fwlink/?linkid=$SourceLinkId" 2>&1
         foreach ($line in $head) {
             if ($line -match '^[Ll]ocation:\s*(\S+)') { $resolvedHost = ([Uri]$Matches[1]).Host }
             if ($line -match '^[Cc]ontent-[Ll]ength:\s*(\d+)') { $servedLength = [int64]$Matches[1] }

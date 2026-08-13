@@ -46,6 +46,8 @@ ALLOWLIST = {
     "tasklist": "tasklist.exe",
     "whoami": "whoami.exe",
     "bcdboot": "bcdboot.exe",
+    "curl": "curl.exe",
+    "certutil": "certutil.exe",
     "powershell": "WindowsPowerShell\\v1.0\\powershell.exe",
 }
 

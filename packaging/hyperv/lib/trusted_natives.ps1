@@ -47,6 +47,8 @@ $script:TrustedNativeAllowlist = @{
     'tasklist'   = 'tasklist.exe'
     'whoami'     = 'whoami.exe'
     'bcdboot'    = 'bcdboot.exe'
+    'curl'       = 'curl.exe'
+    'certutil'   = 'certutil.exe'
     'powershell' = 'WindowsPowerShell\v1.0\powershell.exe'
 }
 
@@ -113,14 +115,46 @@ function Test-TrustedNativeDescriptor {
         throw ("TRUSTED_NATIVES_OWNER_UNTRUSTED: " + $Path + " owner=" + $ownerSid)
     }
 
-    $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+    # A NULL DACL GRANTS EVERYONE FULL CONTROL, and .NET reports it as an EMPTY
+    # rule collection -- so the loop below simply never ran and this function
+    # RETURNED SUCCESS over a world-writable binary. The Python twin refused it.
+    # Both twins now enforce identical semantics (INVARIANT 6); parity is
+    # asserted on this predicate, not merely on the allowlist.
+    $rawSddl = ''
+    try { $rawSddl = $acl.GetSecurityDescriptorSddlForm(
+              [Security.AccessControl.AccessControlSections]::Access) } catch { $rawSddl = '' }
+    # SDDL with no "D:" component at all, or an explicit NO_ACCESS_CONTROL
+    # marker, means there is no DACL -- distinct from a DACL that is present
+    # and empty (which denies everyone and is safe).
+    if ($rawSddl -notmatch 'D:') {
+        throw ("TRUSTED_NATIVES_WRITABLE_BY_UNTRUSTED_PRINCIPAL: " + $Path + " (null DACL)")
+    }
+
+    $rules = $null
+    try {
+        $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+    } catch {
+        # An ACE this predicate cannot interpret (object/callback/conditional
+        # types) must REFUSE rather than be skipped -- the Python twin raises
+        # TRUSTED_NATIVES_DESCRIPTOR_UNREADABLE for exactly this case.
+        throw ("TRUSTED_NATIVES_DESCRIPTOR_UNREADABLE: " + $Path +
+               " (access rules uninterpretable: " + $_.Exception.Message + ")")
+    }
+    if ($null -eq $rules) {
+        throw ("TRUSTED_NATIVES_DESCRIPTOR_UNREADABLE: " + $Path + " (no access rules returned)")
+    }
     foreach ($rule in $rules) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
+        $identity = $null
+        try { $identity = $rule.IdentityReference.Value } catch { $identity = $null }
+        if (-not $identity) {
+            throw ("TRUSTED_NATIVES_DESCRIPTOR_UNREADABLE: " + $Path +
+                   " (an allow ACE carries no resolvable SID)")
+        }
         $rights = [int64]$rule.FileSystemRights -band 0xFFFFFFFFL
         if (($rights -band $WriteMask) -eq 0) { continue }
-        $sid = $rule.IdentityReference.Value
-        if ($script:TrustedNativeWriteSids -notcontains $sid) {
-            throw ("TRUSTED_NATIVES_WRITABLE_BY_UNTRUSTED_PRINCIPAL: " + $Path + " sid=" + $sid)
+        if ($script:TrustedNativeWriteSids -notcontains $identity) {
+            throw ("TRUSTED_NATIVES_WRITABLE_BY_UNTRUSTED_PRINCIPAL: " + $Path + " sid=" + $identity)
         }
     }
 }

@@ -311,8 +311,11 @@ verified nonexistent, applies a restrictive DACL with inheritance broken BEFORE
 any content, and copies content only file-by-file from the verified export
 (never a move/rename of an author-owned tree). Every directory it creates is
 opened with `FILE_FLAG_OPEN_REPARSE_POINT` and checked for the reparse
-attribute; identity is confirmed by comparing the file ID of the handle used for
-the ACL write against the file ID reached by path. There is no pre-existing tree
+attribute. The DACL is applied with `SetSecurityInfo` **on that open handle**
+(never a path-based `SetAccessControl`, which follows reparse points and
+re-resolves the name), and the file ID is compared at creation, immediately
+before the write, immediately after it, and finally handle-versus-path — so the
+object that received the ACL is provably the object that was identified. There is no pre-existing tree
 to scan for junctions — the adopted-directory class is removed by construction.
 Guard: `audit:offline-taskroot-integrity` (pre-planted junction refused;
 mid-copy junction race refused both on a colliding path and via the final
@@ -378,12 +381,40 @@ The architectural fix changes operator steps. Flagged deltas:
   DPAPI state); licence-issuance brokering (the reviewer never holds the issuer
   key).
 
-Operator order: `reviewer_bootstrap.ps1 -RegisterTask -AuthorAccount <name>`
-(creates the non-administrative reviewer, installs the session scripts into an
-operator-owned protected bin, registers the scheduled task), then
-`-ProvisionPaths`, then `-ExportSource`. The reviewer is driven with
-`schtasks /Run` (stored credential, no password). `-Verify` reports the current
-bootstrap facts.
+### Trusted / pristine-source handover contract (INVARIANT 8)
+
+**The author workspace alone can never establish provenance.** Before any
+privileged bootstrap action the operator must hold three values obtained from a
+channel independent of that workspace — a release ticket, a signed handover
+note, a second reviewer, anything the author cannot write:
+
+| Out-of-band input | Used for |
+|---|---|
+| expected **export root hash** | `-ExpectedExportRootHash`; `-ExportSource` refuses without it and refuses on mismatch |
+| expected **bootstrap SHA-256** | `-ExpectedBootstrapSha256`; the script verifies its own bytes before acting |
+| expected **source commit / tree** | `-SourceCommit` / `-SourceTree`, recorded into the manifest as data |
+
+**Operator order.**
+
+1. Copy `packaging\hyperv\` to a **pristine location** outside the author
+   workspace.
+2. `reviewer_bootstrap.ps1 -SelfHashes` and compare all four hashes against the
+   out-of-band list. Only a byte-matching bundle may proceed.
+3. `-RegisterTask -AuthorAccount <name> -ExpectedBootstrapSha256 <hex>` —
+   creates the non-administrative reviewer (password typed by the operator,
+   never learned by the author), installs the session scripts into an
+   operator-owned protected bin, registers the scheduled task.
+4. `-ProvisionPaths -AuthorAccount <name>`.
+5. `-ExportSource -SourceWorkspace <author checkout> -SourceCommit <hex>
+   -SourceTree <hex> -AuthorAccount <name> -ExpectedExportRootHash <hex>` —
+   exports the bytes without consulting `.git`, computes the manifest in
+   PowerShell/.NET (no repository code runs), and pins the root hash **only if
+   it equals the operator's out-of-band value**.
+6. Drive the reviewer with `schtasks /Run` (stored credential, no password).
+   `-Verify` reports the current bootstrap facts.
+
+If step 5 reports `OFFLINE_EXPORT_ROOT_HASH_MISMATCH`, the author workspace does
+not match the independently supplied provenance and **nothing has been pinned**.
 
 ## 15. Verification map
 
@@ -393,6 +424,7 @@ bootstrap facts.
 | C2 export manifest (six-round `.git` corpus, byte flip, missing manifest, pin) | `pnpm run audit:offline-export-integrity` |
 | C3 fresh task root (pre-plant + mid-copy junction race, handle identity) | `pnpm run audit:offline-taskroot-integrity` |
 | C4 git-free boundary (git uninvokable, repo shape, isolated interpreter) | `pnpm run audit:offline-boundary-shape` |
+| **v2.1 trust root: F1-F7 negative controls** (operator pin gates acceptance, twin parity, NULL DACL, icacls exit codes, native-door sweep, poisoned SystemRoot, handle identity) | `pnpm run audit:offline-trust-root` |
 | Dedicated site-less reviewer runtime | `pnpm run audit:offline-reviewer-runtime` |
 | audit:all offline-membership pin | `pnpm run audit:offline-audit-membership` |
 | License format, binding, expiry, rollback, updates, key hygiene | `pnpm run audit:offline-license` |

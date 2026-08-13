@@ -480,13 +480,24 @@ def main() -> int:
         # The two implementations of the tree digest must agree, or the reviewer's
         # own pin and the runtime manifest can both look correct while describing
         # different trees.
-        # Resolved from System32 rather than PATH: `which` can pick up a shim,
-        # and a guard that cannot say which shell it ran is not evidence. The
-        # whole block is guarded because an on-access scanner refusing to launch
-        # it crashed the guard mid-run, losing fifteen passing cycles with it.
-        ps = (Path(os.environ.get("SystemRoot", r"C:\Windows"))
-              / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
-        if ps.is_file():
+        # RESOLVED THROUGH C1 (INVARIANT 7), not from $env:SystemRoot.
+        #
+        # This guard is an audit:all chain member, and it used to build the
+        # PowerShell path out of os.environ["SystemRoot"] -- the exact operand
+        # C1 exists to remove. Under the natives-trust guard's own poisoning
+        # fixture it would launch the author-planted mimic, and RT16 (which
+        # binds the PowerShell tree digest to the Python manifest) would pass
+        # on the mimic's stdout. The sibling offline_natives_trust_guard already
+        # did this correctly; this one measured something the poison controls.
+        from offline_trusted_natives import TrustedNativeRefusal  # noqa: PLC0415
+        from offline_trusted_natives import resolve as _trusted_native  # noqa: PLC0415
+        try:
+            ps = _trusted_native("powershell")
+        except TrustedNativeRefusal as exc:
+            rec("RT16 digest-agrees-across-implementations", False,
+                f"powershell could not be resolved through C1: {exc}")
+            ps = None
+        if ps is not None and ps.is_file():
             session = ROOT / "packaging" / "hyperv" / "reviewer_session.ps1"
             # Written to a FILE and run with -File, never passed as -Command.
             # An inline command containing Invoke-Expression is refused outright

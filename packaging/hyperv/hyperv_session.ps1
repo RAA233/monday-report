@@ -45,6 +45,10 @@ param(
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
 
+# C1 (INVARIANT 7): natives resolve through the trusted-natives module, never
+# by bare name through PATH.
+. (Join-Path $PSScriptRoot 'lib\trusted_natives.ps1')
+
 $KeyArgTokens = @("-keyfile", "--key-file", "-keyenv", "--key-env", "-privatekey", "--private-key",
                   "-signingkey", "--signing-key", "-issuerkey", "--issuer-key")
 $KeyEnvNames = @("MONDAY_REPORT_OFFLINE_KEYS_DIR", "MONDAY_REPORT_LICENSE_PRIVATE_KEY",
@@ -258,7 +262,7 @@ $runnerArgs = @(
 if ($Stage -eq "resume") { $runnerArgs += @("-TransferIn", $InDir) }
 
 $log = Join-Path $OutDir $(if ($Stage -eq "request") { "04-request-phase.log" } else { "07-resume-phase.log" })
-& powershell @runnerArgs *> $log
+& (Get-TrustedNative -Name powershell) @runnerArgs *> $log
 $code = $LASTEXITCODE
 
 if ($Stage -eq "request") {

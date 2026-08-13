@@ -52,6 +52,11 @@ param(
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
 
+# C1 (INVARIANT 7): every native this file invokes resolves through the
+# trusted-natives module. A bare-name `powershell` here is a door around C1 in
+# exactly the same sense as one in the reviewer session.
+. (Join-Path $PSScriptRoot 'lib\trusted_natives.ps1')
+
 $CredPath = Join-Path $StateRoot "e2-guest.cred"
 
 function Emit {
@@ -180,7 +185,7 @@ switch ($Action) {
                 param($stage, $extra)
                 $args = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\tool\hyperv_session.ps1", "-Stage", $stage)
                 if ($extra) { $args += $extra.Split(" ") | Where-Object { $_ } }
-                $out = & powershell @args 2>&1
+                $out = & (Get-TrustedNative -Name powershell) @args 2>&1
                 [ordered]@{ exit_code = $LASTEXITCODE; output = ($out | Out-String) }
             }
             if (-not (Wait-Job -Job $job -Timeout $TimeoutSeconds)) {

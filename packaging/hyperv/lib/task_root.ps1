@@ -77,6 +77,30 @@ namespace MondayReport {
             IntPtr securityDescriptor, uint requestedRevision, uint securityInformation,
             out IntPtr stringSecurityDescriptor, out uint stringLength);
 
+        // Writing the DACL THROUGH A HANDLE (not by path) is what makes the
+        // identity comparison meaningful: the bytes whose ACL we set are the
+        // bytes whose file ID we already read from that same handle.
+        [DllImport("advapi32.dll", SetLastError = true)]
+        public static extern uint SetSecurityInfo(
+            SafeFileHandle handle, uint objectType, uint securityInfo,
+            IntPtr psidOwner, IntPtr psidGroup, IntPtr pDacl, IntPtr pSacl);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            string stringSecurityDescriptor, uint revision,
+            out IntPtr securityDescriptor, out uint securityDescriptorSize);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetSecurityDescriptorDacl(
+            IntPtr securityDescriptor, [MarshalAs(UnmanagedType.Bool)] out bool daclPresent,
+            out IntPtr pDacl, [MarshalAs(UnmanagedType.Bool)] out bool daclDefaulted);
+
+        public const uint WRITE_DAC = 0x00040000;
+        public const uint DACL_SECURITY_INFORMATION = 0x4;
+        public const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+
         [DllImport("kernel32.dll")]
         public static extern IntPtr LocalFree(IntPtr hMem);
 
@@ -98,11 +122,17 @@ function Open-TaskRootHandle {
     <#
       Open an existing directory with FILE_FLAG_OPEN_REPARSE_POINT so a link
       is seen as itself, never followed. Throws when the open fails.
+
+      -ForAclWrite additionally requests WRITE_DAC, so the SAME handle can both
+      report the file ID and receive the DACL write.
     #>
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param([Parameter(Mandatory = $true)][string]$Path,
+          [switch]$ForAclWrite)
+    $access = [MondayReport.TaskRootNative]::READ_CONTROL
+    if ($ForAclWrite) { $access = $access -bor [MondayReport.TaskRootNative]::WRITE_DAC }
     $handle = [MondayReport.TaskRootNative]::CreateFileW(
         $Path,
-        [MondayReport.TaskRootNative]::READ_CONTROL,
+        $access,
         [MondayReport.TaskRootNative]::FILE_SHARE_ALL,
         [IntPtr]::Zero,
         [MondayReport.TaskRootNative]::OPEN_EXISTING,
@@ -155,6 +185,48 @@ function Get-HandleSddl {
         }
     } finally {
         [void][MondayReport.TaskRootNative]::LocalFree($descriptor)
+    }
+}
+
+function Set-HandleProtectedDacl {
+    <#
+      Write a protected DACL THROUGH AN OPEN HANDLE (SetSecurityInfo), never by
+      path. This is the mechanism C3 documents: because the handle was opened
+      with FILE_FLAG_OPEN_REPARSE_POINT and its file ID was already read, the
+      object receiving the ACL is provably the object we identified -- a
+      path-based SetAccessControl instead FOLLOWS reparse points and re-resolves
+      the name, which is what made the previous documented claim false.
+
+      $Sddl is the DACL portion only, e.g. 'D:P(A;OICI;FA;;;S-1-5-18)'.
+    #>
+    param([Parameter(Mandatory = $true)]$Handle,
+          [Parameter(Mandatory = $true)][string]$Sddl,
+          [Parameter(Mandatory = $true)][string]$Label)
+
+    $sd = [IntPtr]::Zero
+    $size = [uint32]0
+    if (-not [MondayReport.TaskRootNative]::ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            $Sddl, 1, [ref]$sd, [ref]$size)) {
+        throw ("TASKROOT_DACL_SDDL_INVALID: " + $Label + " (win32 " +
+               [Runtime.InteropServices.Marshal]::GetLastWin32Error() + ")")
+    }
+    try {
+        $present = $false; $dacl = [IntPtr]::Zero; $defaulted = $false
+        if (-not [MondayReport.TaskRootNative]::GetSecurityDescriptorDacl(
+                $sd, [ref]$present, [ref]$dacl, [ref]$defaulted)) {
+            throw ("TASKROOT_DACL_SDDL_INVALID: " + $Label + " (no DACL)")
+        }
+        if (-not $present) { throw ("TASKROOT_DACL_SDDL_INVALID: " + $Label + " (DACL absent)") }
+        $info = [MondayReport.TaskRootNative]::DACL_SECURITY_INFORMATION -bor
+                [MondayReport.TaskRootNative]::PROTECTED_DACL_SECURITY_INFORMATION
+        $status = [MondayReport.TaskRootNative]::SetSecurityInfo(
+            $Handle, [MondayReport.TaskRootNative]::SE_FILE_OBJECT, $info,
+            [IntPtr]::Zero, [IntPtr]::Zero, $dacl, [IntPtr]::Zero)
+        if ($status -ne 0) {
+            throw ("TASKROOT_DACL_WRITE_FAILED: " + $Label + " (status " + $status + ")")
+        }
+    } finally {
+        if ($sd -ne [IntPtr]::Zero) { [void][MondayReport.TaskRootNative]::LocalFree($sd) }
     }
 }
 
@@ -219,42 +291,62 @@ function New-ReviewerTaskRoot {
 
     # 2. Create, then verify through a handle BEFORE anything else touches it.
     [void][IO.Directory]::CreateDirectory($Path)
-    [void](Assert-CreatedDirectorySound -Path $Path)
+    $createdIdentity = Assert-CreatedDirectorySound -Path $Path
 
-    # 3. Restrictive DACL with inheritance broken, BEFORE content. Owner and
-    #    full control: the current (reviewer) principal + SYSTEM; optional
-    #    read-only grants; nothing else.
-    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
-    $security = New-Object Security.AccessControl.DirectorySecurity
-    $security.SetAccessRuleProtection($true, $false)   # break inheritance, copy nothing
-    $inherit = [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
-    $propagate = [Security.AccessControl.PropagationFlags]::None
-    foreach ($sid in @($me, $system)) {
-        $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
-            $sid, [Security.AccessControl.FileSystemRights]::FullControl,
-            $inherit, $propagate, [Security.AccessControl.AccessControlType]::Allow)))
-    }
+    # 3. Restrictive DACL with inheritance broken, BEFORE content -- written
+    #    THROUGH THE SAME HANDLE that reports the file ID (see below), so the
+    #    object receiving the ACL is provably the object identified.
+    #
+    #    A previous version built a DirectorySecurity and called
+    #    SetAccessControl on a PATH, discarded the pre-DACL identity, and only
+    #    captured $rootIdentity AFTER the write -- so the documented
+    #    "handle-vs-path file-ID comparison spanning the ACL write" did not
+    #    exist, and a path-based write FOLLOWS reparse points. That claim is now
+    #    true rather than removed.
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $aces = @(('(A;OICI;FA;;;' + $me + ')'), '(A;OICI;FA;;;S-1-5-18)')
     foreach ($sidString in $GrantReadSids) {
-        $sid = New-Object Security.Principal.SecurityIdentifier($sidString)
-        $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
-            $sid, [Security.AccessControl.FileSystemRights]'ReadAndExecute,ListDirectory,Read',
-            $inherit, $propagate, [Security.AccessControl.AccessControlType]::Allow)))
+        # Validate every supplied SID before it becomes part of an ACL.
+        $parsed = New-Object Security.Principal.SecurityIdentifier($sidString)
+        $aces += ('(A;OICI;FRFX;;;' + $parsed.Value + ')')
     }
-    $directoryInfo = New-Object IO.DirectoryInfo($Path)
-    $directoryInfo.SetAccessControl($security)
+    $sddlDacl = 'D:P' + ($aces -join '')
 
-    # 4. Read the DACL back THROUGH THE HANDLE and confirm protection + identity.
-    $rootHandle = Open-TaskRootHandle -Path $Path
+    $aclHandle = Open-TaskRootHandle -Path $Path -ForAclWrite
     try {
-        $facts = Get-HandleFileFacts -Handle $rootHandle -Label $Path
-        if ($facts.reparse) { throw ("TASKROOT_REPARSE_POINT_DETECTED: " + $Path) }
-        $rootIdentity = $facts.identity
-        $sddl = Get-HandleSddl -Handle $rootHandle -Label $Path
+        # Identity BEFORE the write, from the handle that will receive it.
+        $before = Get-HandleFileFacts -Handle $aclHandle -Label $Path
+        if ($before.reparse) { throw ("TASKROOT_REPARSE_POINT_DETECTED: " + $Path) }
+        if ($before.identity -cne $createdIdentity) {
+            throw ("TASKROOT_PATH_IDENTITY_DIVERGED: " + $Path +
+                   " (changed between creation and ACL write)")
+        }
+        Set-HandleProtectedDacl -Handle $aclHandle -Sddl $sddlDacl -Label $Path
+
+        # 4. Read the DACL back THROUGH THE SAME HANDLE, and re-read the file ID
+        #    through it: the write, the read-back and both identity reads all
+        #    address one kernel object.
+        $after = Get-HandleFileFacts -Handle $aclHandle -Label ($Path + ' (post-ACL)')
+        if ($after.identity -cne $before.identity) {
+            throw ("TASKROOT_PATH_IDENTITY_DIVERGED: " + $Path + " (across the ACL write)")
+        }
+        if ($after.reparse) { throw ("TASKROOT_REPARSE_POINT_DETECTED: " + $Path) }
+        $rootIdentity = $after.identity
+        $sddl = Get-HandleSddl -Handle $aclHandle -Label $Path
         if ($sddl -notmatch 'D:P') {
             throw ("TASKROOT_DACL_NOT_PROTECTED: " + $Path + " sddl=" + $sddl)
         }
-    } finally { $rootHandle.Dispose() }
+        # And the PATH must still reach that same object: handle-vs-PATH, which
+        # is the comparison the design calls for.
+        $pathHandle = Open-TaskRootHandle -Path $Path
+        try {
+            $viaPath = Get-HandleFileFacts -Handle $pathHandle -Label ($Path + ' (via path)')
+            if ($viaPath.identity -cne $rootIdentity) {
+                throw ("TASKROOT_PATH_IDENTITY_DIVERGED: " + $Path +
+                       " (the path no longer reaches the ACL'd object)")
+            }
+        } finally { $pathHandle.Dispose() }
+    } finally { $aclHandle.Dispose() }
 
     if ($null -ne $TestHookBeforeContent) { & $TestHookBeforeContent $Path }
 

@@ -97,6 +97,10 @@ def walk_export(root: Path) -> dict[str, Path]:
         raise ExportRefusal(f"EXPORT_CONTAINS_REPARSE_POINT: <root> {root}")
 
     files: dict[str, Path] = {}
+    #: Case-folded index. Python dicts are ordinal, so the twin-parity risk is
+    #: the opposite one: a path pair that is ordinally distinct but addresses
+    #: the SAME file on Windows. Both twins refuse it (INVARIANT 5).
+    folded: dict[str, str] = {}
     stack: list[Path] = [root]
     while stack:
         current = stack.pop()
@@ -120,6 +124,11 @@ def walk_export(root: Path) -> dict[str, Path]:
                 head = handle.read(7)
             if head.lower() == b"gitdir:":
                 raise ExportRefusal(f"EXPORT_CONTAINS_GITDIR_POINTER: {rel}")
+            lowered = rel.lower()
+            if lowered in folded:
+                raise ExportRefusal(
+                    f"EXPORT_PATH_CASE_COLLISION: {rel} collides with {folded[lowered]}")
+            folded[lowered] = rel
             files[rel] = entry
     return files
 
@@ -172,6 +181,17 @@ def load_manifest(manifest_path: Path) -> dict:
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         raise ExportRefusal(f"EXPORT_MANIFEST_UNREADABLE: {manifest_path} :: no files map")
+    # A manifest declaring two case-variant paths addresses ONE Windows file
+    # with two entries; both twins refuse it rather than let a fold pick which
+    # entry was actually verified (INVARIANT 5).
+    folded: dict[str, str] = {}
+    for declared_path in files:
+        lowered = declared_path.lower()
+        if lowered in folded:
+            raise ExportRefusal(
+                f"EXPORT_PATH_CASE_COLLISION: manifest declares both "
+                f"{declared_path} and {folded[lowered]}")
+        folded[lowered] = declared_path
     return manifest
 
 

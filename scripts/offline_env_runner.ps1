@@ -45,6 +45,25 @@ param(
 $ErrorActionPreference = "Stop"
 $script:Checks = @()
 
+function Get-GuestTrustedPowerShell {
+    <#
+      C1's rule, applied inside the GUEST (INVARIANT 7).
+
+      This runner is copied into the Environment 2 guest without packaging\
+      hyperv\lib, so it cannot dot-source the trusted-natives module -- but the
+      rule still applies: the system directory comes from the OS, never from
+      PATH and never from $env:SystemRoot, so a bare-name `powershell` cannot be
+      shadowed by anything on the guest's search path.
+    #>
+    $systemDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+    if (-not $systemDir -or -not [IO.Directory]::Exists($systemDir)) {
+        throw 'GUEST_TRUSTED_NATIVES_SYSTEM_DIR_UNRESOLVED'
+    }
+    $exe = [IO.Path]::Combine($systemDir, 'WindowsPowerShell\v1.0\powershell.exe')
+    if (-not [IO.File]::Exists($exe)) { throw ('GUEST_TRUSTED_NATIVES_BINARY_ABSENT: ' + $exe) }
+    return $exe
+}
+
 function Add-Check {
     param([string]$Id, [bool]$Ok, [string]$Detail = "")
     $script:Checks += [pscustomobject]@{
@@ -540,7 +559,7 @@ else {
     $env:USERPROFILE = $sandboxHome
     try {
         $installedExe = Join-Path $env:LOCALAPPDATA "Programs\MondayReportOffline\MondayReportOffline.exe"
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
+        & (Get-GuestTrustedPowerShell) -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
         # The Python runner requires returncode 0 on every installer step; the
         # exit code was discarded here, so an installer that errored while
         # leaving the exe in place still passed.
@@ -554,11 +573,11 @@ else {
         New-Item -ItemType Directory -Force $licMarker | Out-Null
         Set-Content -Path (Join-Path $licMarker "monday-report-license.json") -Value "{}" -Encoding UTF8
 
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
+        & (Get-GuestTrustedPowerShell) -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
         $upgradeCode = $LASTEXITCODE
         Add-Check "PK27 upgrade-preserves-data-and-license" (($upgradeCode -eq 0) -and (Test-Path (Join-Path $dataMarker "monday_report_state.json")) -and (Test-Path (Join-Path $licMarker "monday-report-license.json"))) "re-running the installer preserves customer data and the license"
 
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Split-Path -Parent $installedExe) "uninstall.ps1") | Out-Null
+        & (Get-GuestTrustedPowerShell) -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Split-Path -Parent $installedExe) "uninstall.ps1") | Out-Null
         $uninstallCode = $LASTEXITCODE
         Start-Sleep -Seconds 6
         # uninstall.ps1 hands the final directory removal to a DETACHED process,
@@ -571,11 +590,11 @@ else {
         }
         Add-Check "PK28 uninstall-preserves-data" (($uninstallCode -eq 0) -and $binariesRemoved -and (Test-Path (Join-Path $dataMarker "monday_report_state.json"))) ("default uninstall REMOVES the binaries (removed=" + $binariesRemoved + ") and preserves customer data")
 
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
+        & (Get-GuestTrustedPowerShell) -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PackageDir "install.ps1") | Out-Null
         $reinstallCode = $LASTEXITCODE
         Add-Check "PK29 reinstall-detects-preserved-data" (($reinstallCode -eq 0) -and (Test-Path (Join-Path $dataMarker "monday_report_state.json")) -and (Test-Path $installedExe)) "reinstalling finds the preserved data directory in place"
 
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Split-Path -Parent $installedExe) "uninstall.ps1") -RemoveData | Out-Null
+        & (Get-GuestTrustedPowerShell) -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Split-Path -Parent $installedExe) "uninstall.ps1") -RemoveData | Out-Null
         $removeDataCode = $LASTEXITCODE
         Start-Sleep -Seconds 6
         Add-Check "PK30 explicit-data-removal-path-separate" (($removeDataCode -eq 0) -and -not (Test-Path (Join-Path $env:LOCALAPPDATA "MondayReportOffline"))) "explicit -RemoveData is a separate, deliberate path"

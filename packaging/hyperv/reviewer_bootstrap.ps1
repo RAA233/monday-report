@@ -63,12 +63,27 @@ param(
     [switch]$ExportSource,
     [switch]$RegisterTask,
     [switch]$Verify,
+    # Print the SHA-256 of this script and its libraries so the operator can
+    # compare them against the out-of-band list BEFORE any privileged action.
+    [switch]$SelfHashes,
 
     # -ExportSource inputs. The workspace is the author checkout to export;
     # commit/tree are the operator-RECORDED provenance strings.
     [string]$SourceWorkspace = '',
     [string]$SourceCommit = '',
     [string]$SourceTree = '',
+
+    # OUT-OF-BAND OPERATOR PINS (INVARIANT 2). These arrive from a channel
+    # independent of the author workspace -- a release ticket, a signed
+    # handover note, a second reviewer -- and are NEVER read from the repo.
+    #   -ExpectedExportRootHash  the export root hash the operator was told to
+    #                            expect; -ExportSource refuses without it and
+    #                            refuses on mismatch.
+    #   -ExpectedBootstrapSha256 this script's own expected SHA-256; when
+    #                            supplied, the script verifies its OWN bytes
+    #                            before doing anything (INVARIANT 3).
+    [string]$ExpectedExportRootHash = '',
+    [string]$ExpectedBootstrapSha256 = '',
 
     # Principals. AuthorAccount is REQUIRED for RegisterTask and ExportSource:
     # grants and refusals key to the named author, never to $env:USERNAME.
@@ -211,12 +226,22 @@ function Invoke-ProvisionPaths {
 }
 
 function Invoke-ExportSource {
-    Assert-Elevated
+    # ARGUMENT CONTRACT FIRST, ELEVATION SECOND. A missing operator pin is a
+    # violation of the invocation contract itself; gating it behind
+    # Assert-Elevated made the refusal depend on an operand it has nothing to do
+    # with, and hid it behind an elevation error whenever the contract was
+    # exercised unelevated.
     foreach ($required in @(
             @('SourceWorkspace', $SourceWorkspace), @('SourceCommit', $SourceCommit),
-            @('SourceTree', $SourceTree), @('AuthorAccount', $AuthorAccount))) {
+            @('SourceTree', $SourceTree), @('AuthorAccount', $AuthorAccount),
+            @('ExpectedExportRootHash', $ExpectedExportRootHash))) {
         if (-not $required[1]) { throw ('OFFLINE_EXPORT_ARGUMENT_REQUIRED: -' + $required[0]) }
     }
+    if ($ExpectedExportRootHash.Trim() -cnotmatch '^[0-9a-fA-F]{64}$') {
+        throw ('OFFLINE_EXPORT_PIN_MALFORMED: -ExpectedExportRootHash must be a ' +
+               '64-hex SHA-256 supplied out of band by the operator')
+    }
+    Assert-Elevated
     $authorSid = Assert-OperatorIsNotAuthor -Author $AuthorAccount
     $reviewerSid = Resolve-AccountSid -Name ('.\'+ $User)
     $workspace = (New-Object IO.DirectoryInfo($SourceWorkspace)).FullName.TrimEnd('\')
@@ -274,20 +299,29 @@ function Invoke-ExportSource {
     }
     Write-Step ("exported " + $copied + " files to " + $SourceRoot)
 
-    # Manifest from DISK BYTES (C2). The generator is pure .NET-equivalent
-    # Python run OUTSIDE the boundary; provenance strings are recorded, never
-    # derived. Then verify the fresh export against its own manifest before
-    # pinning -- generate-then-verify catches a copy raced mid-flight.
-    $generator = Join-Path $SourceRoot 'scripts\offline_export_manifest.py'
-    if (-not (Test-Path -LiteralPath $generator)) {
-        throw 'OFFLINE_EXPORT_GENERATOR_MISSING: scripts/offline_export_manifest.py is not in the export'
+    # Manifest from DISK BYTES (C2), computed by POWERSHELL/.NET from the
+    # operator's verified bootstrap bundle -- INVARIANT 1: no author-controlled
+    # executable runs before source trust is established. The previous version
+    # ran the author's just-copied scripts/offline_export_manifest.py through a
+    # PATH-resolved `python`, elevated, so author code minted the pin the
+    # reviewer later treats as authority.
+    $generated = New-SourceExportManifest -ExportRoot $SourceRoot `
+        -SourceCommit $SourceCommit.ToLowerInvariant() `
+        -SourceTree $SourceTree.ToLowerInvariant()
+
+    # INVARIANT 4: acceptance is PINNED, never self-consistent. The operator's
+    # out-of-band root hash is compared here; a self-verify with no
+    # -ExpectedRootHash would only prove the manifest agrees with itself, which
+    # an author who controlled the generator could always arrange.
+    $expected = $ExpectedExportRootHash.Trim().ToLowerInvariant()
+    if ($generated.root_hash -cne $expected) {
+        throw ('OFFLINE_EXPORT_ROOT_HASH_MISMATCH: the export computed ' +
+               $generated.root_hash + ' but the operator pinned ' + $expected +
+               '; the author workspace does not match the independently ' +
+               'supplied provenance and NOTHING has been pinned')
     }
-    $python = (Get-Command python -ErrorAction SilentlyContinue)
-    if (-not $python) { throw 'OFFLINE_EXPORT_PYTHON_REQUIRED: the operator needs a python on PATH (operator side only)' }
-    & $python.Source $generator generate --export-root $SourceRoot `
-        --source-commit $SourceCommit.ToLowerInvariant() --source-tree $SourceTree.ToLowerInvariant()
-    if ($LASTEXITCODE -ne 0) { throw 'OFFLINE_EXPORT_MANIFEST_GENERATION_FAILED' }
-    $manifest = Test-SourceExportVerified -ExportRoot $SourceRoot
+    $manifest = Test-SourceExportVerified -ExportRoot $SourceRoot `
+        -ExpectedRootHash $expected
 
     # Pin the root hash where the author cannot write (trust dir is
     # operator/SYSTEM-write only; reviewer and author read).
@@ -416,8 +450,60 @@ function Invoke-Verify {
     $facts | ConvertTo-Json | Write-Output
 }
 
+function Get-BootstrapBundleHashes {
+    <#
+      SHA-256 of this script and every library it dot-sources, computed with
+      .NET only (no native, no PATH). The operator compares these against the
+      out-of-band list before trusting a run -- INVARIANT 3.
+    #>
+    $result = [ordered]@{}
+    foreach ($rel in @('reviewer_bootstrap.ps1', 'lib\trusted_natives.ps1',
+                       'lib\export_verify.ps1', 'lib\task_root.ps1')) {
+        $path = Join-Path $PSScriptRoot $rel
+        if (-not [IO.File]::Exists($path)) {
+            $result[$rel] = 'ABSENT'
+            continue
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $stream = [IO.File]::OpenRead($path)
+            try { $digest = $sha.ComputeHash($stream) } finally { $stream.Dispose() }
+        } finally { $sha.Dispose() }
+        $result[$rel] = (($digest | ForEach-Object { $_.ToString('x2') }) -join '')
+    }
+    return $result
+}
+
+function Assert-BootstrapSelfVerified {
+    <#
+      INVARIANT 3: verify this script's OWN bytes against the operator's
+      out-of-band SHA-256 before it is allowed to do anything. Computed with
+      trusted .NET facilities, never a PATH-resolved hashing tool.
+
+      This cannot make an unverified bootstrap safe -- a modified script could
+      delete this check. It is the operator's confirmation that the pristine
+      copy they were told to run is the copy that is running, which is why the
+      procedure also has them compare -SelfHashes out of band BEFORE invoking a
+      privileged action.
+    #>
+    if (-not $ExpectedBootstrapSha256) { return }
+    if ($ExpectedBootstrapSha256.Trim() -cnotmatch '^[0-9a-fA-F]{64}$') {
+        throw 'OFFLINE_BOOTSTRAP_PIN_MALFORMED: -ExpectedBootstrapSha256 must be a 64-hex SHA-256'
+    }
+    $actual = (Get-BootstrapBundleHashes)['reviewer_bootstrap.ps1']
+    if ($actual -cne $ExpectedBootstrapSha256.Trim().ToLowerInvariant()) {
+        throw ('OFFLINE_BOOTSTRAP_SELF_VERIFY_FAILED: this script hashes ' + $actual +
+               ' but the operator pinned ' + $ExpectedBootstrapSha256.Trim().ToLowerInvariant() +
+               '; refusing to run unverified bootstrap bytes')
+    }
+    Write-Step ('bootstrap self-verified against the operator pin (' + $actual.Substring(0, 16) + '...)')
+}
+
 # ---------------------------------------------------------------------------
+Assert-BootstrapSelfVerified
+
 $ran = $false
+if ($SelfHashes)     { (Get-BootstrapBundleHashes) | ConvertTo-Json | Write-Output; $ran = $true }
 if ($ProvisionPaths) { Invoke-ProvisionPaths; $ran = $true }
 if ($ExportSource)   { Invoke-ExportSource;   $ran = $true }
 if ($RegisterTask)   { Invoke-RegisterTask;   $ran = $true }

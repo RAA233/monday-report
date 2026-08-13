@@ -80,7 +80,19 @@ function Get-ExportFiles {
     }
     $rootFull = $rootInfo.FullName.TrimEnd('\')
 
-    $files = @{}
+    # ORDINAL identity, never a PowerShell hashtable (INVARIANT 5).
+    #
+    # `@{}` is case-INSENSITIVE: `scripts/b.py` and `scripts/B.py` collapse into
+    # one slot, so an entry can be silently overwritten and never hashed, and a
+    # case-only rename that the Python twin REFUSES was ACCEPTED here -- in the
+    # twin the reviewer actually runs. A StringComparer::Ordinal dictionary
+    # makes the two implementations agree by construction, and the explicit
+    # case-collision test below refuses the Windows-only shape where two
+    # ordinally-distinct paths address the same file.
+    $files = New-Object 'System.Collections.Generic.Dictionary[string,string]' (
+        [StringComparer]::Ordinal)
+    $seenFolded = New-Object 'System.Collections.Generic.Dictionary[string,string]' (
+        [StringComparer]::OrdinalIgnoreCase)
     $stack = New-Object System.Collections.Generic.Stack[IO.DirectoryInfo]
     $stack.Push($rootInfo)
     while ($stack.Count -gt 0) {
@@ -110,6 +122,15 @@ function Get-ExportFiles {
             if ($read -eq 7 -and [Text.Encoding]::ASCII.GetString($head) -ieq 'gitdir:') {
                 throw ("EXPORT_CONTAINS_GITDIR_POINTER: " + $rel)
             }
+            # Two on-disk paths differing only by case cannot both exist on
+            # Windows, but a crafted export mounted elsewhere (or a manifest
+            # replayed against one) can present them. Refuse rather than let a
+            # fold decide which one was verified.
+            if ($seenFolded.ContainsKey($rel)) {
+                throw ("EXPORT_PATH_CASE_COLLISION: " + $rel + " collides with " +
+                       $seenFolded[$rel])
+            }
+            $seenFolded[$rel] = $rel
             $files[$rel] = $entry.FullName
         }
     }
@@ -118,7 +139,10 @@ function Get-ExportFiles {
 
 function Get-ExportRootHash {
     <# Byte-identical to offline_export_manifest.root_hash. #>
-    param([Parameter(Mandatory = $true)][hashtable]$FileHashes,
+    # Typed as the ordinal dictionary, not [hashtable]: a hashtable parameter
+    # would silently re-fold the keys this function is supposed to keep ordinal.
+    param([Parameter(Mandatory = $true)]
+          [System.Collections.Generic.Dictionary[string,string]]$FileHashes,
           [Parameter(Mandatory = $true)][string]$SourceCommit,
           [Parameter(Mandatory = $true)][string]$SourceTree)
 
@@ -140,6 +164,72 @@ function Get-ExportRootHash {
         $digest = $sha.ComputeHash($bytes)
     } finally { $sha.Dispose() }
     return (($digest | ForEach-Object { $_.ToString('x2') }) -join '')
+}
+
+function New-SourceExportManifest {
+    <#
+      Generate the C2 manifest for an export using POWERSHELL/.NET ONLY.
+
+      INVARIANT 1 + 4. The previous implementation shelled out to
+      `$SourceRoot\scripts\offline_export_manifest.py` -- a file that had just
+      been copied FROM THE AUTHOR -- through a PATH-resolved `python`, while
+      elevated. Author-controlled code therefore minted the very manifest and
+      root hash that the reviewer later treats as authority, and the run was
+      accepted on self-consistency alone. This generator ships with the
+      operator's out-of-band-verified bootstrap bundle and executes nothing
+      from the export it is measuring.
+
+      Byte-for-byte compatible with scripts/offline_export_manifest.py: same
+      walk, same shape refusals, same ordinal canonical root hash. The Python
+      twin can verify what this writes and vice versa.
+    #>
+    param([Parameter(Mandatory = $true)][string]$ExportRoot,
+          [Parameter(Mandatory = $true)][string]$SourceCommit,
+          [Parameter(Mandatory = $true)][string]$SourceTree)
+
+    foreach ($pair in @(@('SourceCommit', $SourceCommit), @('SourceTree', $SourceTree))) {
+        if ($pair[1] -cnotmatch '^[0-9a-f]{40}$') {
+            throw ("EXPORT_PROVENANCE_MALFORMED: " + $pair[0] +
+                   " must be 40 lowercase hex")
+        }
+    }
+
+    # Get-ExportFiles applies every shape refusal (.git any spelling, gitdir
+    # heads, reparse points, case collisions) before a single byte is hashed.
+    $onDisk = Get-ExportFiles -ExportRoot $ExportRoot
+    if ($onDisk.Count -eq 0) { throw ("EXPORT_EMPTY: " + $ExportRoot) }
+
+    $hashes = New-Object 'System.Collections.Generic.Dictionary[string,string]' (
+        [StringComparer]::Ordinal)
+    foreach ($rel in $onDisk.Keys) {
+        $hashes[$rel] = Get-ExportFileSha256 -Path $onDisk[$rel]
+    }
+    $rootHash = Get-ExportRootHash -FileHashes $hashes `
+        -SourceCommit $SourceCommit -SourceTree $SourceTree
+
+    # Emit JSON with ORDINALLY sorted keys so both twins read identical values.
+    $keys = @($hashes.Keys)
+    [Array]::Sort($keys, [StringComparer]::Ordinal)
+    $sb = New-Object Text.StringBuilder
+    [void]$sb.AppendLine('{')
+    [void]$sb.AppendLine('  "file_count": ' + $hashes.Count + ',')
+    [void]$sb.AppendLine('  "files": {')
+    for ($i = 0; $i -lt $keys.Count; $i++) {
+        $line = '    "' + $keys[$i] + '": "' + $hashes[$keys[$i]] + '"'
+        if ($i -lt $keys.Count - 1) { $line += ',' }
+        [void]$sb.AppendLine($line)
+    }
+    [void]$sb.AppendLine('  },')
+    [void]$sb.AppendLine('  "root_hash": "' + $rootHash + '",')
+    [void]$sb.AppendLine('  "schema_version": "' + $script:ExportManifestSchema + '",')
+    [void]$sb.AppendLine('  "source_commit": "' + $SourceCommit + '",')
+    [void]$sb.AppendLine('  "source_tree": "' + $SourceTree + '"')
+    [void]$sb.AppendLine('}')
+
+    $manifestPath = [IO.Path]::Combine($ExportRoot, $script:ExportManifestName)
+    $bytes = [Text.Encoding]::ASCII.GetBytes($sb.ToString().Replace("`r`n", "`n"))
+    [IO.File]::WriteAllBytes($manifestPath, $bytes)
+    return @{ root_hash = $rootHash; file_count = $hashes.Count; path = $manifestPath }
 }
 
 function Test-AuthorWorkspaceShape {
@@ -205,9 +295,55 @@ function Test-SourceExportVerified {
         throw ("EXPORT_MANIFEST_UNREADABLE: " + $ManifestPath + " :: wrong schema")
     }
 
-    $declared = @{}
-    foreach ($property in $manifest.files.PSObject.Properties) {
-        $declared[$property.Name] = [string]$property.Value
+    # ORDINAL dictionaries here too (INVARIANT 5): a manifest declaring two
+    # case-variant paths collapsed into ONE slot in a PowerShell hashtable, so
+    # the count check passed and one declared entry was never verified at all.
+    # ORDINAL JSON PARSE for the files map.
+    #
+    # ConvertFrom-Json builds a PSCustomObject, whose property names are
+    # CASE-INSENSITIVE: a manifest declaring both `scripts/b.py` and
+    # `scripts/B.py` collapses into ONE property at parse time, so a collision
+    # check over .PSObject.Properties can never see the duplicate and the PS
+    # twin ACCEPTED a manifest the Python twin refused. JavaScriptSerializer
+    # returns an ordinal Dictionary, so both keys survive to be judged.
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
+    $rawJson = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8
+    $ordinalFiles = $null
+    try {
+        $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $serializer.MaxJsonLength = [int]::MaxValue
+        $ordinalFiles = ($serializer.DeserializeObject($rawJson))['files']
+    } catch {
+        throw ("EXPORT_MANIFEST_UNREADABLE: " + $ManifestPath +
+               " :: ordinal parse failed :: " + $_.Exception.Message)
+    }
+    if ($null -eq $ordinalFiles) {
+        throw ("EXPORT_MANIFEST_UNREADABLE: " + $ManifestPath + " :: no files map")
+    }
+
+    $declared = New-Object 'System.Collections.Generic.Dictionary[string,string]' (
+        [StringComparer]::Ordinal)
+    $declaredFolded = New-Object 'System.Collections.Generic.Dictionary[string,string]' (
+        [StringComparer]::OrdinalIgnoreCase)
+    foreach ($key in $ordinalFiles.Keys) {
+        if ($declared.ContainsKey($key)) {
+            throw ("EXPORT_MANIFEST_DUPLICATE_PATH: " + $key)
+        }
+        if ($declaredFolded.ContainsKey($key)) {
+            throw ("EXPORT_PATH_CASE_COLLISION: manifest declares both " +
+                   $key + " and " + $declaredFolded[$key])
+        }
+        $declaredFolded[$key] = $key
+        $declared[$key] = [string]$ordinalFiles[$key]
+    }
+    # The two parsers must agree on how many paths the manifest declares. A
+    # disagreement means one of them folded something, which is exactly the
+    # class this check exists to close (INVARIANT 5: twin disagreement FAILS).
+    $convertFromJsonCount = @($manifest.files.PSObject.Properties).Count
+    if ($declared.Count -ne $convertFromJsonCount) {
+        throw ("EXPORT_PATH_CASE_COLLISION: the manifest declares " + $declared.Count +
+               " ordinally-distinct paths but only " + $convertFromJsonCount +
+               " survive a case-insensitive parse")
     }
     if ($declared.Count -eq 0) {
         throw ("EXPORT_MANIFEST_UNREADABLE: " + $ManifestPath + " :: no files map")
@@ -220,7 +356,8 @@ function Test-SourceExportVerified {
             throw ("EXPORT_UNDECLARED_FILE: " + $rel)
         }
     }
-    $recomputed = @{}
+    $recomputed = New-Object 'System.Collections.Generic.Dictionary[string,string]' (
+        [StringComparer]::Ordinal)
     foreach ($rel in $declared.Keys) {
         if (-not $onDisk.ContainsKey($rel)) {
             throw ("EXPORT_DECLARED_FILE_ABSENT: " + $rel)

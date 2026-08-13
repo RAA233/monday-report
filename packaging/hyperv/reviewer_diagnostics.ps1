@@ -32,6 +32,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# INVARIANT 7 / C4 DOOR COMPLETENESS. This script runs AS THE REVIEWER
+# PRINCIPAL, inside the boundary, from the installed protected bin -- so a
+# bare-name native here is a door around C1 in exactly the session where DPAPI
+# decrypts the review key. It previously launched `powershell.exe` by bare name
+# twice. C1 is dot-sourced and every native goes through it: proving the module
+# refuses git means nothing unless the module is the ONLY door.
+. (Join-Path $PSScriptRoot 'lib\trusted_natives.ps1')
+
 $CredPath = Join-Path $ReviewerState 'e2-guest.cred'
 $Result   = Join-Path $OutRoot 'e2-diagnostics.json'
 
@@ -182,7 +190,7 @@ $probe = Invoke-Command -VMName $VmName -Credential $cred -ErrorAction Stop -Scr
         #
         # Dot-sourcing with an invented switch was rejected here: it would run
         # the script body in this scope and could execute real work.
-        $pf = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner `
+        $pf = & (Get-TrustedNative -Name powershell) -NoProfile -ExecutionPolicy Bypass -File $runner `
               -Phase '__diagnostic_probe__' 2>&1 | Out-String
         $r.runner_launch_exit = $LASTEXITCODE
         $r.runner_launch_tail = $pf
@@ -228,7 +236,9 @@ if ($RunRequestProbe) {
                   '-InstallerSha256',"$($meta.installer_sha256)")
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = 'powershell.exe'
+        # ProcessStartInfo with a bare FileName resolves through PATH exactly as
+        # the call operator does -- the same C1 door, just spelled differently.
+        $psi.FileName = (Get-TrustedNative -Name powershell)
         $psi.Arguments = ($args | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
         $psi.UseShellExecute = $false
         $psi.RedirectStandardOutput = $true

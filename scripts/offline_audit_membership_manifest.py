@@ -91,6 +91,17 @@ PINNED_MEMBERS = (
         "id_pattern": r"^BS\d+[a-z]?\s",
         "recorder": "rec",
     },
+    {
+        # v2.1: the F1-F7 trust-root negative controls. Pinned for the same
+        # reason as the four class batteries -- a green audit:all must not be
+        # able to mean "trust-root establishment was never validated".
+        "command": "audit:offline-trust-root",
+        "script": "python scripts/offline_trust_root_guard.py",
+        "guard": "scripts/offline_trust_root_guard.py",
+        "min_checks": 20,
+        "id_pattern": r"^TRF\d+[a-z]?\s",
+        "recorder": "rec",
+    },
 )
 
 
