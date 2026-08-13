@@ -20,7 +20,32 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-BASE = "86fd1fa98e2591cce0f4e2e996ea448c67f65e20"  # main base of feat/offline-edition-v2
+#: Fallback only. The scan range is resolved DYNAMICALLY below.
+_BASE_FALLBACK = "86fd1fa98e2591cce0f4e2e996ea448c67f65e20"  # original main base
+
+
+def _scan_base() -> str:
+    """The commit this branch's own delta is measured against.
+
+    RESOLVED AS THE MERGE-BASE WITH origin/main, not pinned. A pinned SHA goes
+    stale the moment main is merged in: the diff range then also contains
+    MAIN's newly-merged files, so OS01 -- which claims to scan
+    "PR-introduced source" -- was measuring a set adjacent to the one it names
+    and would attribute a leak in main's code to this branch. (That misfire
+    already happened once, against a seeded private-key fixture in
+    production_queue_secret_scan_guard.) The merge-base always yields exactly
+    this branch's own contribution, including after every future main sync.
+    """
+
+    completed = subprocess.run(["git", "-C", str(ROOT), "merge-base", "HEAD", "origin/main"],
+                               capture_output=True, text=True, timeout=30)
+    candidate = (completed.stdout or "").strip()
+    if completed.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}", candidate):
+        return candidate
+    return _BASE_FALLBACK
+
+
+BASE = _scan_base()
 
 LEAK_PATTERNS: dict[str, str] = {
     "private_key_block": r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----",

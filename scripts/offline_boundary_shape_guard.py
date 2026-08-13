@@ -99,6 +99,20 @@ def main() -> int:  # noqa: PLR0915 -- one linear battery
             "REFUSED" in nested.stdout and "OFFLINE_EXPORT_NESTED_REPOSITORY" in nested.stdout,
             nested.stdout.strip()[:90])
 
+        # Case variant: on Windows a nested repository spelled `.GIT` is a
+        # nested repository. The shape rule must not key to spelling.
+        nested_upper_ws = work / "nested-upper-workspace"
+        (nested_upper_ws / ".git").mkdir(parents=True)
+        (nested_upper_ws / "vendor" / ".GIT").mkdir(parents=True)
+        nested_upper = run_ps(
+            f". '{EXPORT_PS}'; "
+            f"try {{ Test-AuthorWorkspaceShape -WorkspaceRoot '{nested_upper_ws}' | Out-Null; "
+            "Write-Output 'ACCEPTED' } catch { Write-Output ('REFUSED ' + $_.Exception.Message) }")
+        rec("BS09 nested-uppercase-repository-refused",
+            "REFUSED" in nested_upper.stdout
+            and "OFFLINE_EXPORT_NESTED_REPOSITORY" in nested_upper.stdout,
+            nested_upper.stdout.strip()[:90])
+
         norepo_ws = work / "no-repo-workspace"
         (norepo_ws / "scripts").mkdir(parents=True)
         norepo = run_ps(

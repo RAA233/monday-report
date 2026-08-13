@@ -199,6 +199,33 @@ def main() -> int:  # noqa: PLR0915 -- one linear battery
         both_refuse("EI13 pin-mismatch-refused", "wrong pinned root hash",
                     export, "0" * 64, "EXPORT_PIN_MISMATCH")
 
+        # ---- CASE VARIANT: the shape rule must not key to spelling ----------
+        # Windows paths are case-insensitive, so a directory created as `.GIT`
+        # IS `.git` to every tool including git. A case-sensitive shape test
+        # keyed the refusal to fewer operands than the damage, and BOTH twins
+        # verified an export containing `.GIT/refs/replace`.
+        upper = export / ".GIT" / "modules" / "x"
+        upper.mkdir(parents=True)
+        (upper / "config").write_bytes(b"[core]\n")
+        both_refuse("EI15 uppercase-git-refused", "a .GIT directory containing files",
+                    export, pin, "EXPORT_CONTAINS_GIT_SHAPE")
+        shutil.rmtree(export / ".GIT")
+
+        # The discriminating case: an EMPTY .GIT tree carries no files, so the
+        # file-set comparison cannot catch it incidentally. Only the O(1) shape
+        # rule can, which is exactly the guarantee C2 claims.
+        (export / ".GIT" / "refs" / "replace").mkdir(parents=True)
+        both_refuse("EI16 empty-uppercase-git-tree-refused",
+                    "an EMPTY .GIT tree (no files for the file-set check to see)",
+                    export, pin, "EXPORT_CONTAINS_GIT_SHAPE")
+        shutil.rmtree(export / ".GIT")
+
+        # And the pointer-file head is spelling-insensitive too.
+        (export / "scripts" / ".git").write_bytes(b"GITDIR: C:/elsewhere/.git\n")
+        both_refuse("EI17 uppercase-gitdir-pointer-refused", "GITDIR: pointer head",
+                    export, pin, "EXPORT_CONTAINS_GIT")
+        (export / "scripts" / ".git").unlink()
+
         # ---- the flip closes: clean again after every fault removed ---------
         py_ok, _ = py_verify(export, pin)
         ps_ok, _ = ps_verify(export, pin)

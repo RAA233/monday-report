@@ -247,7 +247,14 @@ function Invoke-ExportSource {
     while ($stack.Count -gt 0) {
         $current = $stack.Pop()
         foreach ($entry in ([IO.DirectoryInfo]$current).GetFileSystemInfos()) {
-            if ($ExportExcludes -ccontains $entry.Name) { continue }
+            # CASE-INSENSITIVE exclusion: on Windows '.GIT' and '.git' are the
+            # same directory, so a case-sensitive skip would COPY a repository
+            # into the export that the C2 shape rule then has to catch.
+            $excluded = $false
+            foreach ($name in $ExportExcludes) {
+                if ($entry.Name -ieq $name) { $excluded = $true; break }
+            }
+            if ($excluded) { continue }
             if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
                 throw ('OFFLINE_EXPORT_SOURCE_REPARSE_POINT: ' + $entry.FullName)
             }

@@ -40,11 +40,20 @@ function Get-ExportFileSha256 {
 }
 
 function Test-ExportEntryShape {
-    <# The O(1) shape refusals for one entry. Throws on violation. #>
+    <#
+      The O(1) shape refusals for one entry. Throws on violation.
+
+      CASE-INSENSITIVE, deliberately. Windows paths are case-insensitive, so a
+      directory created as '.GIT' IS '.git' to every tool including git itself.
+      A case-sensitive test keyed the refusal to fewer operands than the damage:
+      an EMPTY '.GIT' tree carries no files, so the file-set comparison could
+      not catch it incidentally either, and both twins verified an export
+      containing a git directory. The rule is "any .git shape, any spelling".
+    #>
     param([Parameter(Mandatory = $true)][IO.FileSystemInfo]$Entry,
           [Parameter(Mandatory = $true)][string]$Rel)
 
-    if ($Entry.Name -ceq '.git') {
+    if ($Entry.Name -ieq '.git') {
         throw ("EXPORT_CONTAINS_GIT_SHAPE: " + $Rel)
     }
     if ($Entry.Attributes -band [IO.FileAttributes]::ReparsePoint) {
@@ -98,7 +107,7 @@ function Get-ExportFiles {
             try {
                 $read = $stream.Read($head, 0, 7)
             } finally { $stream.Dispose() }
-            if ($read -eq 7 -and [Text.Encoding]::ASCII.GetString($head) -ceq 'gitdir:') {
+            if ($read -eq 7 -and [Text.Encoding]::ASCII.GetString($head) -ieq 'gitdir:') {
                 throw ("EXPORT_CONTAINS_GITDIR_POINTER: " + $rel)
             }
             $files[$rel] = $entry.FullName
@@ -154,8 +163,10 @@ function Test-AuthorWorkspaceShape {
         throw ('OFFLINE_EXPORT_SOURCE_NOT_A_REPOSITORY_ROOT: ' + $rootFull + ' has no .git ' +
                'at its root; export only a real author checkout root')
     }
+    # -ieq / -ine: case-insensitive, for the same reason Test-ExportEntryShape is.
+    # A nested repository spelled '.GIT' is a nested repository on Windows.
     $nested = @(Get-ChildItem -LiteralPath $rootFull -Recurse -Force -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -ceq '.git' -and $_.FullName -cne $rootGit } |
+                Where-Object { $_.Name -ieq '.git' -and $_.FullName -ine $rootGit } |
                 Select-Object -First 1)
     if ($nested.Count) {
         throw ('OFFLINE_EXPORT_NESTED_REPOSITORY: ' + $nested[0].FullName + ' -- the author ' +

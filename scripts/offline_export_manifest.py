@@ -67,9 +67,17 @@ def _is_reparse(path: Path) -> bool:
 
 
 def _refuse_shape(root: Path, rel: str, name: str, path: Path) -> None:
-    """The O(1) shape refusals, applied to every entry as it is walked."""
+    """The O(1) shape refusals, applied to every entry as it is walked.
 
-    if name == ".git":
+    CASE-INSENSITIVE, deliberately. Windows paths are case-insensitive, so a
+    directory created as ``.GIT`` IS ``.git`` to every tool including git
+    itself. A case-sensitive test keyed the refusal to fewer operands than the
+    damage: an EMPTY ``.GIT`` tree carries no files, so the file-set comparison
+    could not catch it incidentally either, and both twins verified an export
+    containing a git directory. The rule is "any .git shape, any spelling".
+    """
+
+    if name.lower() == ".git":
         raise ExportRefusal(f"EXPORT_CONTAINS_GIT_SHAPE: {rel or name} under {root}")
     if _is_reparse(path):
         raise ExportRefusal(f"EXPORT_CONTAINS_REPARSE_POINT: {rel or name} under {root}")
@@ -110,7 +118,7 @@ def walk_export(root: Path) -> dict[str, Path]:
                 continue  # the manifest travels beside the tree it describes
             with entry.open("rb") as handle:
                 head = handle.read(7)
-            if head == b"gitdir:":
+            if head.lower() == b"gitdir:":
                 raise ExportRefusal(f"EXPORT_CONTAINS_GITDIR_POINTER: {rel}")
             files[rel] = entry
     return files
