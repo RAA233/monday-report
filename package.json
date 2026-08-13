@@ -145,6 +145,8 @@
     "audit:offline-license": "python scripts/offline_license_guard.py",
     "audit:offline-airgap": "python scripts/offline_airgap_guard.py",
     "audit:offline-secret-scan": "python scripts/offline_secret_scan_guard.py",
+    "audit:offline-runtime": "python scripts/offline_runtime_guard.py",
+    "build:offline-package": "python packaging/build_offline_package.py",
     "offline:issue-test-license": "python scripts/offline_operator_issue.py"
   },
   "dependencies": {
