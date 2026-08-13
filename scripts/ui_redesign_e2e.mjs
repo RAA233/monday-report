@@ -1425,6 +1425,48 @@ async function main() {
     );
   }
 
+  // ── the reviewed schema-variant board and the directional variant ─────────
+  //
+  // Fresh-load assertions on purpose: the phase strip renders the VARIANT's
+  // committed phase only while the drafted form is empty, so a draft built
+  // earlier in the run could mask a missing variant.
+  {
+    await page.goto(`${WEB}/app/studio`, { waitUntil: "networkidle" });
+    const board = page.locator('section[aria-label="Reviewed schema variants"]');
+    const boardPresent = (await board.count()) === 1;
+    const cardCount = boardPresent ? await board.locator("article").count() : 0;
+    const boardText = boardPresent ? await board.innerText() : "";
+    const hasVersion = /MR-SCHEMA-1/.test(boardText);
+    const shortLabels = ["DDR", "BHA", "Mud", "Survey", "DIR"];
+    const missingLabels = shortLabels.filter((label) => !boardText.includes(label));
+    const countLines = (boardText.match(/\d+ markers · \d+ checks · \d+ outputs/g) ?? []).length;
+    check(
+      "studio-schema-board-covers-variants",
+      boardPresent && cardCount === 5 && hasVersion && missingLabels.length === 0 && countLines === 5,
+      boardPresent
+        ? `${cardCount} variant card(s); schema version shown: ${hasVersion}; ` +
+          `${countLines} of 5 cards carry a "markers · checks · outputs" count line` +
+          (missingLabels.length ? `; missing labels: ${missingLabels.join(", ")}` : "")
+        : 'no section labelled "Reviewed schema variants" rendered on /app/studio'
+    );
+
+    // Select the Directional variant BEFORE any draft is built: the title and the
+    // meta strip must switch to the committed directional labels.
+    await page.getByRole("radio", { name: "DIR" }).check();
+    const h1 = (await page.locator("h1").first().innerText()).replace(/\s+/g, " ").trim();
+    const bodyAfter = await page.locator("body").innerText();
+    const directionalTitle = /Directional steering draft/i.test(h1);
+    const directionalPhase = bodyAfter.includes("Directional steering report");
+    const dirTag = /\bDIR\b/.test(bodyAfter);
+    check(
+      "studio-directional-variant-renders",
+      directionalTitle && directionalPhase && dirTag,
+      `h1 = ${JSON.stringify(h1)} (directional: ${directionalTitle}); ` +
+        `committed phase "Directional steering report" rendered: ${directionalPhase}; ` +
+        `DIR short label rendered: ${dirTag}`
+    );
+  }
+
   // ── an operator-cleared draft field must STAY cleared ─────────────────────
   //
   // Three states must stay distinct: not loaded, empty by operator choice, and a
@@ -2102,6 +2144,58 @@ async function main() {
     context.off("request", countExports);
     await s1page.unroute((url) => url.origin === new URL(API).origin);
 
+    // ── a session without view_validation_queue must not read the queue ─────────────
+    //
+    // GET /validation-tasks requires view_validation_queue, and a refused GET appends
+    // an audited permission_denied event to the hash-chained log — so the provider
+    // must consult the session's permission map BEFORE issuing the read, exactly like
+    // the shared Stage 2 reads. Served with fixtures: the REAL session payload minus
+    // the grant, while /validation-tasks COUNTS whatever still reaches it. The gate
+    // must then render as not visible — never as "clear", which an unread queue does
+    // not establish.
+    {
+      let queueReads = 0;
+      const realSession = await apiJson("/auth/session");
+      const restricted = {
+        ...realSession,
+        permissions: { ...(realSession.permissions ?? {}), view_validation_queue: false }
+      };
+      const restrictRoutes = async (route) => {
+        const url = new URL(route.request().url());
+        if (/\/auth\/session$/.test(url.pathname)) {
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(restricted)
+          });
+        }
+        if (/\/validation-tasks$/.test(url.pathname)) {
+          queueReads += 1;
+          return route.fulfill({
+            status: 403,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: "permission_denied" })
+          });
+        }
+        return route.fallback();
+      };
+      await s1page.route(
+        (url) => url.origin === new URL(API).origin,
+        (route) => restrictRoutes(route)
+      );
+      await s1page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
+      await s1page.waitForTimeout(900);
+      const restrictedBody = await s1page.locator("body").innerText();
+      const gateNotVisible = /Export gate not visible/i.test(restrictedBody);
+      check(
+        "restricted-session-issues-no-queue-read",
+        queueReads === 0 && gateNotVisible,
+        `GET /validation-tasks was issued ${queueReads} time(s) (expected 0) for a session ` +
+          `without view_validation_queue; the gate banner reads "not visible": ${gateNotVisible}`
+      );
+      await s1page.unroute((url) => url.origin === new URL(API).origin);
+    }
+
     // ── keep 3: the inert-state contract, on the app's OWN rendered controls ────────
     // Measured, not asserted: each control is read live, marked inert, read again.
     // Colours are composited through the alpha stack (a 10%-opacity wash is not an
@@ -2372,6 +2466,9 @@ async function main() {
     "browser-targets-gated-api",
     "studio-does-not-draft-on-mount",
     "studio-discloses-explicit-drafting",
+    "studio-schema-board-covers-variants",
+    "studio-directional-variant-renders",
+    "restricted-session-issues-no-queue-read",
     "studio-cleared-field-stays-empty",
     "studio-local-edit-survives-reconnect",
     "retry-press-keeps-focus",

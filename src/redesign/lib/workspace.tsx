@@ -490,8 +490,31 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   // intermediate "loading" transition too and re-ran the gate's three fetches twice.
   const [queueVersion, setQueueVersion] = useState(0);
 
+  // The session the newest probe resolved, readable SYNCHRONOUSLY by
+  // loadValidationTasks: the probe calls it in the same async continuation that
+  // called setSession, before React re-renders with the new state. Null until a
+  // probe succeeds, and reset to null when one fails, so a stale session can never
+  // authorise a queue read against a degraded API.
+  const sessionRef = useRef<ApiSession | null>(null);
+
   const loadValidationTasks = useCallback(async () => {
     const token = ++queueToken.current;
+    // Permission-gated BEFORE any request is issued, exactly like the shared Stage 2
+    // reads below: GET /validation-tasks requires view_validation_queue, and a
+    // refused GET appends an audited permission_denied event to the hash-chained
+    // log. Sessions without the grant (ENGINEER, MANAGER) were appending one per
+    // app load just by mounting the shell. Default-deny over the session's own
+    // permission map — the model the backend enforces per route; the gate effect
+    // then reports `unauthorized`, which is not evidence about the gate (the
+    // backend still enforces it on export). When NO session has been probed the
+    // request proceeds and fails on its own terms, so a degraded API still reads
+    // as an error rather than a permission refusal.
+    const probed = sessionRef.current;
+    if (probed && probed.permissions?.["view_validation_queue"] !== true) {
+      setValidationTasks({ state: "unauthorized" });
+      setQueueVersion((n) => n + 1);
+      return;
+    }
     setValidationTasks({ state: "loading" });
     try {
       const tasks = await getValidationTasks();
@@ -533,12 +556,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         const [nextSession, nextWorkspaces] = await Promise.all([getSession(), getWorkspaces()]);
         if (cancelled) return;
         probedSession = nextSession;
+        // Before loadValidationTasks below: the ref is what that callback consults,
+        // and the state set on the next line is not visible until the re-render.
+        sessionRef.current = nextSession;
         setSession(nextSession);
         setWorkspaces(nextWorkspaces);
         setActiveId((current) => current ?? nextWorkspaces[0]?.id ?? null);
         setApiStatus("connected");
       } catch (error) {
         if (cancelled) return;
+        // No session resolved: the queue gate above must not consult a stale one.
+        sessionRef.current = null;
         // Classify the refusal instead of calling every failure unreachability.
         // `src/lib/api.ts` throws `API <status>: <detail>`, so the status is here:
         // 401/403 = credential or role, 503 = a backend that is up but has no client

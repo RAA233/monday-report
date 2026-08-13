@@ -1113,6 +1113,67 @@ export function Studio() {
       <p className="text-muted" style={{ fontSize: 12.5, margin: 0, maxWidth: "80ch" }}>
         Required sections for {activeVariant.label}: {activeVariant.requiredSections.join(", ")}.
       </p>
+
+      {/* Reviewed schema variants — the committed MR-SCHEMA-1 coverage board.
+          Every figure is read from `src/data/reportVariantSchemas.ts`, the same
+          module the selector above renders from, so this board cannot drift from
+          the schema the backend and the guards pin. */}
+      <Frame as="section" aria-label="Reviewed schema variants" style={{ padding: 18, display: "grid", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div>
+            <span className="mr-kicker">Reviewed schema variants</span>
+            <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: "2px 0 0" }}>
+              Extraction and drafting targets
+            </h2>
+          </div>
+          <Tag tone="accent">{reportVariantSchemaVersion}</Tag>
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit,minmax(min(190px,100%),1fr))",
+            gap: 10
+          }}
+        >
+          {reportFormatVariants.map((variant) => (
+            <article
+              key={variant.id}
+              aria-current={variant.id === activeVariant.id ? "true" : undefined}
+              style={{
+                border:
+                  variant.id === activeVariant.id
+                    ? "1px solid var(--color-accent-700)"
+                    : "1px solid var(--color-divider)",
+                padding: "10px 12px",
+                display: "grid",
+                gap: 4,
+                alignContent: "start"
+              }}
+            >
+              <span
+                style={{
+                  fontSize: 10,
+                  letterSpacing: "0.1em",
+                  textTransform: "uppercase",
+                  color: "var(--color-accent-700)"
+                }}
+              >
+                {variant.shortLabel}
+              </span>
+              <strong style={{ fontFamily: "var(--font-heading)", fontSize: 14.5 }}>{variant.label}</strong>
+              <code style={{ fontSize: 11 }}>{variant.schemaId}</code>
+              <span className="text-muted" style={{ fontSize: 11.5 }}>
+                {variant.extractionMarkers.length} markers · {variant.draftingChecks.length} checks ·{" "}
+                {variant.outputSections.length} outputs
+              </span>
+            </article>
+          ))}
+        </div>
+        <p className="text-muted" style={{ fontSize: 11.5, margin: 0, maxWidth: "80ch" }}>
+          Marker, check and output counts are read from the committed schema module, never a
+          hand-typed figure.
+        </p>
+      </Frame>
     </>
   );
 }
