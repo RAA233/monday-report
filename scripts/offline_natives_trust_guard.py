@@ -158,6 +158,37 @@ def main() -> int:  # noqa: PLR0915 -- one linear battery
             clean_predicate_ok and plant_py_refused,
             "identical predicate: real System32 binary accepted, user-owned plant refused")
 
+        # NT04d WITNESSES THE DACL-WRITE ACE BRANCH DIRECTLY.
+        #
+        # The plant above is owner-untrusted, so it refuses at the OWNER check
+        # and never reaches the hand-rolled ACE parser -- the more error-prone
+        # path. This drives that parser's REFUSE direction over a REAL System32
+        # binary (owner trusted, so the owner check passes) by counting execute
+        # rights as "write": the binary's genuine BUILTIN\Users:ReadAndExecute
+        # ACE then trips the write branch and must be named, proving the mask
+        # test, the ACE walk, and the SID extraction all execute correctly.
+        # 0x20 = FILE_EXECUTE, 0x1 = FILE_READ_DATA.
+        execute_mask = 0x20 | 0x1
+        py_dacl_refused = ""
+        try:
+            natives.verify_descriptor(real_system / "icacls.exe", write_mask=execute_mask)
+        except natives.TrustedNativeRefusal as exc:
+            py_dacl_refused = str(exc)
+        rec("NT04d py-dacl-write-branch-witnessed",
+            "WRITABLE_BY_UNTRUSTED_PRINCIPAL" in py_dacl_refused
+            and "S-1-5-32-545" in py_dacl_refused,
+            f"the ACE parser's refuse branch fires over a real binary and names the "
+            f"non-trusted SID ({py_dacl_refused[-70:]!r})")
+
+        ps_dacl = run_ps(
+            f"try {{ Test-TrustedNativeDescriptor -Path '{real_system / 'icacls.exe'}' "
+            "-WriteMask 0x21; Write-Output 'ACCEPTED' } "
+            "catch { Write-Output ('REFUSED ' + $_.Exception.Message) }")
+        rec("NT04e ps-dacl-write-branch-witnessed",
+            "REFUSED" in ps_dacl.stdout and "WRITABLE_BY_UNTRUSTED" in ps_dacl.stdout
+            and "S-1-5-32-545" in ps_dacl.stdout,
+            ps_dacl.stdout.strip()[-90:])
+
         # ---- NT05 unreadable descriptor fails CLOSED ------------------------
         missing = work / "not-there.exe"
         missing_refused = False

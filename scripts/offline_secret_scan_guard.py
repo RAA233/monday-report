@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-BASE = "58ade47c2a8927a3bfbbeceb65ad3788aebf78be"  # PR #29 head = this branch's base
+BASE = "86fd1fa98e2591cce0f4e2e996ea448c67f65e20"  # main base of feat/offline-edition-v2
 
 LEAK_PATTERNS: dict[str, str] = {
     "private_key_block": r"-----BEGIN (?:RSA |EC )?PRIVATE KEY-----",

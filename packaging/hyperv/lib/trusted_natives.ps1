@@ -87,7 +87,13 @@ function Test-TrustedNativeDescriptor {
       read the descriptor. Never returns $false -- refusal is an exception so a
       forgotten caller check cannot fail open.
     #>
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param([Parameter(Mandatory = $true)][string]$Path,
+          # Seam for the natives-trust guard: the set of rights that count as
+          # "can change the binary or its policy". Defaults to the production
+          # mask; the guard passes an execute-inclusive mask to drive the DACL
+          # REFUSE branch over a real binary's real (non-trusted) allow ACE,
+          # since the production faults stop at the owner check.
+          [int64]$WriteMask = $script:TrustedNativeWriteMask)
 
     try {
         $acl = [IO.File]::GetAccessControl(
@@ -111,7 +117,7 @@ function Test-TrustedNativeDescriptor {
     foreach ($rule in $rules) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
         $rights = [int64]$rule.FileSystemRights -band 0xFFFFFFFFL
-        if (($rights -band $script:TrustedNativeWriteMask) -eq 0) { continue }
+        if (($rights -band $WriteMask) -eq 0) { continue }
         $sid = $rule.IdentityReference.Value
         if ($script:TrustedNativeWriteSids -notcontains $sid) {
             throw ("TRUSTED_NATIVES_WRITABLE_BY_UNTRUSTED_PRINCIPAL: " + $Path + " sid=" + $sid)

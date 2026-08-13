@@ -17,6 +17,14 @@ directory). Enumeration cannot terminate, so this module removes the operands:
   no principal outside SYSTEM / TrustedInstaller / BUILTIN\\Administrators may
   hold any write-capable right on it. Failure to READ the descriptor refuses
   the run -- fail closed, never open.
+
+SCOPE (stated honestly): this predicate verifies the BINARY's own owner and
+DACL. It relies on the system directory itself (the parent) being
+OS-protected -- which it is, by the same TrustedInstaller/SYSTEM ownership that
+resolves it -- so a non-administrative author cannot replace a binary via
+parent-directory delete/create rights. The predicate does not separately audit
+the parent's DACL; that protection is a property of a correctly-installed
+Windows System32, not an author-controllable operand in this threat model.
 """
 from __future__ import annotations
 
@@ -100,11 +108,18 @@ class _AceHeader(ctypes.Structure):
                 ("AceSize", wintypes.WORD)]
 
 
-def verify_descriptor(path: Path) -> None:
+def verify_descriptor(path: Path, *, write_mask: int = WRITE_MASK) -> None:
     """The trust predicate for one already-resolved binary path.
 
     Returns None on success; raises :class:`TrustedNativeRefusal` on any
     failure INCLUDING failure to read or parse the descriptor.
+
+    ``write_mask`` is the set of rights that count as "can change the binary or
+    its policy"; it defaults to the production mask and exists as a seam so the
+    natives-trust guard can drive the DACL-parse REFUSE branch over a real
+    binary's real (non-trusted) allow ACE -- the production faults are
+    owner-untrusted and stop at the owner check, leaving the ACE loop witnessed
+    only in the accept direction otherwise.
     """
 
     owner_sid = ctypes.c_void_p()
@@ -154,7 +169,7 @@ def verify_descriptor(path: Path) -> None:
             mask = ctypes.cast(
                 ctypes.c_void_p(ace_pointer.value + ctypes.sizeof(_AceHeader)),
                 ctypes.POINTER(wintypes.DWORD)).contents.value
-            if not (mask & WRITE_MASK):
+            if not (mask & write_mask):
                 continue
             sid_address = ace_pointer.value + ctypes.sizeof(_AceHeader) + ctypes.sizeof(wintypes.DWORD)
             sid = _sid_to_string(ctypes.c_void_p(sid_address))

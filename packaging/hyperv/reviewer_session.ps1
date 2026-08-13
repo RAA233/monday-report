@@ -483,6 +483,17 @@ $codeFiles = @(
     $PSCommandPath,
     (Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_credential_migration.ps1'),
     (Join-Path (Split-Path $PSCommandPath -Parent) 'reviewer_diagnostics.ps1'),
+    # The C1/C2/C3 primitive libraries this session DOT-SOURCES are executed
+    # code in exactly the sense the entry point is: a change to any of them
+    # runs inside this session. The installed bin's DACL is the primary control
+    # (author-read-only), but they are pinned too so a change shows up here.
+    (Join-Path (Split-Path $PSCommandPath -Parent) 'lib\trusted_natives.ps1'),
+    (Join-Path (Split-Path $PSCommandPath -Parent) 'lib\export_verify.ps1'),
+    (Join-Path (Split-Path $PSCommandPath -Parent) 'lib\task_root.ps1'),
+    # The C2 twin and the trusted-natives twin the Python driver loads from the
+    # verified export, and the export-manifest verifier itself.
+    (Join-Path $SourceRoot 'scripts\offline_trusted_natives.py'),
+    (Join-Path $SourceRoot 'scripts\offline_export_manifest.py'),
     (Join-Path $SourceRoot 'scripts\offline_reviewer_execute.py'),
     (Join-Path $SourceRoot 'scripts\offline_issuance_broker.py'),
     (Join-Path $SourceRoot 'scripts\offline_hyperv_matrix.py'),
