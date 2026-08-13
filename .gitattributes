@@ -45,6 +45,13 @@
 *.html text eol=lf
 *.sh   text eol=lf
 
+# --- pre-trust bootstrap: the OPERATOR pins this file's SHA-256 out of band and
+#     verifies it before executing it.  Without an explicit rule .ps1 resolved to
+#     eol=unspecified, so a checkout under core.autocrlf=true materialized CRLF and
+#     the operator's pin failed on exactly the machine that matters.  The pinned
+#     bytes must be the committed bytes on every platform. ---
+*.ps1  text eol=lf
+
 # --- remaining tracked text files (independent review F4: these resolved eol=unspecified and
 #     still materialized CRLF on a fresh autocrlf=true checkout; none is digest-bound today, but
 #     covering them removes the latent recurrence risk if one ever becomes bound) ---

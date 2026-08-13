@@ -49,8 +49,20 @@
 
 .PARAMETER TrustedSid
   Semicolon-delimited additional SIDs to treat as trusted owners/writers, on top
-  of SYSTEM, BUILTIN\Administrators and TrustedInstaller.  Production invocations
-  do not pass this.
+  of SYSTEM, BUILTIN\Administrators and TrustedInstaller.
+
+  THIS WIDENS THE TRUST SET.  Production invocations do not pass it.  It exists
+  because an admin-only trust root can legitimately be owned by a service
+  principal that is not one of the three built-ins, and because the black-box
+  harness in this repository runs UNELEVATED and therefore cannot construct a
+  fixture owned by BUILTIN\Administrators; it substitutes its own SID here and
+  proves separately, in a control scenario that omits this parameter, that the
+  default trust set rejects that same SID.
+
+  Well-known open groups (Everyone, Authenticated Users, BUILTIN\Users,
+  INTERACTIVE, Guests, Anonymous, ...) are REFUSED here, so this parameter can
+  never be used - by an operator, by a harness, or by a mistake - to bless a
+  world-writable root.
 #>
 
 [CmdletBinding()]
@@ -77,10 +89,11 @@ $EXIT = @{
     SOURCE_MISSING               = 20
     SOURCE_REPARSE               = 21
     SOURCE_GIT_PATH              = 22
-    PATH_COLLISION               = 23
+    SOURCE_COLLISION             = 23
     SOURCE_NAME_UNSAFE           = 24
     BUNDLE_PIN_MISMATCH          = 25
     SOURCE_UNREADABLE            = 26
+    SOURCE_EMPTY_DIRECTORY       = 27
 
     PARENT_MISSING               = 30
     PARENT_REPARSE               = 31
@@ -103,6 +116,20 @@ $EXIT = @{
     COPY_FAILED                  = 50
     DESTINATION_MISMATCH         = 51
     ROOT_IDENTITY_CHANGED        = 52
+    COPY_DIRECTORY_OCCUPIED      = 53
+
+    # The installed tree is enumerated and hashed by the SAME code that
+    # enumerated the source.  It gets its own reason codes anyway: a reparse
+    # point found in the source and a reparse point found in the destination are
+    # different events with different causes, and a taxonomy that spells them the
+    # same way cannot tell a hostile source from a hostile destination.
+    DESTINATION_MISSING          = 60
+    DESTINATION_REPARSE          = 61
+    DESTINATION_GIT_PATH         = 62
+    DESTINATION_COLLISION        = 63
+    DESTINATION_NAME_UNSAFE      = 64
+    DESTINATION_UNREADABLE       = 66
+    DESTINATION_EMPTY_DIRECTORY  = 67
 }
 
 $BUNDLE_CONTRACT = 'offline-bootstrap-bundle/v1'
@@ -113,6 +140,25 @@ foreach ($sid in @(
         'S-1-5-32-544',                                                                 # BUILTIN\Administrators
         'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'                # TrustedInstaller
     )) { $null = $script:TrustedSids.Add($sid) }
+
+# SIDs that name a group any logged-on user belongs to.  -TrustedSid may not add
+# one of these: a trust set that contains an open group makes every subsequent
+# DACL check vacuous, and the check would still print that it ran.
+$script:OpenSids = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+foreach ($sid in @(
+        'S-1-1-0',        # Everyone
+        'S-1-5-7',        # ANONYMOUS LOGON
+        'S-1-5-11',       # Authenticated Users
+        'S-1-5-4',        # INTERACTIVE
+        'S-1-5-2',        # NETWORK
+        'S-1-5-14',       # REMOTE INTERACTIVE LOGON
+        'S-1-5-32-545',   # BUILTIN\Users
+        'S-1-5-32-546',   # BUILTIN\Guests
+        'S-1-5-32-547',   # BUILTIN\Power Users
+        'S-1-5-32-555',   # BUILTIN\Remote Desktop Users
+        'S-1-5-113',      # Local account
+        'S-1-5-114'       # Local account and member of Administrators group
+    )) { $null = $script:OpenSids.Add($sid) }
 
 # --------------------------------------------------------------------------
 # P/Invoke.  ONE Add-Type, at startup, for declarations only.  This is the sole
@@ -367,6 +413,35 @@ function Test-ComponentNameSafe {
         }
     }
     return $null
+}
+
+function Assert-PathRepresentable {
+    <#
+      .SYNOPSIS
+        Every component below the volume root of an absolute path must mean the
+        same thing to Win32 and to the extended-length (\\?\) form.
+      .DESCRIPTION
+        This script addresses the same directories two ways: the parent/root
+        CHAIN is judged through ordinary Win32 paths (which silently trim trailing
+        dots and spaces), while enumeration and copying go through \\?\ paths
+        (which do not).  If any component of the operator's path carries a
+        trailing dot or space, those two forms name DIFFERENT directories - the
+        one that is judged and the one that is written to.  Refusing the path is
+        the only way to keep the verdict and the write on the same object.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+    $tail = $Path.Substring(3)          # caller has already required X:\ rooting
+    if ($tail.Length -eq 0) { return }
+    foreach ($component in $tail.Split([char]'\')) {
+        if ($component.Length -eq 0) { continue }
+        $problem = Test-ComponentNameSafe -Component $component
+        if ($null -ne $problem) {
+            Deny -Reason $Reason -Detail "$Path : component '$component': $problem"
+        }
+    }
 }
 
 function Test-GitComponent {
@@ -682,20 +757,27 @@ function Get-BundleMembers {
         Relative paths are built by ACCUMULATING the raw component names walked
         into.  No path string is ever parsed, sliced, or stripped, so there is no
         way for '../evil.ps1' to become 'evil.ps1'.
+
+        $Phase selects the refusal-code family (SOURCE_* or DESTINATION_*).  The
+        SAME code walks both trees - that is the point of re-hashing the
+        destination - but a refusal must still say which tree it came from.
     #>
-    param([Parameter(Mandatory = $true)][string]$Root)
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][ValidateSet('SOURCE', 'DESTINATION')][string]$Phase
+    )
 
     $rootExtended = Get-ExtendedPath -Path $Root
     $rootHandle = Open-NodeHandle -Path $rootExtended
     if ($rootHandle -eq $INVALID_HANDLE) {
         $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        Deny -Reason 'SOURCE_MISSING' -Detail "$Root win32=$err"
+        Deny -Reason "${Phase}_MISSING" -Detail "$Root win32=$err"
     }
     try {
         $information = Get-HandleInformation -Handle $rootHandle
-        if ($null -eq $information) { Deny -Reason 'SOURCE_MISSING' -Detail "$Root (information unreadable)" }
-        if ($information.IsReparse) { Deny -Reason 'SOURCE_REPARSE' -Detail $Root }
-        if (-not $information.IsDirectory) { Deny -Reason 'SOURCE_MISSING' -Detail "$Root is not a directory" }
+        if ($null -eq $information) { Deny -Reason "${Phase}_MISSING" -Detail "$Root (information unreadable)" }
+        if ($information.IsReparse) { Deny -Reason "${Phase}_REPARSE" -Detail $Root }
+        if (-not $information.IsDirectory) { Deny -Reason "${Phase}_MISSING" -Detail "$Root is not a directory" }
     } finally {
         $null = [OfflineBootstrapNative]::CloseHandle($rootHandle)
     }
@@ -711,7 +793,18 @@ function Get-BundleMembers {
             $frame = $stack.Pop()
             $entries = $null
             try { $entries = [IO.Directory]::GetFileSystemEntries($frame.Extended) }
-            catch { Deny -Reason 'SOURCE_UNREADABLE' -Detail "$($frame.Extended) ($($_.Exception.Message))" }
+            catch { Deny -Reason "${Phase}_UNREADABLE" -Detail "$($frame.Extended) ($($_.Exception.Message))" }
+
+            # A directory with no entries contributes nothing to the manifest, so
+            # the pin cannot see it: an empty directory could be added to, or
+            # removed from, a pinned bundle without changing the root hash, and
+            # the destination re-hash would not notice either.  Rather than widen
+            # the pre-image to carry directories that the copy would then have to
+            # reproduce, an empty directory is simply not a legal bundle member.
+            if (@($entries).Count -eq 0) {
+                $where = if (@($frame.Components).Count -eq 0) { '<root>' } else { ($frame.Components -join '/') }
+                Deny -Reason "${Phase}_EMPTY_DIRECTORY" -Detail $where
+            }
 
             foreach ($entry in $entries) {
                 $name = [IO.Path]::GetFileName($entry)
@@ -719,19 +812,19 @@ function Get-BundleMembers {
                 $relative = ($components -join '/')
 
                 if (Test-GitComponent -Component $name) {
-                    Deny -Reason 'SOURCE_GIT_PATH' -Detail $relative
+                    Deny -Reason "${Phase}_GIT_PATH" -Detail $relative
                 }
 
                 $handle = Open-NodeHandle -Path $entry
                 if ($handle -eq $INVALID_HANDLE) {
                     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-                    Deny -Reason 'SOURCE_UNREADABLE' -Detail "$relative win32=$err"
+                    Deny -Reason "${Phase}_UNREADABLE" -Detail "$relative win32=$err"
                 }
                 $information = $null
                 try {
                     $information = Get-HandleInformation -Handle $handle
-                    if ($null -eq $information) { Deny -Reason 'SOURCE_UNREADABLE' -Detail "$relative (information unreadable)" }
-                    if ($information.IsReparse) { Deny -Reason 'SOURCE_REPARSE' -Detail $relative }
+                    if ($null -eq $information) { Deny -Reason "${Phase}_UNREADABLE" -Detail "$relative (information unreadable)" }
+                    if ($information.IsReparse) { Deny -Reason "${Phase}_REPARSE" -Detail $relative }
                 } finally {
                     $null = [OfflineBootstrapNative]::CloseHandle($handle)
                 }
@@ -751,14 +844,14 @@ function Get-BundleMembers {
                      [OfflineBootstrapNative]::FILE_FLAG_OPEN_REPARSE_POINT), [IntPtr]::Zero)
                 if ($contentHandle -eq $INVALID_HANDLE) {
                     $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-                    Deny -Reason 'SOURCE_UNREADABLE' -Detail "$relative win32=$err"
+                    Deny -Reason "${Phase}_UNREADABLE" -Detail "$relative win32=$err"
                 }
                 $safe = New-Object Microsoft.Win32.SafeHandles.SafeFileHandle -ArgumentList @($contentHandle, $true)
                 $stream = $null
                 try {
                     $contentInfo = Get-HandleInformation -Handle $contentHandle
-                    if ($null -eq $contentInfo) { Deny -Reason 'SOURCE_UNREADABLE' -Detail "$relative (information unreadable)" }
-                    if ($contentInfo.IsReparse) { Deny -Reason 'SOURCE_REPARSE' -Detail $relative }
+                    if ($null -eq $contentInfo) { Deny -Reason "${Phase}_UNREADABLE" -Detail "$relative (information unreadable)" }
+                    if ($contentInfo.IsReparse) { Deny -Reason "${Phase}_REPARSE" -Detail $relative }
                     $stream = New-Object System.IO.FileStream -ArgumentList @($safe, [System.IO.FileAccess]::Read)
                     $digest = $sha.ComputeHash($stream)
                     $null = $members.Add([pscustomobject]@{
@@ -791,12 +884,15 @@ function Assert-MembersUnambiguous {
         unusable.  The dictionary is ORDINAL - a case-insensitive dictionary would
         do the folding for us and leave the explicit fold untestable.
     #>
-    param([Parameter(Mandatory = $true)]$Members)
+    param(
+        [Parameter(Mandatory = $true)]$Members,
+        [Parameter(Mandatory = $true)][ValidateSet('SOURCE', 'DESTINATION')][string]$Phase
+    )
 
     $seen = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     foreach ($member in $Members) {
         if ($seen.ContainsKey($member.Folded)) {
-            Deny -Reason 'PATH_COLLISION' -Detail ("'{0}' collides with '{1}' (folded '{2}')" -f
+            Deny -Reason "${Phase}_COLLISION" -Detail ("'{0}' collides with '{1}' (folded '{2}')" -f
                 $member.Relative, $seen[$member.Folded], $member.Folded)
         }
         $seen[$member.Folded] = $member.Relative
@@ -805,7 +901,7 @@ function Assert-MembersUnambiguous {
         foreach ($component in $member.Components) {
             $problem = Test-ComponentNameSafe -Component $component
             if ($null -ne $problem) {
-                Deny -Reason 'SOURCE_NAME_UNSAFE' -Detail ("'{0}': component '{1}': {2}" -f $member.Relative, $component, $problem)
+                Deny -Reason "${Phase}_NAME_UNSAFE" -Detail ("'{0}': component '{1}': {2}" -f $member.Relative, $component, $problem)
             }
         }
     }
@@ -864,23 +960,44 @@ function Get-BundleRootHash {
 # --------------------------------------------------------------------------
 
 function Copy-BundleMember {
+    <#
+      .DESCRIPTION
+        Every directory below the root is created with CreateDirectoryW, which
+        FAILS if the name is already occupied, and each is created exactly once
+        (tracked in $CreatedDirectories).  The obvious alternative,
+        [IO.Directory]::CreateDirectory, succeeds when the name already exists -
+        including when what exists is a junction someone dropped in after the
+        root was verified.  The file write that followed would then land on the
+        junction's target, OUTSIDE the root, and only the destination re-hash
+        would notice, after the bytes were already written somewhere else.
+        Refusing an occupied directory name keeps every write inside the root
+        this process created.
+    #>
     param(
         [Parameter(Mandatory = $true)]$Member,
         [Parameter(Mandatory = $true)][string]$SourceRootExtended,
-        [Parameter(Mandatory = $true)][string]$DestinationRootExtended
+        [Parameter(Mandatory = $true)][string]$DestinationRootExtended,
+        [Parameter(Mandatory = $true)]$CreatedDirectories
     )
 
     $sourcePath = $SourceRootExtended
     foreach ($component in $Member.Components) { $sourcePath = $sourcePath + '\' + $component }
+
     $destinationPath = $DestinationRootExtended
-    $directory = $DestinationRootExtended
     for ($i = 0; $i -lt $Member.Components.Count; $i++) {
         $destinationPath = $destinationPath + '\' + $Member.Components[$i]
-        if ($i -lt ($Member.Components.Count - 1)) { $directory = $destinationPath }
-    }
-    if ($directory -ne $DestinationRootExtended) {
-        try { $null = [IO.Directory]::CreateDirectory($directory) }
-        catch { Deny -Reason 'COPY_FAILED' -Detail "$($Member.Relative): $($_.Exception.Message)" }
+        if ($i -lt ($Member.Components.Count - 1)) {
+            if (-not $CreatedDirectories.Contains($destinationPath)) {
+                if (-not [OfflineBootstrapNative]::CreateDirectoryW($destinationPath, [IntPtr]::Zero)) {
+                    $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                    if ($err -eq 183) {
+                        Deny -Reason 'COPY_DIRECTORY_OCCUPIED' -Detail "$($Member.Relative): '$destinationPath' already exists"
+                    }
+                    Deny -Reason 'COPY_FAILED' -Detail "$($Member.Relative): mkdir '$destinationPath' win32=$err"
+                }
+                $null = $CreatedDirectories.Add($destinationPath)
+            }
+        }
     }
 
     $sourceHandle = [OfflineBootstrapNative]::CreateFileW($sourcePath,
@@ -945,6 +1062,9 @@ try {
         if ($trimmed -notmatch '^S-1-[0-9\-]+$') {
             Deny -Reason 'ARGS_INVALID' -Detail "TrustedSid entry is not a SID: $trimmed"
         }
+        if ($script:OpenSids.Contains($trimmed)) {
+            Deny -Reason 'ARGS_INVALID' -Detail "TrustedSid entry names an open group and would make every DACL check vacuous: $trimmed"
+        }
         $null = $script:TrustedSids.Add($trimmed)
     }
 
@@ -961,6 +1081,7 @@ try {
     if (-not (Test-LocalDriveRooted -Path $parent)) {
         Deny -Reason 'PARENT_NOT_ANCHORED' -Detail $parent
     }
+    Assert-PathRepresentable -Path $parent -Reason 'ARGS_INVALID'
     if ([string]::IsNullOrWhiteSpace($SourcePath)) {
         Deny -Reason 'ARGS_INVALID' -Detail 'SourcePath is empty'
     }
@@ -968,13 +1089,14 @@ try {
     if (-not (Test-LocalDriveRooted -Path $source)) {
         Deny -Reason 'ARGS_INVALID' -Detail "SourcePath is not rooted on a local drive: $source"
     }
+    Assert-PathRepresentable -Path $source -Reason 'ARGS_INVALID'
     $root = [IO.Path]::Combine($parent, $RootName)
 
     Write-Note "stage=arguments parent=$parent parent_source=$parentSource root=$root source=$source"
 
     # ---- 2. bundle: enumerate, pin, compare ------------------------------
-    $members = Get-BundleMembers -Root $source
-    Assert-MembersUnambiguous -Members $members
+    $members = Get-BundleMembers -Root $source -Phase 'SOURCE'
+    Assert-MembersUnambiguous -Members $members -Phase 'SOURCE'
     $sorted = Get-SortedMembers -Members $members
     $computed = Get-BundleRootHash -SortedMembers $sorted
     Write-Note "stage=bundle members=$(@($sorted).Count) computed=$computed"
@@ -989,7 +1111,22 @@ try {
     # ---- 4. atomic create-or-refuse --------------------------------------
     if (-not [OfflineBootstrapNative]::CreateDirectoryW($root, [IntPtr]::Zero)) {
         $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        if ($err -eq 183) { Deny -Reason 'ROOT_EXISTS' -Detail "$root win32=183" }
+        if ($err -eq 183) {
+            # Refused either way; the only question is what to CALL it.  A name
+            # occupied by a junction and a name occupied by a real directory are
+            # different attacks, and a taxonomy that spells them the same way
+            # cannot tell a reviewer which one a scenario actually exercised.
+            # This inspection changes no decision - it only names the refusal.
+            $occupied = 'ROOT_EXISTS'
+            $probe = Open-NodeHandle -Path $root
+            if ($probe -ne $INVALID_HANDLE) {
+                try {
+                    $probeInfo = Get-HandleInformation -Handle $probe
+                    if ($null -ne $probeInfo -and $probeInfo.IsReparse) { $occupied = 'ROOT_REPARSE' }
+                } finally { $null = [OfflineBootstrapNative]::CloseHandle($probe) }
+            }
+            Deny -Reason $occupied -Detail "$root win32=183"
+        }
         Deny -Reason 'ROOT_CREATE_FAILED' -Detail "$root win32=$err"
     }
     Write-Note "stage=root-created root=$root"
@@ -1004,8 +1141,10 @@ try {
     # ---- 6. copy ---------------------------------------------------------
     $sourceExtended = Get-ExtendedPath -Path $source
     $rootExtended = Get-ExtendedPath -Path $root
+    $createdDirectories = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($member in $sorted) {
-        Copy-BundleMember -Member $member -SourceRootExtended $sourceExtended -DestinationRootExtended $rootExtended
+        Copy-BundleMember -Member $member -SourceRootExtended $sourceExtended `
+                          -DestinationRootExtended $rootExtended -CreatedDirectories $createdDirectories
     }
     Write-Note "stage=copied members=$(@($sorted).Count)"
 
@@ -1013,8 +1152,8 @@ try {
     # The destination is enumerated and hashed from scratch, by the same code
     # that enumerated the source.  Equality is required over the member SET, the
     # relative paths, the digests and the sizes - not over the root hash alone.
-    $installed = Get-BundleMembers -Root $root
-    Assert-MembersUnambiguous -Members $installed
+    $installed = Get-BundleMembers -Root $root -Phase 'DESTINATION'
+    Assert-MembersUnambiguous -Members $installed -Phase 'DESTINATION'
     $installedSorted = Get-SortedMembers -Members $installed
     if (@($installedSorted).Count -ne @($sorted).Count) {
         Deny -Reason 'DESTINATION_MISMATCH' -Detail "member count source=$(@($sorted).Count) destination=$(@($installedSorted).Count)"
