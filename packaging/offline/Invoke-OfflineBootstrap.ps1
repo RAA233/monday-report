@@ -782,7 +782,13 @@ function Test-NodeSecurity {
 # Canonicalisation and the trust chain
 # --------------------------------------------------------------------------
 
-$VOLUME_GUID_PATTERN = '^\\\\\?\\Volume\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}\\'
+# The trailing separator is OPTIONAL.  GetFinalPathNameByHandle returns the
+# volume root as '\\?\Volume{GUID}\', and every path this script composes is
+# built by trimming a trailing separator and appending '\component' - so the
+# volume root reaches this pattern in BOTH spellings.  Requiring the separator
+# made a parent that IS a volume root throw out of Split-CanonicalPath and land
+# in the catch-all as UNEXPECTED_ERROR instead of being judged.
+$VOLUME_GUID_PATTERN = '^\\\\\?\\Volume\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}\\?'
 
 function Resolve-CanonicalPath {
     <#
@@ -855,8 +861,11 @@ function Split-CanonicalPath {
     param([Parameter(Mandatory = $true)][string]$Canonical)
     $match = [regex]::Match($Canonical, $VOLUME_GUID_PATTERN)
     if (-not $match.Success) { throw "not a volume-GUID path: $Canonical" }
-    $root = $match.Value
-    $tail = $Canonical.Substring($root.Length)
+    # Normalise to exactly one trailing separator, whichever spelling arrived:
+    # opening a volume root requires it, and appending a component requires its
+    # absence.  Both are handled here, once, rather than at every call site.
+    $root = $match.Value.TrimEnd([char]'\') + '\'
+    $tail = $Canonical.Substring($match.Value.Length).TrimStart([char]'\')
     $components = @()
     if ($tail.Length -gt 0) {
         $components = @($tail.Split([char]'\') | Where-Object { $_.Length -gt 0 })
@@ -997,7 +1006,12 @@ function Get-DirectoryEntryNames {
         if ($find -ne $INVALID_HANDLE) { $null = $script:Native::FindClose($find) }
         [Runtime.InteropServices.Marshal]::FreeHGlobal($buffer)
     }
-    return @($names)
+    # The unary comma is load bearing.  `return @($names)` unrolls an EMPTY list
+    # to nothing, so an empty directory came back as $null - indistinguishable
+    # from a directory that could not be read, and reported as UNREADABLE instead
+    # of EMPTY_DIRECTORY.  Wrapping keeps the empty array an empty array, so the
+    # two conditions stay two conditions.
+    return ,@($names)
 }
 
 function Get-BundleMembers {
