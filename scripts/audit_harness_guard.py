@@ -194,6 +194,25 @@ print(json.dumps({"environment": os.environ.get("MONDAY_REPORT_API_BASE"), "runt
         )
     )
 
+    # OFFLINE MEMBERSHIP META-CHECK (re-derived for Offline Edition v2).
+    #
+    # Redundant assertion, from a guard that is NOT the offline guard, that the
+    # Offline Edition effect-proving batteries are pinned into audit:all early
+    # and are not hollowed. Removing offline validation therefore requires
+    # coordinated edits to package.json, offline_audit_membership_manifest.py,
+    # AND this conspicuous step-1 guard -- deterrence, not impossibility.
+    membership_manifest = ROOT / "scripts" / "offline_audit_membership_manifest.py"
+    if membership_manifest.exists():
+        manifest_module = load_module("offline_audit_membership_manifest", membership_manifest)
+        reasons = manifest_module.verify_membership()
+        checks.append(
+            assert_check(
+                "Offline Edition batteries pinned into audit:all",
+                not reasons,
+                reasons or "all pinned offline members present, early, and non-hollowed",
+            )
+        )
+
     failed = [check for check in checks if not check["ok"]]
     for check in checks:
         status = "PASS" if check["ok"] else "FAIL"

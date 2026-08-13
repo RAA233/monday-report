@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ENVIRONMENT_2 unattend file (template).
+
+    Supported Windows unattended-setup mechanisms ONLY. This file deliberately
+    contains no requirement bypass of any kind:
+
+      * no BypassNRO, and no registry injection of any sort
+      * no offline hive edit, no Setup binary modification
+      * no TPM, Secure Boot, CPU, RAM or storage requirement bypass
+      * no activation bypass and no evaluation-restriction bypass
+      * no Microsoft-account requirement circumvention beyond the documented
+        HideOnlineAccountScreens setting combined with a declared local account
+
+    Every element below is a documented Microsoft-Windows-Shell-Setup /
+    Microsoft-Windows-International-Core setting from the Windows Unattended
+    Setup Reference. The image is applied with DISM and made bootable with
+    BCDBoot, both supported deployment procedures.
+
+    The provisioning script renders __COMPUTER_NAME__, __ADMIN_NAME__,
+    __ADMIN_PASSWORD_B64__ and __TIMEZONE__ in memory and writes the rendered
+    copy directly into the mounted guest volume. The rendered copy is never
+    written to an ordinary host path, and it is removed from the guest after
+    first boot (see provision_vm.ps1, Remove-GuestUnattend).
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <ComputerName>__COMPUTER_NAME__</ComputerName>
+      <TimeZone>__TIMEZONE__</TimeZone>
+    </component>
+  </settings>
+
+  <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <InputLocale>en-US</InputLocale>
+      <SystemLocale>en-US</SystemLocale>
+      <UILanguage>en-US</UILanguage>
+      <UserLocale>en-US</UserLocale>
+    </component>
+
+    <component name="Microsoft-Windows-Shell-Setup"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+
+      <!-- Documented OOBE settings. No requirement is bypassed; these only
+           suppress interactive pages that an unattended install answers. -->
+      <OOBE>
+        <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
+        <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
+        <ProtectYourPC>3</ProtectYourPC>
+      </OOBE>
+
+      <!-- The single task-specific local administrator. PowerShell Direct
+           authenticates as this account; the credential is generated per VM,
+           DPAPI-protected on the host, and never reused. -->
+      <UserAccounts>
+        <LocalAccounts>
+          <LocalAccount wcm:action="add">
+            <Name>__ADMIN_NAME__</Name>
+            <DisplayName>__ADMIN_NAME__</DisplayName>
+            <Group>Administrators</Group>
+            <Password>
+              <Value>__ADMIN_PASSWORD_B64__</Value>
+              <PlainText>false</PlainText>
+            </Password>
+          </LocalAccount>
+        </LocalAccounts>
+      </UserAccounts>
+
+    </component>
+  </settings>
+
+</unattend>
