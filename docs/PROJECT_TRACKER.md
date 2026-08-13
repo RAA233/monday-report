@@ -30,6 +30,7 @@ Evidence status at this head:
 
 - `DUAL_BACKEND_UI`: re-earned at this head by running `python scripts/dual_backend_ui_guard.py` with the rewritten scenario inventory against BOTH backends (local JSON store and the runner-owned restricted PostgreSQL store); the result is recorded in the cutover PR.
 - `OUTCOME_1_FUNCTIONAL_MATRIX`: STALE-PENDING-REVIEW for its UI-facing rows — it was accepted against the retired v1 interface. The API-layer rows are unaffected, but UI-facing rows should be re-reviewed against the canonical frontend before being cited. The prior acceptance is retained as history, not deleted.
+- Known pre-existing backend defect surfaced by the new UI08 coverage (NOT introduced by this change — the branch touches no backend file): on the PostgreSQL snapshot path, `POST /monday-reports` answers 201, appends `monday_report.create` to the audit chain and serves the report from `GET /monday-reports`, but the tenant's `monday_report_state_snapshots` payload keeps `"monday_reports": []` — the accepted mutation is silently not persisted (no browser or concurrency needed to reproduce; the local JSON backend persists it correctly). The dual-backend certifier therefore records the `monday_reports` postcondition (visible as local=1 / postgres=0 in its output) without gating on it until the store defect is fixed.
 
 ## 2026-07-14 Benchmarking Release Evidence
 
