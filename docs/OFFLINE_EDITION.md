@@ -182,7 +182,86 @@ configured — the loopback boundary is what makes unauthenticated local mode
 safe, so an unauthenticated API is never published to a network. A runtime lock file + live-port probe prevents two instances from
 mutating the same state; stale locks are recovered after crashes.
 
-## 11. The terminating trust boundary (Offline Edition v2)
+## 11. Establishing the trust root (v2.1 — the design that governs C1–C4)
+
+v2 removed the author's `.git` from every integrity decision. An independent
+review then found the remaining, deeper hole: **v2 never established the trust
+root itself.** `-ExportSource` ran the author's own just-copied
+`scripts/offline_export_manifest.py`, through a `PATH`-resolved `python`,
+elevated, and accepted the result on self-consistency alone (no
+`-ExpectedRootHash`). Author-controlled code running as the operator minted the
+very pin that the reviewer later treats as authority, and the "provenance" it
+recorded was whatever the author's tree said. The C4 claim
+"provenance is operator-recorded" was false, and #30's trusted-source-copy
+constraint had been dropped entirely.
+
+This section is the governing design. It is written **before** the fixes it
+mandates, and every control below is verified by EFFECT (an executed call, a
+computed hash, an applied ACL, a launched binary's identity) — never by the
+presence of a string in a file.
+
+### The eight invariants
+
+1. **No author-controlled executable runs before source trust is established.**
+   No repository Python helper, no `PATH`-resolved interpreter, no elevated
+   repository script that mints its own manifest or root hash. Trust cannot be
+   bootstrapped by the thing being trusted.
+
+2. **The operator supplies OUT-OF-BAND pins from an independent pristine
+   channel**: the exact expected export root hash, the exact SHA-256 of the
+   bootstrap script, and the expected source commit/provenance. These arrive as
+   parameters or from the operator-owned trust directory. They are **never**
+   read from the author workspace or repository.
+
+3. **The bootstrap script's own bytes are verified before it executes**, using
+   trusted OS facilities only (`Get-FileHash`/.NET, and any native resolved
+   from the verified System directory — never `PATH`), compared against the
+   operator-supplied SHA-256. This is an operator step performed on a pristine
+   copy; only a byte-matching bootstrap may run.
+
+4. **Source acceptance is pinned, never self-consistent.** Author bytes are
+   exported without consulting `.git`; the byte manifest and root hash are
+   computed by a **non-author-controlled implementation** (the PowerShell side,
+   using trusted natives and .NET only — no repository Python); the result is
+   compared against the operator pin. Self-consistency-only acceptance is
+   forbidden. Any `.git`/`.GIT`/`gitdir`/reparse point/case-collision refuses.
+
+5. **C2 path identity is ordinal and collision-hostile.** No PowerShell
+   hashtable ever carries file identity (they are case-insensitive and collapse
+   slots). Canonical sorted paths, explicit ordinal comparison, Windows
+   case-collisions rejected outright, and any PowerShell/Python twin
+   disagreement is a FAILURE rather than a preference.
+
+6. **C1 ACL evaluation is fail-closed and twin-identical.** A NULL DACL fails.
+   An unknown or uninterpretable relevant ACE fails. An unsafe inherited or
+   write-capable ACE fails. Owner and DACL are read through Windows ACL APIs.
+   Both twins enforce the *same* semantics — parity is asserted on the
+   predicate, not merely on the allowlist.
+
+7. **Privileged natives are never `PATH`- or environment-derived.** Every
+   privileged native — `icacls` included — resolves from the verified OS System
+   directory through C1. `$env:USERNAME` is never an authorization operand: the
+   intended operator/reviewer **SID** is derived and verified explicitly, and
+   every native's exit code is checked. A bare-name native anywhere inside the
+   boundary is a door around C1 and is therefore a defect, not a style issue.
+
+8. **A trusted/pristine-source handover contract is explicit in the operator
+   procedure.** The author workspace alone can *never* establish provenance.
+
+### What this changes for the operator
+
+The operator now supplies three out-of-band values, obtained from a channel
+independent of the author's workspace, and runs the bootstrap from a **pristine
+copy** whose hash they verified first. See §14 for the exact invocation.
+
+### Honest scope of the v2.1 remediation
+
+These invariants close the *establishment* of the trust root. They do not
+change the protocol's standing residual (§17): the reviewer still executes code
+the author wrote, and that is closed only by human review of the exact attested
+commit. Nor do they claim resistance to a host administrator.
+
+## 12. The terminating trust boundary (Offline Edition v2)
 
 The earlier package established the reviewer's trust in the source by having the
 reviewer operate on the author's own Git checkout. Six independent review rounds
@@ -252,7 +331,7 @@ nested/no-repo refused; a seeded `sitecustomize`/PYTHONPATH does NOT load under
 `-I -S`, and the SAME seed DOES load unisolated — proving the flag, not an inert
 fixture).
 
-## 12. Environment 2 — a task-owned clean Hyper-V virtual machine
+## 13. Environment 2 — a task-owned clean Hyper-V virtual machine
 
 Environment 2 remains a genuine Generation 2 Hyper-V VM installed from official
 Microsoft evaluation media with Secure Boot (Windows template) and a virtual
@@ -272,7 +351,7 @@ absent that record the package and commercial verdicts stay **NOT_ACCEPTED**,
 and the generators/guards report the honest "package not built" / not-accepted
 state rather than passing vacuously.
 
-## 13. Operator procedure (v2 deltas from the earlier package)
+## 14. Operator procedure (v2 deltas from the earlier package)
 
 The architectural fix changes operator steps. Flagged deltas:
 
@@ -306,7 +385,7 @@ operator-owned protected bin, registers the scheduled task), then
 `schtasks /Run` (stored credential, no password). `-Verify` reports the current
 bootstrap facts.
 
-## 14. Verification map
+## 15. Verification map
 
 | Concern | Guard |
 | --- | --- |
@@ -331,7 +410,7 @@ The four C1–C4 guards run in `audit:all` immediately after the harness guard;
 membership is pinned in `scripts/offline_audit_membership_manifest.py` and
 asserted redundantly from `audit_harness_guard` (not an offline guard).
 
-## 15. The dual-principal acceptance protocol
+## 16. The dual-principal acceptance protocol
 
 The authoritative acceptance anchor is a fact the authoring process cannot
 manufacture: an Ed25519 signature from a key held by a SEPARATE Windows
@@ -356,7 +435,7 @@ package hashes; a different commit or tree; an attestation reused for a new
 package or transcripts; a modified transcript; a hand-edited `accepted` field
 (`audit:offline-evidence-contract`, hermetic, 29 checks).
 
-## 16. What this protocol does NOT claim
+## 17. What this protocol does NOT claim
 
 Stated plainly, because each of these was at some point claimed and was wrong.
 
