@@ -344,17 +344,20 @@ def main(argv: list[str] | None = None) -> int:
         transitions.append({"step": label, "ok": bool(payload.get("ok")),
                             "state": payload.get("guest_state") or payload.get("state") or ""})
 
-    if not (app_dir / "MondayReportOffline.exe").exists():
-        print(json.dumps({"guard": "offline_hyperv", "detail": "package not built",
-                          "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
-        return 1
-
     # ---- mode selection: authoritative brokered, or non-authoritative direct --
     #
     # In brokered mode this process never holds the issuer key. That is the whole
     # point: while the matrix signs its own licences, the principal running it is
     # also the principal issuing them, and its output cannot support commercial
     # acceptance no matter how green it is.
+    #
+    # ARGUMENT-CONTRACT REFUSALS COME BEFORE THE PACKAGE CHECK. Offered issuer
+    # material, a missing head binding, or a missing nonce are violations of the
+    # invocation contract itself -- they key to the arguments alone and say
+    # nothing about whether a package was built. Gating them behind the
+    # package-existence check made the refusal depend on an operand it has
+    # nothing to do with (and hid the refusal behind "package not built"
+    # whenever the disposable acceptance guard exercised it hermetically).
     global _STATE_ROOT
     if args.state_root:
         _STATE_ROOT = args.state_root
@@ -399,6 +402,14 @@ def main(argv: list[str] | None = None) -> int:
                                         "MONDAY_REPORT_OPERATOR_KEY_FILE (host side only, never transferred)",
                               "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
             return 1
+
+    # The package must exist to actually RUN a matrix. This is checked after the
+    # argument-contract refusals above (which do not depend on it) and before any
+    # real work begins.
+    if not (app_dir / "MondayReportOffline.exe").exists():
+        print(json.dumps({"guard": "offline_hyperv", "detail": "package not built",
+                          "summary": {"passed": 0, "failed": 1, "certification": "not_passed"}}))
+        return 1
 
     state_path = root / "orchestrator-state.json"
 
