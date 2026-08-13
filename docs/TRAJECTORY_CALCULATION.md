@@ -152,7 +152,10 @@ planned/actual sequence) has its own independent anchor.
 
 ## Vertical-profile visualization
 
-The Report Studio vertical profile (`src/components/TrajectoryVerticalProfile.tsx`)
+The Well-view vertical profile (`TrajectoryProfile` in
+`src/redesign/components/trajectory.tsx`, rendered on `/app/well`; originally
+implemented as `src/components/TrajectoryVerticalProfile.tsx` in the retired v1
+interface with identical display semantics)
 renders **one panel per explicit calculation segment** — segments are never overlaid on a
 shared TVD axis, so incompatible TVD references cannot be visually compared. Axes:
 horizontal = `horizontal_displacement_ft` from the segment anchor (zero at the anchor,
@@ -163,7 +166,10 @@ review-required and not-certified labels apply unchanged.
 
 ## Plan-view visualization
 
-The Report Studio plan view (`src/components/TrajectoryPlanView.tsx`) is a pure display
+The Well-view plan figure (`TrajectoryPlan` in
+`src/redesign/components/trajectory.tsx`, rendered on `/app/well`; originally
+implemented as `src/components/TrajectoryPlanView.tsx` in the retired v1
+interface with identical display semantics) is a pure display
 of the calculated stations above — it performs **no additional calculation or
 interpolation**. It renders one path per calculation segment (never bridging skipped
 stations or survey-type boundaries), uses equal ft scale with north up and east right,

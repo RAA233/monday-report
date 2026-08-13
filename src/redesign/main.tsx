@@ -6,14 +6,14 @@ import "../styles/redesign.css";
 import { AppRoutes } from "./router";
 
 /**
- * Entry point for the redesigned frontend (redesign.html, port 5174).
+ * Entry point for the canonical frontend (root index.html, port 5173).
  *
- * Deliberately separate from `src/main.tsx`: the v1 application keeps mounting at
- * `/` on 5173 so the committed UI suite keeps asserting against it unchanged.
+ * The redesign IS the application: the retired v1 entry is gone and the root
+ * document loads this module directly.
  */
 const container = document.getElementById("root");
 if (!container) {
-  throw new Error("redesign entry: #root is missing from redesign.html");
+  throw new Error("frontend entry: #root is missing from index.html");
 }
 
 // `WorkspaceProvider` lives inside the router, around the /app subtree only, so the

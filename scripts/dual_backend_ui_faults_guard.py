@@ -36,7 +36,7 @@ def valid_backend(backend):
     scen = [{"check_id": sid, "result": "PASS"} for sid in U.EXPECTED_SCENARIOS]
     counters = {k: 0 for k in ["console_error_count", "uncaught_exception_count", "failed_business_request_count",
                                "normal_HTTP_423_count", "normal_HTTP_500_count", "normal_HTTP_503_count"]}
-    db = {"uploaded_files": 1, "parsed_documents": 1, "benchmark_measurements": 1}
+    db = {"uploaded_files": 1, "parsed_documents": 1, "benchmark_measurements": 1, "monday_reports": 1}
     if backend == "postgres":
         identity = {"store_class": "PostgresStateStore", "repository_backend": "postgres",
                     "session_user_is_restricted_login": True, "runtime_not_superuser": True,
@@ -101,9 +101,14 @@ def run() -> int:
     rec("DF10 benchmarking-success-without-db",
         refuses(lambda l, p: p["db_postconditions"].__setitem__("benchmark_measurements", 0)),
         "a benchmarking UI success with NO committed measurement row is not certified")
-    rec("DF11 resolved-download-missing",
-        refuses(lambda l, p: l["scenarios"].__setitem__(7, {"check_id": "UI08-draft-download", "result": "FAIL"})),
-        "a missing/empty browser download is not certified")
+    rec("DF10b report-create-success-without-db",
+        refuses(lambda l, p: p["db_postconditions"].__setitem__("monday_reports", 0)),
+        "a Monday-report-creation UI success with NO committed report row at the backend's authority "
+        "(monday_report_norm_reports on postgres; the JSON snapshot locally) is not certified")
+    rec("DF11 report-create-scenario-failed",
+        refuses(lambda l, p: l["scenarios"].__setitem__(7, {"check_id": "UI08-report-create-mutation",
+                                                            "result": "FAIL"})),
+        "a failed Monday-report-creation scenario is not certified")
     rec("DF12 console-error-ignored",
         refuses(lambda l, p: p["counters"].__setitem__("console_error_count", 1)),
         "a console error is not ignored")

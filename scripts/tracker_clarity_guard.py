@@ -34,20 +34,20 @@ def main() -> int:
         ),
         check_contains(
             "Tracker UI clear lanes",
-            ROOT / "src" / "components" / "ProjectTracker.tsx",
+            ROOT / "src" / "redesign" / "pages" / "Tracker.tsx",
             [
                 "clearTrackerLanes",
                 "Clear tracker",
-                "clear-tracker-grid",
-                "clear-tracker-card",
+                'aria-label="Clear tracker"',
+                "lane.items.map",
             ],
         ),
         check_contains(
-            "Tracker clear lane styling",
-            ROOT / "src" / "styles.css",
+            "Tracker table styling",
+            ROOT / "src" / "styles" / "redesign.css",
             [
-                ".clear-tracker-grid",
-                ".clear-tracker-card",
+                ".mr-table-head",
+                ".mr-table-row",
             ],
         ),
     ]

@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   askChat,
+  createUploadFileSignedUrl,
   getMondayReports,
   getWorkspaceBenchmarking,
-  type ApiChatResponse
+  type ApiChatResponse,
+  type ApiCitation
 } from "../../lib/api";
 import { formatSourceCitation } from "../../lib/citationFormat";
 import { Cells, ErrorState, Frame, PageHeader, Tag } from "../components/primitives";
@@ -688,6 +690,12 @@ function unreadCellValue(state: Loadable<unknown>): string {
  */
 const MONDAY_REPORT_EXPORT = /^monday_report_(pdf|xlsx|html|csv|json)$/;
 
+/** Per-citation progress for the "open the source" action. */
+type SourceActionStatus =
+  | { state: "working"; message: string }
+  | { state: "done"; message: string; url: string }
+  | { state: "error"; message: string };
+
 function ChatTurn({
   turn,
   onNavigate,
@@ -709,6 +717,39 @@ function ChatTurn({
 }) {
   const isUser = turn.role === "user";
   const answer = turn.answer;
+
+  // The citation SOURCE action, ported from the committed v1 behaviour: each cited
+  // source can be opened through the API's expiring signed-URL route. Statuses are
+  // per-citation and local to this turn; the URL is never a storage path.
+  const [sourceStatuses, setSourceStatuses] = useState<Record<string, SourceActionStatus>>({});
+
+  async function openSourceCitation(citation: ApiCitation): Promise<void> {
+    if (!citation.file_id) {
+      setSourceStatuses((current) => ({
+        ...current,
+        [citation.id]: { state: "error", message: "Source file is not attached to this citation." }
+      }));
+      return;
+    }
+    setSourceStatuses((current) => ({
+      ...current,
+      [citation.id]: { state: "working", message: "Preparing source…" }
+    }));
+    try {
+      const signed = await createUploadFileSignedUrl(citation.file_id);
+      window.open(signed.url, "_blank", "noopener,noreferrer");
+      setSourceStatuses((current) => ({
+        ...current,
+        [citation.id]: { state: "done", message: "Source ready", url: signed.url }
+      }));
+    } catch (caught) {
+      setSourceStatuses((current) => ({
+        ...current,
+        [citation.id]: { state: "error", message: `The source was not opened. ${errorText(caught)}` }
+      }));
+    }
+  }
+
   const exportTokens = answer?.export_actions ?? [];
   const issuableExports = exportTokens.flatMap((token) => {
     const match = MONDAY_REPORT_EXPORT.exec(token);
@@ -860,22 +901,51 @@ function ChatTurn({
 
             {answer.citations.length > 0 ? (
               <div style={{ display: "grid", gap: 6 }} role="group" aria-label="Source citations">
-                {answer.citations.map((citation) => (
-                  <span
-                    key={citation.id}
-                    style={{
-                      border: "1px solid var(--color-divider)",
-                      padding: "7px 10px",
-                      fontSize: 11.5,
-                      lineHeight: 1.45,
-                      color: "var(--color-neutral-700)"
-                    }}
-                  >
-                    {formatSourceCitation(citation.locator_type, citation.locator)} ·{" "}
-                    {Math.round(citation.confidence * 100)}% confidence
-                    {citation.snippet ? ` — “${citation.snippet}”` : ""}
-                  </span>
-                ))}
+                {answer.citations.map((citation) => {
+                  const sourceStatus = sourceStatuses[citation.id];
+                  return (
+                    <div key={citation.id} className="citation-item">
+                      <div className="citation-line">
+                        <strong style={{ fontWeight: 600 }}>
+                          {formatSourceCitation(citation.locator_type, citation.locator)}
+                        </strong>
+                        <span className="text-muted">
+                          {Math.round(citation.confidence * 100)}% confidence
+                        </span>
+                        {/* Native `disabled` only for the STANDING condition (no file
+                            attached); the in-flight state stays focusable and is made
+                            inert by the handler, matching this entry's control rules. */}
+                        <button
+                          type="button"
+                          className="source-link-button"
+                          disabled={!citation.file_id}
+                          aria-disabled={sourceStatus?.state === "working" || undefined}
+                          aria-label={`Open source for ${formatSourceCitation(citation.locator_type, citation.locator)}`}
+                          onClick={() => {
+                            if (sourceStatus?.state === "working") return;
+                            void openSourceCitation(citation);
+                          }}
+                        >
+                          {sourceStatus?.state === "working" ? "Preparing…" : "Source"}
+                        </button>
+                      </div>
+                      {citation.snippet ? (
+                        <span style={{ display: "block" }}>“{citation.snippet}”</span>
+                      ) : null}
+                      {sourceStatus ? (
+                        <span role="status" className={`source-status source-status-${sourceStatus.state}`}>
+                          {sourceStatus.state === "done" ? (
+                            <a href={sourceStatus.url} rel="noreferrer" target="_blank">
+                              {sourceStatus.message} — opens the expiring signed URL
+                            </a>
+                          ) : (
+                            sourceStatus.message
+                          )}
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
               <span className="text-muted" style={{ fontSize: 11.5 }}>

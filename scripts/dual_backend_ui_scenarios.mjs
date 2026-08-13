@@ -5,19 +5,20 @@
 // orchestrator (dual_backend_ui_guard.py) launches each backend, runs this once per backend, attaches
 // the database/state postconditions, and compares the two result sets.
 //
+// The frontend under test is the CANONICAL redesign entry: the public landing at `/`, the application
+// shell under `/app`, a real router, and sidebar navigation links. Scenarios enter at `/app` and use
+// the sidebar (aside[aria-label="Primary"]) exactly as an operator would.
+//
 // Emits a single JSON object on stdout: { backend, fatal, scenarios[], counters{}, console_errors[],
-// network_errors[] }. Business responses come only from the real API — no mocks, no route interception.
+// network_errors[] }. Business responses come only from the real API — no mocks, no interception.
 //
 // Env: DBUI_WEB_BASE, DBUI_API_BASE, DBUI_BACKEND, DBUI_EXPECT_TENANT, DBUI_UPLOAD_FIXTURE, DBUI_DOWNLOAD_DIR
-import fs from "node:fs/promises";
-import path from "node:path";
 import { chromium } from "playwright";
 
 const web = process.env.DBUI_WEB_BASE;
 const backend = process.env.DBUI_BACKEND || "unknown";
 const expectTenant = process.env.DBUI_EXPECT_TENANT || "";
 const uploadFixture = process.env.DBUI_UPLOAD_FIXTURE || "";
-const downloadDir = process.env.DBUI_DOWNLOAD_DIR || "";
 
 const scenarios = [];
 const consoleErrors = [];
@@ -72,33 +73,58 @@ page.on("response", (r) => {
 });
 
 async function openFresh() {
-  await page.goto(web, { waitUntil: "domcontentloaded", timeout: 30000 });
-  await page.locator(".app-shell").waitFor({ state: "visible", timeout: 20000 });
+  // `/app` is the shell entry (Ask). `/` is the public landing and issues no
+  // authenticated read, so it proves nothing about the backend under test.
+  await page.goto(`${web}/app`, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await page.locator("[data-shell]").waitFor({ state: "visible", timeout: 20000 });
   await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
 }
 async function nav(label) {
-  await page.getByLabel("Primary", { exact: true }).getByRole("button", { name: label, exact: true }).click();
+  // The primary rail is a set of router LINKS, named by their accessible name
+  // (which folds in the validation badge when present, hence the regex).
+  await page
+    .locator('aside[aria-label="Primary"]')
+    .getByRole("link", { name: new RegExp(`^${label}`) })
+    .first()
+    .click();
+  await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
 }
 async function visible(pattern, timeout = 20000) {
   try { await page.getByText(pattern).first().waitFor({ state: "visible", timeout }); return true; }
   catch { return false; }
 }
+async function headingIs(pattern, timeout = 20000) {
+  // POLLS until an h1 matching the pattern is visible: after a client-side route
+  // transition the OLD view's h1 is still mounted for a beat (and views that issue
+  // no request on mount reach networkidle before rendering), so a single read of
+  // the first h1 raced the router and failed views that render perfectly.
+  try {
+    await page
+      .locator("h1")
+      .filter({ hasText: pattern })
+      .first()
+      .waitFor({ state: "visible", timeout });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 let fatal = null;
 try {
-  // UI01 — bootstrap: real session/workspaces load, "API connected" (not local fallback)
+  // UI01 — bootstrap: real session/workspaces load; the topbar chip reads "API connected"
   {
     const m = mark();
     await openFresh();
     const connected = await visible(/API connected/i);
-    const landing = await visible(/Advanced drilling reports without visual noise/i);
+    const askHome = await headingIs(/^Ask Monday Report$/i);
     const noFallback = (await page.getByText(/local fallback/i).count()) === 0;
     scenario("UI01-bootstrap", {
-      description: "app boots against the real external API and shows API-connected (no local fallback)",
-      page: "client-home", actor_classification: "demo_bootstrap", tenant_classification: "primary",
-      expected_ui_state: "API connected + client landing", expected_http_status: "200",
+      description: "app boots against the real external API: the shell renders, the connectivity chip reads API connected, and no local-fallback claim appears",
+      page: "ask", actor_classification: "demo_bootstrap", tenant_classification: "primary",
+      expected_ui_state: "API connected + Ask Monday Report", expected_http_status: "200",
       db_postcondition: "n/a (read path)", ...since(m),
-      result: connected && landing && noFallback ? "PASS" : "FAIL",
+      result: connected && askHome && noFallback ? "PASS" : "FAIL",
     });
   }
   // UI02 — tenant presentation: the expected tenant renders (identity from the real API session)
@@ -108,58 +134,64 @@ try {
     let tenantOk = true;
     if (expectTenant) tenantOk = (await page.getByText(expectTenant, { exact: false }).count()) >= 1;
     scenario("UI02-tenant-presentation", {
-      description: "the sidebar renders the expected tenant identity from the real API session",
-      page: "client-home", actor_classification: "demo_bootstrap", tenant_classification: "primary",
+      description: "the sidebar tenant card renders the expected tenant identity from the real API session",
+      page: "ask", actor_classification: "demo_bootstrap", tenant_classification: "primary",
       expected_ui_state: `tenant '${expectTenant}' visible`, expected_http_status: "200",
       db_postcondition: "n/a (read path)", ...since(m),
       result: tenantOk ? "PASS" : "FAIL",
     });
   }
-  // UI03 — navigation across the real views
+  // UI03 — navigation across the real views, through the sidebar links
   {
     const views = [
-      ["Report Studio", /Technical daily-report command console/i],
-      ["Benchmarking", /Market Benchmark/i],
-      ["Upload", /Upload rig reports/i],
-      ["Dashboard", /Monday Report intelligence/i],
-      ["Validation", /Validation queue/i],
-      ["Tracker", /Project tracker/i],
-      ["Roadmap", /Product roadmap/i],
-      ["Architecture", /Local AI-first architecture/i],
+      ["Monday reports", /^Monday reports$/i],
+      // Fresh load: the Studio h1 is "<active variant label> draft" and DDR is the default.
+      ["Report Studio", /^Daily drilling draft$/i],
+      ["Well schematics", /^Well schematics$/i],
+      ["Upload", /^Upload rig reports$/i],
+      ["Benchmarking", /^Benchmarking$/i],
+      ["Validation", /^Validation queue$/i],
+      ["Failures", /^Failure explorer$/i],
+      ["Audit chain", /^Audit chain$/i],
+      ["Exports", /^Exports$/i],
+      ["Settings", /^Settings$/i],
+      ["Tracker", /^Project tracker$/i],
+      ["Roadmap", /^Product roadmap$/i],
     ];
     let allOk = true; const detail = [];
     const m = mark();
     for (const [label, title] of views) {
       await openFresh();
       await nav(label);
-      const ok = await visible(title);
+      const ok = await headingIs(title);
       if (!ok) { allOk = false; detail.push(`${label}:missing`); }
     }
     scenario("UI03-navigation", {
-      description: "every primary view renders its heading against the real API",
+      description: "every primary view renders its own h1 against the real API, reached through the sidebar",
       page: "all-views", actor_classification: "demo_bootstrap", tenant_classification: "primary",
       expected_ui_state: "each view heading visible", expected_http_status: "200",
       db_postcondition: "n/a (read path)", views_checked: views.length, detail: detail.join(",") || "all-visible",
       ...since(m), result: allOk ? "PASS" : "FAIL",
     });
   }
-  // UI04 — upload mutation (the one always-present real-API mutation reachable by a fixed selector)
+  // UI04 — upload mutation: the audited direct-upload intake on /app/upload
   {
     const m = mark();
     await openFresh();
     await nav("Upload");
-    await visible(/Upload rig reports/i);
+    await headingIs(/^Upload rig reports$/i);
     let uploadOk = false, detail = "";
     try {
-      await page.locator('input[type="file"]').first().setInputFiles(uploadFixture);
-      uploadOk = await visible(/Stored, hashed, and audited/i, 25000);
-      const failed = await page.getByText(/backend upload audit failed/i).count();
-      if (failed > 0) { uploadOk = false; detail = "backend upload audit failed"; }
+      await page.getByLabel("Select report files to upload").setInputFiles(uploadFixture);
+      // Rendered only after POST /uploads/direct succeeds: "Stored, hashed (sha256 …), audited, and queued".
+      uploadOk = await visible(/Stored, hashed/i, 25000);
+      const refused = await page.getByText(/uploads refused|Outcome partly unknown/i).count();
+      if (refused > 0) { uploadOk = false; detail = "upload refused or outcome unknown"; }
     } catch (e) { detail = `upload-error:${e.message}`; }
     scenario("UI04-upload-mutation", {
-      description: "uploading a file via the UI stores+hashes+audits it through the real API",
+      description: "uploading a file via /app/upload stores+hashes+audits it through the real API (POST /uploads/direct)",
       page: "upload", actor_classification: "demo_bootstrap", tenant_classification: "primary",
-      expected_ui_state: "Stored, hashed, and audited", expected_http_status: "201",
+      expected_ui_state: "Stored, hashed, audited, and queued", expected_http_status: "201",
       db_postcondition: "PENDING(python: uploaded_file row + parsed_document after worker)",
       detail, ...since(m), result: uploadOk ? "PASS" : "FAIL",
     });
@@ -169,112 +201,120 @@ try {
     const m = mark();
     await openFresh();
     await nav("Benchmarking");
-    await visible(/Market Benchmark/i);
+    await headingIs(/^Benchmarking$/i);
     let benchOk = false, detail = "";
     try {
-      const ftInput = page.getByLabel(/feet.*day|ft.*day/i).first();
-      const hasInput = await ftInput.count();
-      if (hasInput) {
-        await ftInput.fill("540");
-        const src = page.getByLabel(/source|dataset/i).first();
-        if (await src.count()) await src.fill("dual-backend-ui synthetic");
-        await page.getByRole("button", { name: /Record measurement/i }).click();
-        // mutation-ONLY confirmation (BenchmarkingModule sets this string only after a successful
-        // recordMeasurement API call); static page labels must not be able to satisfy this.
-        benchOk = await visible(/Measurement recorded, anomaly rules evaluated/i, 20000);
-      } else {
-        detail = "no ft/day input exposed"; benchOk = false;
+      // The record form renders once the gated benchmarking read resolves — WAIT for
+      // it rather than sampling `count()` the instant the route mounts.
+      const ftInput = page.locator("#bm-value");
+      await ftInput.waitFor({ state: "visible", timeout: 20000 });
+      await ftInput.fill("540");
+      const src = page.locator("#bm-source");
+      if (await src.count()) await src.fill("dual-backend-ui synthetic");
+      await page.getByRole("button", { name: /Record measurement/i }).click();
+      // Mutation-ONLY confirmation: this sentence is set only after a successful
+      // createBenchmarkMeasurement API call ("...anomaly rules were evaluated...").
+      benchOk = await visible(/anomaly rules were evaluated/i, 20000);
+      if (!benchOk && (await page.getByText(/Not recorded|Outcome unknown/i).count()) > 0) {
+        detail = "the record was refused or its outcome unknown";
       }
     } catch (e) { detail = `bench-error:${e.message}`; }
     scenario("UI05-benchmarking-mutation", {
       description: "recording a benchmark measurement via the UI persists through the real API",
       page: "benchmarking", actor_classification: "demo_bootstrap", tenant_classification: "primary",
-      expected_ui_state: "measurement recorded + variance rendered", expected_http_status: "200",
+      expected_ui_state: "Measurement recorded", expected_http_status: "200",
       db_postcondition: "PENDING(python: benchmark measurement recorded)",
       detail, ...since(m), result: benchOk ? "PASS" : "FAIL",
     });
   }
-  // UI06 — chat: a real API-backed answer (source-backed), not the local fallback
+  // UI06 — chat: a real API-backed answer on the Ask home
   {
     const m = mark();
     await openFresh();
-    await nav("Local AI Chat");
-    await visible(/Ask Monday Report first/i);
     let chatOk = false, detail = "";
     try {
-      await page.getByPlaceholder(/Ask about failures/i).fill("Summarize the current rig evidence and risks.");
-      await page.getByRole("button", { name: /Send question/i }).click();
-      const sourceBacked = await visible(/Source-backed response/i, 25000);
-      chatOk = sourceBacked;
-      if (!sourceBacked) detail = "no source-backed (real-API) answer rendered";
+      await page.getByLabel("Ask the analyst").fill("Summarize the current rig evidence and risks.");
+      await page.getByRole("button", { name: "Ask", exact: true }).click();
+      const answered = await page
+        .locator('article[aria-label="Monday Report answer"]')
+        .first()
+        .waitFor({ state: "visible", timeout: 25000 })
+        .then(() => true)
+        .catch(() => false);
+      const refusal = (await page.getByText(/was not processed/i).count()) > 0;
+      chatOk = answered && !refusal;
+      if (!answered) detail = "no answer turn rendered";
+      else if (refusal) detail = "the answer turn carries a refusal classification";
     } catch (e) { detail = `chat-error:${e.message}`; }
     scenario("UI06-chat-real-answer", {
-      description: "chat returns a real API-backed source answer (not the offline local fallback)",
-      page: "chat", actor_classification: "demo_bootstrap", tenant_classification: "primary",
-      expected_ui_state: "Source-backed response", expected_http_status: "200",
+      description: "Ask returns a real API-backed answer turn (POST /chat), not a refusal classification",
+      page: "ask", actor_classification: "demo_bootstrap", tenant_classification: "primary",
+      expected_ui_state: "an answer turn with no refusal", expected_http_status: "200",
       db_postcondition: "n/a (read/derive path)", detail, ...since(m),
       result: chatOk ? "PASS" : "FAIL",
     });
   }
-  // UI07 — report studio source draft (real API getReportDraft)
+  // UI07 — report studio source draft (real API getReportDraft; the route audits the draft)
   {
     const m = mark();
     await openFresh();
     await nav("Report Studio");
-    await visible(/Technical daily-report command console/i);
+    await headingIs(/draft$/i);
     let draftOk = false, detail = "";
     try {
-      await page.getByRole("button", { name: /Source draft/i }).click();
+      await page.getByRole("button", { name: /Build source-backed draft/i }).click();
       draftOk = await visible(/Source-backed draft ready/i, 20000);
       if (!draftOk) detail = "source draft not ready";
     } catch (e) { detail = `draft-error:${e.message}`; }
     scenario("UI07-report-draft", {
       description: "Report Studio pulls a source-backed draft from the real API",
-      page: "report-studio", actor_classification: "demo_bootstrap", tenant_classification: "primary",
+      page: "studio", actor_classification: "demo_bootstrap", tenant_classification: "primary",
       expected_ui_state: "Source-backed draft ready", expected_http_status: "200",
-      db_postcondition: "n/a (read path)", detail, ...since(m),
+      db_postcondition: "n/a (read path; the backend audits report_draft.generate)", detail, ...since(m),
       result: draftOk ? "PASS" : "FAIL",
     });
   }
-  // UI08 — client-side draft download (the one real browser-download event the UI exposes)
+  // UI08 — Monday-report creation (real API mutation reachable by a fixed selector)
   {
     const m = mark();
     await openFresh();
-    await nav("Report Studio");
-    await visible(/Technical daily-report command console/i);
-    let dlOk = false, dlName = "", dlSize = 0, detail = "";
+    await nav("Monday reports");
+    await headingIs(/^Monday reports$/i);
+    let createOk = false, detail = "";
     try {
-      const [download] = await Promise.all([
-        page.waitForEvent("download", { timeout: 15000 }),
-        page.getByRole("button", { name: /Export draft/i }).click(),
-      ]);
-      dlName = download.suggestedFilename();
-      const saveTo = path.join(downloadDir, `${backend}-${dlName}`);
-      await download.saveAs(saveTo);
-      const st = await fs.stat(saveTo);
-      dlSize = st.size;
-      dlOk = dlSize > 0 && /\.md$/i.test(dlName);
-    } catch (e) { detail = `download-error:${e.message}`; }
-    scenario("UI08-draft-download", {
-      description: "the Report Studio 'Export draft' control produces a real, nonempty Markdown browser download",
-      page: "report-studio", actor_classification: "demo_bootstrap", tenant_classification: "primary",
-      expected_ui_state: "browser download of a .md file", expected_http_status: "n/a (client blob)",
-      db_postcondition: "n/a (client-side blob)", download_name: dlName, download_size: dlSize,
-      detail, ...since(m), result: dlOk ? "PASS" : "FAIL",
+      // `.first()`: the control renders in the page header AND beside the empty
+      // state, and both are the same handler.
+      await page.getByRole("button", { name: /New Monday report/i }).first().click();
+      // Mutation-ONLY confirmation: the success toast body reads
+      // "<id> opened as a <status> for <period> and appended to the audit chain."
+      // — set only after a successful createMondayReport API call. The failure
+      // toast ("Not created") cannot match this.
+      createOk = await visible(/opened as a (draft|review)/i, 20000);
+      if (!createOk) detail = "no creation confirmation rendered";
+    } catch (e) { detail = `create-error:${e.message}`; }
+    scenario("UI08-report-create-mutation", {
+      description: "creating a Monday report via the UI persists through the real API (POST /monday-reports)",
+      page: "reports", actor_classification: "demo_bootstrap", tenant_classification: "primary",
+      expected_ui_state: "Report created", expected_http_status: "201",
+      db_postcondition: "PENDING(python: monday report row present)",
+      detail, ...since(m), result: createOk ? "PASS" : "FAIL",
     });
   }
-  // UI09 — validation queue renders (read-only; buttons are local-state-only per the UI inventory)
+  // UI09 — validation queue renders (read path in THIS run: the redesign's decision
+  // buttons DO call the real validation API, but the demo queue is empty while the
+  // browser runs — the worker that raises a task runs after the scenarios — so the
+  // transition path is exercised by scripts/ui_redesign_e2e.mjs, not here)
   {
     const m = mark();
     await openFresh();
     await nav("Validation");
-    const queueOk = await visible(/Validation queue/i);
+    const queueOk = await headingIs(/^Validation queue$/i);
     scenario("UI09-validation-queue-render", {
-      description: "the Validation view renders the queue from the real API (transition buttons are UI-local; "
-        + "real approve/reject/reopen is an API-only contract — see the guard's api_only_contracts)",
+      description: "the Validation view renders the queue from the real API (decision controls are real API "
+        + "mutations in this frontend; they are exercised with a seeded task by scripts/ui_redesign_e2e.mjs)",
       page: "validation", actor_classification: "demo_bootstrap", tenant_classification: "primary",
       expected_ui_state: "Validation queue visible", expected_http_status: "200",
-      db_postcondition: "n/a (read path; UI does not mutate validation state)", ...since(m),
+      db_postcondition: "n/a (read path in this run)", ...since(m),
       result: queueOk ? "PASS" : "FAIL",
     });
   }

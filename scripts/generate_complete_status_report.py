@@ -202,7 +202,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## Audit Evidence",
         "",
         "- `pnpm run build` - PASS",
-        "- `pnpm run test:ui` - PASS - Client Home, rig/MR list, import/export coverage, chat, studio, upload, dashboard, explorer, validation, tracker, roadmap, and architecture screenshots.",
+        "- `pnpm run test:ui` - PASS - canonical redesign suite: landing, ask, reports, studio, validation, exports, well, upload, benchmarking, failures, audit, settings, tracker, and roadmap route/state coverage.",
         "- `pnpm run audit:phase` - PASS",
         "- `pnpm run audit:parser-fixture-evals` - PASS",
         "- `pnpm run audit:forge-corpus` - PASS",
@@ -373,7 +373,7 @@ def build_pdf(report: dict[str, Any], output_path: Path) -> None:
                 [
                     ["Command", "Result"],
                     ["pnpm run build", "PASS"],
-                    ["pnpm run test:ui", "PASS - Client Home and full UI screenshots"],
+                    ["pnpm run test:ui", "PASS - canonical redesign route/state coverage"],
                     ["pnpm run audit:phase", "PASS"],
                     ["pnpm run audit:parser-fixture-evals", "PASS"],
                     ["pnpm run audit:forge-corpus", "PASS"],

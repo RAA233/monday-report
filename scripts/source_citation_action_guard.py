@@ -19,7 +19,7 @@ def main() -> int:
         ),
         check_file_contains(
             "Chat source citation action",
-            ROOT / "src/components/ChatAnalyst.tsx",
+            ROOT / "src/redesign/pages/Ask.tsx",
             [
                 "createUploadFileSignedUrl",
                 "type ApiCitation",
@@ -32,7 +32,7 @@ def main() -> int:
         ),
         check_file_contains(
             "Source citation action styling",
-            ROOT / "src/styles.css",
+            ROOT / "src/styles/redesign.css",
             [
                 ".citation-item",
                 ".citation-line",

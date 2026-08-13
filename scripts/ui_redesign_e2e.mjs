@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Redesign route and state coverage (additive).
+ * Route and state coverage for the CANONICAL frontend (`pnpm run test:ui`).
  *
- * This is a NEW suite for the redesigned frontend on its own Vite entry. It does
- * not replace and does not touch `scripts/ui_quality_e2e.mjs`, which continues to
- * assert against the v1 application on its own entry.
+ * The redesign is the canonical frontend: the root `index.html` on port 5173
+ * loads `src/redesign/main.tsx`, and this suite is the UI gate for it. The
+ * retired v1 entry and its `ui_quality_e2e.mjs` suite are gone.
  *
- * What it proves, against a real browser and the real built/served redesign:
+ * What it proves, against a real browser and the real built/served frontend:
  *   - the public landing page renders its committed copy and disclosures
  *   - every route (Stage 1 AND Stage 2, plus the ported tracker/roadmap) renders
  *     its own heading
@@ -36,7 +36,7 @@
  *   node scripts/ui_redesign_e2e.mjs
  *
  * Environment (the first five are REQUIRED - the gate refuses a default):
- *   MONDAY_REPORT_WEB_BASE   the isolated web origin (never the live v1 port 5173)
+ *   MONDAY_REPORT_WEB_BASE   the isolated web origin (never the live canonical port 5173)
  *   MONDAY_REPORT_API_BASE   the isolated API origin, explicit port, never 8000
  *   MONDAY_REPORT_API_KEY    API key the served frontend was built/run with
  *   MONDAY_REPORT_SHOT_DIR   optional; write screenshots and the JSON summary here.
@@ -55,7 +55,7 @@
  *
  * Because it mutates its target, it refuses to start at all unless
  * `scripts/verification_isolation.py` certifies the environment as isolated from the
- * live runtime - the same fail-closed preflight the committed v1 suite runs.
+ * live runtime - the repository's shared fail-closed preflight.
  */
 import { chromium } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -81,7 +81,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 // and this file must not modify the shared module:
 //
 //   1. The repository's single Python preflight, so there is one definition of
-//      "isolated" and this suite cannot drift from the frozen v1 suite.
+//      "isolated" and this suite cannot drift from the other verification callers.
 //   2. A local re-assertion of the same substantive facts, which closes three gaps the
 //      shared module leaves open for a MUTATING caller:
 //        - MONDAY_REPORT_ALLOW_LIVE_TARGET=1 excuses every violation, and the PID
@@ -98,7 +98,7 @@ function refuseNotIsolated(reason, detail) {
   console.error(`FAIL: verification isolation - ${reason}`);
   if (detail) console.error(detail);
   console.error(
-    "test:ui-redesign mutates its target, so it refuses to run without an explicitly isolated stack."
+    "test:ui mutates its target, so it refuses to run without an explicitly isolated stack."
   );
   process.exit(2);
 }
@@ -181,11 +181,14 @@ try {
     refuseNotIsolated("MONDAY_REPORT_API_BASE is the live API port 8000.");
   }
   if (port(process.env.MONDAY_REPORT_WEB_BASE) === "5173") {
-    refuseNotIsolated("MONDAY_REPORT_WEB_BASE is the live v1 web port 5173.");
+    // 5173 is the LIVE canonical web port — never test against the live server.
+    refuseNotIsolated("MONDAY_REPORT_WEB_BASE is the live canonical web port 5173.");
   }
 }
 
-const WEB = (process.env.MONDAY_REPORT_WEB_BASE ?? "http://127.0.0.1:5174").replace(/\/$/, "");
+// The ?? defaults are unreachable — the isolation gate above refuses unset values —
+// and are kept only so a reader sees the SHAPE of a valid value.
+const WEB = (process.env.MONDAY_REPORT_WEB_BASE ?? "http://127.0.0.1:5183").replace(/\/$/, "");
 const API = (process.env.MONDAY_REPORT_API_BASE ?? "http://127.0.0.1:8000").replace(/\/$/, "");
 const API_KEY = process.env.MONDAY_REPORT_API_KEY ?? "";
 const SHOT_DIR = process.env.MONDAY_REPORT_SHOT_DIR ?? "";
@@ -214,7 +217,7 @@ const ROUTES = [
   { path: "/app/studio", headingPattern: /draft$/i, label: "studio" },
   { path: "/app/validation", heading: "Validation queue", label: "validation" },
   { path: "/app/exports", heading: "Exports", label: "exports" },
-  // Stage 2 surfaces plus the two program records ported from v1. Each heading is
+  // Stage 2 surfaces plus the two ported program records. Each heading is
   // the view's own h1, so a route silently swapped for NotFound cannot pass.
   { path: "/app/well", heading: "Well schematics", label: "well" },
   { path: "/app/upload", heading: "Upload rig reports", label: "upload" },
@@ -1425,6 +1428,54 @@ async function main() {
     );
   }
 
+  // ── the reviewed schema-variant board and the directional variant ─────────
+  //
+  // Fresh-load assertions on purpose: the phase strip renders the VARIANT's
+  // committed phase only while the drafted form is empty, so a draft built
+  // earlier in the run could mask a missing variant.
+  {
+    await page.goto(`${WEB}/app/studio`, { waitUntil: "networkidle" });
+    const board = page.locator('section[aria-label="Reviewed schema variants"]');
+    const boardPresent = (await board.count()) === 1;
+    const cardCount = boardPresent ? await board.locator("article").count() : 0;
+    const boardText = boardPresent ? await board.innerText() : "";
+    const hasVersion = /MR-SCHEMA-1/.test(boardText);
+    const shortLabels = ["DDR", "BHA", "Mud", "Survey", "DIR"];
+    const missingLabels = shortLabels.filter((label) => !boardText.includes(label));
+    const countLines = (boardText.match(/\d+ markers · \d+ checks · \d+ outputs/g) ?? []).length;
+    check(
+      "studio-schema-board-covers-variants",
+      boardPresent && cardCount === 5 && hasVersion && missingLabels.length === 0 && countLines === 5,
+      boardPresent
+        ? `${cardCount} variant card(s); schema version shown: ${hasVersion}; ` +
+          `${countLines} of 5 cards carry a "markers · checks · outputs" count line` +
+          (missingLabels.length ? `; missing labels: ${missingLabels.join(", ")}` : "")
+        : 'no section labelled "Reviewed schema variants" rendered on /app/studio'
+    );
+
+    // Select the Directional variant BEFORE any draft is built: the title and the
+    // meta strip must switch to the committed directional labels. The radio INPUT
+    // is visually hidden (the SegControl label is the visible, clickable part), so
+    // the label is clicked and the radio's checked state is asserted afterwards.
+    await page
+      .getByRole("radiogroup", { name: "Report format variants" })
+      .locator("label", { hasText: "DIR" })
+      .click();
+    await page.getByRole("radio", { name: "DIR" }).waitFor({ state: "attached", timeout: 5000 });
+    const h1 = (await page.locator("h1").first().innerText()).replace(/\s+/g, " ").trim();
+    const bodyAfter = await page.locator("body").innerText();
+    const directionalTitle = /Directional steering draft/i.test(h1);
+    const directionalPhase = bodyAfter.includes("Directional steering report");
+    const dirTag = /\bDIR\b/.test(bodyAfter);
+    check(
+      "studio-directional-variant-renders",
+      directionalTitle && directionalPhase && dirTag,
+      `h1 = ${JSON.stringify(h1)} (directional: ${directionalTitle}); ` +
+        `committed phase "Directional steering report" rendered: ${directionalPhase}; ` +
+        `DIR short label rendered: ${dirTag}`
+    );
+  }
+
   // ── an operator-cleared draft field must STAY cleared ─────────────────────
   //
   // Three states must stay distinct: not loaded, empty by operator choice, and a
@@ -2102,6 +2153,58 @@ async function main() {
     context.off("request", countExports);
     await s1page.unroute((url) => url.origin === new URL(API).origin);
 
+    // ── a session without view_validation_queue must not read the queue ─────────────
+    //
+    // GET /validation-tasks requires view_validation_queue, and a refused GET appends
+    // an audited permission_denied event to the hash-chained log — so the provider
+    // must consult the session's permission map BEFORE issuing the read, exactly like
+    // the shared Stage 2 reads. Served with fixtures: the REAL session payload minus
+    // the grant, while /validation-tasks COUNTS whatever still reaches it. The gate
+    // must then render as not visible — never as "clear", which an unread queue does
+    // not establish.
+    {
+      let queueReads = 0;
+      const realSession = await apiJson("/auth/session");
+      const restricted = {
+        ...realSession,
+        permissions: { ...(realSession.permissions ?? {}), view_validation_queue: false }
+      };
+      const restrictRoutes = async (route) => {
+        const url = new URL(route.request().url());
+        if (/\/auth\/session$/.test(url.pathname)) {
+          return route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify(restricted)
+          });
+        }
+        if (/\/validation-tasks$/.test(url.pathname)) {
+          queueReads += 1;
+          return route.fulfill({
+            status: 403,
+            contentType: "application/json",
+            body: JSON.stringify({ detail: "permission_denied" })
+          });
+        }
+        return route.fallback();
+      };
+      await s1page.route(
+        (url) => url.origin === new URL(API).origin,
+        (route) => restrictRoutes(route)
+      );
+      await s1page.goto(`${WEB}/app/exports`, { waitUntil: "networkidle" });
+      await s1page.waitForTimeout(900);
+      const restrictedBody = await s1page.locator("body").innerText();
+      const gateNotVisible = /Export gate not visible/i.test(restrictedBody);
+      check(
+        "restricted-session-issues-no-queue-read",
+        queueReads === 0 && gateNotVisible,
+        `GET /validation-tasks was issued ${queueReads} time(s) (expected 0) for a session ` +
+          `without view_validation_queue; the gate banner reads "not visible": ${gateNotVisible}`
+      );
+      await s1page.unroute((url) => url.origin === new URL(API).origin);
+    }
+
     // ── keep 3: the inert-state contract, on the app's OWN rendered controls ────────
     // Measured, not asserted: each control is read live, marked inert, read again.
     // Colours are composited through the alpha stack (a 10%-opacity wash is not an
@@ -2372,6 +2475,9 @@ async function main() {
     "browser-targets-gated-api",
     "studio-does-not-draft-on-mount",
     "studio-discloses-explicit-drafting",
+    "studio-schema-board-covers-variants",
+    "studio-directional-variant-renders",
+    "restricted-session-issues-no-queue-read",
     "studio-cleared-field-stays-empty",
     "studio-local-edit-survives-reconnect",
     "retry-press-keeps-focus",

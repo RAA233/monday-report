@@ -162,12 +162,37 @@ print(json.dumps({"environment": os.environ.get("MONDAY_REPORT_API_BASE"), "runt
     ui_markers = next(
         markers
         for path, markers in roadmap_guard.CHECKS
-        if path.name == "ui_quality_e2e.mjs"
+        if path.name == "ui_redesign_e2e.mjs"
     )
-    checks.append(assert_check("Roadmap guard requires Benchmarking label", 'label: "Benchmarking"' in ui_markers, "active UI markers"))
-    checks.append(assert_check("Roadmap guard requires Benchmarking screenshot", "04-benchmarking.png" in ui_markers, "active UI markers"))
-    checks.append(assert_check("Roadmap guard requires Roadmap screenshot", "10-roadmap.png" in ui_markers, "active UI markers"))
-    checks.append(assert_check("Roadmap guard rejects obsolete Roadmap screenshot", "09-roadmap.png" not in ui_markers, "active UI markers"))
+    checks.append(
+        assert_check(
+            "Roadmap guard pins the Benchmarking route",
+            '{ path: "/app/benchmarking", heading: "Benchmarking", label: "benchmarking" }' in ui_markers,
+            "active UI markers",
+        )
+    )
+    checks.append(
+        assert_check(
+            "Roadmap guard pins the Roadmap route",
+            '{ path: "/app/roadmap", heading: "Product roadmap", label: "roadmap" }' in ui_markers,
+            "active UI markers",
+        )
+    )
+    checks.append(
+        assert_check(
+            "Roadmap guard route table covers the ported program surfaces",
+            ("/app/tracker", "tracker") in roadmap_guard.EXPECTED_UI_ROUTES
+            and ("/app/roadmap", "roadmap") in roadmap_guard.EXPECTED_UI_ROUTES,
+            "EXPECTED_UI_ROUTES",
+        )
+    )
+    checks.append(
+        assert_check(
+            "Roadmap guard pins no retired v1 suite",
+            all(path.name != "ui_quality_e2e.mjs" for path, _ in roadmap_guard.CHECKS),
+            "no ui_quality_e2e.mjs pin remains in roadmap_guard.CHECKS",
+        )
+    )
 
     failed = [check for check in checks if not check["ok"]]
     for check in checks:

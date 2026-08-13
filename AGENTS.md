@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Monday Report is a Vite React/TypeScript app. Runtime source lives in `src/`, with app composition in `src/App.tsx`, entry setup in `src/main.tsx`, shared styling in `src/styles.css`, reusable views in `src/components/`, seeded domain data in `src/data/`, and deterministic analytics helpers in `src/lib/`. Database design artifacts live in `db/schema.sql`. `dist/` is generated output and should not be edited by hand.
+Monday Report is a Vite React/TypeScript app. Runtime source lives in `src/`: the canonical entry is `src/redesign/main.tsx` (loaded by the root `index.html` on port 5173), with the router in `src/redesign/router.tsx`, the shell in `src/redesign/shell/`, views in `src/redesign/pages/`, shared client state in `src/redesign/lib/workspace.tsx`, and styling in `src/styles/tokens.css` + `src/styles/redesign.css`. Committed program data lives in `src/data/`, and the API client plus shared display helpers in `src/lib/`. Database design artifacts live in `db/schema.sql`. `dist/` is generated output and should not be edited by hand.
 
 ## Build, Test, and Development Commands
 
@@ -15,11 +15,11 @@ Set `$env:CI='true'` in PowerShell before build commands when running in non-int
 
 ## Coding Style & Naming Conventions
 
-Use TypeScript and React function components. Keep component files in PascalCase, such as `Dashboard.tsx`, and helper modules in camelCase, such as `analytics.ts`. Prefer explicit prop interfaces and typed domain objects from `src/data/domain.ts`. Use two-space indentation, double quotes, semicolons, and JSX that keeps UI labels close to the component that renders them.
+Use TypeScript and React function components. Keep component files in PascalCase, such as `Tracker.tsx`, and helper modules in camelCase, such as `trajectoryGeometry.ts`. Prefer explicit prop interfaces and the typed API shapes from `src/lib/api.ts`. Use two-space indentation, double quotes, semicolons, and JSX that keeps UI labels close to the component that renders them.
 
 ## Testing Guidelines
 
-No automated test framework is configured yet. Before submitting changes, run `pnpm run build` and manually smoke-test the dashboard, upload flow, chat, explorer filters, validation queue, and architecture view. If tests are added, place component tests near the component or under `src/__tests__/`, and name them `*.test.ts` or `*.test.tsx`.
+The UI gate is `pnpm run test:ui` (`scripts/ui_redesign_e2e.mjs`), which requires an explicitly isolated stack (state/storage/export roots outside the repo, API port != 8000, web port != 5173) and refuses to run against the live servers. Before submitting changes, run `pnpm run build` and the relevant `audit:*` guards; `pnpm run audit:all` is the full chain.
 
 ## Commit & Pull Request Guidelines
 
