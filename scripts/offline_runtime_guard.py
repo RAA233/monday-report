@@ -267,6 +267,31 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
             icon.status_code == 200 and b"svg" in icon.content,
             "the canonical frontend's /favicon.svg is served from the dist root")
 
+        # ---- the packaged app carries POST /monday-reports idempotency ----
+        # The offline wrapper mounts the backend app behind a license
+        # middleware that intercepts EVERY mutating request. A replay-safe
+        # POST must stay replay-safe through that middleware -- measured here
+        # rather than assumed from the backend's own guard, because the
+        # wrapper is what the customer actually runs.
+        renewed_ws = client.post("/workspaces", json={"name": "Idem Rig"})
+        idem_ws = renewed_ws.json().get("id", "")
+        idem_body = {"workspace_id": idem_ws,
+                     "period_start": "2026-08-10", "period_end": "2026-08-16"}
+        idem_headers = {"Idempotency-Key": "offline-wrapper-key-01"}
+        first = client.post("/monday-reports", json=idem_body, headers=idem_headers)
+        replay = client.post("/monday-reports", json=idem_body, headers=idem_headers)
+        conflict = client.post("/monday-reports",
+                               json=dict(idem_body, period_end="2026-08-17"),
+                               headers=idem_headers)
+        rec("RT28 idempotent-report-create-through-wrapper",
+            first.status_code == 201
+            and replay.status_code in (200, 201)
+            and replay.json().get("id") == first.json().get("id")
+            and conflict.status_code == 409,
+            f"a keyed POST /monday-reports replays to the SAME report id through the "
+            f"license middleware ({first.status_code}/{replay.status_code}) and a "
+            f"different body under the same key still conflicts ({conflict.status_code})")
+
     # ---- launcher-level checks (no live server needed) ----
     port = RT.select_port()
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
