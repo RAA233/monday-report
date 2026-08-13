@@ -741,16 +741,31 @@ class HostBaseline(object):
         self.artifact_prefixes = set()
         self.raw_processes = {}
         self.raw_artifacts = []
-        trivial = Path(base) / "_host-baseline.ps1"
-        with open(str(trivial), "w", encoding="utf-8", newline="") as handle:
+        self.script = Path(base) / "_host-baseline.ps1"
+        with open(str(self.script), "w", encoding="utf-8", newline="") as handle:
             handle.write("exit 0\n")
         temp = str(Path(base) / "_host-baseline-temp")
         ensure_dir(long_path(temp))
+        # Three passes, not one.  Windows PowerShell writes its script-policy
+        # probe files only on SOME launches, so a single measurement produced a
+        # baseline that sometimes contained them and sometimes did not - and a
+        # run measured against the empty version reported the interpreter's own
+        # files as the bootstrap's.  The scenarios that depend on this pair each
+        # observed run with a fresh measurement as well (measure_into), so the
+        # subtraction never rests on one sample.
+        for _ in range(3):
+            self.measure_into(temp)
+        self.raw_artifacts = sorted(self.artifact_prefixes)
+
+    def measure_into(self, temp):
+        """Run the trivial script with TEMP=`temp` and fold what it produces into
+        the baseline.  Any file it leaves behind is removed, so the directory is
+        clean for the observed run that follows."""
         watcher = Watcher([temp])
         watcher.start()
         try:
             command = [system_powershell(), "-NoProfile", "-NonInteractive",
-                       "-ExecutionPolicy", "Bypass", "-File", str(trivial)]
+                       "-ExecutionPolicy", "Bypass", "-File", str(self.script)]
             environment = dict(os.environ)
             environment.update({"TEMP": temp, "TMP": temp})
             process = subprocess.Popen(command, stdout=subprocess.PIPE,
@@ -760,9 +775,8 @@ class HostBaseline(object):
             process.communicate(timeout=120)
         finally:
             watcher.stop()
-        self.raw_processes = dict(watcher.descendants)
-        self.raw_artifacts = sorted(watcher.artifacts)
-        self.process_names = watcher.descendant_names()
+        self.raw_processes.update(watcher.descendants)
+        self.process_names |= watcher.descendant_names()
         for name in watcher.artifacts:
             # '__PSScriptPolicyTest_abc.def.ps1' -> '__PSScriptPolicyTest_'.
             # rsplit, not split: splitting on the FIRST underscore of a name that
@@ -771,6 +785,11 @@ class HostBaseline(object):
             # including the '_CodeDom' style names a compiler leaves behind.
             head = name.rsplit("_", 1)[0]
             self.artifact_prefixes.add(head + "_" if head else name)
+        for name in list(watcher.artifacts):
+            try:
+                os.remove(long_path(temp) + "\\" + name)
+            except OSError:
+                pass
 
     def describe(self):
         return ("processes=%s artifacts=%s (subtracted from every observation below)"
@@ -1124,6 +1143,24 @@ class Skipped(object):
         return False
 
 
+def stopped_in_source_stage(result):
+    """A class-level safety statement, not a restatement of the expected reason.
+
+    The bootstrap validates the bundle BEFORE it looks at the parent chain, so a
+    bundle that violates the path policy must never reach the chain stage at all,
+    whatever the specific violation was.  Codes below 30 are the source family;
+    30 and above mean the run carried this bundle forward.
+
+    This is what turns each source-policy deletion experiment into an observation
+    of DAMAGE rather than a change of wording: with the mechanism, the ambiguous
+    or unpinnable bundle is stopped; without it, the harness sees the same bundle
+    accepted and carried into the chain stage, one step from being copied.
+    """
+    return ("the run stopped inside the SOURCE stage (exit %s), so this bundle never "
+            "reached the parent chain or the copy" % result.code,
+            result.code is not None and result.code < 30)
+
+
 SCENARIOS = []
 
 
@@ -1217,6 +1254,7 @@ def _no_compiler(base, image, work):
     source = work.source().small_bundle()
     temp = str(Path(base) / "temp-observed")
     ensure_dir(long_path(temp))
+    HOST.measure_into(temp)     # paired measurement, same directory, same instant
     result = launch(image, chain.args(source),
                     env_overrides={"TEMP": temp, "TMP": temp},
                     watch_dirs=[temp])
@@ -1260,6 +1298,7 @@ def _poisoned_environment(base, image, work):
         with open(long_path(bait) + "\\" + name, "wb") as handle:
             handle.write(b"MZ-not-a-real-image")
     bait_before = sorted(os.listdir(long_path(bait)))
+    HOST.measure_into(temp)     # paired measurement, same directory, same instant
     result = launch(image, chain.args(source),
                     env_overrides={"TEMP": temp, "TMP": temp, "PATH": bait,
                                    "PATHEXT": ".EXE;.CMD;.BAT"},
@@ -1617,6 +1656,10 @@ def _non_ascii_member(base, image, work):
         ("harness confirms both non-ASCII members really exist on disk",
          exists(source.path + "\\a-\uff21.txt") and exists(source.path + "\\a-\U0001f600.txt")),
         ("harness sees no root created", not exists(chain.root())),
+        ("the two implementations did NOT end up disagreeing about this bundle's root "
+         "hash - a disagreement here is the whole damage the alphabet prevents",
+         result.code != CODE_OF["BUNDLE_PIN_MISMATCH"]),
+        stopped_in_source_stage(result),
     ]
     return Result("SCN-11",
                   "a non-ASCII member name is refused, so no pin can depend on how a "
@@ -1639,6 +1682,7 @@ def _name_refusal(ident, tag, member, title, base, image, work, ambiguous=False)
         ("harness confirms the member really exists on disk under that exact name",
          exists(long_path(source.path) + "\\" + member.replace("/", "\\"))),
         ("harness sees no root created", not exists(chain.root())),
+        stopped_in_source_stage(result),
     ]
     if ambiguous:
         # The point of the rule, demonstrated rather than asserted: the extended
@@ -1731,6 +1775,7 @@ def _case_collision(base, image, work):
          "file, so installing this bundle would silently lose one of them",
          _folded(("dup.txt",)) == _folded(("DUP.txt",))),
         ("harness sees no root created", not exists(chain.root())),
+        stopped_in_source_stage(result),
     ]
     return Result("SCN-15", "two members differing only in ASCII case are refused",
                   "SOURCE_COLLISION", result, checks)
@@ -1764,6 +1809,10 @@ def _source_reparse(base, image, work):
         ("harness's pin over the bundle differs from a pin that followed the junction",
          source.pin(follow_reparse=False) != source.pin(follow_reparse=True)),
         ("harness sees no root created", not exists(chain.root())),
+        ("the bootstrap did not end up hashing content the operator never pinned - a "
+         "pin disagreement here would mean it had walked THROUGH the junction",
+         result.code != CODE_OF["BUNDLE_PIN_MISMATCH"]),
+        stopped_in_source_stage(result),
     ]
     return Result("SCN-16",
                   "a reparse point inside the source is refused, never enumerated through",
@@ -1783,6 +1832,7 @@ def _git_in_source(base, image, work):
         ("harness confirms the source really contains .GIT/config",
          exists(source.path + "\\.GIT\\config")),
         ("harness sees no root created", not exists(chain.root())),
+        stopped_in_source_stage(result),
     ]
     return Result("SCN-17", "any spelling of .git in the source is refused",
                   "SOURCE_GIT_PATH", result, checks)
@@ -1804,9 +1854,73 @@ def _empty_directory(base, image, work):
          "which is exactly why the bootstrap must refuse it",
          source.pin() == bundle_root_hash(source.path)),
         ("harness sees no root created", not exists(chain.root())),
+        stopped_in_source_stage(result),
     ]
     return Result("SCN-18", "a directory the pin cannot see is refused",
                   "SOURCE_EMPTY_DIRECTORY", result, checks)
+
+
+@scenario("SCN-20",
+          mechanism="INHERITED ACEs are effective ACEs and are judged as such; an "
+                    "inherit-only ACE grants nothing on the node carrying it and is "
+                    "caught on the child that inherits it",
+          mutations=("inherited_ace",))
+def _inherited_ace(base, image, work):
+    """The fourth topology: the operand is on an ancestor, but it grants nothing
+    THERE and everything on the child.
+
+    No synthetic ACL is needed for this one, because Windows ships it.  The
+    volume root carries an INHERIT-ONLY ACE for Authenticated Users
+    (`(A;OICIIO;SDGXGWGR;;;AU)`): it grants nothing on the volume root itself, so
+    an ancestor check sees nothing wrong there, and every directory created
+    directly under the volume root is born with it as an EFFECTIVE inherited ACE
+    that includes DELETE.
+
+    So a default-permissions directory under C:\\ - the obvious place an operator
+    would put a trust root - is world-renamable, and must be refused.  This row
+    also documents that fact, which is worth an operator's attention on its own.
+    """
+    letter = os.path.abspath(os.sep)[0]
+    volume_root = letter + ":\\"
+    parent = "%s:\\mrb5-inherited-%s" % (letter, uuid.uuid4().hex[:8])
+    ensure_dir(long_path(parent))       # DEFAULT permissions: inheritance intact
+    Chain.ALL.append(parent)
+    source = work.source().small_bundle()
+    argv = ["-RootName", "trustroot", "-SourcePath", source.path,
+            "-ExpectedBundleHash", source.pin(), "-ParentPath", parent]
+    result = launch(image, argv)
+
+    root_sddl = security_descriptor_sddl(volume_root) or ""
+    parent_sddl = security_descriptor_sddl(parent) or ""
+    inherited_masks = [mask for mask in sddl_ace_masks(parent_sddl, "AU")
+                       if mask & REDIRECT_CLASS_MASK]
+
+    # Control: protect the same directory's DACL so nothing is inherited any
+    # more.  If that changes the refusal, the refusal was about the inherited ACE.
+    apply_sddl_dacl(parent, SAFE_READONLY)
+    control = launch(image, argv)
+
+    checks = [
+        ("harness reads the VOLUME ROOT's DACL and finds an Authenticated Users ACE "
+         "marked inherit-only, granting nothing on the volume root itself",
+         "OICIIO" in root_sddl and ";AU)" in root_sddl),
+        ("harness reads the default-permissions directory under it and finds that ACE "
+         "present as an EFFECTIVE inherited grant carrying a redirect-class right "
+         "(mask=0x%08x)" % (inherited_masks[0] if inherited_masks else 0),
+         bool(inherited_masks)),
+        ("harness confirms the parent's copy is marked ID (inherited), so it arrived by "
+         "inheritance and was not set on the parent directly",
+         "ID" in "".join(chunk.split(";")[1] for chunk in parent_sddl.split("(")[1:]
+                         if chunk.split(";")[-1].startswith("AU)"))),
+        ("harness sees no root created", not exists(parent + "\\trustroot")),
+        ("protecting the DACL so nothing is inherited changes the refusal, so the "
+         "refusal was about the INHERITED ACE (control exit %s)" % control.code,
+         control.reason != "PARENT_UNSAFE_WRITABLE_ACE"),
+    ]
+    return Result("SCN-20",
+                  "an inherit-only ACE on the volume root is caught on the child that "
+                  "inherits it - a default-DACL directory under C:\\ is refused",
+                  "PARENT_UNSAFE_WRITABLE_ACE", result, checks)
 
 
 @scenario("SCN-19")
@@ -1992,9 +2106,116 @@ MUTATIONS = {
         "foreach ($sid in @(\n        'S-1-5-18',",
         "foreach ($sid in @(\n        '%s',\n        'S-1-5-18'," % ME,
     )],
+    # Treat an inherited ACE as if it granted nothing - the shape of "I only look
+    # at rules somebody set on THIS object".
+    "inherited_ace": [(
+        "        if ($ace.Flags -band $ACE_FLAG_INHERIT_ONLY) { continue }",
+        "        if ($ace.Flags -band $ACE_FLAG_INHERIT_ONLY) { continue }\n"
+        "        if ($ace.Flags -band $ACE_FLAG_INHERITED) { continue }",
+    )],
     # These mechanisms live in this file, not in the bootstrap.
     "harness_pin": [],
 }
+
+
+def subst_damage_experiment(base, image, workspace, work):
+    """Open the ACTUAL damage of the Critical chain defect, unelevated.
+
+    Every other deletion experiment on the chain can only show a change of
+    refusal, because reaching the install at all needs a chain the production
+    trust set accepts, and an unelevated account cannot build one.  This one
+    reaches it - by running BOTH arms against a bootstrap that has been weakened
+    to trust this account.
+
+    Read that twice.  BOTH IMAGES ARE WEAKENED.  Neither arm is evidence about
+    the production bootstrap, and neither is counted as a passing scenario.  What
+    the PAIR isolates is one variable: the canonical chain.  Same fixture, same
+    trust widening, same everything - the only difference is whether the buried
+    ancestor is on the chain that gets judged.
+
+      arm A  trust_widened                      -> the ancestor IS judged
+      arm B  trust_widened + canonical_chain    -> the drive letter is the root
+
+    In arm B the harness then observes the damage itself: a trust root created
+    and fully populated inside a directory tree whose grandparent grants Everyone
+    DELETE - which is exactly what the previous revision shipped with exit 0.
+    """
+    letter = os.path.abspath(os.sep)[0]
+    top = "%s:\\mrb5-substdmg-%s" % (letter, uuid.uuid4().hex[:8])
+    ensure_dir(long_path(top))
+    Chain.ALL.append(top)
+    parent = top + "\\n0"
+    ensure_dir(long_path(parent))
+    apply_sddl_dacl(parent, MINE_FULL)
+    apply_sddl_dacl(top, MINE_FULL + "(A;;SD;;;WD)")
+
+    drive = free_drive_letter()
+    if drive is None:
+        print("  (no free drive letter; the damage experiment could not be built)")
+        return True
+    define_dos_device(drive, parent)
+    try:
+        source = work.source().small_bundle()
+        expected_files = tree_digests(source.path)
+        arm_a = mutate(image, ("trust_widened",), workspace)
+        arm_b = mutate(image, ("trust_widened", "canonical_chain"), workspace)
+        argv = ["-RootName", "trustroot", "-SourcePath", source.path,
+                "-ExpectedBundleHash", source.pin(), "-ParentPath", drive + ":\\"]
+
+        result_a = launch(arm_a, argv)
+        root = parent + "\\trustroot"
+        created_a = exists(root)
+        if created_a:
+            remove_tree(root)
+
+        result_b = launch(arm_b, argv)
+        created_b = exists(root)
+        installed = tree_digests(root) if created_b else None
+        ancestor_sddl = security_descriptor_sddl(top) or ""
+        ancestor_masks = sddl_ace_masks(ancestor_sddl, "WD")
+
+        print("  DAMAGE EXPERIMENT for the canonical chain (SCN-03's mechanism)")
+        print("    BOTH arms run a DELIBERATELY WEAKENED bootstrap that trusts this")
+        print("    account, because an unelevated process cannot otherwise reach an")
+        print("    install at all.  NEITHER arm is acceptance evidence for the")
+        print("    production bootstrap.  The PAIR isolates one variable.")
+        print("    arm A  trust_widened                    -> %s%s"
+              % (result_a.reason, exit_note(result_a.code)))
+        print("    arm B  trust_widened + canonical_chain  -> %s%s"
+              % (result_b.reason, exit_note(result_b.code)))
+        observations = [
+            ("arm A refused and created nothing",
+             result_a.code != 0 and not created_a),
+            ("arm B EXITED ZERO - it accepted the chain",
+             result_b.code == 0),
+            ("harness sees a trust root really created at the buried real path %s" % root,
+             created_b),
+            ("harness-computed digests of the installed tree equal the source bundle, so "
+             "this was a complete install and not a partial one",
+             installed is not None and installed == expected_files),
+            ("harness reads the GRANDPARENT of that root and finds Everyone holding "
+             "DELETE (mask=0x%08x) - anybody on this machine can rename the tree the "
+             "trust root lives in" % (ancestor_masks[0] if ancestor_masks else 0),
+             bool(ancestor_masks) and bool(ancestor_masks[0] & REDIRECT_CLASS_MASK)),
+            ("harness confirms the grandparent is NOT reachable from the drive letter "
+             "the operator typed, so only chain canonicalisation could have judged it",
+             os.path.dirname(drive + ":\\") == drive + ":\\"),
+        ]
+        for description, ok in observations:
+            print("      [%s] %s" % ("ok" if ok else "NO", description))
+        held = all(ok for _, ok in observations)
+        print("    conclusion: %s" % (
+            "removing the canonical chain OPENS the damage - the install completes "
+            "under a world-renamable ancestor" if held else
+            "the experiment did not reproduce the damage; treat SCN-03's flip as a "
+            "change of refusal only"))
+        print()
+        if created_b:
+            remove_tree(root)
+        return held
+    finally:
+        remove_dos_device(drive, parent)
+        kernel32.DefineDosDeviceW(DDD_REMOVE_DEFINITION, drive + ":", None)
 
 
 def mutate(image, keys, workspace):
@@ -2195,6 +2416,12 @@ def main():
             if flip_failures:
                 print("%d mechanism(s) did not flip." % flip_failures)
             failures += flip_failures
+
+            damage_base = base + "\\_damage"
+            os.makedirs(long_path(damage_base), exist_ok=False)
+            if not subst_damage_experiment(damage_base, image, workspace,
+                                           Workspace(damage_base)):
+                failures += 1
     finally:
         if not args.keep:
             for path in Chain.ALL:
