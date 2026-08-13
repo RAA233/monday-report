@@ -94,11 +94,20 @@ async function visible(pattern, timeout = 20000) {
   catch { return false; }
 }
 async function headingIs(pattern, timeout = 20000) {
+  // POLLS until an h1 matching the pattern is visible: after a client-side route
+  // transition the OLD view's h1 is still mounted for a beat (and views that issue
+  // no request on mount reach networkidle before rendering), so a single read of
+  // the first h1 raced the router and failed views that render perfectly.
   try {
-    await page.locator("h1").first().waitFor({ state: "visible", timeout });
-  } catch { return false; }
-  const text = (await page.locator("h1").first().innerText()).replace(/\s+/g, " ").trim();
-  return pattern.test(text);
+    await page
+      .locator("h1")
+      .filter({ hasText: pattern })
+      .first()
+      .waitFor({ state: "visible", timeout });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 let fatal = null;
@@ -195,17 +204,19 @@ try {
     await headingIs(/^Benchmarking$/i);
     let benchOk = false, detail = "";
     try {
+      // The record form renders once the gated benchmarking read resolves — WAIT for
+      // it rather than sampling `count()` the instant the route mounts.
       const ftInput = page.locator("#bm-value");
-      if (await ftInput.count()) {
-        await ftInput.fill("540");
-        const src = page.locator("#bm-source");
-        if (await src.count()) await src.fill("dual-backend-ui synthetic");
-        await page.getByRole("button", { name: /Record measurement/i }).click();
-        // Mutation-ONLY confirmation: the toast heading "Measurement recorded" is set
-        // only after a successful createBenchmarkMeasurement API call.
-        benchOk = await visible(/Measurement recorded/i, 20000);
-      } else {
-        detail = "no ft/day input exposed"; benchOk = false;
+      await ftInput.waitFor({ state: "visible", timeout: 20000 });
+      await ftInput.fill("540");
+      const src = page.locator("#bm-source");
+      if (await src.count()) await src.fill("dual-backend-ui synthetic");
+      await page.getByRole("button", { name: /Record measurement/i }).click();
+      // Mutation-ONLY confirmation: this sentence is set only after a successful
+      // createBenchmarkMeasurement API call ("...anomaly rules were evaluated...").
+      benchOk = await visible(/anomaly rules were evaluated/i, 20000);
+      if (!benchOk && (await page.getByText(/Not recorded|Outcome unknown/i).count()) > 0) {
+        detail = "the record was refused or its outcome unknown";
       }
     } catch (e) { detail = `bench-error:${e.message}`; }
     scenario("UI05-benchmarking-mutation", {
@@ -271,10 +282,14 @@ try {
     await headingIs(/^Monday reports$/i);
     let createOk = false, detail = "";
     try {
-      await page.getByRole("button", { name: /New Monday report/i }).click();
-      // Mutation-ONLY confirmation: the toast heading "Report created" is set only
-      // after a successful createMondayReport API call.
-      createOk = await visible(/Report created/i, 20000);
+      // `.first()`: the control renders in the page header AND beside the empty
+      // state, and both are the same handler.
+      await page.getByRole("button", { name: /New Monday report/i }).first().click();
+      // Mutation-ONLY confirmation: the success toast body reads
+      // "<id> opened as a <status> for <period> and appended to the audit chain."
+      // — set only after a successful createMondayReport API call. The failure
+      // toast ("Not created") cannot match this.
+      createOk = await visible(/opened as a (draft|review)/i, 20000);
       if (!createOk) detail = "no creation confirmation rendered";
     } catch (e) { detail = `create-error:${e.message}`; }
     scenario("UI08-report-create-mutation", {
