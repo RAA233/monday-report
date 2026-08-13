@@ -41,9 +41,9 @@ import {
  * shell and pages share — session, workspaces, connectivity, and the open
  * validation count that gates exports.
  *
- * Connectivity is this entry's own model, in the same SPIRIT as the committed v1
- * behaviour in `src/App.tsx` (probe on mount, degrade honestly, offer a retry) but not
- * the same states: v1 carries a two-value online/offline flag and falls back to local
+ * Connectivity is this entry's own model, in the same SPIRIT as the retired v1
+ * interface's behaviour (probe on mount, degrade honestly, offer a retry) but not
+ * the same states: v1 carried a two-value online/offline flag and fell back to local
  * data, while this entry has no fallback dataset and distinguishes four outcomes —
  * `checking` → `connected` | `refused` | `misconfigured` | `offline`. When the API
  * cannot be used the app says which of those it is and disables actions rather than

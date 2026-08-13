@@ -1454,8 +1454,14 @@ async function main() {
     );
 
     // Select the Directional variant BEFORE any draft is built: the title and the
-    // meta strip must switch to the committed directional labels.
-    await page.getByRole("radio", { name: "DIR" }).check();
+    // meta strip must switch to the committed directional labels. The radio INPUT
+    // is visually hidden (the SegControl label is the visible, clickable part), so
+    // the label is clicked and the radio's checked state is asserted afterwards.
+    await page
+      .getByRole("radiogroup", { name: "Report format variants" })
+      .locator("label", { hasText: "DIR" })
+      .click();
+    await page.getByRole("radio", { name: "DIR" }).waitFor({ state: "attached", timeout: 5000 });
     const h1 = (await page.locator("h1").first().innerText()).replace(/\s+/g, " ").trim();
     const bodyAfter = await page.locator("body").innerText();
     const directionalTitle = /Directional steering draft/i.test(h1);

@@ -8,7 +8,7 @@ Build chat, upload, extraction, and validation first. The fastest proof of value
 
 ## 2. User Workflow
 
-The user logs in, creates or joins an organization, creates a workspace for a campaign, rig, asset, or well set, then lands on Client Home for rig/MR access. The user opens Local AI Chat, uploads a ZIP or selects a folder, and workers unzip, scan, parse, OCR, classify, chunk, embed, and extract failures, tools, companies, NPT, root causes, recommendations, and citations. The user asks AI questions, applies filters, reviews low-confidence records in the validation queue, generates the official Monday Report, and exports JSON, CSV, HTML, PDF, or XLSX.
+The user logs in, creates or joins an organization, creates a workspace for a campaign, rig, asset, or well set, then lands on the chat-first Ask home (`/app`) for rig/MR access. The user asks from there or opens Upload, uploads a ZIP or selects a folder, and workers unzip, scan, parse, OCR, classify, chunk, embed, and extract failures, tools, companies, NPT, root causes, recommendations, and citations. The user asks AI questions, applies filters, reviews low-confidence records in the validation queue, generates the official Monday Report, and exports JSON, CSV, HTML, PDF, or XLSX.
 
 ## 3. MVP Feature List
 
