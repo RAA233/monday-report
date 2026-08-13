@@ -285,11 +285,11 @@ needs elevation.
 
 ### Coverage: every refusal reason, executed or disclosed
 
-The taxonomy has 46 outcomes. Each one below is either executed by a named
-scenario or listed as `UNTESTED` with the reason it is not executed. There is no
-categorical coverage claim anywhere in this document, because the previous
-revision made one — "an unelevated run proves every refusal path" — and it was
-false: 10 outcomes were exercised and 36 were neither tested nor disclosed.
+The taxonomy has 46 outcomes. **23 are executed by named scenarios** — seven of
+those only when the harness runs elevated — and **23 are `UNTESTED` and say why**.
+There is no categorical coverage claim anywhere in this document, because the
+previous revision made one — "an unelevated run proves every refusal path" — and
+it was false: 10 outcomes were exercised and 36 were neither tested nor disclosed.
 
 This table is **generated** by `python scripts\offline_bootstrap_guard.py
 --coverage-table`, and `CTL-COVERAGE` fails the gate if what is pasted here is not
