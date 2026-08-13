@@ -8,10 +8,20 @@
  *
  * What it proves, against a real browser and the real built/served redesign:
  *   - the public landing page renders its committed copy and disclosures
- *   - every Stage 1 route renders its own heading
+ *   - every route (Stage 1 AND Stage 2, plus the ported tracker/roadmap) renders
+ *     its own heading
  *   - deep-route refresh works (a full document load of /app/reports stays there)
  *   - /app/chat redirects to /app, and an unknown /app path renders in-shell
- *   - reserved Stage 2 routes declare themselves unimplemented
+ *   - navigating to /app/well issues NO report-draft GET (that endpoint appends a
+ *     report_draft.generate audit event; loading is an explicit user action)
+ *   - the upload view drives a real file through POST /uploads/direct and the
+ *     processing queue grows by exactly that job
+ *   - benchmarking's mutation controls match the payload's own permissions map
+ *   - the audit view's integrity chip matches GET /audit-logs/integrity
+ *   - the failure explorer filters the seeded failure client-side
+ *   - settings renders the permission map and runtime status with NO mutation
+ *     control in the main landmark
+ *   - tracker/roadmap render the committed program records and label them as such
  *   - the export gate shows the exact committed copy while a task is open, and
  *     resolving the task unlocks it
  *   - no page scrolls horizontally at 390 / 768 / 1440 / 1728
@@ -191,7 +201,7 @@ const VIEWPORTS = [
   { name: "wide", width: 1728, height: 1080 }
 ];
 
-const STAGE1_ROUTES = [
+const ROUTES = [
   // The hero h1 is two block spans, so innerText joins them with a space.
   { path: "/", heading: "Rig evidence in. Audited reports out.", label: "landing" },
   { path: "/app/signin", heading: "Sign in to the workspace", label: "signin" },
@@ -199,14 +209,40 @@ const STAGE1_ROUTES = [
   { path: "/app/reports", heading: "Monday reports", label: "reports" },
   // The Studio h1 is "<variant label> draft" and the variant is user-selectable, so
   // the assertion is the shape. `heading: null` used to reduce this check to "some
-  // page with one h1", which NotFound and PendingStage also satisfy — deleting the
-  // Studio route kept the suite green.
+  // page with one h1", which NotFound also satisfies — deleting the Studio route
+  // kept the suite green.
   { path: "/app/studio", headingPattern: /draft$/i, label: "studio" },
   { path: "/app/validation", heading: "Validation queue", label: "validation" },
-  { path: "/app/exports", heading: "Exports", label: "exports" }
+  { path: "/app/exports", heading: "Exports", label: "exports" },
+  // Stage 2 surfaces plus the two program records ported from v1. Each heading is
+  // the view's own h1, so a route silently swapped for NotFound cannot pass.
+  { path: "/app/well", heading: "Well schematics", label: "well" },
+  { path: "/app/upload", heading: "Upload rig reports", label: "upload" },
+  { path: "/app/benchmarking", heading: "Benchmarking", label: "benchmarking" },
+  { path: "/app/failures", heading: "Failure explorer", label: "failures" },
+  { path: "/app/audit", heading: "Audit chain", label: "audit" },
+  { path: "/app/settings", heading: "Settings", label: "settings" },
+  { path: "/app/tracker", heading: "Project tracker", label: "tracker" },
+  { path: "/app/roadmap", heading: "Product roadmap", label: "roadmap" }
 ];
 
-const STAGE2_ROUTES = ["/app/well", "/app/upload", "/app/benchmarking", "/app/failures", "/app/audit", "/app/settings"];
+/** Routes swept by the responsive/zoom loops: the in-shell views plus landing. */
+const RESPONSIVE_ROUTES = [
+  "/",
+  "/app",
+  "/app/reports",
+  "/app/validation",
+  "/app/exports",
+  "/app/studio",
+  "/app/well",
+  "/app/upload",
+  "/app/benchmarking",
+  "/app/failures",
+  "/app/audit",
+  "/app/settings",
+  "/app/tracker",
+  "/app/roadmap"
+];
 
 const results = [];
 let failed = 0;
@@ -499,6 +535,25 @@ async function main() {
       /* non-URL schemes (data:, blob:) are not an origin we can bind */
     }
   });
+  // Every report-draft GET the BROWSER issues, whoever triggered it. GET
+  // /workspaces/{id}/report-draft appends a report_draft.generate event to the
+  // hash-chained audit log, so navigation must never issue it — only an explicit
+  // click may. The /app/well check below reads this counter across its own
+  // navigation window; the Studio's explicit "Build source-backed draft" click
+  // later in the run is EXPECTED to increment it.
+  let draftReads = 0;
+  context.on("request", (request) => {
+    try {
+      if (
+        request.method() === "GET" &&
+        /\/workspaces\/[^/]+\/report-draft$/.test(new URL(request.url()).pathname)
+      ) {
+        draftReads += 1;
+      }
+    } catch {
+      /* non-URL schemes carry no pathname */
+    }
+  });
   // Every validation decision the BROWSER issued, with the status the API answered.
   // A decision the API ACCEPTED (2xx) that is nevertheless still open afterwards was
   // lost by the store, not by the UI - a distinction the failure message must make,
@@ -581,15 +636,28 @@ async function main() {
         ? ` — offending sentence: ${JSON.stringify((/[^.]*ambiguous[^.]*\./i.exec(landingText) ?? ["?"])[0].trim())}`
         : "")
   );
-  // Every route that renders the not-implemented page must be named as pending.
-  const pendingNamed = ["Well schematics", "upload", "benchmarking", "failure explorer", "audit-chain", "settings"];
-  const pendingMissing = pendingNamed.filter((name) => !new RegExp(name, "i").test(landingText));
+  // Every implemented surface is named in the closing copy, and NONE of them is
+  // still described as pending — the pending machinery is gone, so any surviving
+  // "next increment" phrasing would be a false claim about a working surface.
+  const surfacesNamed = [
+    "Well schematics",
+    "upload",
+    "benchmarking",
+    "failure explorer",
+    "audit-chain",
+    "settings",
+    "tracker",
+    "roadmap"
+  ];
+  const surfacesMissing = surfacesNamed.filter((name) => !new RegExp(name, "i").test(landingText));
+  const claimsPending = /next increment|not implemented/i.test(landingText);
   check(
-    "landing-names-every-pending-surface",
-    pendingMissing.length === 0,
-    pendingMissing.length === 0
-      ? `all ${pendingNamed.length} pending surfaces are named in the closing copy`
-      : `the closing copy omits: ${pendingMissing.join(", ")}`
+    "landing-names-every-surface",
+    surfacesMissing.length === 0 && !claimsPending,
+    (surfacesMissing.length === 0
+      ? `all ${surfacesNamed.length} surfaces are named in the closing copy`
+      : `the closing copy omits: ${surfacesMissing.join(", ")}`) +
+      `; still describes something as pending/unimplemented: ${claimsPending}`
   );
   // A per-field citation chip on a NARRATIVE block would assert provenance the payload
   // does not carry; the page's own capability card says so.
@@ -623,8 +691,8 @@ async function main() {
   );
   if (!ctaLanded) await page.goto(`${WEB}/app`, { waitUntil: "networkidle" });
 
-  // ── every Stage 1 route renders ───────────────────────────────────────────
-  for (const route of STAGE1_ROUTES) {
+  // ── every route renders its own heading ───────────────────────────────────
+  for (const route of ROUTES) {
     await page.goto(`${WEB}${route.path}`, { waitUntil: "networkidle" });
     const headings = await page.locator("h1").allInnerTexts();
     const one = headings.length === 1;
@@ -698,17 +766,86 @@ async function main() {
     )}`
   );
 
-  // ── reserved Stage 2 routes must not claim completeness ───────────────────
-  for (const route of STAGE2_ROUTES) {
-    await page.goto(`${WEB}${route}`, { waitUntil: "networkidle" });
-    const text = await page.locator("body").innerText();
-    const declares = /not implemented in this increment/i.test(text) && /Redesign pending/i.test(text);
+  // ── /app/well must not read the draft on navigation ───────────────────────
+  //
+  // The EFFECT, not a string: the counter above records every report-draft GET the
+  // browser issues, and this window proves navigation adds none. The explicit-load
+  // affordance is asserted alongside so the zero cannot be satisfied by a page that
+  // simply lacks the capability.
+  {
+    const before = draftReads;
+    await page.goto(`${WEB}/app/well`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(1200);
+    const issued = draftReads - before;
+    const loadButton = await page
+      .locator("button", { hasText: /^Load well evidence$/ })
+      .count();
+    const disclosesAudit = /report_draft\.generate/i.test(await page.locator("body").innerText());
     check(
-      `stage2-declared-pending:${route}`,
-      declares,
-      declares
-        ? "route declares itself unimplemented"
-        : "route does NOT declare itself unimplemented — it may read as a working surface"
+      "well-navigation-issues-no-draft-get",
+      issued === 0 && loadButton > 0 && disclosesAudit,
+      `navigation to /app/well issued ${issued} report-draft GET(s) (expected 0); ` +
+        `explicit "Load well evidence" control present: ${loadButton > 0}; ` +
+        `the page discloses that loading appends report_draft.generate: ${disclosesAudit}`
+    );
+  }
+
+  // ── settings is a read-only disclosure: no mutation control in <main> ──────
+  {
+    await page.goto(`${WEB}/app/settings`, { waitUntil: "networkidle" });
+    const settings = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      if (!main) return null;
+      return {
+        permissionRows: main.querySelectorAll("[data-permission-map] [data-permission]").length,
+        grantedAttrs: [...main.querySelectorAll("[data-permission-map] [data-permission]")].every(
+          (row) => row.getAttribute("data-granted") === "true" || row.getAttribute("data-granted") === "false"
+        ),
+        runtimeNamed: /runtime status/i.test(main.textContent ?? ""),
+        localAiNamed: /local ai/i.test(main.textContent ?? ""),
+        mutationControls: main.querySelectorAll("button, input, select, textarea, form").length
+      };
+    });
+    // The backend defines 23 permissions today; >= 20 pins "the real map rendered"
+    // without breaking on an additive permission.
+    check(
+      "settings-read-only-permission-map",
+      settings !== null &&
+        settings.permissionRows >= 20 &&
+        settings.grantedAttrs &&
+        settings.runtimeNamed &&
+        settings.localAiNamed &&
+        settings.mutationControls === 0,
+      settings === null
+        ? "no <main> landmark rendered"
+        : `${settings.permissionRows} permission row(s) with granted/denied attributes: ${settings.grantedAttrs}; ` +
+          `runtime status named: ${settings.runtimeNamed}; local AI named: ${settings.localAiNamed}; ` +
+          `${settings.mutationControls} mutation control(s) in <main> (must be 0 — the page is read-only)`
+    );
+  }
+
+  // ── tracker and roadmap render the committed records, labelled as such ─────
+  {
+    await page.goto(`${WEB}/app/tracker`, { waitUntil: "networkidle" });
+    const trackerText = await page.locator("body").innerText();
+    const trackerLabelled = /committed record in src\/data\/projectTracker\.ts/i.test(trackerText);
+    const trackerItem = /Plan and scope lock/i.test(trackerText);
+    check(
+      "tracker-committed-record",
+      trackerLabelled && trackerItem,
+      `states its data is the committed record (src/data/projectTracker.ts): ${trackerLabelled}; ` +
+        `renders a known committed phase ("Plan and scope lock"): ${trackerItem}`
+    );
+
+    await page.goto(`${WEB}/app/roadmap`, { waitUntil: "networkidle" });
+    const roadmapText = await page.locator("body").innerText();
+    const roadmapLabelled = /committed narrative record in src\/data\/productRoadmap\.ts/i.test(roadmapText);
+    const roadmapItem = /MR-SCHEMA-1/.test(roadmapText);
+    check(
+      "roadmap-committed-record",
+      roadmapLabelled && roadmapItem,
+      `states its data is the committed record (src/data/productRoadmap.ts): ${roadmapLabelled}; ` +
+        `renders a known committed signal ("MR-SCHEMA-1"): ${roadmapItem}`
     );
   }
 
@@ -1054,6 +1191,191 @@ async function main() {
         check("export-gate-precondition", false, `not run: ${error.message}`);
       }
       return false;
+    }
+  }
+
+  // ── Stage 2 behavior: EFFECTS on the live surfaces ─────────────────────────
+  //
+  // These need the same bindings as the gate flow: the script's API key, so the
+  // DOM can be compared against the backend's own answers, and a served bundle
+  // bound to the gated API, because the upload check performs a UI-driven WRITE.
+  // Refusal is one declared id, mirroring the gate flow's coverage discipline.
+  let stage2FlowRefused = false;
+  if (!API_KEY || !browserBoundToGatedApi) {
+    stage2FlowRefused = true;
+    check(
+      "stage2-behavior-precondition",
+      false,
+      !API_KEY
+        ? "not run: MONDAY_REPORT_API_KEY is not set, so backend truth cannot be read for comparison"
+        : "not run: the served bundle does not target the gated API origin, so a UI-driven upload would land on an unauthorised stack"
+    );
+  } else {
+    // ── upload: a real file through the new UI, measured on the queue ────────
+    try {
+      const jobsBefore = (await apiJson("/processing-jobs")).length;
+      const uploadPosts = [];
+      const uploadListener = (response) => {
+        try {
+          const request = response.request();
+          if (
+            request.method() === "POST" &&
+            new URL(response.url()).pathname === "/uploads/direct"
+          ) {
+            uploadPosts.push(response.status());
+          }
+        } catch {
+          /* non-URL schemes */
+        }
+      };
+      context.on("response", uploadListener);
+      await page.goto(`${WEB}/app/upload`, { waitUntil: "networkidle" });
+      mutated.value = true;
+      await page.setInputFiles("#up-files", {
+        name: "ui_stage2_upload_note.txt",
+        mimeType: "text/plain",
+        // Benign demo text on purpose: no extractor keyword, so if a worker run
+        // ever drains this job it raises no validation task.
+        buffer: Buffer.from(
+          "Stage 2 UI upload check. Demo data only; plain operator note with no failure keywords.",
+          "utf8"
+        )
+      });
+      const outcomeShown = await page
+        .getByText(/Stored, hashed \(sha256/)
+        .first()
+        .waitFor({ state: "visible", timeout: 20000 })
+        .then(() => true)
+        .catch(() => false);
+      context.off("response", uploadListener);
+      const jobsAfter = (await apiJson("/processing-jobs")).length;
+      check(
+        "upload-ui-stores-and-queues",
+        outcomeShown &&
+          uploadPosts.length === 1 &&
+          uploadPosts[0] >= 200 &&
+          uploadPosts[0] < 300 &&
+          jobsAfter === jobsBefore + 1,
+        `outcome card shown: ${outcomeShown}; browser POST /uploads/direct statuses: [${uploadPosts.join(", ")}] ` +
+          `(expected one 2xx); processing jobs ${jobsBefore} -> ${jobsAfter} (expected +1 — the intake queued exactly this file's job)`
+      );
+    } catch (error) {
+      check("upload-ui-stores-and-queues", false, `aborted: ${String(error?.message ?? error).slice(0, 200)}`);
+    }
+
+    // ── benchmarking: mutation controls match the payload's permissions map ──
+    try {
+      const workspaces = await apiJson("/workspaces");
+      const wsId = workspaces[0]?.id;
+      const payload = wsId ? await apiJson(`/workspaces/${wsId}/benchmarking`) : null;
+      await page.goto(`${WEB}/app/benchmarking`, { waitUntil: "networkidle" });
+      await page
+        .locator("[data-perm]")
+        .first()
+        .waitFor({ state: "visible", timeout: 15000 })
+        .catch(() => {});
+      const controls = await page.evaluate(() =>
+        [...document.querySelectorAll("[data-perm]")].map((el) => ({
+          perm: el.getAttribute("data-perm"),
+          disabled: el.disabled === true
+        }))
+      );
+      // A control must be ENABLED exactly when the payload grants its permission.
+      // The dismiss control appears only when an active anomaly exists, so the
+      // required coverage is the two always-rendered mutations.
+      const required = ["review_anomalies", "manage_benchmark_config"];
+      const missing = required.filter((perm) => !controls.some((control) => control.perm === perm));
+      const mismatches = payload
+        ? controls.filter((control) => (payload.permissions[control.perm] === true) === control.disabled)
+        : [];
+      check(
+        "benchmarking-controls-match-payload-permissions",
+        payload !== null && missing.length === 0 && controls.length > 0 && mismatches.length === 0,
+        payload === null
+          ? "the workspace or its benchmarking payload could not be read"
+          : `${controls.length} permission-gated control(s) rendered; missing required: [${missing.join(", ")}]; ` +
+            `mismatches vs the payload map: ${
+              mismatches.length === 0
+                ? "none"
+                : mismatches
+                    .map((control) => `${control.perm} granted=${payload.permissions[control.perm]} disabled=${control.disabled}`)
+                    .join("; ")
+            }`
+      );
+    } catch (error) {
+      check(
+        "benchmarking-controls-match-payload-permissions",
+        false,
+        `aborted: ${String(error?.message ?? error).slice(0, 200)}`
+      );
+    }
+
+    // ── audit: the integrity chip matches the backend's own verdict ──────────
+    try {
+      await page.goto(`${WEB}/app/audit`, { waitUntil: "networkidle" });
+      await page
+        .locator("[data-integrity-state]")
+        .first()
+        .waitFor({ state: "visible", timeout: 15000 })
+        .catch(() => {});
+      const chipState = await page
+        .locator("[data-integrity-state]")
+        .first()
+        .getAttribute("data-integrity-state")
+        .catch(() => null);
+      // Read the backend AFTER the render: nothing navigates or writes between the
+      // paint and this GET, so the two observe the same chain.
+      const integrity = await apiJson("/audit-logs/integrity");
+      const wanted = integrity.integrity_state ?? "unknown";
+      check(
+        "audit-integrity-chip-matches-backend",
+        chipState !== null && chipState === wanted,
+        `chip data-integrity-state=${JSON.stringify(chipState)}; GET /audit-logs/integrity reports ${JSON.stringify(wanted)}`
+      );
+    } catch (error) {
+      check(
+        "audit-integrity-chip-matches-backend",
+        false,
+        `aborted: ${String(error?.message ?? error).slice(0, 200)}`
+      );
+    }
+
+    // ── failures: the filter finds the seeded failure and refuses garbage ────
+    if (!gateChecked) {
+      check(
+        "failures-filter-finds-seeded-failure",
+        false,
+        "not run: the gate flow did not complete, so no seeded failure record is guaranteed to exist"
+      );
+    } else {
+      try {
+        await page.goto(`${WEB}/app/failures`, { waitUntil: "networkidle" });
+        const rowsFor = async (query) => {
+          await page.fill("#fx-query", query);
+          await page.waitForTimeout(300);
+          return page
+            .locator('[role="table"][aria-label="Extracted failure events"] .mr-table-row')
+            .count();
+        };
+        const mwdRows = await rowsFor("MWD");
+        const garbageRows = await rowsFor("zz-no-such-failure-zz");
+        const honestNoMatch = /No failure matches these filters/i.test(
+          await page.locator("body").innerText()
+        );
+        check(
+          "failures-filter-finds-seeded-failure",
+          mwdRows >= 1 && garbageRows === 0 && honestNoMatch,
+          `filter "MWD" matches ${mwdRows} row(s) (expected >= 1, the seeded MWD failure); ` +
+            `garbage filter matches ${garbageRows} (expected 0) and the page reports a filter no-match, ` +
+            `not an empty workspace: ${honestNoMatch}`
+        );
+      } catch (error) {
+        check(
+          "failures-filter-finds-seeded-failure",
+          false,
+          `aborted: ${String(error?.message ?? error).slice(0, 200)}`
+        );
+      }
     }
   }
 
@@ -1436,7 +1758,7 @@ async function main() {
   // ── 200% zoom: the reflow target, at every Stage 1 route ───────────────────
   //
   // 1440x900 at 200% is 720x450 CSS px, which is what a zoomed desktop actually is.
-  for (const route of ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"]) {
+  for (const route of RESPONSIVE_ROUTES) {
     await page.setViewportSize({ width: 720, height: 450 });
     await page.goto(`${WEB}${route}`, { waitUntil: "networkidle" });
     await assertNoHorizontalScroll(page, `zoom200${route}`);
@@ -1455,7 +1777,7 @@ async function main() {
   // ── responsive: no page-level horizontal scroll at any viewport ───────────
   for (const viewport of VIEWPORTS) {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
-    for (const route of ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"]) {
+    for (const route of RESPONSIVE_ROUTES) {
       await page.goto(`${WEB}${route}`, { waitUntil: "networkidle" });
       await assertNoHorizontalScroll(page, `${viewport.name}${route}`);
     }
@@ -1499,13 +1821,13 @@ async function main() {
   // missing nav used to satisfy ">= 44".
   check(
     "mobile-nav-hit-targets",
-    mobile.count >= 11 && Number.isFinite(mobile.minHeight) && mobile.minHeight >= 44,
-    `${mobile.count} nav targets found (expected >= 11); smallest is ${mobile.minHeight}px`
+    mobile.count >= 13 && Number.isFinite(mobile.minHeight) && mobile.minHeight >= 44,
+    `${mobile.count} nav targets found (expected >= 13: eleven original destinations plus tracker and roadmap); smallest is ${mobile.minHeight}px`
   );
   check(
     "mobile-nav-chrome-hidden",
-    mobile.labelCount === 3 && mobile.labelsHidden === mobile.labelCount && mobile.tenantHidden,
-    `${mobile.labelsHidden} of ${mobile.labelCount} group labels are display:none (expected 3 of 3); tenant card display:none = ${mobile.tenantHidden}`
+    mobile.labelCount === 4 && mobile.labelsHidden === mobile.labelCount && mobile.tenantHidden,
+    `${mobile.labelsHidden} of ${mobile.labelCount} group labels are display:none (expected 4 of 4 — Operate/Review/Trust plus the ported Program group); tenant card display:none = ${mobile.tenantHidden}`
   );
   await shoot(page, "reports-mobile-nav");
 
@@ -2000,6 +2322,22 @@ async function main() {
   const gateFlowMissing = GATE_FLOW_IDS.filter((id) => !emitted.has(id));
   const gateComplete = gateRefusals.length > 0 ? true : gateFlowMissing.length === 0;
 
+  /**
+   * The Stage 2 behavior flow shares the gate flow's coverage shape: it either ran
+   * and emitted all four of its ids (a "not run" branch inside still emits the id,
+   * as a failure), or it refused up front with its one declared refusal id.
+   */
+  const STAGE2_FLOW_IDS = [
+    "upload-ui-stores-and-queues",
+    "benchmarking-controls-match-payload-permissions",
+    "audit-integrity-chip-matches-backend",
+    "failures-filter-finds-seeded-failure"
+  ];
+  const stage2Missing = STAGE2_FLOW_IDS.filter((id) => !emitted.has(id));
+  const stage2Complete = stage2FlowRefused
+    ? emitted.has("stage2-behavior-precondition")
+    : stage2Missing.length === 0;
+
   // Every check id an unconditional run emits. Declared so a caller can pin the
   // suite's coverage: a check that silently disappears (deleted, or skipped by a
   // conditional branch) is reported here rather than shrinking the totals unnoticed.
@@ -2016,7 +2354,7 @@ async function main() {
     "landing-sections",
     "landing-stat-band",
     "landing-cta-navigates",
-    ...STAGE1_ROUTES.map((route) => `route-renders:${route.label}`),
+    ...ROUTES.map((route) => `route-renders:${route.label}`),
     "deep-route-status",
     "deep-route-refresh",
     "deep-route-refresh:studio-param",
@@ -2024,9 +2362,12 @@ async function main() {
     "deep-route-with-query-string",
     "chat-redirects-to-ask",
     "unknown-route-in-shell",
-    ...STAGE2_ROUTES.map((route) => `stage2-declared-pending:${route}`),
+    "well-navigation-issues-no-draft-get",
+    "settings-read-only-permission-map",
+    "tracker-committed-record",
+    "roadmap-committed-record",
     "landing-workflow-names-real-queue-sources",
-    "landing-names-every-pending-surface",
+    "landing-names-every-surface",
     "landing-hero-no-per-field-narrative-provenance",
     "browser-targets-gated-api",
     "studio-does-not-draft-on-mount",
@@ -2040,14 +2381,10 @@ async function main() {
     ),
     "profile-panel-keyboard",
     "mobile-nav-focus-ring-not-clipped",
-    ...["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"].map(
-      (route) => `no-horizontal-scroll:zoom200${route}`
-    ),
+    ...RESPONSIVE_ROUTES.map((route) => `no-horizontal-scroll:zoom200${route}`),
     "api-chip-no-false-local-fallback",
     ...VIEWPORTS.flatMap((viewport) =>
-      ["/", "/app", "/app/reports", "/app/validation", "/app/exports", "/app/studio"].map(
-        (route) => `no-horizontal-scroll:${viewport.name}${route}`
-      )
+      RESPONSIVE_ROUTES.map((route) => `no-horizontal-scroll:${viewport.name}${route}`)
     ),
     "mobile-nav-single-column",
     "mobile-nav-hit-targets",
@@ -2061,25 +2398,39 @@ async function main() {
     "no-failed-app-requests"
   ];
 
-  const declared = new Set([...EXPECTED_CHECK_IDS, ...GATE_FLOW_IDS, ...GATE_REFUSAL_IDS, "coverage-complete"]);
+  const declared = new Set([
+    ...EXPECTED_CHECK_IDS,
+    ...GATE_FLOW_IDS,
+    ...GATE_REFUSAL_IDS,
+    ...STAGE2_FLOW_IDS,
+    "stage2-behavior-precondition",
+    "coverage-complete"
+  ]);
   const missing = EXPECTED_CHECK_IDS.filter((id) => !emitted.has(id));
   const unexpected = [...emitted].filter((id) => !declared.has(id));
-  const complete = missing.length === 0 && unexpected.length === 0 && gateComplete;
+  const complete = missing.length === 0 && unexpected.length === 0 && gateComplete && stage2Complete;
   check(
     "coverage-complete",
     complete,
     complete
-      ? `all ${EXPECTED_CHECK_IDS.length} unconditional check(s) ran, nothing undeclared appeared, and the gate flow ` +
+      ? `all ${EXPECTED_CHECK_IDS.length} unconditional check(s) ran, nothing undeclared appeared, the gate flow ` +
         (gateRefusals.length > 0
           ? `declared itself not run (${gateRefusals.join(", ")})`
-          : `emitted all ${GATE_FLOW_IDS.length} of its ids`)
+          : `emitted all ${GATE_FLOW_IDS.length} of its ids`) +
+        `, and the Stage 2 behavior flow ` +
+        (stage2FlowRefused ? "declared itself not run" : `emitted all ${STAGE2_FLOW_IDS.length} of its ids`)
       : [
           missing.length ? `${missing.length} declared check(s) did not run: ${missing.slice(0, 8).join(", ")}` : "",
           unexpected.length ? `${unexpected.length} undeclared check id(s): ${unexpected.slice(0, 8).join(", ")}` : "",
           gateComplete
             ? ""
             : `the gate flow neither completed nor declared itself not run: ${gateFlowRan.length} of ` +
-              `${GATE_FLOW_IDS.length} ids ran, missing ${gateFlowMissing.slice(0, 8).join(", ")}`
+              `${GATE_FLOW_IDS.length} ids ran, missing ${gateFlowMissing.slice(0, 8).join(", ")}`,
+          stage2Complete
+            ? ""
+            : `the Stage 2 behavior flow neither completed nor declared itself not run: missing ${stage2Missing
+                .slice(0, 8)
+                .join(", ")}`
         ]
           .filter(Boolean)
           .join(" ;; ")
@@ -2092,6 +2443,7 @@ async function main() {
     api_base: API,
     export_gate_exercised: gateChecked,
     export_gate_refusals: gateRefusals,
+    stage2_behavior_refused: stage2FlowRefused,
     seeded_validation_tasks: seeded.count,
     mutates_target_stack: mutated.value,
     screenshots: SHOTS.note,
