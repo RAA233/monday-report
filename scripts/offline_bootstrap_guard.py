@@ -91,6 +91,7 @@ import ctypes
 import ctypes.wintypes as wt
 import hashlib
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -1260,9 +1261,28 @@ def _no_compiler(base, image, work):
                     watch_dirs=[temp])
     watcher = result.watcher
     extra_processes, toolchain, extra_artifacts = watcher.beyond(HOST)
+
+    # A static complement to the observation, over the bytes the harness already
+    # hashed.  The observation is the stronger evidence - it is what actually
+    # happened - but it can only speak for the path this run took, and a
+    # construct sitting on a branch that was not taken is still a construct that
+    # can spawn a process.  Comment and doc lines are excluded: the file
+    # discusses csc.exe at length precisely because it no longer runs it.
+    forbidden = ("Add-Type", "Start-Process", "Invoke-Expression", "New-Object -Com",
+                 "ComObject", "Get-WmiObject", "Get-CimInstance", "Invoke-WmiMethod",
+                 "Diagnostics.Process", "Import-Module", "$env:PATH", "$env:TEMP",
+                 "$env:TMP", "$env:SystemRoot")
+    stripped = re.sub(r"<#.*?#>", "", image.path.read_text(encoding="utf-8"), flags=re.S)
+    code_lines = [line for line in stripped.splitlines()
+                  if line.strip() and not line.strip().startswith("#")]
+    present = sorted(set(token for token in forbidden
+                         if any(token in line for line in code_lines)))
+
     checks = [
         ("harness polled the live process table throughout the run",
          watcher.samples > 20),
+        ("no process-creating or environment-reading construct appears on any executable "
+         "line of the pinned bytes, taken or not (%s)" % (present or "none"), not present),
         ("harness saw NO process beyond the measured interpreter baseline (%s)"
          % (sorted(extra_processes.values()) or "none seen"), not extra_processes),
         ("harness saw NO compiler or shell in the bootstrap's process tree (%s)"
