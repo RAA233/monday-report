@@ -182,7 +182,12 @@ python scripts\offline_bootstrap_guard.py                     # the scenario tab
 python scripts\offline_bootstrap_guard.py --delete-mechanism  # + the self-review pass
 python scripts\offline_bootstrap_guard.py --show-stdout       # + what the bootstrap printed
 python scripts\offline_bootstrap_guard.py --coverage-table    # the coverage table, as markdown
+python scripts\offline_bootstrap_guard.py --only SCN-15       # ONE scenario; never certifies
 ```
+
+Only the first two forms produce a verdict. `--only` filters the table, and a
+filtered run is structurally incapable of certifying the whole: it prints
+`FILTERED RUN — NOT A CERTIFICATION` and exits non-zero regardless of its rows.
 
 It treats the bootstrap as an opaque binary: it hashes the file, refuses to launch
 anything whose hash does not match, and forms every verdict from the exit code
@@ -211,6 +216,13 @@ rows as skips, so a run in which seven rows had never been written at all still
 printed "passed". They are failures now. **An unelevated run therefore cannot
 certify** — that is the correct outcome, not a defect in the run.
 
+The same hole has a second shape: a run that never constructs a row at all. A
+`--only` filter selects scenarios before anything else happens, so an unselected
+row is not blocked, not failed and not counted — it simply does not exist, and a
+tally over what survived the filter would call a one-row table a pass. **A filtered
+run therefore computes no verdict and always exits non-zero**, whatever its
+selected rows did.
+
 ### Unelevated runs are honest about what they cannot show
 
 With `-TrustedSid` gone, an unelevated process **cannot** build a fixture the
@@ -218,11 +230,13 @@ production trust set accepts: its filtered token has `BUILTIN\Administrators` as
 deny-only, so every directory it creates is owned by itself. Faking a principal to
 get around that is precisely the defect this revision removed.
 
-An unelevated run proves the refusal paths marked as executed in the coverage
-table below, the whole name and pin policy, the process-and-temp observation, the
-DOS-device chain bypass and the object-identity differential. It reports the seven
-properties that need the bootstrap to **accept** a chain and **install** as
-`BLOCKED_ELEVATION_REQUIRED`, each of which fails the gate.
+An unelevated run proves the **16** refusal paths marked as executed in the
+coverage table below *and reachable without elevation* — not the 23 the table
+declares. The other seven, and outcome `OK` itself, belong to the `ELV-*` rows and
+are reported `BLOCKED_ELEVATION_REQUIRED`, each of which fails the gate. Within
+that boundary an unelevated run does prove the whole name and pin policy, the
+process-and-temp observation, the DOS-device chain bypass and the struct-offset
+half of the object-identity differential.
 
 To run all seven, open an **elevated** PowerShell (Run as administrator) and run
 exactly this:
@@ -233,13 +247,18 @@ python scripts\offline_bootstrap_guard.py --delete-mechanism
 ```
 
 That single command runs the whole table — `CTL-*`, `SCN-*`, `IDN-*` and all
-seven `ELV-*` rows — and then the deletion experiments. **There is no flag that
-asks for the ELV rows and no flag that skips them.** They run when, and only when,
-the harness finds an elevated token in its own process (`CheckTokenMembership`
-against `S-1-5-32-544`); it does not take anybody's word for it, and there is no
-argument that substitutes a principal. Elevated, the fixtures it creates are owned
-by `BUILTIN\Administrators`, which is in the production trust set — so no
-principal has to be invented for them to pass.
+seven `ELV-*` rows — and then the deletion experiments. **No flag selects the ELV
+rows.** They run when, and only when, the harness finds an elevated token in its
+own process (`CheckTokenMembership` against `S-1-5-32-544`); it does not take
+anybody's word for it, and there is no argument that substitutes a principal.
+Elevated, the fixtures it creates are owned by `BUILTIN\Administrators`, which is
+in the production trust set — so no principal has to be invented for them to pass.
+
+`--only` **does** narrow the table, and can therefore leave the `ELV-*` rows out of
+a run. So a filtered run computes **no verdict at all**: it prints
+`FILTERED RUN — NOT A CERTIFICATION`, lists every scenario it did not run, and
+exits non-zero however its selected rows turned out. `--only` is for working on one
+scenario; it can never produce evidence. Run the command above **without** it.
 
 Expected results when run elevated:
 

@@ -3213,11 +3213,13 @@ ELEVATED_COMMAND = (
     "    python scripts\\offline_bootstrap_guard.py --delete-mechanism\n"
     "\n"
     "That single command runs the WHOLE table - CTL-*, SCN-*, IDN-* and all seven\n"
-    "ELV-* rows - and then the deletion experiments.  There is no separate flag for\n"
-    "the ELV rows and no way to ask for them: they run when, and only when, the\n"
-    "harness finds an elevated token in its OWN process (CheckTokenMembership against\n"
-    "S-1-5-32-544).  It takes nobody's word for that, and there is no argument that\n"
-    "substitutes a principal.\n"
+    "ELV-* rows - and then the deletion experiments.  No flag SELECTS the ELV rows:\n"
+    "they run when, and only when, the harness finds an elevated token in its OWN\n"
+    "process (CheckTokenMembership against S-1-5-32-544).  It takes nobody's word for\n"
+    "that, and there is no argument that substitutes a principal.\n"
+    "--only DOES narrow the table and can therefore leave the ELV rows out - so a\n"
+    "filtered run computes NO verdict, prints FILTERED RUN - NOT A CERTIFICATION and\n"
+    "exits non-zero however its rows turn out.  Run the command above WITHOUT --only.\n"
     "Elevated, the fixtures it creates are owned by BUILTIN\\Administrators, which is\n"
     "in the production trust set - so no principal has to be invented for them to pass."
 )
@@ -3851,6 +3853,11 @@ def print_coverage(results):
     rows = coverage_rows()
     executed = [r for r in rows if r[2] != "UNTESTED"]
     verdicts = dict((r.id, r.verdict) for r in results)
+    # reason -> {scenario id: True} for every row that PASSED **on that reason**.
+    reached = {}
+    for r in results:
+        if r.verdict == "PASS":
+            reached.setdefault(r.expected, {})[r.id] = True
     print("REFUSAL-TAXONOMY COVERAGE  (generated from the scenario declarations)")
     print("  %d outcomes in the taxonomy: %d claimed by a named scenario, %d UNTESTED"
           % (len(rows), len(executed), len(rows) - len(executed)))
@@ -3867,15 +3874,28 @@ def print_coverage(results):
             print("  %-4d %-30s %s" % (code, name,
                                        "UNTESTED - " + (why or "NO REASON GIVEN")))
             continue
-        annotated = ", ".join("%s[%s]" % (ident, verdicts.get(ident, "NOT-SELECTED"))
-                              for ident in who.split(", "))
-        if not any(verdicts.get(ident) == "PASS" for ident in who.split(", ")):
+        # A reason is DEMONSTRATED only by a passing row that actually REACHED
+        # it.  Asking merely whether some scenario claiming the reason passed
+        # credits a reason to a pass that went somewhere else: CTL-PROGFILES
+        # declares both OK and ROOT_CREATE_FAILED and, unelevated, passes on
+        # ROOT_CREATE_FAILED - which used to mark outcome 0 (OK) demonstrated
+        # while its only real row, ELV-01, sat blocked.  That is the happy path,
+        # and it was the one outcome the count quietly forgave.
+        annotated = ", ".join(
+            "%s[%s%s]" % (ident, verdicts.get(ident, "NOT-SELECTED"),
+                          "" if reached.get(name, {}).get(ident) is None
+                          else " reached")
+            for ident in who.split(", "))
+        if name not in reached:
             blocked_outcomes += 1
+            annotated += "   <- NOT DEMONSTRATED IN THIS RUN"
         print("  %-4d %-30s %s" % (code, name, annotated))
     print()
-    print("  in THIS run: %d outcome(s) claimed above have no PASSING scenario behind"
+    print("  in THIS run: %d outcome(s) claimed above were NOT REACHED by any passing"
           % blocked_outcomes)
-    print("  them, so they are not demonstrated by this run whatever the table declares.")
+    print("  scenario, so they are not demonstrated by this run whatever the table")
+    print("  declares.  Reaching an outcome means a PASSING row whose EXPECTED reason")
+    print("  was that outcome - not merely a passing row that mentions it.")
     print()
 
     declared = {}
@@ -3891,6 +3911,25 @@ def print_coverage(results):
         print("  COVERAGE DECLARATIONS DO NOT MATCH WHAT THE ROWS TESTED:")
         for line in inconsistent:
             print("    %s" % line)
+        print()
+
+    # The check the cross-check above cannot make.  It only asks whether a row's
+    # expected reason is among its declarations; it never asks whether every
+    # declaration was reached.  A spec declaring two reasons reaches at most one
+    # per run, so the OTHER one is an assumption until some row reaches it.
+    unreached = []
+    for spec in SCENARIOS:
+        for reason in spec["reasons"]:
+            if reason in reached and spec["id"] in reached[reason]:
+                continue
+            unreached.append((spec["id"], reason, reason in reached))
+    if unreached:
+        print("  DECLARED BUT NOT REACHED BY THE DECLARING SCENARIO IN THIS RUN:")
+        for ident, reason, elsewhere in unreached:
+            print("    %-14s %-30s %s"
+                  % (ident, reason,
+                     "reached by another passing row" if elsewhere
+                     else "NOT reached by anything - assumed, not shown"))
         print()
     return len(inconsistent)
 
@@ -3932,14 +3971,27 @@ def main():
     print("  launcher  : %s" % system_powershell())
     print("  account   : %s" % ME)
     print("  elevated  : %s   <- read from this token, not from the bootstrap" % ELEVATED)
+    print("  filter    : %s" % (("--only %r  <- FILTERED RUN, see below" % args.only)
+                                if args.only else "none (whole table)"))
+    if args.only:
+        selected_ids = sorted(s["id"] for s in SCENARIOS
+                              if args.only.lower() in s["id"].lower())
+        print()
+        print("  FILTERED RUN - NOT A CERTIFICATION.  --only was given, so this run")
+        print("  examines %d of %d scenarios (%s)."
+              % (len(selected_ids), len(SCENARIOS),
+                 ", ".join(selected_ids) or "none matched"))
+        print("  A subset cannot certify the whole.  No verdict is computed and the")
+        print("  process exits non-zero however the selected rows turn out.  --only is")
+        print("  for working on one scenario, never for producing evidence.")
     if not ELEVATED:
         print()
         print("  UNELEVATED RUN.  It proves the refusal paths listed in the coverage table")
         print("  below - not 'every refusal path'; the table says exactly which and which")
         print("  not.  The seven properties that need the bootstrap to ACCEPT a chain and")
         print("  INSTALL are reported BLOCKED_ELEVATION_REQUIRED and are NOT faked, and")
-        print("  BECAUSE THEY ARE BLOCKED THIS RUN CANNOT CERTIFY.  That is the correct")
-        print("  outcome for an unelevated run, not a defect in it.")
+        print("  BECAUSE THEY ARE BLOCKED AN UNFILTERED UNELEVATED RUN CANNOT CERTIFY.")
+        print("  That is the correct outcome for an unelevated run, not a defect in it.")
 
     base = str(Path(os.path.abspath(os.sep)) / ("mr-bootstrap-guard-" + uuid.uuid4().hex[:10]))
     os.makedirs(long_path(base), exist_ok=False)
@@ -4079,14 +4131,38 @@ def main():
                 print("(fixture cleanup left %s: %s)" % (base, exc))
 
     # ---- certification ---------------------------------------------------
-    # ONE rule: certification requires every row to be a PASS.  A blocked row, an
-    # inconclusive row and a row nobody ran are all "not a pass", and none of
-    # them may produce a green gate.  The previous revision computed this from
-    # `verdict.startswith("FAIL")`, which let seven never-written rows and every
-    # unbuildable fixture through.
+    # ONE rule: certification requires every row IN THE WHOLE TABLE to be a PASS.
+    # A blocked row, an inconclusive row and a row nobody ran are all "not a
+    # pass", and none of them may produce a green gate.  An earlier revision
+    # computed this from `verdict.startswith("FAIL")`, which let seven
+    # never-written rows and every unbuildable fixture through.
+    #
+    # A FILTERED run is the same hole in a different shape, and it was open here
+    # until now.  `--only` selected specs BEFORE the elevation branch, so an
+    # unselected ELV row was never even constructed as Blocked, and the tally
+    # below then counted only what survived the filter: `--only CTL-OWNER` exited
+    # 0 with "rows: PASS=1, VERDICT: PASS" on a table containing one row.  A
+    # filtered run examines a subset by construction, so it can never be a
+    # certification of the whole - it is structurally incapable of it, whatever
+    # its rows did.  It therefore prints no verdict at all and always exits
+    # non-zero, so it can be neither mistaken for nor substituted for a full run.
     tally = {}
     for r in results:
         tally[r.verdict] = tally.get(r.verdict, 0) + 1
+    if args.only:
+        unselected = sorted(spec["id"] for spec in SCENARIOS
+                            if args.only.lower() not in spec["id"].lower())
+        print("FILTERED RUN - NOT A CERTIFICATION")
+        print("  --only %r selected %d of %d scenarios.  %d were NOT RUN:"
+              % (args.only, len(results), len(SCENARIOS), len(unselected)))
+        for index in range(0, len(unselected), 8):
+            print("    %s" % ", ".join(unselected[index:index + 8]))
+        print("  rows that DID run: %s"
+              % ", ".join("%s=%d" % item for item in sorted(tally.items())))
+        print("  A subset cannot certify the whole, so NO VERDICT is computed here and")
+        print("  this run exits non-zero even if every row it ran passed.  Re-run with")
+        print("  no --only to obtain a verdict.")
+        return 1
     print("CERTIFICATION")
     print("  rows: %s" % ", ".join("%s=%d" % item for item in sorted(tally.items())))
     if failures:
