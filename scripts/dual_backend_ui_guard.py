@@ -399,7 +399,16 @@ def _run_pg_ui(ctx):
         uploaded = snap_count("uploaded_files") or snap_count("uploads")
         parsed = snap_count("parsed_documents")
         benchmarks = snap_count("benchmark_measurements") or snap_count("benchmarking_measurements")
-        reports = snap_count("monday_reports")
+        # monday_reports is a NORMALIZED-AUTHORITY entity on this backend
+        # (PostgresStateStore.NORMALIZED_ENTITY_KEYS): the snapshot payload's
+        # "monday_reports" key is blanked BY DESIGN and the durable row commits to
+        # monday_report_norm_reports in the same transaction as its audit event.
+        # Counting the snapshot key here is what produced the earlier false
+        # "confirmed lost write" (local=1 / postgres=0): it measured a
+        # deliberately-empty projection, not the durable state. Count the read/write
+        # authority instead (audit:report-create-persistence pins this live).
+        reports = int(boot_q("select count(*) from monday_report_norm_reports "
+                             "where tenant_slug=%s", (slug,)) or 0)
         rb = observe_runtime_backend(api_base)
         # store_class is DERIVED from observation: only a PostgresStateStore opens a PG connection
         # carrying our application_name, and only it writes the tenant's JSONB snapshot row.
@@ -467,18 +476,19 @@ def judge(local, pg, docker_ok, allow_unavailable=False):
     def db_backed(data):
         # UI mutation success must be backed by real database rows (UI cannot report success without a
         # committed DB mutation): upload -> uploaded_file + parsed_document; benchmarking -> a
-        # measurement.
+        # measurement; Monday-report creation -> a committed report row AT ITS AUTHORITY.
         #
-        # monday_reports is OBSERVED and emitted in db_postconditions but deliberately NOT gated yet:
-        # a CONFIRMED pre-existing backend defect (no browser, no concurrency needed to reproduce)
-        # loses the monday_report.create mutation on the PostgreSQL snapshot path — POST answers 201,
-        # the audit chain records monday_report.create, GET /monday-reports serves the report, but the
-        # tenant's monday_report_state_snapshots payload keeps "monday_reports": []. Until that store
-        # defect is fixed, gating here would fail the PG backend for a backend bug the UI faithfully
-        # surfaced; the recorded local=1 / postgres=0 divergence stays visible in the emitted output.
+        # The gate on monday_reports is RE-TIGHTENED: the earlier "confirmed backend defect" that
+        # relaxed it to observation-only was a MISMEASUREMENT, not a lost write. On the postgres
+        # backend monday_reports is a normalized-authority entity, so the snapshot payload's
+        # "monday_reports" key is blanked BY DESIGN and the durable row commits to
+        # monday_report_norm_reports in the same transaction as its monday_report.create audit event
+        # (live-proven, including across an API process restart, by audit:report-create-persistence).
+        # The certifier now counts that authority table for the PG backend (the local JSON snapshot
+        # remains the local backend's authority), so local and postgres both report 1 after UI08.
         db = data.get("db_postconditions", {})
         return (db.get("uploaded_files", 0) >= 1 and db.get("parsed_documents", 0) >= 1
-                and db.get("benchmark_measurements", 0) >= 1)
+                and db.get("benchmark_measurements", 0) >= 1 and db.get("monday_reports", 0) >= 1)
 
     local_all_pass = (not local.get("fatal") and present_local >= set(EXPECTED_SCENARIOS)
                       and all(_scn_result(local, s) == "PASS" for s in EXPECTED_SCENARIOS)
