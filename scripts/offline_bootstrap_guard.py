@@ -431,7 +431,9 @@ def bundle_root_hash(root):
 
 
 def tree_digests(root):
-    """relative path -> sha256, computed here, junctions never followed."""
+    """relative path -> sha256, computed here.  The root itself is refused if it
+    is a reparse point; junctions BELOW it are walked, because a scenario that
+    plants one needs to see what actually landed on the other side."""
     if not exists(root) or is_reparse_point(root):
         return None
     return dict((m["relative"], m["sha256"]) for m in enumerate_bundle(root))
@@ -859,8 +861,10 @@ def _tamper_after_hash(base, image):
 
 
 @scenario("SCN-08",
-          mechanism="per-component trailing dot/space trim + ordinal case fold",
-          mutations=("case_fold",))
+          mechanism="collision fold: per-component trailing dot/space trim + ordinal "
+                    "case fold (with the trailing-space name check as the second line, "
+                    "so the flip needs both removed)",
+          mutations=("case_fold", "trim_name_check"))
 def _collision(base, image):
     fx = Fixture(base, "scn-08")
     fx.hardened_parent()
@@ -869,7 +873,10 @@ def _collision(base, image):
     # but Win32 resolves both to the same directory - so the bundle names one
     # destination file twice and copy order, not the pin, decides which survives.
     fx.write("Sub /x.bin", b"second\n")
-    result = launch(image, fx.args(pin="c" * 64))
+    # A CORRECT pin for this source, so the refusal cannot be attributed to a
+    # pin mismatch and removing the mechanism installs the ambiguity rather than
+    # tripping over an unrelated check.
+    result = launch(image, fx.args())
     checks = [
         ("harness confirms both colliding directories exist on disk",
          exists(fx.source + "\\sub") and exists(long_path(fx.source) + "\\Sub ")),
@@ -891,7 +898,10 @@ def _source_reparse(base, image):
     with open(long_path(outside) + "\\secret.txt", "wb") as handle:
         handle.write(b"not part of the bundle\n")
     create_junction(fx.source + "\\linked", outside)
-    result = launch(image, fx.args(pin="d" * 64))
+    # A CORRECT pin, so the refusal cannot be attributed to a pin mismatch and
+    # removing the mechanism installs the damage instead of tripping over an
+    # unrelated check.
+    result = launch(image, fx.args())
     checks = [
         ("harness confirms the source really contains a junction",
          is_reparse_point(fx.source + "\\linked")),
@@ -1040,7 +1050,10 @@ def _git_in_source(base, image):
     fx.hardened_parent()
     fx.small_bundle()
     fx.write(".GIT/config", b"[core]\n")
-    result = launch(image, fx.args(pin="e" * 64))
+    # A CORRECT pin, so the refusal cannot be attributed to a pin mismatch and
+    # removing the mechanism installs the damage instead of tripping over an
+    # unrelated check.
+    result = launch(image, fx.args())
     checks = [
         ("harness confirms the source really contains .GIT/config",
          exists(fx.source + "\\.GIT\\config")),
@@ -1058,7 +1071,10 @@ def _empty_directory(base, image):
     fx.hardened_parent()
     fx.small_bundle()
     os.makedirs(long_path(fx.source) + "\\hollow", exist_ok=False)
-    result = launch(image, fx.args(pin="f" * 64))
+    # A CORRECT pin, so the refusal cannot be attributed to a pin mismatch and
+    # removing the mechanism installs the damage instead of tripping over an
+    # unrelated check.
+    result = launch(image, fx.args())
     checks = [
         ("harness confirms the empty directory exists and holds nothing",
          listing(fx.source + "\\hollow") == []),
@@ -1101,11 +1117,18 @@ def _manifest_order(base, image):
           mutations=("open_sid",))
 def _open_sid(base, image):
     fx = Fixture(base, "scn-15")
-    fx.hardened_parent()
+    # Same inherit-only Everyone ACE as SCN-11: without the deny list, naming
+    # Everyone as trusted makes the root's own DACL check pass and the bundle is
+    # installed into a world-writable root.  With it, nothing runs at all.
+    fx.hardened_parent(extra_aces="(A;OICIIO;0x2;;;WD)")
     fx.small_bundle()
-    argv = fx.args(trusted=False) + ["-TrustedSid", "S-1-1-0"]
+    argv = fx.args(trusted=False) + ["-TrustedSid", ME + ";S-1-1-0"]
     result = launch(image, argv)
-    checks = [("harness sees no root created", not exists(fx.root()))]
+    checks = [
+        ("harness sees no root created", not exists(fx.root())),
+        ("harness confirms the parent really carries the inheritable Everyone ACE",
+         ";WD)" in (security_descriptor_sddl(fx.parent) or "")),
+    ]
     return Result("SCN-15", "the trust-widening parameter cannot be handed Everyone",
                   "ARGS_INVALID", result, checks)
 
@@ -1187,6 +1210,10 @@ MUTATIONS = {
     "sorted_manifest": (
         "    for ($i = 0; $i -lt $rows.Count; $i++) { $sorted[$i] = $index[$keys[$i]] }",
         "    for ($i = 0; $i -lt $rows.Count; $i++) { $sorted[$i] = $rows[$i] }",
+    ),
+    "trim_name_check": (
+        """    if ((Get-TrimmedComponent -Component $Component) -ne $Component) {""",
+        """    if ($false) {""",
     ),
     "open_sid": (
         "        if ($script:OpenSids.Contains($trimmed)) {",
