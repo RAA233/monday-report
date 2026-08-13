@@ -53,6 +53,17 @@
 *.cfg  text eol=lf
 *.ini  text eol=lf
 *.example text eol=lf
+
+# --- PowerShell sources and rendered-file templates (Offline Edition) ---
+#     Offline Edition boundary and installer scripts are .ps1; the C2 export
+#     manifest hashes raw file bytes, so their checkout materialization must be
+#     byte-identical to the committed blob on every platform. *.template covers
+#     packaging/hyperv/unattend.xml.template, whose extension is .template
+#     rather than .xml; the rendered unattend is written to the guest volume,
+#     never checked out. Every tracked .ps1 blob is already LF, so pinning the
+#     rule renormalizes nothing.
+*.ps1      text eol=lf
+*.template text eol=lf
 .gitignore    text eol=lf
 .gitattributes text eol=lf
 .npmrc        text eol=lf

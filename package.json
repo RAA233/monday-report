@@ -141,7 +141,11 @@
     "audit:read-coherence": "python scripts/read_coherence_guard.py",
     "audit:local-snapshot-atomicity-repro": "python scripts/local_snapshot_atomicity_repro.py",
     "audit:local-snapshot-atomicity": "python scripts/local_snapshot_atomicity_guard.py",
-    "test:ui-redesign": "node scripts/ui_redesign_e2e.mjs"
+    "test:ui-redesign": "node scripts/ui_redesign_e2e.mjs",
+    "audit:offline-license": "python scripts/offline_license_guard.py",
+    "audit:offline-airgap": "python scripts/offline_airgap_guard.py",
+    "audit:offline-secret-scan": "python scripts/offline_secret_scan_guard.py",
+    "offline:issue-test-license": "python scripts/offline_operator_issue.py"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
