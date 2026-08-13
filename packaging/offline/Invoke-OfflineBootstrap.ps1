@@ -94,6 +94,7 @@ $EXIT = @{
     BUNDLE_PIN_MISMATCH          = 25
     SOURCE_UNREADABLE            = 26
     SOURCE_EMPTY_DIRECTORY       = 27
+    MANIFEST_UNSORTED            = 28
 
     PARENT_MISSING               = 30
     PARENT_REPARSE               = 31
@@ -908,15 +909,49 @@ function Assert-MembersUnambiguous {
 }
 
 function Get-SortedMembers {
+    <#
+      .SYNOPSIS
+        The members in deterministic ordinal order of their folded relative path.
+      .DESCRIPTION
+        The pre-image is order-sensitive, so the ORDER is part of the pin.  It
+        must depend only on the member names - never on the order the filesystem
+        happened to hand them out, which differs between a tree walked
+        depth-first and the same tree laid out on another volume.
+
+        The obvious spelling, [Array]::Sort($keys, $values, comparer), does NOT
+        work here: under PowerShell the keys array comes back sorted while the
+        parallel items array is left untouched, so the manifest silently kept
+        enumeration order and the root hash was not reproducible.  The members
+        are therefore reordered explicitly, through a dictionary keyed by the
+        folded path - which is unique, because Assert-MembersUnambiguous has
+        already refused any bundle in which two members fold together.
+
+        The result is then checked to be strictly increasing.  A manifest that is
+        not in the order the pre-image claims cannot be pinned, so an unsorted
+        result is a refusal, not a warning.
+    #>
     param([Parameter(Mandatory = $true)]$Members)
     $rows = @($Members)
     if ($rows.Count -le 1) { return $rows }
+
+    $index = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
     $keys = New-Object string[] $rows.Count
-    for ($i = 0; $i -lt $rows.Count; $i++) { $keys[$i] = [string]$rows[$i].Folded }
-    $values = New-Object object[] $rows.Count
-    for ($i = 0; $i -lt $rows.Count; $i++) { $values[$i] = $rows[$i] }
-    [Array]::Sort($keys, $values, [StringComparer]::Ordinal)
-    return @($values)
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $key = [string]$rows[$i].Folded
+        $index[$key] = $rows[$i]
+        $keys[$i] = $key
+    }
+    [Array]::Sort($keys, [StringComparer]::Ordinal)
+
+    $sorted = New-Object object[] $rows.Count
+    for ($i = 0; $i -lt $rows.Count; $i++) { $sorted[$i] = $index[$keys[$i]] }
+    for ($i = 1; $i -lt $sorted.Count; $i++) {
+        if ([StringComparer]::Ordinal.Compare([string]$sorted[$i - 1].Folded, [string]$sorted[$i].Folded) -ge 0) {
+            Deny -Reason 'MANIFEST_UNSORTED' -Detail ("'{0}' precedes '{1}'" -f
+                $sorted[$i - 1].Relative, $sorted[$i].Relative)
+        }
+    }
+    return $sorted
 }
 
 function Get-BundleRootHash {
