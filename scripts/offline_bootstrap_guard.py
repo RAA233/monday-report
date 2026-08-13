@@ -41,10 +41,26 @@ as one of:
   INCONCLUSIVE        a fixture never managed to inject its hostile change, or a
                       platform facility it needs is unavailable; the run proves
                       nothing either way
-  NOT-RUN-ELEVATION   the property cannot be demonstrated by an unelevated
-                      process without faking a principal.  Not a pass, not a
-                      failure: an honest gap, with the exact elevated command
-                      printed for the operator.
+  BLOCKED_ELEVATION_REQUIRED
+                      the property cannot be demonstrated by an unelevated
+                      process without faking a principal, so it was NOT run.
+
+ONLY `PASS` CERTIFIES.  Every other verdict - including INCONCLUSIVE and
+BLOCKED_ELEVATION_REQUIRED - counts as a failure and the gate exits non-zero.  A
+previous revision forgave both, so a run in which seven of the rows had never
+been written at all, and any fixture this machine could not build, still printed
+"passed".  An unelevated run therefore CANNOT certify, by construction: the seven
+ELV rows are blocked and the verdict is FAIL, with the exact elevated command
+printed.  That is the correct outcome, not a defect in the run.
+
+COVERAGE IS DECLARED, NOT CLAIMED.  Every scenario declares the taxonomy
+outcomes it executes; the coverage table is generated from those declarations,
+cross-checked against the taxonomy in the pinned bootstrap bytes and against the
+operator document, and printed on every run with each scenario's ACTUAL verdict
+beside it.  Every outcome that no scenario executes is listed as UNTESTED with
+the reason it is not executed.  There is no categorical coverage claim anywhere,
+because the previous revision made one ("an unelevated run proves every refusal
+path") that was false by a factor of four.
 
 The code -> name table below is THIS FILE'S OWN copy of the published taxonomy.
 It is not read from the bootstrap, so a bootstrap that renumbered its codes would
@@ -63,13 +79,15 @@ process cannot create a directory owned by any trusted principal - its filtered
 token has BUILTIN\\Administrators as deny-only, so every directory it creates is
 owned by itself.  Therefore:
 
-  * every REFUSAL path, the whole bundle/name/pin policy, the process-and-temp
-    observation and the DOS-device chain bypass are proved here, unelevated;
+  * the refusal paths listed as executed in the coverage table, the whole
+    bundle/name/pin policy, the process-and-temp observation, the DOS-device
+    chain bypass and the object-identity differential are proved here,
+    unelevated;
   * every property that requires the bootstrap to ACCEPT a chain and INSTALL -
     the happy path, the created root's owner/DACL, the pre-created root, the
-    junction root, the post-hash byte tamper, the destination swap, the occupied
-    subdirectory - is reported NOT-RUN-ELEVATION-REQUIRED, with the exact
-    elevated command to complete it.
+    junction root, the mid-copy plant, the destination swap, the occupied
+    subdirectory - is reported BLOCKED_ELEVATION_REQUIRED and FAILS the run,
+    with the exact elevated command to complete it.
 
 Those rows are NOT quietly turned green, and no fake principal stands in for the
 operator.  Where a mechanism could otherwise ship with no experiment at all, a
@@ -712,11 +730,22 @@ class Watcher(object):
     def beyond(self, host):
         """(unexpected processes, toolchain processes, unexpected artifacts) -
         everything this run produced that the measured interpreter baseline did
-        not."""
+        not.
+
+        The toolchain set is the MACHINE-WIDE one (`new_named`), not a subset of
+        the descendant tree.  That distinction is the whole of the defence that
+        killed a previous revision: a toolchain process started through a broker
+        or through WMI is reparented away from the bootstrap, so a descendant
+        walk never sees it.  `new_named` records any compiler-or-shell process
+        that appeared during the run WHOEVER its parent is; narrowing it back to
+        `self.descendants` here would have discarded exactly the evasion the
+        collection was written for.
+        """
         extra_processes = dict(
             (pid, name) for pid, name in self.descendants.items()
             if name.lower() not in host.process_names)
-        toolchain = dict(
+        toolchain = dict(self.new_named)
+        toolchain.update(
             (pid, name) for pid, name in self.descendants.items()
             if name.lower() in self.TOOLCHAIN_NAMES)
         extra_artifacts = sorted(
@@ -1028,6 +1057,20 @@ class Source(object):
         self.write("z.txt", b"omega\n")
         return self
 
+    def wide_bundle(self, members=600, tail=None):
+        """A bundle wide enough that the copy takes long enough to interrupt.
+
+        The ELV rows that plant something mid-copy need a window to plant it in,
+        and a four-member bundle is copied faster than any poller can react.
+        Every member name begins with 'a', so `tail` - if given - sorts last in
+        the folded manifest and is therefore the member copied last.
+        """
+        for index in range(members):
+            self.write("a%04d.txt" % index, ("member %04d\n" % index).encode("ascii"))
+        if tail:
+            self.write(tail, b"tail\n")
+        return self
+
     def pin(self, follow_reparse=False):
         return bundle_root_hash(self.path, follow_reparse)
 
@@ -1114,22 +1157,39 @@ class Result(object):
 
     @property
     def ok(self):
-        return self.verdict in ("PASS", "INCONCLUSIVE")
+        return self.verdict == "PASS"
 
     @property
     def counts_as_failure(self):
-        return self.verdict.startswith("FAIL")
+        """ONLY a PASS is not a failure.
+
+        INCONCLUSIVE used to be forgiven here, which meant a machine that could
+        not build a fixture produced the same green line as a machine on which
+        the property held.  A run that proves nothing is not a run that proves
+        the property, so it counts against certification and the operator is
+        told which row could not be built and why.
+        """
+        return self.verdict != "PASS"
 
 
-class Skipped(object):
-    """A property this process cannot demonstrate without faking a principal."""
+class Blocked(object):
+    """An ELV row that this process could not run because it is unelevated.
+
+    NOT a pass and NOT quietly forgiven: `counts_as_failure` is True, so an
+    unelevated run can never certify.  That is the point.  The seven properties
+    below need the bootstrap to ACCEPT a chain and INSTALL, an unelevated token
+    cannot create a directory owned by a trusted principal, and inventing a
+    principal is the defect this revision exists to remove.  The honest outcome
+    is therefore a FAILING certification with the exact elevated command
+    printed - not a green run with seven rows quietly skipped.
+    """
 
     def __init__(self, ident, title, expected, command):
         self.id = ident
         self.title = title
         self.expected = expected
         self.command = command
-        self.verdict = "NOT-RUN-ELEVATION"
+        self.verdict = "BLOCKED_ELEVATION_REQUIRED"
         self.observed = "-"
         self.checks = []
         self.note = ""
@@ -1137,11 +1197,11 @@ class Skipped(object):
 
     @property
     def ok(self):
-        return True
+        return False
 
     @property
     def counts_as_failure(self):
-        return False
+        return True
 
 
 def stopped_in_source_stage(result):
@@ -1165,10 +1225,28 @@ def stopped_in_source_stage(result):
 SCENARIOS = []
 
 
-def scenario(ident, mechanism=None, mutations=(), elevation=False):
+def scenario(ident, mechanism=None, mutations=(), elevation=False, reasons=(),
+             title=None, expected=None):
+    """Register a scenario.
+
+    `reasons` names the taxonomy outcomes this scenario EXECUTES.  It is not
+    decoration: the coverage table is built from these declarations, and
+    CTL-COVERAGE re-checks each declaration against what the row actually
+    observed, so a scenario cannot claim a reason it did not reach.
+
+    `title` and `expected` are required on an `elevation` scenario and only
+    there: when the harness is unelevated the row must be REPORTED without being
+    run, and a row that reported nothing at all would be a row nobody notices is
+    missing.
+    """
+    if elevation and (title is None or expected is None):
+        raise SystemExit("elevation scenario %s must declare title= and expected=" % ident)
+
     def register(function):
         SCENARIOS.append({"id": ident, "run": function, "mechanism": mechanism,
-                          "mutations": tuple(mutations), "elevation": elevation})
+                          "mutations": tuple(mutations), "elevation": elevation,
+                          "reasons": tuple(reasons), "title": title,
+                          "expected": expected})
         return function
     return register
 
@@ -1180,7 +1258,8 @@ def scenario(ident, mechanism=None, mutations=(), elevation=False):
 @scenario("CTL-OWNER",
           mechanism="the owner of every chain component must be one of the three trusted "
                     "SIDs; there is no parameter that adds a fourth",
-          mutations=("trust_widened",))
+          mutations=("trust_widened",),
+          reasons=("PARENT_OWNER_UNTRUSTED",))
 def _owner_control(base, image, work):
     """The load-bearing control for the whole unelevated run.
 
@@ -1211,7 +1290,7 @@ def _owner_control(base, image, work):
                   "PARENT_OWNER_UNTRUSTED", result, checks)
 
 
-@scenario("CTL-PROGFILES")
+@scenario("CTL-PROGFILES", reasons=("OK", "ROOT_CREATE_FAILED"))
 def _programfiles_control(base, image, work):
     """The production trust set is not merely restrictive - it ACCEPTS the real
     thing.  The OS-derived ProgramFiles chain (the volume root, then Program
@@ -1248,7 +1327,8 @@ def _programfiles_control(base, image, work):
           mechanism="every P/Invoke is declared in-process with System.Reflection.Emit; "
                     "there is no Add-Type, so no compiler is started and nothing is "
                     "written to the environment-derived %TEMP%",
-          mutations=("no_addtype",))
+          mutations=("no_addtype",),
+          reasons=("PARENT_OWNER_UNTRUSTED",))
 def _no_compiler(base, image, work):
     chain = Chain("nocompiler", mode="production")
     chain.harden()
@@ -1299,7 +1379,8 @@ def _no_compiler(base, image, work):
 @scenario("SCN-02",
           mechanism="nothing is resolved by name and no environment string names a "
                     "directory that is written to",
-          mutations=("no_addtype",))
+          mutations=("no_addtype",),
+          reasons=("PARENT_OWNER_UNTRUSTED",))
 def _poisoned_environment(base, image, work):
     """TEMP, TMP, PATH and PATHEXT all point at directories this harness owns and
     watches.  SystemRoot is deliberately left alone: poisoning it would break the
@@ -1389,7 +1470,8 @@ def _unsafe_ancestor_body(ident, title, image, work, build, expected="PARENT_UNS
           mechanism="the parent is resolved with GetFinalPathNameByHandle(VOLUME_NAME_GUID) "
                     "and the ENTIRE canonical chain is judged; a drive letter is never "
                     "treated as a volume root",
-          mutations=("canonical_chain",))
+          mutations=("canonical_chain",),
+          reasons=("PARENT_UNSAFE_WRITABLE_ACE",))
 def _subst_chain_bypass(base, image, work):
     """The exact exploit that got past the previous revision.
 
@@ -1445,7 +1527,8 @@ def _subst_chain_bypass(base, image, work):
 @scenario("SCN-04",
           mechanism="every component of the chain is judged, not just the leaf "
                     "(redirect-class rights anywhere upstream defeat a leaf nobody can write)",
-          mutations=("chain_leaf_only",))
+          mutations=("chain_leaf_only",),
+          reasons=("PARENT_UNSAFE_WRITABLE_ACE",))
 def _unsafe_grandparent(base, image, work):
     """The depth variant: no aliasing at all, the unsafe node is simply two
     levels above the root.  Answers 'does the refusal key to fewer operands than
@@ -1466,7 +1549,8 @@ def _unsafe_grandparent(base, image, work):
 @scenario("SCN-05",
           mechanism="a junction TRAVERSED on the way to the parent is resolved to its real "
                     "target, so the target's ancestors are what get judged",
-          mutations=("canonical_chain",))
+          mutations=("canonical_chain",),
+          reasons=("PARENT_UNSAFE_WRITABLE_ACE",))
 def _junction_ancestor(base, image, work):
     """The aliasing variant that is not a drive letter.
 
@@ -1506,7 +1590,8 @@ def _junction_ancestor(base, image, work):
 
 @scenario("SCN-06",
           mechanism="content-changing rights judged on the final node of the chain",
-          mutations=("content_class",))
+          mutations=("content_class",),
+          reasons=("PARENT_UNSAFE_WRITABLE_ACE",))
 def _writable_parent(base, image, work):
     """The leaf variant: Everyone may add files to the parent itself.  Not
     inherit-only, this object only - exactly the writable parent the design must
@@ -1543,7 +1628,8 @@ def _writable_parent(base, image, work):
 @scenario("SCN-07",
           mechanism="the parent itself may not be a reparse point (its identity is "
                     "controlled by whoever can rewrite the reparse data)",
-          mutations=("reparse_node",))
+          mutations=("reparse_node",),
+          reasons=("PARENT_REPARSE",))
 def _junction_parent(base, image, work):
     letter = os.path.abspath(os.sep)[0]
     target = "%s:\\mrb5-jptarget-%s" % (letter, uuid.uuid4().hex[:8])
@@ -1591,7 +1677,8 @@ def _wrong_bootstrap_pin(base, image, work):
 
 @scenario("SCN-09",
           mechanism="root-hash comparison against the operator pin, before any copy",
-          mutations=("bundle_pin",))
+          mutations=("bundle_pin",),
+          reasons=("BUNDLE_PIN_MISMATCH",))
 def _wrong_bundle_pin(base, image, work):
     chain = Chain("bundlepin", mode="production")
     chain.harden()
@@ -1611,7 +1698,8 @@ def _wrong_bundle_pin(base, image, work):
           mechanism="deterministic ordinal sort of the manifest over the folded ASCII "
                     "member paths (the pre-image is order-sensitive, so enumeration "
                     "order must not reach the pin)",
-          mutations=("sorted_manifest",))
+          mutations=("sorted_manifest",),
+          reasons=("PARENT_OWNER_UNTRUSTED",))
 def _manifest_order(base, image, work):
     """Two independent implementations agreeing on a pin is provable WITHOUT an
     install, because the bootstrap compares the pin BEFORE it looks at the parent
@@ -1650,7 +1738,8 @@ def _manifest_order(base, image, work):
 @scenario("SCN-11",
           mechanism="bundle path components restricted to A-Za-z0-9._- , so no member "
                     "name can be ordered or folded differently by two implementations",
-          mutations=("ascii_alphabet",))
+          mutations=("ascii_alphabet",),
+          reasons=("SOURCE_NAME_UNSAFE",))
 def _non_ascii_member(base, image, work):
     """The two members below are the disagreement, in its smallest form.
 
@@ -1719,7 +1808,8 @@ def _name_refusal(ident, tag, member, title, base, image, work, ambiguous=False)
 
 @scenario("SCN-12",
           mechanism="reserved DOS device names refused, with or without an extension",
-          mutations=("reserved_names",))
+          mutations=("reserved_names",),
+          reasons=("SOURCE_NAME_UNSAFE",))
 def _reserved_name(base, image, work):
     return _name_refusal("SCN-12", "reserved", "COM1.txt",
                          "a reserved device name with an extension is refused",
@@ -1729,7 +1819,8 @@ def _reserved_name(base, image, work):
 @scenario("SCN-13",
           mechanism="a trailing dot is refused (Win32 resolves 'name.' to 'name', so the "
                     "path judged and the path written would differ)",
-          mutations=("trailing_dot",))
+          mutations=("trailing_dot",),
+          reasons=("SOURCE_NAME_UNSAFE",))
 def _trailing_dot(base, image, work):
     return _name_refusal("SCN-13", "trailingdot", "weird.",
                          "a member name with a trailing dot is refused",
@@ -1740,7 +1831,8 @@ def _trailing_dot(base, image, work):
           mechanism="a trailing space is refused, and independently the ASCII alphabet "
                     "does not contain the space at all - two rules, so the flip needs "
                     "both removed (defence in depth, reported rather than hidden)",
-          mutations=("trailing_space", "ascii_alphabet"))
+          mutations=("trailing_space", "ascii_alphabet"),
+          reasons=("SOURCE_NAME_UNSAFE",))
 def _trailing_space(base, image, work):
     return _name_refusal("SCN-14", "trailingspace", "weird ",
                          "a member name with a trailing space is refused",
@@ -1750,7 +1842,8 @@ def _trailing_space(base, image, work):
 @scenario("SCN-15",
           mechanism="ordinal ASCII case fold over the member paths, so a bundle that names "
                     "one destination file twice is refused instead of silently losing one",
-          mutations=("case_fold",))
+          mutations=("case_fold",),
+          reasons=("SOURCE_COLLISION",))
 def _case_collision(base, image, work):
     """Two members that differ only in ASCII case cannot both exist on a normal
     case-insensitive NTFS directory, so this fixture first turns on per-directory
@@ -1807,7 +1900,8 @@ def _case_collision(base, image, work):
 
 @scenario("SCN-16",
           mechanism="reparse check on every enumerated source entry",
-          mutations=("enum_reparse",))
+          mutations=("enum_reparse",),
+          reasons=("SOURCE_REPARSE",))
 def _source_reparse(base, image, work):
     chain = Chain("srcreparse", mode="production")
     chain.harden()
@@ -1841,7 +1935,8 @@ def _source_reparse(base, image, work):
 
 @scenario("SCN-17",
           mechanism="ordinal-ignore-case equality against '.git' on every component",
-          mutations=("git_component",))
+          mutations=("git_component",),
+          reasons=("SOURCE_GIT_PATH",))
 def _git_in_source(base, image, work):
     chain = Chain("gitpath", mode="production")
     chain.harden()
@@ -1860,7 +1955,8 @@ def _git_in_source(base, image, work):
 
 @scenario("SCN-18",
           mechanism="empty directories refused rather than left invisible to the pin",
-          mutations=("empty_dir",))
+          mutations=("empty_dir",),
+          reasons=("SOURCE_EMPTY_DIRECTORY",))
 def _empty_directory(base, image, work):
     chain = Chain("emptydir", mode="production")
     chain.harden()
@@ -1884,7 +1980,8 @@ def _empty_directory(base, image, work):
           mechanism="INHERITED ACEs are effective ACEs and are judged as such; an "
                     "inherit-only ACE grants nothing on the node carrying it and is "
                     "caught on the child that inherits it",
-          mutations=("inherited_ace",))
+          mutations=("inherited_ace",),
+          reasons=("PARENT_UNSAFE_WRITABLE_ACE",))
 def _inherited_ace(base, image, work):
     """The fourth topology: the operand is on an ancestor, but it grants nothing
     THERE and everything on the child.
@@ -1943,7 +2040,7 @@ def _inherited_ace(base, image, work):
                   "PARENT_UNSAFE_WRITABLE_ACE", result, checks)
 
 
-@scenario("SCN-19")
+@scenario("SCN-19", reasons=("PARENT_OWNER_UNTRUSTED",))
 def _no_trust_widening_parameter(base, image, work):
     """D3, as a black-box question: hand the bootstrap the parameter the previous
     revision accepted, naming this account, and see whether anything is trusted
@@ -1975,41 +2072,1240 @@ def _no_trust_widening_parameter(base, image, work):
 
 
 # ---------------------------------------------------------------------------
+# Cheap refusal paths that need no elevation and were previously undisclosed.
+#
+# Every one of these was reachable all along; the previous revision simply never
+# built a fixture for it, and claimed "an unelevated run proves every refusal
+# path" anyway.  Each row below is an ordinary black-box scenario: exit code plus
+# observations this file makes for itself.
+# ---------------------------------------------------------------------------
+
+@scenario("SCN-21",
+          mechanism="arguments are validated before anything is opened: the pin must be "
+                    "64 hex characters and the root name must satisfy the bundle path "
+                    "policy",
+          reasons=("ARGS_INVALID",))
+def _args_invalid(base, image, work):
+    """Two different argument faults, one row.
+
+    The second launch is a within-scenario differential: a DIFFERENT invalid
+    argument on an otherwise identical command line must produce the same
+    refusal, which is what makes the refusal about argument validation rather
+    than about the particular string.
+    """
+    chain = Chain("argsinvalid", mode="production")
+    chain.harden()
+    source = work.source().small_bundle()
+    bad_pin = launch(image, ["-RootName", "trustroot", "-SourcePath", source.path,
+                             "-ExpectedBundleHash", "z" * 64,
+                             "-ParentPath", chain.parent])
+    bad_name = launch(image, ["-RootName", "COM1", "-SourcePath", source.path,
+                              "-ExpectedBundleHash", source.pin(),
+                              "-ParentPath", chain.parent])
+    good = launch(image, chain.args(source))
+    checks = [
+        ("harness confirms the rejected pin really is not 64 hex characters",
+         not re.match(r"^[0-9a-fA-F]{64}$", "z" * 64)),
+        ("a reserved root name is refused the same way (exit %s)" % bad_name.code,
+         bad_name.reason == "ARGS_INVALID"),
+        ("the SAME command line with valid arguments gets PAST argument validation, so "
+         "the refusal was about the arguments and not about the fixture (exit %s)"
+         % good.code,
+         good.reason != "ARGS_INVALID"),
+        ("harness sees no root created", not exists(chain.root())),
+        ("harness sees the source tree untouched", listing(source.path) is not None),
+    ]
+    return Result("SCN-21", "an unusable pin or root name is refused before anything is opened",
+                  "ARGS_INVALID", bad_pin, checks)
+
+
+@scenario("SCN-22",
+          mechanism="the source is opened before it is walked; a name that is not an "
+                    "existing directory is refused",
+          reasons=("SOURCE_MISSING",))
+def _source_missing(base, image, work):
+    chain = Chain("srcmissing", mode="production")
+    chain.harden()
+    source = work.source().small_bundle()
+    absent = source.path + "-does-not-exist"
+    result = launch(image, ["-RootName", "trustroot", "-SourcePath", absent,
+                            "-ExpectedBundleHash", source.pin(),
+                            "-ParentPath", chain.parent])
+    a_file = launch(image, ["-RootName", "trustroot",
+                            "-SourcePath", source.path + "\\a.txt",
+                            "-ExpectedBundleHash", source.pin(),
+                            "-ParentPath", chain.parent])
+    checks = [
+        ("harness confirms the named source really does not exist", not exists(absent)),
+        ("a source that exists but is a FILE is refused the same way (exit %s)"
+         % a_file.code, a_file.reason == "SOURCE_MISSING"),
+        ("harness sees no root created", not exists(chain.root())),
+        stopped_in_source_stage(result),
+    ]
+    return Result("SCN-22", "a source that is not an existing directory is refused",
+                  "SOURCE_MISSING", result, checks)
+
+
+@scenario("SCN-23",
+          mechanism="the source path is opened WITHOUT following reparse points, so a "
+                    "junction NAMED as the source is refused rather than walked through",
+          mutations=("reparse_node",),
+          reasons=("SOURCE_REPARSE",))
+def _source_is_junction(base, image, work):
+    """A different site from SCN-16.
+
+    SCN-16 plants a junction INSIDE the bundle and proves the enumeration
+    refuses it.  This row names a junction AS the source, which is judged by
+    Resolve-CanonicalPath - a different check in a different function, and one
+    that no previous row reached.
+    """
+    chain = Chain("srcjunction", mode="production")
+    chain.harden()
+    source = work.source().small_bundle()
+    link = str(Path(base) / ("srclink-" + uuid.uuid4().hex[:8]))
+    create_junction(link, source.path)
+    result = launch(image, ["-RootName", "trustroot", "-SourcePath", link,
+                            "-ExpectedBundleHash", source.pin(),
+                            "-ParentPath", chain.parent])
+    checks = [
+        ("harness confirms the named source really is a reparse point",
+         is_reparse_point(link)),
+        ("harness confirms the junction target is a perfectly good bundle, so nothing "
+         "but the reparse point can be what this refusal is about",
+         tree_digests(source.path) is not None and len(tree_digests(source.path)) == 4),
+        ("harness sees no root created", not exists(chain.root())),
+        stopped_in_source_stage(result),
+    ]
+    return Result("SCN-23", "a junction NAMED as the source is refused, not followed",
+                  "SOURCE_REPARSE", result, checks)
+
+
+@scenario("SCN-24",
+          mechanism="a member the bootstrap cannot open is refused rather than skipped; a "
+                    "skipped member would be a member the pin cannot see",
+          reasons=("SOURCE_UNREADABLE",))
+def _source_unreadable(base, image, work):
+    """The bundle contains a subdirectory this process may not list.
+
+    The harness still OWNS that subdirectory - it simply removed its own list
+    right - so the fixture needs no elevation and cleanup is a DACL rewrite, not
+    a change of owner.
+    """
+    chain = Chain("srcunreadable", mode="production")
+    chain.harden()
+    source = work.source().small_bundle()
+    source.write("locked/hidden.txt", b"unreadable\n")
+    pin = source.pin()
+    apply_sddl_dacl(source.path + "\\locked", "D:P(A;OICI;FA;;;SY)")
+    result = launch(image, ["-RootName", "trustroot", "-SourcePath", source.path,
+                            "-ExpectedBundleHash", pin, "-ParentPath", chain.parent])
+    try:
+        os.listdir(long_path(source.path) + "\\locked")
+        readable = True
+    except OSError:
+        readable = False
+    reset_dacl(source.path + "\\locked")
+    checks = [
+        ("harness confirms the member directory really cannot be listed by this process",
+         not readable),
+        ("harness confirms the unreadable member IS part of the pinned bundle, so "
+         "skipping it silently would install a tree the pin does not describe",
+         "locked/hidden.txt" in (tree_digests(source.path) or {})),
+        ("harness sees no root created", not exists(chain.root())),
+        stopped_in_source_stage(result),
+    ]
+    return Result("SCN-24", "a bundle member that cannot be read is refused, not skipped",
+                  "SOURCE_UNREADABLE", result, checks)
+
+
+@scenario("SCN-25",
+          mechanism="the parent is opened before it is judged; a name that is not an "
+                    "existing directory is refused",
+          reasons=("PARENT_MISSING",))
+def _parent_missing(base, image, work):
+    chain = Chain("parentmissing", mode="production")
+    chain.harden()
+    source = work.source().small_bundle()
+    absent = chain.parent + "\\nowhere"
+    result = launch(image, chain.args(source, parent=absent))
+    control = launch(image, chain.args(source))
+    checks = [
+        ("harness confirms the named parent really does not exist", not exists(absent)),
+        ("the same command line with an EXISTING parent gets further (exit %s), so the "
+         "refusal was about the parent's absence" % control.code,
+         control.reason != "PARENT_MISSING"),
+        ("harness sees nothing created at or under the named parent",
+         not exists(absent) and not exists(absent + "\\trustroot")),
+    ]
+    return Result("SCN-25", "a parent that does not exist is refused",
+                  "PARENT_MISSING", result, checks)
+
+
+@scenario("SCN-26",
+          mechanism="a NULL DACL is not an empty DACL - it grants everyone everything - "
+                    "and is refused rather than read as 'no dangerous ACEs found'",
+          reasons=("PARENT_DACL_ABSENT",))
+def _parent_null_dacl(base, image, work):
+    """The most dangerous DACL there is, and the one an ACE walk sees as empty.
+
+    A NULL DACL means unrestricted access for every principal.  A check that
+    enumerates ACEs and refuses when it finds a bad one sees ZERO ACEs here and
+    would conclude the node is clean.  This row is the difference between
+    "found nothing wrong" and "could not tell".
+    """
+    # depth=0, so the node carrying the hostile descriptor is the FIRST component
+    # below the volume root and nothing this account owns is judged before it.
+    # With a deeper fixture the walk stops at the top on OWNER_UNTRUSTED and the
+    # NULL DACL is never reached - a refusal keyed to fewer operands than the
+    # damage, which is the exact mistake this revision is here to avoid.
+    chain = Chain("nulldacl", depth=0, mode="production")
+    chain.harden()
+    apply_sddl_dacl(chain.parent, "D:NO_ACCESS_CONTROL")
+    source = work.source().small_bundle()
+    result = launch(image, chain.args(source))
+    sddl = security_descriptor_sddl(chain.parent) or ""
+    masks = sddl_ace_masks(sddl, "WD")
+    reset_dacl(chain.parent)
+    control = launch(image, chain.args(source))
+    checks = [
+        ("harness reads the parent descriptor and finds NO_ACCESS_CONTROL - a NULL DACL",
+         "NO_ACCESS_CONTROL" in sddl),
+        ("harness confirms an ACE walk over that descriptor finds no ACE at all, so a "
+         "check that only looks for bad ACEs would have called this node clean",
+         not masks),
+        ("harness sees no root created", not exists(chain.root())),
+        ("putting an ordinary DACL back changes the refusal, so the refusal was about "
+         "the NULL DACL (control exit %s)" % control.code,
+         control.reason != "PARENT_DACL_ABSENT"),
+    ]
+    return Result("SCN-26", "a NULL DACL on the parent is refused, not read as 'clean'",
+                  "PARENT_DACL_ABSENT", result, checks)
+
+
+@scenario("SCN-27",
+          mechanism="an ACE type this bootstrap cannot decode is refused; a decoder that "
+                    "skipped what it did not understand would skip exactly the ACE an "
+                    "attacker chooses",
+          reasons=("PARENT_ACE_UNINTERPRETABLE",))
+def _parent_conditional_ace(base, image, work):
+    """A CALLBACK (conditional) ACE, type 9 - not ALLOWED and not DENIED.
+
+    Its access mask is in the same place, but what it grants depends on a
+    condition expression the bootstrap does not evaluate.  Treating it as
+    absent would let `(XA;;FA;;;WD;(TRUE))` - full control for Everyone, granted
+    unconditionally - pass an ACE walk untouched.
+    """
+    # depth=0 for the same reason as SCN-26: the node under test must be the
+    # first component below the volume root, or the walk refuses higher up and
+    # this row would be evidence about the wrong node.
+    chain = Chain("condace", depth=0, mode="production")
+    chain.harden()
+    hostile = ("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;%s)"
+               "(XA;OICI;FA;;;WD;(TRUE))" % ME)
+    try:
+        apply_sddl_dacl(chain.parent, hostile)
+    except OSError as exc:
+        return Result("SCN-27", "an ACE type the bootstrap cannot decode is refused",
+                      "PARENT_ACE_UNINTERPRETABLE", Launch(None, "", False), [],
+                      note="INCONCLUSIVE: this machine would not accept a conditional "
+                           "ACE (%s)" % exc)
+    source = work.source().small_bundle()
+    result = launch(image, chain.args(source))
+    sddl = security_descriptor_sddl(chain.parent) or ""
+    reset_dacl(chain.parent)
+    chain.harden()
+    control = launch(image, chain.args(source))
+    checks = [
+        ("harness reads the parent DACL and finds a conditional (callback) ACE granting "
+         "Everyone full control",
+         "(XA;" in sddl and ";WD;" in sddl),
+        ("harness confirms the ACE is neither ALLOWED nor DENIED, so a decoder that "
+         "handles only those two types cannot see what it grants",
+         "(XA;" in sddl),
+        ("harness sees no root created", not exists(chain.root())),
+        ("removing ONLY the conditional ACE changes the refusal, so the refusal was "
+         "about it (control exit %s)" % control.code,
+         control.reason != "PARENT_ACE_UNINTERPRETABLE"),
+    ]
+    return Result("SCN-27", "an ACE type the bootstrap cannot decode is refused",
+                  "PARENT_ACE_UNINTERPRETABLE", result, checks)
+
+
+# ---------------------------------------------------------------------------
+# Object identity: the bootstrap's structure layout against this harness's.
+#
+# The bootstrap records a node's identity as volumeSerial:fileIndex, reading
+# BY_HANDLE_FILE_INFORMATION out of a raw buffer at explicit offsets.  This
+# harness reads the same structure through a ctypes declaration.  Two
+# implementations of the same concept, and until this revision NO ROW COMPARED
+# THEM - so the bootstrap read nNumberOfLinks and nFileIndexHigh for two years
+# and every scenario stayed green.
+#
+# The comparison here is over the bytes the harness already hashed, not over
+# anything the bootstrap printed.  A behavioural comparison of the same property
+# is ELV-06, which needs an install and therefore elevation.
+# ---------------------------------------------------------------------------
+
+BHFI_FIELD_OFFSETS = dict(
+    (name, getattr(BY_HANDLE_FILE_INFORMATION, name).offset)
+    for name, _ in BY_HANDLE_FILE_INFORMATION._fields_)
+
+
+def bootstrap_bhfi_offsets(image):
+    """The offsets the PINNED bootstrap bytes actually read, parsed out of them."""
+    text = image.path.read_text(encoding="utf-8")
+    found = {}
+    for variable, offset in re.findall(
+            r"\$(\w+)\s*=\s*\[uint32\]\[Runtime\.InteropServices\.Marshal\]::"
+            r"ReadInt32\(\$buffer,\s*(\d+)\)", text):
+        found[variable] = int(offset)
+    return found
+
+
+def buggy_identity(path):
+    """What the PREVIOUS offsets computed: (serial, nNumberOfLinks<<32|indexHigh).
+
+    Reproduced here so the defect can be measured rather than described.  This
+    is the harness modelling the old bug on purpose; nothing in the current
+    bootstrap computes it.
+    """
+    handle = kernel32.CreateFileW(long_path(path), 0, FILE_SHARE_ALL, None,
+                                  OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None)
+    if handle == INVALID_HANDLE_VALUE or handle is None:
+        return None
+    try:
+        info = BY_HANDLE_FILE_INFORMATION()
+        if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            return None
+        return (info.dwVolumeSerialNumber,
+                (info.nNumberOfLinks << 32) | info.nFileIndexHigh)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+@scenario("IDN-01",
+          mechanism="the bootstrap reads nFileIndexHigh at 44 and nFileIndexLow at 48, "
+                    "the layout this harness's ctypes structure independently reports",
+          reasons=())
+def _identity_offsets(base, image, work):
+    """The differential the previous revision did not have.
+
+    Nothing is launched: the comparison is between the offsets written in the
+    bytes this harness hashed and the offsets ctypes computes for the same
+    structure.  A disagreement fails the row, so the two implementations cannot
+    drift apart again without the gate saying so.
+    """
+    found = bootstrap_bhfi_offsets(image)
+    text = image.path.read_text(encoding="utf-8")
+    expected = {"volumeSerial": BHFI_FIELD_OFFSETS["dwVolumeSerialNumber"],
+                "sizeHigh": BHFI_FIELD_OFFSETS["nFileSizeHigh"],
+                "sizeLow": BHFI_FIELD_OFFSETS["nFileSizeLow"],
+                "indexHigh": BHFI_FIELD_OFFSETS["nFileIndexHigh"],
+                "indexLow": BHFI_FIELD_OFFSETS["nFileIndexLow"]}
+    disagreements = sorted("%s: bootstrap=%s harness=%d"
+                           % (name, found.get(name), offset)
+                           for name, offset in expected.items()
+                           if found.get(name) != offset)
+    checks = [
+        ("harness's ctypes declaration of BY_HANDLE_FILE_INFORMATION is 52 bytes with "
+         "nNumberOfLinks@%d nFileIndexHigh@%d nFileIndexLow@%d"
+         % (BHFI_FIELD_OFFSETS["nNumberOfLinks"], BHFI_FIELD_OFFSETS["nFileIndexHigh"],
+            BHFI_FIELD_OFFSETS["nFileIndexLow"]),
+         ctypes.sizeof(BY_HANDLE_FILE_INFORMATION) == 52 and
+         BHFI_FIELD_OFFSETS["nNumberOfLinks"] == 40 and
+         BHFI_FIELD_OFFSETS["nFileIndexHigh"] == 44 and
+         BHFI_FIELD_OFFSETS["nFileIndexLow"] == 48),
+        ("harness parsed five field offsets out of the PINNED bootstrap bytes (%s)"
+         % ", ".join("%s@%d" % (k, v) for k, v in sorted(found.items())),
+         len(found) >= 5),
+        ("the two independent implementations agree on every offset (%s)"
+         % (disagreements or "no disagreement"), not disagreements),
+        ("the bootstrap does not read offset 40 at all - reading it is the defect, "
+         "because 40 is nNumberOfLinks",
+         40 not in found.values()),
+        ("the bootstrap's own comment spells the corrected layout, so a reader is not "
+         "told 44/40 while the code does 44/48",
+         "nNumberOfLinks          DWORD" in text and
+         "44  nFileIndexHigh" in text and "48  nFileIndexLow" in text),
+    ]
+    return Result("IDN-01",
+                  "the bootstrap's BY_HANDLE_FILE_INFORMATION offsets equal this "
+                  "harness's, field by field",
+                  "NOT-LAUNCHED", Launch(None, "", False), checks)
+
+
+@scenario("IDN-02", reasons=())
+def _identity_distinct(base, image, work):
+    """Distinct live objects must have distinct identities.
+
+    128 directories that all exist AT THE SAME TIME.  The correct identity
+    distinguishes all of them; the identity the previous offsets computed does
+    not, and the row prints how badly.  This is the defect measured rather than
+    argued: an identity that cannot tell two concurrently existing objects apart
+    cannot detect a swap between them.
+    """
+    holder = str(Path(base) / ("identity-" + uuid.uuid4().hex[:8]))
+    ensure_dir(long_path(holder))
+    paths = []
+    for index in range(128):
+        node = holder + "\\d%03d" % index
+        ensure_dir(long_path(node))
+        paths.append(node)
+    correct = [object_identity(node) for node in paths]
+    buggy = [buggy_identity(node) for node in paths]
+    checks = [
+        ("harness built 128 directories that all exist at the same instant",
+         all(exists(node) for node in paths)),
+        ("harness read every one of them successfully",
+         all(value is not None for value in correct)),
+        ("the CORRECT identity distinguishes all 128 (%d distinct)"
+         % len(set(correct)), len(set(correct)) == 128),
+        ("the identity the PREVIOUS offsets computed collapses them to %d distinct "
+         "values, so it could not have detected a swap between %d of these objects"
+         % (len(set(buggy)), 128 - len(set(buggy))),
+         len(set(buggy)) < len(set(correct))),
+        ("the two formulas differ on this volume, which is what makes the offsets "
+         "load-bearing rather than cosmetic",
+         set(correct) != set(buggy)),
+    ]
+    return Result("IDN-02",
+                  "distinct concurrently-existing objects get distinct file-index "
+                  "identities - and did not under the previous offsets",
+                  "NOT-LAUNCHED", Launch(None, "", False), checks)
+
+
+@scenario("IDN-03", reasons=())
+def _identity_recreate(base, image, work):
+    """Negative controls for the two things a swap detector is asked to catch.
+
+    WHAT THIS SHOWS AND WHAT IT DOES NOT.  A file index is an MFT record number
+    plus a sequence number.  Deleting a directory and recreating the same NAME
+    normally bumps the sequence, so the identity changes - and 200 trials below
+    say it changed every time on this volume.  That is an OBSERVATION about this
+    volume, not a guarantee: nothing in NTFS promises a record number and
+    sequence pair is never reused, and a volume under different pressure could
+    behave differently.  The row therefore asserts only what it measured, and
+    reports the count so a reviewer can see the strength of the evidence rather
+    than infer it.
+
+    The swap control is the stronger of the two, and it is unconditional: two
+    directories that exist at the same time under the same parent, one renamed
+    over the other's name, must not share an identity.
+    """
+    holder = str(Path(base) / ("recreate-" + uuid.uuid4().hex[:8]))
+    ensure_dir(long_path(holder))
+
+    # 1. swap: two objects alive at once, then one takes the other's name.
+    left = holder + "\\left"
+    right = holder + "\\right"
+    ensure_dir(long_path(left))
+    ensure_dir(long_path(right))
+    identity_left = object_identity(left)
+    identity_right = object_identity(right)
+    os.rename(long_path(left), long_path(holder + "\\left-moved"))
+    os.rename(long_path(right), long_path(left))
+    identity_after = object_identity(left)
+
+    # 2. recreate: the same name, 200 times.
+    trials = 200
+    recycled = holder + "\\recycled"
+    seen = []
+    repeats = 0
+    previous = None
+    for _ in range(trials):
+        ensure_dir(long_path(recycled))
+        identity = object_identity(recycled)
+        seen.append(identity)
+        if previous is not None and identity == previous:
+            repeats += 1
+        previous = identity
+        os.rmdir(long_path(recycled))
+
+    checks = [
+        ("two directories alive at the same instant have different identities",
+         identity_left is not None and identity_right is not None and
+         identity_left != identity_right),
+        ("after the swap the NAME resolves to the other object, and the identity says "
+         "so - the name alone would have said nothing changed",
+         identity_after == identity_right and identity_after != identity_left),
+        ("delete-and-recreate under the same name produced a DIFFERENT identity on "
+         "every one of %d consecutive trials (%d repeats, %d distinct values); this "
+         "is measured on this volume, NOT a guarantee that an index is never reused"
+         % (trials, repeats, len(set(seen))),
+         repeats == 0),
+        ("harness read an identity on every trial", all(v is not None for v in seen)),
+    ]
+    return Result("IDN-03",
+                  "identity survives a rename-swap and changes across delete-and-recreate "
+                  "- measured, with the limits stated",
+                  "NOT-LAUNCHED", Launch(None, "", False), checks)
+
+
+# ---------------------------------------------------------------------------
 # Properties that require the bootstrap to ACCEPT a chain and INSTALL.
 #
 # An unelevated process cannot build a fixture the production trust set accepts,
 # and faking one is the exact defect this revision exists to remove.  These rows
-# are therefore NOT RUN unless the harness is running elevated.
+# therefore do not run unless the harness is running elevated - and when they do
+# not run they report BLOCKED_ELEVATION_REQUIRED, which COUNTS AS A FAILURE.  An
+# unelevated run cannot certify.  That is deliberate: the accept-and-install half
+# of the bootstrap is half of the bootstrap.
+#
+# Until this revision these seven rows were bare (id, title, expected) tuples
+# with no function behind them.  main() built the same Skipped object in the
+# elevated branch and the unelevated branch, differing only by an appended
+# string, so the documented elevated command was a no-op and Skipped never
+# counted against the gate.  Everything below is a real scenario in the same
+# style as CTL-*/SCN-*: an exit code, plus damage this harness observes for
+# itself, plus a deletion experiment that opens that damage.
 # ---------------------------------------------------------------------------
 
-ELEVATION_ONLY = [
-    ("ELV-01", "positive control: a clean bundle installs into a fresh root, and the "
-               "created root's owner and DACL are read back by the harness", "OK"),
-    ("ELV-02", "a pre-created root is refused, not adopted", "ROOT_EXISTS"),
-    ("ELV-03", "a junction occupying the root name is refused, not written through",
-     "ROOT_REPARSE"),
-    ("ELV-04", "an unsafe INHERITED ACL on the created root is refused before copying",
-     "ROOT_UNSAFE_WRITABLE_ACE"),
-    ("ELV-05", "bytes changed between hashing and copy are caught by the destination re-hash",
-     "DESTINATION_MISMATCH"),
-    ("ELV-06", "the root replaced after the copy by an identical-content twin is caught",
-     "ROOT_IDENTITY_CHANGED"),
-    ("ELV-07", "a subdirectory name occupied mid-copy is refused, not written through",
-     "COPY_DIRECTORY_OCCUPIED"),
-]
+PRODUCTION_TRUSTED_SIDS = (
+    "S-1-5-18",                                                        # SYSTEM
+    "S-1-5-32-544",                                                    # Administrators
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",  # TrustedInstaller
+)
+
+# "production" when the ELV rows run against the real bootstrap under a real
+# elevated token.  "weakened-selftest" ONLY under --elv-selftest, where the rows
+# run against a bootstrap deliberately weakened to trust this account so that the
+# harness code itself can be exercised without elevation.  That tier is never
+# acceptance evidence and never reaches the certification verdict.
+ELV_TIER = "production"
+
+
+def elv_tier_trusted_sids():
+    if ELV_TIER == "weakened-selftest":
+        return PRODUCTION_TRUSTED_SIDS + (ME,)
+    return PRODUCTION_TRUSTED_SIDS
+
+
+def elv_chain(tag, extra=None):
+    """A chain the ELV tier can build.
+
+    `extra` is keyed by the literal string 'PARENT' rather than by path, because
+    an ELV fixture is always describing the parent it is about to hand over and
+    spelling the path twice invites the two spellings to drift.
+    """
+    mode = "weakened" if ELV_TIER == "weakened-selftest" else "production"
+    chain = Chain(tag, depth=0, mode=mode)
+    chain.harden(extra=dict((chain.parent, value)
+                            for key, value in (extra or {}).items()
+                            if key == "PARENT"))
+    return chain
+
+
+# SDDL prints well-known principals as two-letter abbreviations rather than as
+# SIDs, so a comparison against the trust set has to know both spellings.  Only
+# the three trusted principals are listed: an abbreviation this table does not
+# know is treated as untrusted, which is the safe direction.
+SDDL_ALIASES = {
+    "SY": "S-1-5-18",
+    "BA": "S-1-5-32-544",
+    "SI": "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+}
+
+
+def sddl_owner(sddl):
+    """The owner principal out of an SDDL string, as a SID where possible."""
+    match = re.match(r"^O:(S-[-0-9]+|[A-Z]{2})", sddl or "")
+    if not match:
+        return None
+    return SDDL_ALIASES.get(match.group(1), match.group(1))
+
+
+def sddl_ace_fields(sddl):
+    """[(type, flags, rights, sid)] for every ACE in `sddl`."""
+    out = []
+    for chunk in (sddl or "").split("(")[1:]:
+        fields = chunk.split(")")[0].split(";")
+        if len(fields) >= 6:
+            out.append((fields[0], fields[1], fields[2], fields[5]))
+    return out
+
+
+def decode_rights(rights):
+    """One SDDL rights field as an integer access mask, decoded here."""
+    if rights.lower().startswith("0x"):
+        return int(rights, 16)
+    value = 0
+    for index in range(0, len(rights) - 1, 2):
+        value |= SDDL_RIGHTS.get(rights[index:index + 2].upper(), 0)
+    return value
+
+
+def untrusted_writable_aces(sddl):
+    """Every EFFECTIVE ACE granting a NON-trusted principal a redirect- or
+    content-class right on this node, decoded here rather than string-matched."""
+    trusted = set(elv_tier_trusted_sids())
+    hits = []
+    for ace_type, flags, rights, sid in sddl_ace_fields(sddl):
+        if ace_type != "A" or "IO" in flags:
+            continue
+        if SDDL_ALIASES.get(sid, sid) in trusted:
+            continue
+        mask = decode_rights(rights)
+        if mask & (REDIRECT_CLASS_MASK | CONTENT_CLASS_MASK):
+            hits.append((sid, mask))
+    return hits
+
+
+def wait_until(predicate, timeout=600.0, interval=0.0005):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if predicate():
+                return True
+        except OSError:
+            pass
+        time.sleep(interval)
+    return False
+
+
+def copy_tree_into(source_root, destination_root):
+    """A harness-built duplicate of a bundle, used as a swap twin."""
+    ensure_dir(long_path(destination_root))
+    for member in enumerate_bundle(source_root):
+        target = long_path(destination_root) + "\\" + member["relative"].replace("/", "\\")
+        ensure_dir(target.rsplit("\\", 1)[0])
+        with open(long_path(source_root) + "\\" + member["relative"].replace("/", "\\"),
+                  "rb") as handle:
+            data = handle.read()
+        with open(target, "wb") as handle:
+            handle.write(data)
+
+
+@scenario("ELV-01", elevation=True,
+          title="positive control: a clean bundle installs into a fresh root, and the "
+                "created root's owner, DACL and content are read back by the harness",
+          expected="OK",
+          reasons=("OK",))
+def _install_positive_control(base, image, work):
+    """The row that makes every ELV refusal below mean something.
+
+    Without it, "refuses everything" and "refuses correctly" are the same table.
+    Nothing here is taken from the bootstrap's output: the harness walks the
+    installed tree itself, hashes every member itself with hashlib, reads the
+    root's owner and DACL itself through GetNamedSecurityInfoW, and recomputes
+    the bundle root hash over the INSTALLED bytes - which is a second
+    implementation agreeing with the first over what was actually written.
+    """
+    chain = elv_chain("elv-install")
+    source = work.source().small_bundle()
+    pin = source.pin()
+    root = chain.root()
+    result = launch(image, chain.args(source))
+
+    installed = tree_digests(root)
+    sddl = security_descriptor_sddl(root) or ""
+    owner = sddl_owner(sddl)
+    hostile = untrusted_writable_aces(sddl)
+    checks = [
+        ("harness sees a root really created at %s" % root, exists(root)),
+        ("harness confirms the root is a directory and NOT a reparse point",
+         exists(root) and not is_reparse_point(root) and
+         bool(file_attributes(root) & FILE_ATTRIBUTE_DIRECTORY)),
+        ("harness walks the installed tree and its own SHA-256 of every member equals "
+         "the source bundle's",
+         installed is not None and installed == tree_digests(source.path)),
+        ("harness recomputes the bundle root hash over the INSTALLED bytes and gets the "
+         "operator's pin back",
+         exists(root) and bundle_root_hash(root) == pin),
+        ("harness reads the created root's OWNER and finds a trusted principal (%s)"
+         % owner, owner in elv_tier_trusted_sids()),
+        ("harness decodes the created root's DACL and finds no ACE granting an "
+         "untrusted principal a redirect- or content-class right (%s)"
+         % (hostile or "none"), not hostile),
+        ("harness confirms the root is not itself writable by this account through an "
+         "inherited grant it could have missed",
+         not any(sid == ME for sid, _ in hostile)),
+    ]
+    return Result("ELV-01",
+                  "a clean bundle installs, and the harness reads the created root's "
+                  "owner, DACL and every installed byte back for itself",
+                  "OK", result, checks)
+
+
+@scenario("ELV-02", elevation=True,
+          mechanism="the root is created with CreateDirectoryW, which FAILS when the name "
+                    "is occupied; an existing directory is never adopted",
+          mutations=("root_create_atomic",),
+          title="a pre-created root is refused, not adopted",
+          expected="ROOT_EXISTS",
+          reasons=("ROOT_EXISTS",))
+def _root_exists(base, image, work):
+    """Adoption is the damage.
+
+    The occupied name here is a perfectly ordinary directory with a clean,
+    admin-owned DACL - so nothing about its security descriptor is what the
+    refusal is about.  What is wrong with it is that the bootstrap did not
+    create it, and therefore knows nothing about what is already inside.  The
+    marker file is that unknown content, and the deletion experiment shows the
+    bundle being installed alongside it.
+    """
+    chain = elv_chain("elv-rootexists")
+    root = chain.root()
+    ensure_dir(long_path(root))
+    with open(long_path(root) + "\\preexisting.txt", "wb") as handle:
+        handle.write(b"content the operator's pin never covered\n")
+    identity_before = object_identity(root)
+    source = work.source().small_bundle()
+    result = launch(image, chain.args(source))
+    after = listing(root)
+    checks = [
+        ("harness confirms the root name was occupied by a real directory before the "
+         "run, and by the same object after it",
+         identity_before is not None and object_identity(root) == identity_before),
+        ("harness confirms the occupied directory is NOT a reparse point, so this is the "
+         "plain-directory case and not the junction case",
+         not is_reparse_point(root)),
+        ("harness finds the pre-existing directory still holds exactly what it held "
+         "before - nothing was installed into it (%s)" % (after,),
+         after == ["preexisting.txt"]),
+        ("the run did not certify an install into a directory it did not create "
+         "(exit %s)" % result.code, result.code != 0),
+    ]
+    return Result("ELV-02", "a pre-created root is refused, not adopted",
+                  "ROOT_EXISTS", result, checks)
+
+
+@scenario("ELV-03", elevation=True,
+          mechanism="the root name is created atomically, and a name occupied by a "
+                    "reparse point is refused rather than written through",
+          mutations=("root_create_atomic", "reparse_node"),
+          title="a junction occupying the root name is refused, not written through",
+          expected="ROOT_REPARSE",
+          reasons=("ROOT_REPARSE",))
+def _root_reparse(base, image, work):
+    """The damage is a write OUTSIDE the trust root.
+
+    The junction points at a directory the harness owns and watches.  With the
+    mechanisms in place nothing is ever written there.  With both deleted, the
+    copy follows the junction and the harness finds the whole bundle sitting in
+    a directory the operator never named - which is the only thing that matters,
+    whatever the run's final exit code turns out to be.
+    """
+    chain = elv_chain("elv-rootreparse")
+    outside = str(Path(base) / ("outside-" + uuid.uuid4().hex[:8]))
+    ensure_dir(long_path(outside))
+    root = chain.root()
+    create_junction(root, outside)
+    source = work.source().small_bundle()
+    result = launch(image, chain.args(source))
+    landed = listing(outside)
+    checks = [
+        ("harness confirms the root name really is a reparse point",
+         is_reparse_point(root)),
+        ("harness confirms the junction target is a directory OUTSIDE the parent chain "
+         "the operator named",
+         not outside.lower().startswith(chain.top.lower())),
+        ("harness finds NOTHING written through the junction: the target is still empty "
+         "(%s)" % (landed,), landed == []),
+        ("the run did not certify an install that landed outside the root (exit %s)"
+         % result.code, result.code != 0),
+    ]
+    return Result("ELV-03", "a junction occupying the root name is refused, not written through",
+                  "ROOT_REPARSE", result, checks)
+
+
+@scenario("ELV-04", elevation=True,
+          mechanism="the created root is judged on its INHERITED descriptor, before a "
+                    "single byte is copied; an inherit-only ACE on the parent grants "
+                    "nothing there and everything on the child",
+          mutations=("inherited_ace",),
+          title="an unsafe INHERITED ACL on the created root is refused before copying",
+          expected="ROOT_UNSAFE_WRITABLE_ACE",
+          reasons=("ROOT_UNSAFE_WRITABLE_ACE",))
+def _root_inherited_unsafe(base, image, work):
+    """The parent is impeccable; the root it gives birth to is not.
+
+    The parent carries `(A;OICIIO;0x2;;;WD)` - inherit-only, so it grants Everyone
+    nothing ON the parent and the parent passes its own check. Every directory
+    created inside it is born with that ACE as an EFFECTIVE grant of
+    FILE_WRITE_DATA to Everyone. A bootstrap that judged only the parent would
+    create a world-writable trust root and fill it.
+    """
+    chain = elv_chain("elv-inherited",
+                      extra={"PARENT": "(A;OICIIO;0x2;;;WD)"})
+    source = work.source().small_bundle()
+    root = chain.root()
+    result = launch(image, chain.args(source))
+
+    parent_sddl = security_descriptor_sddl(chain.parent) or ""
+    root_sddl = security_descriptor_sddl(root) or ""
+    parent_everyone = [(flags, rights) for kind, flags, rights, sid
+                       in sddl_ace_fields(parent_sddl) if sid == "WD" and kind == "A"]
+    root_effective = [(flags, rights) for kind, flags, rights, sid
+                      in sddl_ace_fields(root_sddl)
+                      if sid == "WD" and kind == "A" and "IO" not in flags]
+    root_masks = [mask for mask in sddl_ace_masks(root_sddl, "WD")
+                  if mask & CONTENT_CLASS_MASK]
+    checks = [
+        ("harness reads the PARENT DACL and finds the Everyone ACE marked inherit-only, "
+         "so it grants nothing on the parent itself (%s)" % (parent_everyone or "none"),
+         bool(parent_everyone) and all("IO" in flags for flags, _ in parent_everyone)),
+        ("harness sees the root was created - a root created and then refused is left "
+         "in place on purpose, so its descriptor is readable",
+         exists(root)),
+        ("harness reads the CREATED root's DACL and finds that ACE present as an "
+         "EFFECTIVE, inherited grant to Everyone (%s)" % (root_effective or "none"),
+         bool(root_effective) and all("ID" in flags for flags, _ in root_effective)),
+        ("harness decodes it and finds a content-class right - the root is writable by "
+         "Everyone (mask=0x%08x)" % (root_masks[0] if root_masks else 0),
+         bool(root_masks)),
+        ("harness finds the root EMPTY: the refusal happened before any byte was copied "
+         "into a world-writable directory (%s)" % (listing(root),),
+         listing(root) == []),
+        ("the run did not certify a world-writable trust root (exit %s)" % result.code,
+         result.code != 0),
+    ]
+    return Result("ELV-04",
+                  "an unsafe INHERITED ACL on the created root is refused before copying",
+                  "ROOT_UNSAFE_WRITABLE_ACE", result, checks)
+
+
+@scenario("ELV-05", elevation=True,
+          mechanism="the installed tree is enumerated and hashed again from scratch and "
+                    "required to equal the manifest EXACTLY - member set, paths, digests, "
+                    "sizes and root hash",
+          mutations=("destination_rehash",),
+          title="content that appears in the root during the copy is caught by the "
+                "destination re-hash",
+          expected="DESTINATION_MISMATCH",
+          reasons=("DESTINATION_MISMATCH",))
+def _destination_mismatch(base, image, work):
+    """A file the pin does not cover, planted into the root while the copy runs.
+
+    The bundle is deliberately wide so the copy takes long enough for the plant
+    to land inside it rather than before or after; the harness watches for the
+    root to appear and writes immediately. If the plant misses the window the row
+    reports INCONCLUSIVE rather than pretending either way.
+    """
+    chain = elv_chain("elv-destmismatch")
+    source = work.source().wide_bundle()
+    root = chain.root()
+    planted = root + "\\zzzz-planted.txt"
+    state = {}
+
+    def plant(_process):
+        def run():
+            if not wait_until(lambda: exists(root), timeout=600.0):
+                return
+            try:
+                with open(long_path(planted), "wb") as handle:
+                    handle.write(b"never pinned by the operator\n")
+                state["planted_at"] = time.time()
+            except OSError as exc:
+                state["error"] = exc
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        state["thread"] = thread
+
+    result = launch(image, chain.args(source), on_running=plant)
+    if "thread" in state:
+        state["thread"].join(timeout=30)
+    if "planted_at" not in state:
+        return Result("ELV-05", "content that appears in the root during the copy is "
+                                "caught by the destination re-hash",
+                      "DESTINATION_MISMATCH", result, [],
+                      note="INCONCLUSIVE: the planted file never landed inside the copy "
+                           "window (%s)" % state.get("error", "root never appeared"))
+
+    installed = tree_digests(root) or {}
+    checks = [
+        ("harness confirms the planted file really is inside the trust root",
+         exists(planted)),
+        ("harness confirms the planted file is NOT a member of the pinned bundle",
+         "zzzz-planted.txt" not in (tree_digests(source.path) or {})),
+        ("harness recomputes the bundle root hash over the installed tree and gets a "
+         "value DIFFERENT from the operator's pin, which is the damage",
+         exists(root) and bundle_root_hash(root) != source.pin()),
+        ("harness confirms the bundle's own members did arrive, so the mismatch is the "
+         "planted file and not a broken copy",
+         all(installed.get(name) == digest
+             for name, digest in (tree_digests(source.path) or {}).items())),
+        ("the run did not certify a tree the pin does not cover (exit %s)" % result.code,
+         result.code != 0),
+    ]
+    return Result("ELV-05",
+                  "content that appears in the root during the copy is caught by the "
+                  "destination re-hash",
+                  "DESTINATION_MISMATCH", result, checks)
+
+
+@scenario("ELV-06", elevation=True,
+          mechanism="the root's object identity is captured when it is verified and "
+                    "re-read at the end; a replacement with identical CONTENT is caught "
+                    "because identity is not content",
+          mutations=("root_identity",),
+          title="the root replaced after the copy by an identical-content twin is caught",
+          expected="ROOT_IDENTITY_CHANGED",
+          reasons=("ROOT_IDENTITY_CHANGED",))
+def _root_identity_changed(base, image, work):
+    """The behavioural half of the identity differential.
+
+    A twin directory with BYTE-IDENTICAL content takes the root's name once the
+    copy is done. Every content check the bootstrap can make still passes - the
+    member set, every digest, every size and the root hash are the same - so the
+    ONLY thing that can notice is the file index. This is the row the wrong
+    struct offsets would have silently disarmed: under them the twin and the
+    original could share an identity, and the swap would have been certified.
+    """
+    title = "the root replaced after the copy by an identical-content twin is caught"
+
+    # Swapping two directories takes TWO renames, and between them the root's
+    # name belongs to nothing.  If the bootstrap opens a member inside that gap
+    # it refuses as DESTINATION_UNREADABLE - a real refusal, but about the wrong
+    # thing, and reporting it as this property would be exactly the
+    # FAIL-WRONG-REASON trap the whole harness exists to avoid.  So the swap is
+    # timed into the MIDDLE of the destination re-hash rather than at its start,
+    # and a run that still lands in the gap is retried from a clean fixture.
+    # After the last attempt the row is INCONCLUSIVE, which fails the gate.
+    RACE_LOST = ("DESTINATION_UNREADABLE", "DESTINATION_MISSING", "COPY_FAILED",
+                 "DESTINATION_MISMATCH")
+    attempts = 5
+    last = None
+
+    for attempt in range(attempts):
+        chain = elv_chain("elv-identity")
+        source = work.source().wide_bundle(members=400)
+        root = chain.root()
+        twin = chain.parent + "\\twin-" + uuid.uuid4().hex[:8]
+        copy_tree_into(source.path, twin)
+        displaced = chain.parent + "\\displaced-" + uuid.uuid4().hex[:8]
+        expected_digests = tree_digests(source.path)
+        state = {}
+
+        def swap(_process, state=state, root=root, twin=twin, displaced=displaced,
+                 expected_digests=expected_digests):
+            def run():
+                if not wait_until(lambda: tree_digests(root) == expected_digests,
+                                  timeout=600.0):
+                    return
+                # Let the destination re-hash get well under way.  At the instant
+                # the copy finishes the bootstrap is about to open the ROOT
+                # itself, which is the worst possible moment to take its name
+                # away; a quarter of a second later it is somewhere in the middle
+                # of the member list.
+                time.sleep(0.25)
+                state["original"] = object_identity(root)
+                state["twin"] = object_identity(twin)
+                for _retry in range(2000):
+                    try:
+                        os.rename(long_path(root), long_path(displaced))
+                    except OSError as exc:
+                        state["error"] = exc
+                        time.sleep(0.001)
+                        continue
+                    os.rename(long_path(twin), long_path(root))
+                    state["swapped_at"] = time.time()
+                    return
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            state["thread"] = thread
+
+        result = launch(image, chain.args(source), on_running=swap)
+        if "thread" in state:
+            state["thread"].join(timeout=60)
+        if "swapped_at" not in state:
+            last = Result("ELV-06", title, "ROOT_IDENTITY_CHANGED", result, [],
+                          note="INCONCLUSIVE: the swap never completed inside the run "
+                               "(%s)" % state.get("error", "the copy never finished"))
+            continue
+
+        now = object_identity(root)
+        checks = [
+            ("harness recorded two DIFFERENT identities for the original root and the "
+             "twin before the swap (%s vs %s)"
+             % (state.get("original"), state.get("twin")),
+             state.get("original") is not None and state.get("twin") is not None and
+             state["original"] != state["twin"]),
+            ("harness confirms the object now answering to the root's name is the TWIN",
+             now == state.get("twin")),
+            ("harness confirms the twin's content is byte-identical to the bundle, so "
+             "no content check could have detected the swap",
+             tree_digests(root) == expected_digests),
+            ("harness confirms the twin's bundle root hash equals the operator's pin, "
+             "so the destination re-hash had nothing to complain about either",
+             exists(root) and bundle_root_hash(root) == source.pin()),
+            ("the run did not certify an object it never verified (exit %s)"
+             % result.code, result.code != 0),
+        ]
+        last = Result("ELV-06", title, "ROOT_IDENTITY_CHANGED", result, checks)
+        if last.verdict == "PASS" or result.reason not in RACE_LOST:
+            if attempt:
+                last.note = ("the swap landed inside the re-hash on attempt %d of %d; "
+                             "earlier attempts fell in the two-rename gap and were "
+                             "discarded rather than reported"
+                             % (attempt + 1, attempts))
+            return last
+
+    if last is not None and not last.note.startswith("INCONCLUSIVE"):
+        last.note = ("INCONCLUSIVE: %d attempts all landed in the gap between the two "
+                     "renames, so the refusal observed (%s) is about the gap and not "
+                     "about object identity" % (attempts, last.observed))
+        last.verdict = last._classify()
+    return last
+
+
+@scenario("ELV-07", elevation=True,
+          mechanism="every directory below the root is created with CreateDirectoryW, "
+                    "which fails on an occupied name; [IO.Directory]::CreateDirectory "
+                    "would succeed and the write would follow whatever occupies it",
+          mutations=("copy_dir_create",),
+          title="a subdirectory name occupied mid-copy is refused, not written through",
+          expected="COPY_DIRECTORY_OCCUPIED",
+          reasons=("COPY_DIRECTORY_OCCUPIED",))
+def _copy_directory_occupied(base, image, work):
+    """The bootstrap's own comment names this damage; this row opens it.
+
+    The bundle's only subdirectory sorts last, so the copy reaches it at the very
+    end. While the copy is running the harness drops a JUNCTION into the root
+    under that exact name, pointing outside. With the mechanism in place the name
+    is occupied and the run refuses. With it replaced by the .NET call that
+    tolerates an existing name, the member is written THROUGH the junction and
+    the harness finds the file outside the trust root.
+    """
+    chain = elv_chain("elv-occupied")
+    source = work.source().wide_bundle(tail="zsub/deep.txt")
+    root = chain.root()
+    outside = str(Path(base) / ("occupied-" + uuid.uuid4().hex[:8]))
+    ensure_dir(long_path(outside))
+    state = {}
+
+    def occupy(_process):
+        def run():
+            if not wait_until(lambda: exists(root), timeout=600.0):
+                return
+            try:
+                create_junction(root + "\\zsub", outside)
+                state["occupied_at"] = time.time()
+            except OSError as exc:
+                state["error"] = exc
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        state["thread"] = thread
+
+    result = launch(image, chain.args(source), on_running=occupy)
+    if "thread" in state:
+        state["thread"].join(timeout=30)
+    if "occupied_at" not in state:
+        return Result("ELV-07", "a subdirectory name occupied mid-copy is refused, not "
+                                "written through",
+                      "COPY_DIRECTORY_OCCUPIED", result, [],
+                      note="INCONCLUSIVE: the junction never landed inside the copy "
+                           "window (%s)" % state.get("error", "root never appeared"))
+
+    landed = listing(outside)
+    checks = [
+        ("harness confirms the occupying object really is a reparse point inside the root",
+         is_reparse_point(root + "\\zsub")),
+        ("harness confirms the junction target is OUTSIDE the parent chain the operator "
+         "named", not outside.lower().startswith(chain.top.lower())),
+        ("harness finds NOTHING written through the junction: the target is still empty "
+         "(%s)" % (landed,), landed == []),
+        ("harness confirms the member that would have gone there is not inside the root "
+         "either", not exists(root + "\\zsub\\deep.txt")),
+        ("the run did not certify an install whose last member landed outside the root "
+         "(exit %s)" % result.code, result.code != 0),
+    ]
+    return Result("ELV-07",
+                  "a subdirectory name occupied mid-copy is refused, not written through",
+                  "COPY_DIRECTORY_OCCUPIED", result, checks)
+
 
 ELEVATED_COMMAND = (
-    "Start an ELEVATED PowerShell (Run as administrator) and run:\n"
+    "Start an ELEVATED PowerShell (Run as administrator) and run EXACTLY:\n"
+    "\n"
     "    cd <repo>\n"
     "    python scripts\\offline_bootstrap_guard.py --delete-mechanism\n"
-    "The harness detects the elevated token itself (CheckTokenMembership against\n"
-    "S-1-5-32-544) and runs the ELV-* rows; it does not take anybody's word for it.\n"
+    "\n"
+    "That single command runs the WHOLE table - CTL-*, SCN-*, IDN-* and all seven\n"
+    "ELV-* rows - and then the deletion experiments.  There is no separate flag for\n"
+    "the ELV rows and no way to ask for them: they run when, and only when, the\n"
+    "harness finds an elevated token in its OWN process (CheckTokenMembership against\n"
+    "S-1-5-32-544).  It takes nobody's word for that, and there is no argument that\n"
+    "substitutes a principal.\n"
     "Elevated, the fixtures it creates are owned by BUILTIN\\Administrators, which is\n"
     "in the production trust set - so no principal has to be invented for them to pass."
 )
 
 
 CODE_OF = {name: code for code, name in REASONS.items()}
+
+
+# ---------------------------------------------------------------------------
+# Coverage: every outcome in the taxonomy is either executed or DISCLOSED.
+#
+# The previous revision's operator note claimed "an unelevated run proves every
+# refusal path".  The taxonomy has 46 outcomes; the scenario table exercised 10.
+# The remaining 36 were neither tested nor mentioned anywhere, including the
+# whole DESTINATION_* family.  A coverage claim nobody can check is worse than no
+# claim, so every outcome now appears in the table below with either the
+# scenarios that execute it or the reason it is not executed - and the table is
+# GENERATED from the scenario declarations, cross-checked against the taxonomy in
+# the pinned bootstrap bytes and against the operator document, so it cannot
+# drift away from either.
+# ---------------------------------------------------------------------------
+
+UNTESTED_REASONS = {
+    "UNEXPECTED_ERROR":
+        "the catch-all for a fault the bootstrap does not model; reaching it means "
+        "the bootstrap has a bug, so there is no fixture for it by construction",
+    "NATIVE_INIT_FAILED":
+        "requires the CLR to refuse System.Reflection.Emit; no fixture can produce "
+        "that without modifying the pinned file",
+    "SOURCE_NOT_ANCHORED":
+        "requires the source to canonicalise to something that is not a local "
+        "volume-GUID path, i.e. an SMB/UNC path; publishing a share needs elevation "
+        "and the harness will not fake one",
+    "MANIFEST_UNSORTED":
+        "an internal invariant, unreachable while the sort works; the SCN-10 "
+        "deletion experiment reaches it by removing the sort",
+    "SOURCE_CANONICAL_UNRESOLVED":
+        "requires GetFinalPathNameByHandle to FAIL on a directory that opened "
+        "successfully; no unelevated fixture for that was found",
+    "PARENT_NOT_ANCHORED":
+        "requires a canonical component carrying a trailing dot, trailing space or "
+        "control character.  Measured on this platform: NTFS rejects control "
+        "characters outright and GetFinalPathNameByHandle strips a trailing space "
+        "from the name it returns, so no such component reaches the check",
+    "PARENT_CANONICAL_UNRESOLVED":
+        "same as SOURCE_CANONICAL_UNRESOLVED",
+    "PARENT_CHAIN_UNSTABLE":
+        "requires an ancestor to be replaced BETWEEN the leaf's resolution and the "
+        "walk; the window is a few microseconds and the harness has no way to "
+        "schedule inside it deterministically",
+    "ROOT_DACL_ABSENT":
+        "the root inherits the parent's DACL, and a parent with a NULL DACL is "
+        "refused at PARENT_DACL_ABSENT first (SCN-26), so the root branch is "
+        "unreachable from outside",
+    "ROOT_ACE_UNINTERPRETABLE":
+        "same shape: the parent carrying the undecodable ACE is refused at "
+        "PARENT_ACE_UNINTERPRETABLE first (SCN-27)",
+    "ROOT_OWNER_UNTRUSTED":
+        "the created root's owner comes from the creating token's default owner; "
+        "making it untrusted while the parent stays trusted needs a token this "
+        "harness will not fabricate",
+    "ROOT_MISSING":
+        "requires the root to disappear between its creation and its verification - "
+        "a race with no deterministic fixture",
+    "ROOT_NOT_ANCHORED":
+        "same as PARENT_NOT_ANCHORED",
+    "ROOT_CANONICAL_UNRESOLVED":
+        "same as SOURCE_CANONICAL_UNRESOLVED",
+    "COPY_FAILED":
+        "requires a source or destination open to fail mid-copy for a reason other "
+        "than an occupied name; ELV-07 covers the occupied-name branch beside it",
+    "ROOT_CHAIN_UNSTABLE":
+        "requires the created root's canonical name to differ from the path it was "
+        "created at - a race with no deterministic fixture",
+    "DESTINATION_MISSING":
+        "the destination family is reached only when the INSTALLED tree is hostile "
+        "at re-hash time; this one needs the root to vanish inside that window",
+    "DESTINATION_REPARSE":
+        "needs a reparse point planted inside the root between the copy and the "
+        "re-hash; ELV-05 plants a plain file in that window, ELV-07 plants a "
+        "junction in the copy window, and neither lands in this one",
+    "DESTINATION_GIT_PATH":
+        "needs a '.git' component to appear inside the root between the copy and "
+        "the re-hash",
+    "DESTINATION_COLLISION":
+        "needs two members differing only in ASCII case to appear inside the root "
+        "between the copy and the re-hash, on a case-sensitive directory",
+    "DESTINATION_NAME_UNSAFE":
+        "needs a member with a name outside the portable alphabet to appear inside "
+        "the root between the copy and the re-hash",
+    "DESTINATION_UNREADABLE":
+        "needs a member inside the root to become unreadable between the copy and "
+        "the re-hash",
+    "DESTINATION_EMPTY_DIRECTORY":
+        "needs an empty directory to appear inside the root between the copy and "
+        "the re-hash",
+}
+
+
+def coverage_rows():
+    """(code, reason, scenario ids or 'UNTESTED', why) for EVERY taxonomy outcome."""
+    covered = {}
+    for spec in SCENARIOS:
+        for reason in spec["reasons"]:
+            covered.setdefault(reason, set()).add(spec["id"])
+    rows = []
+    for code in sorted(REASONS):
+        name = REASONS[code]
+        ids = sorted(covered.get(name, ()))
+        rows.append((code, name, ", ".join(ids) if ids else "UNTESTED",
+                     "" if ids else UNTESTED_REASONS.get(name, "")))
+    return rows
+
+
+def coverage_markdown():
+    lines = ["| Code | Reason | Exercised by | If UNTESTED, why not |",
+             "| --- | --- | --- | --- |"]
+    for code, name, who, why in coverage_rows():
+        lines.append("| %d | `%s` | %s | %s |" % (code, name, who, why or "-"))
+    return "\n".join(lines)
+
+
+def bootstrap_taxonomy(image):
+    """The taxonomy as written in the PINNED bootstrap bytes."""
+    text = image.path.read_text(encoding="utf-8")
+    block = text.split("$EXIT = @{", 1)[1].split("\n}", 1)[0]
+    return dict((name, int(code)) for name, code
+                in re.findall(r"^\s*([A-Z_]+)\s*=\s*(\d+)\s*$", block, re.M))
+
+
+COVERAGE_MARKER_BEGIN = "<!-- COVERAGE-TABLE:BEGIN -->"
+COVERAGE_MARKER_END = "<!-- COVERAGE-TABLE:END -->"
+OPERATOR_DOC = ROOT / "packaging" / "offline" / "README.md"
+
+
+@scenario("CTL-COVERAGE", reasons=())
+def _coverage_control(base, image, work):
+    """Coverage is a claim, so it gets a row like every other claim.
+
+    Three things are checked, none of which the bootstrap can influence:
+    every outcome in the taxonomy is either claimed by a scenario or carries a
+    written reason it is not; the harness's copy of the taxonomy equals the one
+    in the bytes it hashed; and the table in the operator document is
+    byte-identical to the one generated here, so the published coverage cannot
+    drift away from the code that produces it.
+    """
+    rows = coverage_rows()
+    silent = [name for _code, name, who, why in rows if who == "UNTESTED" and not why]
+    both = [name for name in UNTESTED_REASONS
+            if any(r[1] == name and r[2] != "UNTESTED" for r in rows)]
+    published = bootstrap_taxonomy(image)
+    mine = dict((name, code) for code, name in REASONS.items())
+    taxonomy_delta = sorted(set(published.items()) ^ set(mine.items()))
+    executed = [r for r in rows if r[2] != "UNTESTED"]
+
+    document = OPERATOR_DOC.read_text(encoding="utf-8") if OPERATOR_DOC.is_file() else ""
+    embedded = ""
+    if COVERAGE_MARKER_BEGIN in document and COVERAGE_MARKER_END in document:
+        embedded = document.split(COVERAGE_MARKER_BEGIN, 1)[1] \
+                           .split(COVERAGE_MARKER_END, 1)[0].strip()
+
+    checks = [
+        ("every one of the %d outcomes in the taxonomy is either executed by a named "
+         "scenario (%d) or carries a written reason it is not (%d)"
+         % (len(rows), len(executed), len(rows) - len(executed)), not silent),
+        ("no outcome is listed as both executed and untested (%s)"
+         % (both or "none"), not both),
+        ("this harness's copy of the taxonomy equals the one in the pinned bootstrap "
+         "bytes (%s)" % (taxonomy_delta or "identical"), not taxonomy_delta),
+        ("the coverage table published in %s is byte-identical to the one generated "
+         "from these declarations" % OPERATOR_DOC.name,
+         embedded == coverage_markdown()),
+        ("no scenario claims an outcome that is not in the taxonomy",
+         not [reason for spec in SCENARIOS for reason in spec["reasons"]
+              if reason not in CODE_OF]),
+    ]
+    return Result("CTL-COVERAGE",
+                  "every taxonomy outcome is executed or disclosed, and the published "
+                  "table is generated from these declarations",
+                  "NOT-LAUNCHED", Launch(None, "", False), checks)
 
 
 # ---------------------------------------------------------------------------
@@ -2133,6 +3429,47 @@ MUTATIONS = {
         "        if ($ace.Flags -band $ACE_FLAG_INHERIT_ONLY) { continue }\n"
         "        if ($ace.Flags -band $ACE_FLAG_INHERITED) { continue }",
     )],
+    # ELV: stop creating the root ATOMICALLY.  With this removed the bootstrap
+    # carries on with whatever already occupies the name - which is adoption
+    # (ELV-02) and, with the reparse gates also gone, a write straight through
+    # somebody else's junction (ELV-03).
+    "root_create_atomic": [(
+        "    if ($script:Native::CreateDirectoryW($root, [IntPtr]::Zero) -eq 0) {",
+        "    if ($false) {",
+    )],
+    # ELV: the .NET call the bootstrap's own comment warns about.  It succeeds
+    # when the name already exists, so the member write that follows lands on
+    # whatever occupies it - outside the root, if that is a junction.
+    "copy_dir_create": [(
+        "                if ($script:Native::CreateDirectoryW($destinationPath, [IntPtr]::Zero) -eq 0) {\n"
+        "                    $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()\n"
+        "                    if ($err -eq $ERROR_ALREADY_EXISTS) {\n"
+        "                        Deny -Reason 'COPY_DIRECTORY_OCCUPIED' -Detail \"$($Member.Relative): '$destinationPath' already exists\"\n"
+        "                    }\n"
+        "                    Deny -Reason 'COPY_FAILED' -Detail \"$($Member.Relative): mkdir '$destinationPath' win32=$err\"\n"
+        "                }",
+        "                $null = [IO.Directory]::CreateDirectory($destinationPath)",
+    )],
+    # ELV: trust the copy instead of re-reading it.  All four comparisons plus
+    # the root-hash comparison go, because any one of them left standing would
+    # catch a planted file and the point is to measure what the whole re-hash is
+    # buying.
+    "destination_rehash": [
+        ("    if (@($installedSorted).Count -ne @($sorted).Count) {",
+         "    if ($false) {"),
+        ("    for ($i = 0; $i -lt @($sorted).Count; $i++) {\n"
+         "        $expectedMember = $sorted[$i]",
+         "    for ($i = 0; $i -lt 0; $i++) {\n"
+         "        $expectedMember = $sorted[$i]"),
+        ("    if ($installedHash -ne $pin) {",
+         "    if ($false) {"),
+    ],
+    # ELV: stop asking whether the root is still the same OBJECT.  Content is
+    # all that is left, and an identical-content twin satisfies content.
+    "root_identity": [(
+        "    if ($null -eq $finalIdentity -or $finalIdentity -ne $rootIdentity) {",
+        "    if ($false) {",
+    )],
     # These mechanisms live in this file, not in the bootstrap.
     "harness_pin": [],
 }
@@ -2238,6 +3575,85 @@ def subst_damage_experiment(base, image, workspace, work):
         kernel32.DefineDosDeviceW(DDD_REMOVE_DEFINITION, drive + ":", None)
 
 
+def elv_selftest(base, image, workspace, args):
+    """Exercise the ELV bodies unelevated.  NOT EVIDENCE.  Read this before
+    quoting a single line of its output.
+
+    The ELV rows can only be acceptance evidence when they run against the
+    PRODUCTION bootstrap under a REAL elevated token.  This mode runs them
+    against a bootstrap deliberately weakened to trust this ordinary account, on
+    fixtures this account owns, so that the harness CODE - the fixture builders,
+    the mid-copy plants, the swap, the observations - can be executed and
+    debugged by whoever writes it.  A row that "passes" here says the scenario is
+    written correctly.  It says nothing whatsoever about the production
+    bootstrap, and it does not reach `failures`, the certification verdict or the
+    exit code.
+
+    It exists because the alternative is shipping seven scenarios nobody has ever
+    executed - which is exactly the defect this revision was written to remove.
+    """
+    global ELV_TIER
+    print("ELV SELF-TEST  (harness development aid - NOT ACCEPTANCE EVIDENCE)")
+    print("  Every row below runs against a bootstrap MUTATED to trust %s," % ME)
+    print("  on fixtures this unelevated account owns.  Nothing here is evidence")
+    print("  about the production bootstrap and nothing here reaches the verdict.")
+    print()
+    weakened = mutate(image, ("trust_widened",), workspace)
+    ELV_TIER = "weakened-selftest"
+    try:
+        for spec in sorted((s for s in SCENARIOS if s["elevation"]), key=lambda s: s["id"]):
+            if args.only and args.only.lower() not in spec["id"].lower():
+                continue
+            cell = base + "\\_elvself-" + spec["id"].lower()
+            os.makedirs(long_path(cell), exist_ok=False)
+            try:
+                outcome = spec["run"](cell, weakened, Workspace(cell))
+            except Exception as exc:                     # noqa: BLE001 - reported, not raised
+                print("  %-8s HARNESS ERROR: %s: %s"
+                      % (spec["id"], type(exc).__name__, exc))
+                continue
+            print("  %-8s %-26s expected=%-24s observed=%s%s"
+                  % (spec["id"], outcome.verdict, outcome.expected, outcome.observed,
+                     exit_note(outcome.launch.code)))
+            for description, ok in outcome.checks:
+                print("             [%s] %s" % ("ok" if ok else "NO", description))
+            if outcome.note:
+                print("             note: %s" % outcome.note)
+
+            if not (args.delete_mechanism and spec["mutations"]):
+                continue
+            # And the other arm: same body, same fixtures, one mechanism gone.
+            # This is where the ELV rows show their damage rather than assert it.
+            try:
+                broken = mutate(image, ("trust_widened",) + spec["mutations"], workspace)
+            except SystemExit as exc:
+                print("             MUTATION DID NOT APPLY: %s" % exc)
+                continue
+            cell = base + "\\_elvmut-" + spec["id"].lower()
+            os.makedirs(long_path(cell), exist_ok=False)
+            try:
+                without = spec["run"](cell, broken, Workspace(cell))
+            except Exception as exc:                     # noqa: BLE001
+                print("             HARNESS ERROR in the mutated arm: %s: %s"
+                      % (type(exc).__name__, exc))
+                continue
+            damage = [d for d, ok in without.checks if not ok]
+            print("             mutation : %s" % "+".join(spec["mutations"]))
+            print("             without  : %s%s%s"
+                  % (without.observed, exit_note(without.launch.code),
+                     "  <-- %d harness-observed check(s) now FAIL: the damage is open"
+                     % len(damage) if damage else ""))
+            for description, ok in without.checks:
+                print("               [%s] %s" % ("ok" if ok else "DAMAGE", description))
+            if not damage and without.observed == without.expected:
+                print("               <-- DID NOT FLIP: this row does not depend on the "
+                      "mechanism it names")
+    finally:
+        ELV_TIER = "production"
+    print()
+    return 0
+
+
 def mutate(image, keys, workspace):
     text = image.path.read_text(encoding="utf-8")
     for key in keys:
@@ -2266,17 +3682,25 @@ def print_table(results, show_stdout=False):
     print("SCENARIO TABLE  (the acceptance oracle)")
     print("  Each verdict is formed from the process exit code plus observations this")
     print("  harness makes itself.  The bootstrap's stdout is recorded and never read by")
-    print("  an assertion.  FAIL-WRONG-REASON means the run refused for an INCIDENTAL")
-    print("  reason and is not evidence for the property; FAIL-EVIDENCE means the reason")
-    print("  was right but the damage happened anyway; NOT-RUN-ELEVATION means the")
-    print("  property cannot be shown without elevation and was NOT faked.")
+    print("  an assertion.  ONLY 'PASS' counts as evidence; every other verdict counts")
+    print("  as a FAILURE for certification:")
+    print("    FAIL-WRONG-REASON          refused, but for an INCIDENTAL reason, so the")
+    print("                               row is not evidence for the property")
+    print("    FAIL-NO-REFUSAL            accepted what it should have refused")
+    print("    FAIL-EVIDENCE              right reason, but the damage happened anyway")
+    print("    INCONCLUSIVE               the fixture could not be built here; the run")
+    print("                               proves nothing either way, so it is not a pass")
+    print("    BLOCKED_ELEVATION_REQUIRED the property needs the bootstrap to ACCEPT and")
+    print("                               INSTALL; this process is unelevated and no")
+    print("                               principal was faked.  An unelevated run cannot")
+    print("                               certify, by design.")
     print()
-    header = ("%s  %-19s  %-30s  %s"
+    header = ("%s  %-26s  %-30s  %s"
               % ("id".ljust(width), "verdict", "expected reason", "observed reason"))
     print(header)
     print("-" * len(header))
     for r in results:
-        print("%s  %-19s  %-30s  %s%s"
+        print("%s  %-26s  %-30s  %s%s"
               % (r.id.ljust(width), r.verdict, r.expected, r.observed,
                  exit_note(r.launch.code)))
     print()
@@ -2288,15 +3712,70 @@ def print_table(results, show_stdout=False):
             print("        note: %s" % r.note)
         if r.launch.note:
             print("        launch: %s" % r.launch.note)
-        if isinstance(r, Skipped):
-            print("        NOT RUN - ELEVATION REQUIRED.  This process is unelevated and")
+        if isinstance(r, Blocked):
+            print("        BLOCKED - ELEVATION REQUIRED.  This process is unelevated and")
             print("        cannot create a directory owned by a trusted principal.  Faking")
-            print("        one is the defect this revision removed, so the row is left open.")
+            print("        one is the defect this revision removed, so the row is left open")
+            print("        AND COUNTS AS A FAILURE.  It is not a skip.")
         if show_stdout and r.launch.stdout:
             print("        --- bootstrap stdout, RECORDED BUT NOT EVIDENCE ---")
             for line in r.launch.stdout.splitlines():
                 print("        | %s" % line)
     print()
+
+
+def print_coverage(results):
+    """The coverage table, printed with every run so no reader has to go looking.
+
+    Also cross-checks the DECLARED reason of every row that ran against the
+    reason the row actually expected, so a scenario cannot claim coverage of an
+    outcome it does not exercise.  Returns the number of inconsistencies.
+    """
+    rows = coverage_rows()
+    executed = [r for r in rows if r[2] != "UNTESTED"]
+    verdicts = dict((r.id, r.verdict) for r in results)
+    print("REFUSAL-TAXONOMY COVERAGE  (generated from the scenario declarations)")
+    print("  %d outcomes in the taxonomy: %d claimed by a named scenario, %d UNTESTED"
+          % (len(rows), len(executed), len(rows) - len(executed)))
+    print("  Nothing here is a coverage CLAIM about paths nobody ran.  A row marked")
+    print("  UNTESTED is untested, and says why.  Every scenario id carries the verdict")
+    print("  IT ACTUALLY GOT IN THIS RUN, so a claimed outcome whose scenario was")
+    print("  blocked or inconclusive reads as blocked or inconclusive, not as covered.")
+    print()
+    print("  %-4s %-30s %s" % ("code", "reason", "exercised by / why not"))
+    print("  " + "-" * 100)
+    blocked_outcomes = 0
+    for code, name, who, why in rows:
+        if who == "UNTESTED":
+            print("  %-4d %-30s %s" % (code, name,
+                                       "UNTESTED - " + (why or "NO REASON GIVEN")))
+            continue
+        annotated = ", ".join("%s[%s]" % (ident, verdicts.get(ident, "NOT-SELECTED"))
+                              for ident in who.split(", "))
+        if not any(verdicts.get(ident) == "PASS" for ident in who.split(", ")):
+            blocked_outcomes += 1
+        print("  %-4d %-30s %s" % (code, name, annotated))
+    print()
+    print("  in THIS run: %d outcome(s) claimed above have no PASSING scenario behind"
+          % blocked_outcomes)
+    print("  them, so they are not demonstrated by this run whatever the table declares.")
+    print()
+
+    declared = {}
+    for spec in SCENARIOS:
+        declared[spec["id"]] = spec["reasons"]
+    inconsistent = []
+    for r in results:
+        claims = declared.get(r.id, ())
+        if claims and r.expected not in claims and r.verdict != "BLOCKED_ELEVATION_REQUIRED":
+            inconsistent.append("%s declares %s but expected %s"
+                                % (r.id, list(claims), r.expected))
+    if inconsistent:
+        print("  COVERAGE DECLARATIONS DO NOT MATCH WHAT THE ROWS TESTED:")
+        for line in inconsistent:
+            print("    %s" % line)
+        print()
+    return len(inconsistent)
 
 
 def main():
@@ -2307,7 +3786,20 @@ def main():
     parser.add_argument("--keep", action="store_true", help="do not delete the fixture tree")
     parser.add_argument("--show-stdout", action="store_true",
                         help="print what the bootstrap printed; it is never an assertion input")
+    parser.add_argument("--coverage-table", action="store_true",
+                        help="print the coverage table as markdown and exit; this is what "
+                             "the operator document must contain, and CTL-COVERAGE checks it")
+    parser.add_argument("--elv-selftest", action="store_true",
+                        help="DEVELOPMENT AID, NOT EVIDENCE: exercise the ELV bodies "
+                             "unelevated against a bootstrap deliberately weakened to trust "
+                             "this account.  Reported separately and never counted.")
     args = parser.parse_args()
+
+    if args.coverage_table:
+        print(COVERAGE_MARKER_BEGIN)
+        print(coverage_markdown())
+        print(COVERAGE_MARKER_END)
+        return 0
 
     if os.name != "nt":
         print("offline bootstrap guard: Windows only (this is the audit:offline:windows gate).")
@@ -2325,10 +3817,12 @@ def main():
     print("  elevated  : %s   <- read from this token, not from the bootstrap" % ELEVATED)
     if not ELEVATED:
         print()
-        print("  UNELEVATED RUN.  Every refusal path, the whole name/pin policy, the")
-        print("  process-and-temp observation and the DOS-device chain bypass are proved")
-        print("  below.  The properties that need the bootstrap to ACCEPT a chain and")
-        print("  INSTALL are reported NOT-RUN-ELEVATION-REQUIRED and are NOT faked.")
+        print("  UNELEVATED RUN.  It proves the refusal paths listed in the coverage table")
+        print("  below - not 'every refusal path'; the table says exactly which and which")
+        print("  not.  The seven properties that need the bootstrap to ACCEPT a chain and")
+        print("  INSTALL are reported BLOCKED_ELEVATION_REQUIRED and are NOT faked, and")
+        print("  BECAUSE THEY ARE BLOCKED THIS RUN CANNOT CERTIFY.  That is the correct")
+        print("  outcome for an unelevated run, not a defect in it.")
 
     base = str(Path(os.path.abspath(os.sep)) / ("mr-bootstrap-guard-" + uuid.uuid4().hex[:10]))
     os.makedirs(long_path(base), exist_ok=False)
@@ -2352,30 +3846,36 @@ def main():
             if not image.reverify():
                 print("FAIL: the bootstrap changed on disk mid-run; refusing to continue")
                 return 1
-            results.append(spec["run"](base, image, work))
-
-        for ident, title, expected in ELEVATION_ONLY:
-            if args.only and args.only.lower() not in ident.lower():
+            # An elevation scenario is REPORTED either way.  Unelevated it is
+            # reported BLOCKED and counts as a failure; there is no branch in
+            # which it silently disappears, and no branch in which an unelevated
+            # process runs its body against the production bootstrap.
+            if spec["elevation"] and not ELEVATED:
+                results.append(Blocked(spec["id"], spec["title"], spec["expected"],
+                                       ELEVATED_COMMAND))
                 continue
-            if ELEVATED:
-                results.append(Skipped(ident, title + "  [ELEVATED RUN: see note]",
-                                       expected, ELEVATED_COMMAND))
-            else:
-                results.append(Skipped(ident, title, expected, ELEVATED_COMMAND))
+            results.append(spec["run"](base, image, work))
 
         results.sort(key=lambda r: r.id)
         print_table(results, show_stdout=args.show_stdout)
         failures += sum(1 for r in results if r.counts_as_failure)
+        failures += print_coverage(results)
 
-        skipped = [r for r in results if r.verdict == "NOT-RUN-ELEVATION"]
-        if skipped:
-            print("NOT RUN - ELEVATION REQUIRED (%d rows)" % len(skipped))
-            for r in skipped:
+        blocked = [r for r in results if r.verdict == "BLOCKED_ELEVATION_REQUIRED"]
+        if blocked:
+            print("BLOCKED - ELEVATION REQUIRED (%d rows, each counting as a FAILURE)"
+                  % len(blocked))
+            for r in blocked:
                 print("  %-8s %-30s %s" % (r.id, r.expected, r.title))
             print()
             for line in ELEVATED_COMMAND.splitlines():
                 print("  " + line)
             print()
+
+        if args.elv_selftest:
+            # Deliberately does not touch `failures`: it is a development aid for
+            # the harness code, not evidence about the production bootstrap.
+            elv_selftest(base, image, workspace, args)
 
         if args.delete_mechanism:
             print("DELETE-THE-MECHANISM  (self-review evidence, NOT the acceptance oracle)")
@@ -2387,6 +3887,13 @@ def main():
             flip_failures = 0
             for spec in selected:
                 if not spec["mutations"]:
+                    continue
+                if spec["elevation"] and not ELEVATED:
+                    print("  %-14s mechanism: %s" % (spec["id"], spec["mechanism"]))
+                    print("                 SKIPPED: the scenario itself is blocked on")
+                    print("                          elevation, so deleting its mechanism")
+                    print("                          would measure nothing.  The row above")
+                    print("                          already counts as a failure.")
                     continue
                 print("  %-14s mechanism: %s" % (spec["id"], spec["mechanism"]))
                 if spec["mutations"] == ("harness_pin",):
@@ -2454,11 +3961,24 @@ def main():
             except OSError as exc:
                 print("(fixture cleanup left %s: %s)" % (base, exc))
 
+    # ---- certification ---------------------------------------------------
+    # ONE rule: certification requires every row to be a PASS.  A blocked row, an
+    # inconclusive row and a row nobody ran are all "not a pass", and none of
+    # them may produce a green gate.  The previous revision computed this from
+    # `verdict.startswith("FAIL")`, which let seven never-written rows and every
+    # unbuildable fixture through.
+    tally = {}
+    for r in results:
+        tally[r.verdict] = tally.get(r.verdict, 0) + 1
+    print("CERTIFICATION")
+    print("  rows: %s" % ", ".join("%s=%d" % item for item in sorted(tally.items())))
     if failures:
-        print("FAIL: %d scenario/mechanism check(s) did not hold." % failures)
+        print("  VERDICT: FAIL - %d row(s)/mechanism(s) did not hold." % failures)
+        if any(r.verdict == "BLOCKED_ELEVATION_REQUIRED" for r in results):
+            print("  The accept-and-install half of the bootstrap was NOT exercised.")
+            print("  This run is not a certification of it and must not be read as one.")
         return 1
-    print("Offline bootstrap guard passed"
-          "%s." % ("" if ELEVATED else " (unelevated tier; elevation-required rows listed above)"))
+    print("  VERDICT: PASS - every row in the table above is a PASS.")
     return 0
 
 

@@ -181,6 +181,7 @@ separate gate and is **not** part of `audit:all`, because it is Windows-only.
 python scripts\offline_bootstrap_guard.py                     # the scenario table
 python scripts\offline_bootstrap_guard.py --delete-mechanism  # + the self-review pass
 python scripts\offline_bootstrap_guard.py --show-stdout       # + what the bootstrap printed
+python scripts\offline_bootstrap_guard.py --coverage-table    # the coverage table, as markdown
 ```
 
 It treats the bootstrap as an opaque binary: it hashes the file, refuses to launch
@@ -191,6 +192,25 @@ mappings via `QueryDosDeviceW`, and the live process table via
 `CreateToolhelp32Snapshot`. **The bootstrap's stdout is recorded and is never an
 input to any assertion.**
 
+### Only PASS certifies
+
+Every row in the scenario table gets one of these verdicts, and **only `PASS`
+counts**:
+
+| Verdict | Meaning | Certifies? |
+| --- | --- | --- |
+| `PASS` | expected refusal reason **and** every independent observation held | yes |
+| `FAIL-WRONG-REASON` | refused, but for an incidental reason — not evidence for the property | no |
+| `FAIL-NO-REFUSAL` | accepted what it should have refused | no |
+| `FAIL-EVIDENCE` | right reason, but the harness saw the damage happen anyway | no |
+| `INCONCLUSIVE` | the fixture could not be built on this machine; the run proves nothing either way | no |
+| `BLOCKED_ELEVATION_REQUIRED` | the property needs the bootstrap to **accept** a chain and **install**; this process is unelevated and no principal was faked | no |
+
+A previous revision forgave `INCONCLUSIVE` and treated the elevation-required
+rows as skips, so a run in which seven rows had never been written at all still
+printed "passed". They are failures now. **An unelevated run therefore cannot
+certify** — that is the correct outcome, not a defect in the run.
+
 ### Unelevated runs are honest about what they cannot show
 
 With `-TrustedSid` gone, an unelevated process **cannot** build a fixture the
@@ -198,21 +218,137 @@ production trust set accepts: its filtered token has `BUILTIN\Administrators` as
 deny-only, so every directory it creates is owned by itself. Faking a principal to
 get around that is precisely the defect this revision removed.
 
-So an unelevated run proves every refusal path, the whole name and pin policy, the
-process-and-temp observation and the DOS-device chain bypass — and reports the
-seven properties that need the bootstrap to **accept** a chain and **install** as
-`NOT-RUN — ELEVATION REQUIRED`, with the command to complete them. Those rows are
-not quietly turned green.
+An unelevated run proves the refusal paths marked as executed in the coverage
+table below, the whole name and pin policy, the process-and-temp observation, the
+DOS-device chain bypass and the object-identity differential. It reports the seven
+properties that need the bootstrap to **accept** a chain and **install** as
+`BLOCKED_ELEVATION_REQUIRED`, each of which fails the gate.
 
-To complete them:
+To run all seven, open an **elevated** PowerShell (Run as administrator) and run
+exactly this:
 
 ```powershell
-# In an ELEVATED PowerShell (Run as administrator):
 cd <repo>
 python scripts\offline_bootstrap_guard.py --delete-mechanism
 ```
 
-The harness detects the elevated token itself (`CheckTokenMembership` against
-`S-1-5-32-544`); it does not take anybody's word for it. Elevated, the fixtures it
-creates are owned by `BUILTIN\Administrators`, which is in the production trust
-set — so no principal has to be invented for them to pass.
+That single command runs the whole table — `CTL-*`, `SCN-*`, `IDN-*` and all
+seven `ELV-*` rows — and then the deletion experiments. **There is no flag that
+asks for the ELV rows and no flag that skips them.** They run when, and only when,
+the harness finds an elevated token in its own process (`CheckTokenMembership`
+against `S-1-5-32-544`); it does not take anybody's word for it, and there is no
+argument that substitutes a principal. Elevated, the fixtures it creates are owned
+by `BUILTIN\Administrators`, which is in the production trust set — so no
+principal has to be invented for them to pass.
+
+Expected results when run elevated:
+
+| Row | Property | Expected |
+| --- | --- | --- |
+| `ELV-01` | a clean bundle installs; the harness reads the created root's owner, DACL and every installed byte back for itself | `OK` (0) |
+| `ELV-02` | a pre-created root is refused, not adopted | `ROOT_EXISTS` (40) |
+| `ELV-03` | a junction occupying the root name is refused, not written through | `ROOT_REPARSE` (42) |
+| `ELV-04` | an unsafe **inherited** ACL on the created root is refused before copying | `ROOT_UNSAFE_WRITABLE_ACE` (46) |
+| `ELV-05` | a file planted in the root during the copy is caught by the destination re-hash | `DESTINATION_MISMATCH` (51) |
+| `ELV-06` | the root replaced after the copy by a **byte-identical** twin is caught by object identity | `ROOT_IDENTITY_CHANGED` (52) |
+| `ELV-07` | a subdirectory name occupied mid-copy is refused, not written through | `COPY_DIRECTORY_OCCUPIED` (53) |
+
+`ELV-05`, `ELV-06` and `ELV-07` act inside the copy window. If the harness misses
+that window the row reports `INCONCLUSIVE`, which fails the gate — it never
+guesses in either direction.
+
+There is also `--elv-selftest`, which runs the seven bodies unelevated against a
+bootstrap **deliberately weakened to trust the current account**. That exists so
+whoever edits the harness can execute the scenario code; it is printed under its
+own banner, it never reaches the verdict, and **it is not evidence about the
+production bootstrap.**
+
+### Object identity
+
+The bootstrap records a node's identity as `volumeSerial:fileIndex`, read out of
+`BY_HANDLE_FILE_INFORMATION` at explicit offsets. The harness reads the same
+structure through its own `ctypes` declaration — two implementations of one
+concept, and until this revision no row compared them. It mattered: the bootstrap
+read `nNumberOfLinks` and `nFileIndexHigh` (offsets 40 and 44) instead of
+`nFileIndexHigh` and `nFileIndexLow` (44 and 48), discarding the only per-file
+unique field in the common case. Measured on one NTFS volume, 128
+concurrently-existing directories produced **128** distinct correct identities and
+**10** distinct identities under the old offsets.
+
+`IDN-01` compares the offsets in the pinned bytes against the harness's structure
+and fails on any disagreement. `IDN-02` measures the collapse above on live
+objects. `IDN-03` is the negative-control pair: a rename-swap must change the
+identity, and delete-and-recreate under the same name did change it on all 200
+trials — an observation about that volume, **not** a guarantee that NTFS never
+reuses a record number and sequence pair. `ELV-06` is the behavioural version and
+needs elevation.
+
+### Coverage: every refusal reason, executed or disclosed
+
+The taxonomy has 46 outcomes. Each one below is either executed by a named
+scenario or listed as `UNTESTED` with the reason it is not executed. There is no
+categorical coverage claim anywhere in this document, because the previous
+revision made one — "an unelevated run proves every refusal path" — and it was
+false: 10 outcomes were exercised and 36 were neither tested nor disclosed.
+
+This table is **generated** by `python scripts\offline_bootstrap_guard.py
+--coverage-table`, and `CTL-COVERAGE` fails the gate if what is pasted here is not
+byte-identical to what the code generates, so it cannot drift. `CTL-COVERAGE` also
+checks the harness's copy of the taxonomy against the taxonomy in the pinned
+bootstrap bytes.
+
+The `ELV-*` rows execute their outcome **only when the harness runs elevated**;
+`CTL-PROGFILES` reaches `OK` only when elevated and `ROOT_CREATE_FAILED`
+otherwise. Each run prints this same table with the verdict each scenario actually
+got, so a claimed outcome whose scenario was blocked reads as blocked.
+
+<!-- COVERAGE-TABLE:BEGIN -->
+| Code | Reason | Exercised by | If UNTESTED, why not |
+| --- | --- | --- | --- |
+| 0 | `OK` | CTL-PROGFILES, ELV-01 | - |
+| 10 | `ARGS_INVALID` | SCN-21 | - |
+| 11 | `UNEXPECTED_ERROR` | UNTESTED | the catch-all for a fault the bootstrap does not model; reaching it means the bootstrap has a bug, so there is no fixture for it by construction |
+| 12 | `NATIVE_INIT_FAILED` | UNTESTED | requires the CLR to refuse System.Reflection.Emit; no fixture can produce that without modifying the pinned file |
+| 19 | `SOURCE_NOT_ANCHORED` | UNTESTED | requires the source to canonicalise to something that is not a local volume-GUID path, i.e. an SMB/UNC path; publishing a share needs elevation and the harness will not fake one |
+| 20 | `SOURCE_MISSING` | SCN-22 | - |
+| 21 | `SOURCE_REPARSE` | SCN-16, SCN-23 | - |
+| 22 | `SOURCE_GIT_PATH` | SCN-17 | - |
+| 23 | `SOURCE_COLLISION` | SCN-15 | - |
+| 24 | `SOURCE_NAME_UNSAFE` | SCN-11, SCN-12, SCN-13, SCN-14 | - |
+| 25 | `BUNDLE_PIN_MISMATCH` | SCN-09 | - |
+| 26 | `SOURCE_UNREADABLE` | SCN-24 | - |
+| 27 | `SOURCE_EMPTY_DIRECTORY` | SCN-18 | - |
+| 28 | `MANIFEST_UNSORTED` | UNTESTED | an internal invariant, unreachable while the sort works; the SCN-10 deletion experiment reaches it by removing the sort |
+| 29 | `SOURCE_CANONICAL_UNRESOLVED` | UNTESTED | requires GetFinalPathNameByHandle to FAIL on a directory that opened successfully; no unelevated fixture for that was found |
+| 30 | `PARENT_MISSING` | SCN-25 | - |
+| 31 | `PARENT_REPARSE` | SCN-07 | - |
+| 32 | `PARENT_DACL_ABSENT` | SCN-26 | - |
+| 33 | `PARENT_ACE_UNINTERPRETABLE` | SCN-27 | - |
+| 34 | `PARENT_OWNER_UNTRUSTED` | CTL-OWNER, SCN-01, SCN-02, SCN-10, SCN-19 | - |
+| 35 | `PARENT_UNSAFE_WRITABLE_ACE` | SCN-03, SCN-04, SCN-05, SCN-06, SCN-20 | - |
+| 36 | `PARENT_NOT_ANCHORED` | UNTESTED | requires a canonical component carrying a trailing dot, trailing space or control character.  Measured on this platform: NTFS rejects control characters outright and GetFinalPathNameByHandle strips a trailing space from the name it returns, so no such component reaches the check |
+| 37 | `PARENT_CANONICAL_UNRESOLVED` | UNTESTED | same as SOURCE_CANONICAL_UNRESOLVED |
+| 38 | `PARENT_CHAIN_UNSTABLE` | UNTESTED | requires an ancestor to be replaced BETWEEN the leaf's resolution and the walk; the window is a few microseconds and the harness has no way to schedule inside it deterministically |
+| 40 | `ROOT_EXISTS` | ELV-02 | - |
+| 41 | `ROOT_CREATE_FAILED` | CTL-PROGFILES | - |
+| 42 | `ROOT_REPARSE` | ELV-03 | - |
+| 43 | `ROOT_DACL_ABSENT` | UNTESTED | the root inherits the parent's DACL, and a parent with a NULL DACL is refused at PARENT_DACL_ABSENT first (SCN-26), so the root branch is unreachable from outside |
+| 44 | `ROOT_ACE_UNINTERPRETABLE` | UNTESTED | same shape: the parent carrying the undecodable ACE is refused at PARENT_ACE_UNINTERPRETABLE first (SCN-27) |
+| 45 | `ROOT_OWNER_UNTRUSTED` | UNTESTED | the created root's owner comes from the creating token's default owner; making it untrusted while the parent stays trusted needs a token this harness will not fabricate |
+| 46 | `ROOT_UNSAFE_WRITABLE_ACE` | ELV-04 | - |
+| 47 | `ROOT_MISSING` | UNTESTED | requires the root to disappear between its creation and its verification - a race with no deterministic fixture |
+| 48 | `ROOT_NOT_ANCHORED` | UNTESTED | same as PARENT_NOT_ANCHORED |
+| 49 | `ROOT_CANONICAL_UNRESOLVED` | UNTESTED | same as SOURCE_CANONICAL_UNRESOLVED |
+| 50 | `COPY_FAILED` | UNTESTED | requires a source or destination open to fail mid-copy for a reason other than an occupied name; ELV-07 covers the occupied-name branch beside it |
+| 51 | `DESTINATION_MISMATCH` | ELV-05 | - |
+| 52 | `ROOT_IDENTITY_CHANGED` | ELV-06 | - |
+| 53 | `COPY_DIRECTORY_OCCUPIED` | ELV-07 | - |
+| 54 | `ROOT_CHAIN_UNSTABLE` | UNTESTED | requires the created root's canonical name to differ from the path it was created at - a race with no deterministic fixture |
+| 60 | `DESTINATION_MISSING` | UNTESTED | the destination family is reached only when the INSTALLED tree is hostile at re-hash time; this one needs the root to vanish inside that window |
+| 61 | `DESTINATION_REPARSE` | UNTESTED | needs a reparse point planted inside the root between the copy and the re-hash; ELV-05 plants a plain file in that window, ELV-07 plants a junction in the copy window, and neither lands in this one |
+| 62 | `DESTINATION_GIT_PATH` | UNTESTED | needs a '.git' component to appear inside the root between the copy and the re-hash |
+| 63 | `DESTINATION_COLLISION` | UNTESTED | needs two members differing only in ASCII case to appear inside the root between the copy and the re-hash, on a case-sensitive directory |
+| 64 | `DESTINATION_NAME_UNSAFE` | UNTESTED | needs a member with a name outside the portable alphabet to appear inside the root between the copy and the re-hash |
+| 66 | `DESTINATION_UNREADABLE` | UNTESTED | needs a member inside the root to become unreadable between the copy and the re-hash |
+| 67 | `DESTINATION_EMPTY_DIRECTORY` | UNTESTED | needs an empty directory to appear inside the root between the copy and the re-hash |
+<!-- COVERAGE-TABLE:END -->
