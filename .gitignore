@@ -1,6 +1,5 @@
 node_modules/
 dist/
-dist-redesign/
 .local_data/
 output/
 tmp/

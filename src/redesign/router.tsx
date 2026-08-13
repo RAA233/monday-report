@@ -41,9 +41,9 @@ import { useRouteAnnounce } from "./lib/useRouteAnnounce";
  *   /app/roadmap               committed product-roadmap record
  *   /app/*                     in-shell not found
  *
- * Deep-route refresh works because `vite.redesign.config.ts` rewrites non-asset
- * GETs to `/redesign.html` rather than letting Vite fall back to the v1 root
- * document.
+ * Deep-route refresh works because `vite.config.ts` rewrites non-asset GETs to
+ * `/index.html`, so a full document load of any `/app/*` URL re-enters this
+ * router with the URL intact.
  *
  * `WorkspaceProvider` wraps the /app subtree ONLY. Mounted above the whole router it
  * ran its authenticated probe on the public landing page, so visiting `/` sent five
