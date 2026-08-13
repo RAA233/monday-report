@@ -1104,6 +1104,30 @@ class Source(object):
             self.write(tail, b"tail\n")
         return self
 
+    def swap_bundle(self, big=48 * 1024 * 1024, small=8):
+        """ONE very large member the manifest orders FIRST, then small ones.
+
+        For the swap row, and only for it.  A directory swap takes TWO renames,
+        and between them the root's name belongs to nothing; whether that gap is
+        noticed depends entirely on how long the bootstrap spends between opens.
+        Measured on this machine with 400 tiny members the destination re-hash
+        opened one roughly every 0.9 ms - the same order as the rename pair - so
+        the gap was hit on most attempts and the row spent its whole retry budget
+        tripping over its own timing.
+
+        The shape below fixes that with arithmetic rather than luck.  The big
+        member sorts first, so the re-hash spends its first few hundred
+        milliseconds inside ONE read, and the small members mark the end of the
+        COPY so the harness knows precisely when to move.  The gap becomes a
+        fraction of a percent of the interval it has to miss.  Nothing about the
+        property changes: it is still a bundle, still copied, still re-hashed.
+        """
+        block = bytes(bytearray(range(256))) * 256          # 64 KiB
+        self.write("a0000.bin", block * max(1, big // len(block)))
+        for index in range(small):
+            self.write("b%04d.txt" % index, ("tail %04d\n" % index).encode("ascii"))
+        return self
+
     def pin(self, follow_reparse=False):
         return bundle_root_hash(self.path, follow_reparse)
 
@@ -3045,41 +3069,81 @@ def _root_identity_changed(base, image, work):
     """
     title = "the root replaced after the copy by an identical-content twin is caught"
 
-    # Swapping two directories takes TWO renames, and between them the root's
-    # name belongs to nothing.  If the bootstrap opens a member inside that gap
-    # it refuses as DESTINATION_UNREADABLE - a real refusal, but about the wrong
-    # thing, and reporting it as this property would be exactly the
-    # FAIL-WRONG-REASON trap the whole harness exists to avoid.  So the swap is
-    # timed into the MIDDLE of the destination re-hash rather than at its start,
-    # and a run that still lands in the gap is retried from a clean fixture.
-    # After the last attempt the row is INCONCLUSIVE, which fails the gate.
+    # TIMING, AND WHAT THE HARNESS MAY CONCLUDE FROM IT.
+    #
+    # The swap has to land in the window between the bootstrap capturing the
+    # root's identity (step 5) and re-reading it (step 8).  Two ways to miss it,
+    # and they must be reported differently:
+    #
+    #   TOO EARLY - swapping two directories takes TWO renames, and between them
+    #     the root's name belongs to nothing.  A member opened inside that gap
+    #     refuses as DESTINATION_UNREADABLE/_MISSING: a real refusal, about the
+    #     wrong thing.  Retried, never reported as this property.
+    #
+    #   TOO LATE - the swap completes after the bootstrap has already re-read the
+    #     identity, so the bootstrap exits 0 having seen nothing wrong.  An
+    #     earlier revision classified that as FAIL-NO-REFUSAL, whose printed
+    #     meaning is "accepted what it should have refused" - i.e. it accused the
+    #     bootstrap of a defect when what had actually happened is that the
+    #     harness lost its own race.  Measured over five observations it did that
+    #     on three of them.  A gate that cries wolf 60% of the time is worse than
+    #     no gate.
+    #
+    # THE HARNESS CANNOT SEE the instant of the bootstrap's identity read - it is
+    # an in-process comparison with no filesystem effect.  So it cannot order its
+    # swap against that read, and therefore MAY NOT claim the bootstrap accepted
+    # a swap it had the chance to catch.  Every exit-0 outcome here is reported
+    # INCONCLUSIVE: "the harness could not win this race", retried within the
+    # budget below, and if the budget runs out the row stays INCONCLUSIVE - which
+    # still blocks certification, so nothing is waved through.  The row can
+    # therefore prove the property (exit 52) but can never accuse on an exit 0.
+    # That asymmetry is deliberate and is the honest reading of what it observes.
+    #
+    # Winning the race is now the normal case, because detecting "the copy has
+    # finished" is cheap: the previous revision re-hashed all 400 installed
+    # members on EVERY poll iteration, which cost hundreds of milliseconds per
+    # poll and routinely put the swap on the far side of the identity read.  The
+    # probe below is one existence check on the member the manifest orders last.
     RACE_LOST = ("DESTINATION_UNREADABLE", "DESTINATION_MISSING", "COPY_FAILED",
-                 "DESTINATION_MISMATCH")
+                 "DESTINATION_MISMATCH", "OK")
     attempts = 5
     last = None
+    history = []
 
     for attempt in range(attempts):
         chain = elv_chain("elv-identity")
-        source = work.source().wide_bundle(members=400)
+        source = work.source().swap_bundle()
         root = chain.root()
         twin = chain.parent + "\\twin-" + uuid.uuid4().hex[:8]
         copy_tree_into(source.path, twin)
         displaced = chain.parent + "\\displaced-" + uuid.uuid4().hex[:8]
         expected_digests = tree_digests(source.path)
+        # The member the MANIFEST orders last is the last one copied, so its
+        # appearance means the copy is done.  Taken from the harness's own
+        # enumeration rather than from the fixture's naming convention.
+        last_relative = sorted(enumerate_bundle(source.path),
+                               key=lambda m: m["folded"])[-1]["relative"]
         state = {}
 
-        def swap(_process, state=state, root=root, twin=twin, displaced=displaced,
-                 expected_digests=expected_digests):
+        def swap(process, state=state, root=root, twin=twin, displaced=displaced,
+                 last_relative=last_relative):
             def run():
-                if not wait_until(lambda: tree_digests(root) == expected_digests,
-                                  timeout=600.0):
+                sentinel = root + "\\" + last_relative.replace("/", "\\")
+                if not wait_until(lambda: exists(root), timeout=600.0):
                     return
-                # Let the destination re-hash get well under way.  At the instant
-                # the copy finishes the bootstrap is about to open the ROOT
-                # itself, which is the worst possible moment to take its name
-                # away; a quarter of a second later it is somewhere in the middle
-                # of the member list.
-                time.sleep(0.25)
+                started = time.time()
+                if not wait_until(lambda: exists(sentinel), timeout=600.0):
+                    return
+                # The sentinel is the member the MANIFEST orders LAST, so its
+                # appearance means the copy is over and the destination re-hash
+                # is about to begin.  The re-hash opens the ROOT first, and that
+                # is the one moment when taking the root's name away is certain
+                # to be noticed - so wait past it, but only just.  The bundle is
+                # shaped (swap_bundle) so that the re-hash then spends hundreds
+                # of milliseconds inside ONE large member, which is the interval
+                # this swap has to land in.
+                state["copy_seconds"] = time.time() - started
+                time.sleep(0.03)
                 state["original"] = object_identity(root)
                 state["twin"] = object_identity(twin)
                 for _retry in range(2000):
@@ -3091,14 +3155,18 @@ def _root_identity_changed(base, image, work):
                         continue
                     os.rename(long_path(twin), long_path(root))
                     state["swapped_at"] = time.time()
+                    state["alive_at_swap"] = process.poll() is None
                     return
             thread = threading.Thread(target=run, daemon=True)
             thread.start()
             state["thread"] = thread
 
         result = launch(image, chain.args(source), on_running=swap)
+        finished_at = time.time()
         if "thread" in state:
             state["thread"].join(timeout=60)
+        history.append(result.reason)
+
         if "swapped_at" not in state:
             last = Result("ELV-06", title, "ROOT_IDENTITY_CHANGED", result, [],
                           note="INCONCLUSIVE: the swap never completed inside the run "
@@ -3124,19 +3192,38 @@ def _root_identity_changed(base, image, work):
              % result.code, result.code != 0),
         ]
         last = Result("ELV-06", title, "ROOT_IDENTITY_CHANGED", result, checks)
+
+        if result.reason == "OK":
+            # The swap completed and the bootstrap still exited 0.  The harness
+            # cannot say whether its swap preceded the identity read, so it says
+            # so, rather than choosing the interpretation that blames the file it
+            # is testing.
+            when = ("AFTER the bootstrap process had already exited"
+                    if state["swapped_at"] > finished_at or not state["alive_at_swap"]
+                    else "while the bootstrap was still running, but the harness cannot "
+                         "order it against an in-process comparison it cannot observe")
+            last.note = ("INCONCLUSIVE: the harness could not win the race - its swap "
+                         "completed %s, so this run did not put the property to the "
+                         "test.  It is NOT evidence that the bootstrap accepted the "
+                         "swap." % when)
+            last.verdict = last._classify()
+            continue
+
         if last.verdict == "PASS" or result.reason not in RACE_LOST:
             if attempt:
-                last.note = ("the swap landed inside the re-hash on attempt %d of %d; "
-                             "earlier attempts fell in the two-rename gap and were "
-                             "discarded rather than reported"
-                             % (attempt + 1, attempts))
+                last.note = ("the swap landed inside the window on attempt %d of %d; "
+                             "earlier attempts (%s) missed it and were discarded rather "
+                             "than reported"
+                             % (attempt + 1, attempts, ", ".join(history[:-1])))
             return last
 
     if last is not None and not last.note.startswith("INCONCLUSIVE"):
-        last.note = ("INCONCLUSIVE: %d attempts all landed in the gap between the two "
-                     "renames, so the refusal observed (%s) is about the gap and not "
-                     "about object identity" % (attempts, last.observed))
+        last.note = ("INCONCLUSIVE: %d attempts all missed the window (%s), so the "
+                     "outcome observed is about the harness's timing and not about "
+                     "object identity" % (attempts, ", ".join(history)))
         last.verdict = last._classify()
+    elif last is not None:
+        last.note += "  [%d attempts, all missed: %s]" % (attempts, ", ".join(history))
     return last
 
 
@@ -3213,11 +3300,13 @@ ELEVATED_COMMAND = (
     "    python scripts\\offline_bootstrap_guard.py --delete-mechanism\n"
     "\n"
     "That single command runs the WHOLE table - CTL-*, SCN-*, IDN-* and all seven\n"
-    "ELV-* rows - and then the deletion experiments.  No flag SELECTS the ELV rows:\n"
-    "they run when, and only when, the harness finds an elevated token in its OWN\n"
-    "process (CheckTokenMembership against S-1-5-32-544).  It takes nobody's word for\n"
-    "that, and there is no argument that substitutes a principal.\n"
-    "--only DOES narrow the table and can therefore leave the ELV rows out - so a\n"
+    "ELV-* rows - and then the deletion experiments.  NO FLAG SUBSTITUTES FOR THE\n"
+    "ELEVATED TOKEN: the ELV bodies run when, and only when, the harness finds\n"
+    "BUILTIN\\Administrators in its OWN process token (CheckTokenMembership against\n"
+    "S-1-5-32-544).  It takes nobody's word for that, and no argument supplies a\n"
+    "principal.  (--only ELV SELECTS those rows, but unelevated they are still only\n"
+    "REPORTED as BLOCKED - selecting a row is not running it.)\n"
+    "--only also narrows the table and can leave the ELV rows out entirely, so a\n"
     "filtered run computes NO verdict, prints FILTERED RUN - NOT A CERTIFICATION and\n"
     "exits non-zero however its rows turn out.  Run the command above WITHOUT --only.\n"
     "Elevated, the fixtures it creates are owned by BUILTIN\\Administrators, which is\n"
@@ -3796,6 +3885,17 @@ def exit_note(code):
 
 
 def print_table(results, show_stdout=False):
+    if not results:
+        # A filter that matches nothing.  The old code took max() over an empty
+        # sequence and died with an uncaught ValueError BEFORE the filtered-run
+        # banner could print, so the one invocation that most needs to say "this
+        # ran nothing" was the one that said nothing at all.
+        print()
+        print("SCENARIO TABLE  (the acceptance oracle)")
+        print("  EMPTY - the filter matched no scenario, so nothing ran and nothing")
+        print("  below is evidence of anything.")
+        print()
+        return
     width = max(len(r.id) for r in results)
     print()
     print("SCENARIO TABLE  (the acceptance oracle)")
@@ -3985,13 +4085,29 @@ def main():
         print("  process exits non-zero however the selected rows turn out.  --only is")
         print("  for working on one scenario, never for producing evidence.")
     if not ELEVATED:
+        elv_here = [s["id"] for s in SCENARIOS
+                    if s["elevation"] and args.only.lower() in s["id"].lower()]
         print()
         print("  UNELEVATED RUN.  It proves the refusal paths listed in the coverage table")
         print("  below - not 'every refusal path'; the table says exactly which and which")
-        print("  not.  The seven properties that need the bootstrap to ACCEPT a chain and")
-        print("  INSTALL are reported BLOCKED_ELEVATION_REQUIRED and are NOT faked, and")
-        print("  BECAUSE THEY ARE BLOCKED AN UNFILTERED UNELEVATED RUN CANNOT CERTIFY.")
-        print("  That is the correct outcome for an unelevated run, not a defect in it.")
+        print("  not.")
+        if len(elv_here) == 7:
+            print("  The seven properties that need the bootstrap to ACCEPT a chain and")
+            print("  INSTALL are reported BLOCKED_ELEVATION_REQUIRED and are NOT faked, and")
+            print("  BECAUSE THEY ARE BLOCKED AN UNFILTERED UNELEVATED RUN CANNOT CERTIFY.")
+            print("  That is the correct outcome for an unelevated run, not a defect in it.")
+        elif elv_here:
+            print("  The filter selected %d of the 7 properties that need the bootstrap to"
+                  % len(elv_here))
+            print("  ACCEPT a chain and INSTALL (%s); those are reported"
+                  % ", ".join(elv_here))
+            print("  BLOCKED_ELEVATION_REQUIRED and are NOT faked.  The other %d are not in"
+                  % (7 - len(elv_here)))
+            print("  this run at all.")
+        else:
+            print("  The filter selected NONE of the 7 properties that need the bootstrap to")
+            print("  ACCEPT a chain and INSTALL, so no BLOCKED row appears below and this")
+            print("  run says nothing whatever about them.")
 
     base = str(Path(os.path.abspath(os.sep)) / ("mr-bootstrap-guard-" + uuid.uuid4().hex[:10]))
     os.makedirs(long_path(base), exist_ok=False)

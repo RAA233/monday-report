@@ -185,9 +185,12 @@ python scripts\offline_bootstrap_guard.py --coverage-table    # the coverage tab
 python scripts\offline_bootstrap_guard.py --only SCN-15       # ONE scenario; never certifies
 ```
 
-Only the first two forms produce a verdict. `--only` filters the table, and a
-filtered run is structurally incapable of certifying the whole: it prints
-`FILTERED RUN — NOT A CERTIFICATION` and exits non-zero regardless of its rows.
+`--coverage-table` prints the table and exits without running anything.
+`--only` filters the table, and a filtered run is structurally incapable of
+certifying the whole: it prints `FILTERED RUN — NOT A CERTIFICATION` and exits
+non-zero regardless of its rows — including when the filter matches nothing.
+**Every other form, `--show-stdout` and `--delete-mechanism` included, runs the
+whole table and produces a verdict.**
 
 It treats the bootstrap as an opaque binary: it hashes the file, refuses to launch
 anything whose hash does not match, and forms every verdict from the exit code
@@ -247,10 +250,13 @@ python scripts\offline_bootstrap_guard.py --delete-mechanism
 ```
 
 That single command runs the whole table — `CTL-*`, `SCN-*`, `IDN-*` and all
-seven `ELV-*` rows — and then the deletion experiments. **No flag selects the ELV
-rows.** They run when, and only when, the harness finds an elevated token in its
-own process (`CheckTokenMembership` against `S-1-5-32-544`); it does not take
-anybody's word for it, and there is no argument that substitutes a principal.
+seven `ELV-*` rows — and then the deletion experiments. **No flag substitutes for
+the elevated token.** The ELV bodies run when, and only when, the harness finds
+`BUILTIN\Administrators` in its own process token (`CheckTokenMembership` against
+`S-1-5-32-544`); it does not take anybody's word for it, and no argument supplies a
+principal. (`--only ELV` does *select* those rows, but unelevated they are still
+only *reported* as `BLOCKED_ELEVATION_REQUIRED` — selecting a row is not running
+it.)
 Elevated, the fixtures it creates are owned by `BUILTIN\Administrators`, which is
 in the production trust set — so no principal has to be invented for them to pass.
 
@@ -272,9 +278,38 @@ Expected results when run elevated:
 | `ELV-06` | the root replaced after the copy by a **byte-identical** twin is caught by object identity | `ROOT_IDENTITY_CHANGED` (52) |
 | `ELV-07` | a subdirectory name occupied mid-copy is refused, not written through | `COPY_DIRECTORY_OCCUPIED` (53) |
 
-`ELV-05`, `ELV-06` and `ELV-07` act inside the copy window. If the harness misses
-that window the row reports `INCONCLUSIVE`, which fails the gate — it never
-guesses in either direction.
+`ELV-05`, `ELV-06` and `ELV-07` act inside a window during the bootstrap's run,
+and a harness that misses its window must not blame the bootstrap for it.
+
+`ELV-06` is the hard one: it swaps a byte-identical twin onto the root's name
+between the bootstrap capturing the root's identity and re-reading it. Miss that
+window **early** — in the gap between the two renames a directory swap needs — and
+a member opened there refuses as `DESTINATION_UNREADABLE`. Miss it **late** and the
+bootstrap has already re-read the identity and exits `OK`. The harness **cannot
+see** the instant of that re-read: it is an in-process comparison with no
+filesystem effect. So it may not claim the bootstrap accepted a swap it had the
+chance to catch, and **every exit-0 outcome here is reported `INCONCLUSIVE`** —
+"the harness could not win this race" — never `FAIL-NO-REFUSAL`. An earlier
+revision did print `FAIL-NO-REFUSAL`, whose stated meaning is "accepted what it
+should have refused"; measured over five runs it said that on three of them, about
+a bootstrap that had done nothing wrong.
+
+The row retries from a clean fixture up to **5 times**. If all five miss, it stays
+`INCONCLUSIVE`, which **fails the gate** — the operator is told the experiment
+could not be run, not that the bootstrap is broken. `ELV-06` can therefore prove
+the property (exit 52) but can never accuse on an exit 0; that asymmetry is
+deliberate. `ELV-05` and `ELV-07` report `INCONCLUSIVE` if their plant never lands
+in the copy window.
+
+Missing the window is now rare rather than normal, because the row's bundle is
+*shaped* for it instead of relying on luck: one large member the manifest orders
+first, so the destination re-hash spends hundreds of milliseconds inside a single
+read, and several small members at the end so the harness knows precisely when the
+copy finished. The interval the two renames must fit inside went from about a
+millisecond to a few hundred. Measured after the fix: **10 of 10 observations
+`PASS`** (one needed a second attempt), **0 `FAIL-NO-REFUSAL`**, **0
+`INCONCLUSIVE`**. Before it: 5 observations gave `PASS, FAIL-NO-REFUSAL, PASS,
+FAIL-NO-REFUSAL, FAIL-NO-REFUSAL`.
 
 There is also `--elv-selftest`, which runs the seven bodies unelevated against a
 bootstrap **deliberately weakened to trust the current account**. That exists so
@@ -292,11 +327,16 @@ read `nNumberOfLinks` and `nFileIndexHigh` (offsets 40 and 44) instead of
 `nFileIndexHigh` and `nFileIndexLow` (44 and 48), discarding the only per-file
 unique field in the common case. Measured on one NTFS volume, 128
 concurrently-existing directories produced **128** distinct correct identities and
-**10** distinct identities under the old offsets.
+**around ten** distinct identities under the old offsets — an illustrative figure,
+not a constant. How far the old formula collapses depends on the volume and on how
+its MFT records happen to be laid out; observations range from about ten to about
+twenty. What does not vary is the direction.
 
 `IDN-01` compares the offsets in the pinned bytes against the harness's structure
 and fails on any disagreement. `IDN-02` measures the collapse above on live
-objects. `IDN-03` is the negative-control pair: a rename-swap must change the
+objects and **prints what it measured on the machine in front of you**, rather
+than asking you to trust a figure from somewhere else. `IDN-03` is the
+negative-control pair: a rename-swap must change the
 identity, and delete-and-recreate under the same name did change it on all 200
 trials — an observation about that volume, **not** a guarantee that NTFS never
 reuses a record number and sequence pair. `ELV-06` is the behavioural version and

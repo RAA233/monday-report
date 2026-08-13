@@ -292,15 +292,23 @@ $ERROR_ALREADY_EXISTS           = 183
 #   44  nFileIndexHigh          DWORD
 #   48  nFileIndexLow           DWORD
 #
-# Total size 52.  An earlier revision of this comment said "index high 40, index
-# low 44" while still giving the correct total, and the code below read those two
-# offsets - so the recorded identity was
+# The STRUCTURE is 52 bytes.  An earlier revision of this comment said "index
+# high 40, index low 44" while still giving the correct total, and the code below
+# read those two offsets - so the recorded identity was
 # volumeSerial:(nNumberOfLinks << 32 | nFileIndexHigh), which throws away
 # nFileIndexLow, the only field that distinguishes two files whose MFT records
-# share a high word.  Measured on this repository's guard: 128 concurrently
-# existing directories produced 128 distinct correct identities and only 10
-# distinct identities under the old offsets.  nNumberOfLinks is not read at all
-# any more; it is listed here only so the arithmetic is checkable by eye.
+# share a high word.  The guard measures the collapse on 128 concurrently
+# existing directories: the correct identity separates all 128, the old offsets
+# separate only a handful.  How small that handful is depends on the volume and
+# on how its MFT records happen to be laid out - observations range from about
+# ten to about twenty - so no fixed figure is quoted here; the guard prints what
+# it measured on the machine in front of you.  nNumberOfLinks is not read at all
+# any more; it is listed above only so the arithmetic is checkable by eye.
+#
+# $BHFI_SIZE is the BUFFER, not the structure: 64 bytes, deliberately larger than
+# the 52 the structure needs, so a future Windows that appends a field cannot
+# make GetFileInformationByHandle write past the end of it.  The reads below name
+# their offsets explicitly and never depend on this number.
 $BHFI_SIZE = 64
 
 # WIN32_FIND_DATAW: dwFileAttributes 0; cFileName (260 WCHARs) at 44; total 592.
