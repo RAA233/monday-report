@@ -168,7 +168,11 @@ by an assertion.
 pnpm run audit:offline:windows                                  # the gate
 python scripts/offline_bootstrap_guard.py --delete-mechanism    # self-review
 python scripts/offline_bootstrap_guard.py --only SCN-10 --keep  # one scenario
+python scripts/offline_bootstrap_guard.py --show-stdout         # what it printed
 ```
+
+`--show-stdout` prints what the bootstrap wrote, clearly labelled as recorded but
+not evidence. No assertion in the harness reads it.
 
 `audit:offline:windows` is a **separate** gate. It is deliberately not part of
 `audit:all`, which must stay portable.
@@ -183,6 +187,29 @@ refuses an unelevated create.
 `--delete-mechanism` disables each scenario's mechanism in a temporary copy and
 requires the outcome to flip. It is self-review evidence, not the acceptance
 oracle; the acceptance oracle is the scenario table.
+
+## Known residuals
+
+Stated here so you do not have to discover them.
+
+1. **The last observation is step 8.** Once the script exits 0, nothing in it
+   protects the root any more. It tells you the root was correct at the moment it
+   stopped looking, not that it is correct now.
+2. **Enumeration walks by path.** A directory whose non-reparse state was read
+   from a handle is re-opened by path when its entries are listed, so it could in
+   principle be swapped in between. On the source side the pin covers it: any
+   substituted content changes the root hash. On the destination side the
+   create-or-refuse subdirectory rule covers the copy and the re-hash plus the
+   identity check cover the rest.
+3. **The source path's ACLs are not judged** — deliberate; see above.
+4. **`-TrustedSid` can still name a non-admin principal.** Open groups are
+   refused, but a named account is not second-guessed. It is your parameter and
+   your judgement.
+5. **An empty directory makes a bundle unpinnable.** If a release legitimately
+   needs one, the pre-image has to grow to carry directories, and the copy has to
+   reproduce them; today the answer is a refusal rather than a silent omission.
+6. **`Add-Type` under PowerShell 5.1 starts the framework C# compiler** — see
+   above.
 
 ## Not in scope for Phase 1
 

@@ -18,9 +18,9 @@ Every verdict below is formed from two things only:
      `GetFileAttributesW`, and object identity read here through
      `GetFileInformationByHandle`.
 
-The bootstrap's stdout is captured so a human can read it, and is never consulted
-by any assertion.  If a scenario's only available evidence were the bootstrap's
-own text, that scenario would not be listed as covered.
+The bootstrap's stdout is captured so a human can read it (`--show-stdout`), and
+is never consulted by any assertion.  If a scenario's only available evidence
+were the bootstrap's own text, that scenario would not be listed as covered.
 
 WHY THE REASON MATTERS AS MUCH AS THE REFUSAL
 ---------------------------------------------
@@ -1084,6 +1084,40 @@ def _empty_directory(base, image):
                   "SOURCE_EMPTY_DIRECTORY", result, checks)
 
 
+@scenario("SCN-17",
+          mechanism="every component of the chain is judged, not just the leaf "
+                    "(redirect-class rights anywhere upstream defeat a leaf nobody can write)",
+          mutations=("chain_leaf_only",))
+def _unsafe_grandparent(base, image):
+    """Answers the self-review question 'does any refusal key to fewer operands
+    than the damage?' with a test rather than a claim: the ACE is planted TWO
+    levels above the root, on a directory that is not the leaf of any check."""
+    fx = Fixture(base, "scn-17")
+    remove_tree(fx.parent)
+    mid = fx.dir + "\\mid"
+    ensure_dir(long_path(mid))
+    fx.parent = mid + "\\parent"
+    ensure_dir(long_path(fx.parent))
+    fx.small_bundle()
+    # DELETE for Everyone on 'mid' ONLY: not inheritable, so neither the parent
+    # nor the root carries it.  Everyone can rename 'mid' out from under an
+    # otherwise impeccable parent and root.
+    apply_sddl_dacl(mid, HARDENED + "(A;;SD;;;WD)")
+    result = launch(image, fx.args())
+    mid_sddl = security_descriptor_sddl(mid) or ""
+    parent_sddl = security_descriptor_sddl(fx.parent) or ""
+    checks = [
+        ("harness reads the grandparent DACL and finds the Everyone delete ACE",
+         ";WD)" in mid_sddl),
+        ("harness confirms the ACE is NOT on the parent, so only a full-chain check can see it",
+         ";WD)" not in parent_sddl),
+        ("harness sees no root created", not exists(fx.root())),
+    ]
+    return Result("SCN-17",
+                  "an unsafe ACE two levels above the root is refused",
+                  "PARENT_UNSAFE_WRITABLE_ACE", result, checks)
+
+
 @scenario("SCN-16",
           mechanism="deterministic ordinal sort of the manifest, over a tree whose "
                     "depth-first order differs from its sorted order at every level",
@@ -1211,6 +1245,14 @@ MUTATIONS = {
         "    for ($i = 0; $i -lt $rows.Count; $i++) { $sorted[$i] = $index[$keys[$i]] }",
         "    for ($i = 0; $i -lt $rows.Count; $i++) { $sorted[$i] = $rows[$i] }",
     ),
+    # Reduces the chain check to the leaf - the defect that killed the third
+    # attempt at this problem: it checked the leaf while adopting the parent.
+    "chain_leaf_only": (
+        "            if ($null -ne $problem) {\n"
+        "                Deny -Reason ($Prefix + '_' + $problem.Kind) -Detail \"$full component=$($problem.Detail)\"",
+        "            if ($isFinal -and $null -ne $problem) {\n"
+        "                Deny -Reason ($Prefix + '_' + $problem.Kind) -Detail \"$full component=$($problem.Detail)\"",
+    ),
     "trim_name_check": (
         """    if ((Get-TrimmedComponent -Component $Component) -ne $Component) {""",
         """    if ($false) {""",
@@ -1246,7 +1288,7 @@ def exit_note(code):
     return "" if code is None else " (exit %d)" % code
 
 
-def print_table(results):
+def print_table(results, show_stdout=False):
     width = max(len(r.id) for r in results)
     print()
     print("SCENARIO TABLE")
@@ -1272,6 +1314,10 @@ def print_table(results):
             print("        note: %s" % r.note)
         if r.launch.note:
             print("        launch: %s" % r.launch.note)
+        if show_stdout and r.launch.stdout:
+            print("        --- bootstrap stdout, RECORDED BUT NOT EVIDENCE ---")
+            for line in r.launch.stdout.splitlines():
+                print("        | %s" % line)
     print()
 
 
@@ -1281,6 +1327,8 @@ def main():
                         help="self-review: disable each mechanism in a copy and require a flip")
     parser.add_argument("--only", default="", help="run only scenarios whose id contains this")
     parser.add_argument("--keep", action="store_true", help="do not delete the fixture tree")
+    parser.add_argument("--show-stdout", action="store_true",
+                        help="print what the bootstrap printed; it is never an assertion input")
     args = parser.parse_args()
 
     if os.name != "nt":
@@ -1313,7 +1361,7 @@ def main():
                 print("FAIL: the bootstrap changed on disk mid-run; refusing to continue")
                 return 1
             results.append(spec["run"](base, image))
-        print_table(results)
+        print_table(results, show_stdout=args.show_stdout)
         failures += sum(0 if r.ok else 1 for r in results)
 
         if args.delete_mechanism:
