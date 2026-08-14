@@ -45,8 +45,9 @@ exports. Local-AI-first, tenant-scoped, fail-closed.
 - `pnpm run test:ui` (= `test:ui-redesign`, `scripts/ui_redesign_e2e.mjs`) — UI
   gate; refuses the live stack (needs isolated state/ports). See [[monday-report-testing]].
 - `pnpm run test:e2e` — `scripts/e2e_mvp.py` upload→worker→export pipeline.
-- `pnpm run audit:all` — the full guard chain (build/e2e/security/persistence/
-  readiness/GA-gap). Run after meaningful changes.
+- `pnpm run audit:all` — the full guard chain (e2e/security/persistence/
+  readiness/GA-gap). It does NOT run `build`; run `pnpm run build` separately.
+  Run both after meaningful changes.
 - `pnpm run ga:readiness` (strict) / `audit:ga-readiness` — GA gate. See
   [[monday-report-release-ga]].
 

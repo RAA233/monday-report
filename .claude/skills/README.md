@@ -28,8 +28,8 @@ Skills reference each other with `[[skill-name]]`. Start with
 | Host/Docker, capacity, Admin/Windows human steps, secrets, runbooks | `monday-report-ops` | Operator boundaries; no host repair/cleanup without authorization. |
 | Anything possibly partner-status / protected / off-limits | `monday-report-protected-files` | Never access; only state non-access. Operator supplies paths. |
 
-(That table lists 13 rows for the 14 skills; the 14th, `monday-report-protected-files`,
-governs all of them — consult it whenever a path might be protected.)
+All 14 project skills appear above. `monday-report-protected-files` also governs
+every other skill — consult it whenever a path might be protected.
 
 ## Project ↔ user-level skill pairings
 
