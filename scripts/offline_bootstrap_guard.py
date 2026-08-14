@@ -3049,6 +3049,136 @@ def _destination_mismatch(base, image, work):
                   "DESTINATION_MISMATCH", result, checks)
 
 
+# The refusal shapes that mean "the harness lost its own race", NOT "the
+# bootstrap has a defect".  Lifted to module scope so the ELV-06 retry gate and
+# the deterministic classification self-test share ONE definition and cannot
+# drift apart.  Two families land here:
+#
+#   * steps 6-7 - the swap caught the destination mid-copy or mid-re-hash:
+#     DESTINATION_UNREADABLE / DESTINATION_MISSING (a member opened in the gap
+#     between the two renames), COPY_FAILED, DESTINATION_MISMATCH; and OK, the
+#     swap that finished only AFTER the identity read (see the timing note in
+#     the scenario body).
+#
+#   * step 8 - the swap landed while Assert-CanonicalChain re-walked the root
+#     chain (Invoke-OfflineBootstrap.ps1 lines 1531-1536).  The rename pair takes
+#     the root's name away and then gives it to the twin; caught in that gap the
+#     chain walk emits ROOT_MISSING (ps1:953/958), ROOT_CANONICAL_UNRESOLVED
+#     (ps1:962) or ROOT_CHAIN_UNSTABLE (ps1:965).  Before these three were listed
+#     here a step-8 race loss was reported as FAIL-WRONG-REASON - the harness
+#     accusing the bootstrap of a defect when it had merely lost its own race,
+#     with no retry.
+#
+# ROOT_IDENTITY_CHANGED is deliberately ABSENT: it is the genuine result this row
+# exists to prove (exit 52), never a race artifact.  ROOT_NOT_ANCHORED and the
+# Test-NodeSecurity kinds are absent too: renaming a real local directory into
+# the name cannot produce them, so they are not step-8 race artifacts.
+SWAP_RACE_LOST_REASONS = (
+    "DESTINATION_UNREADABLE", "DESTINATION_MISSING", "COPY_FAILED",
+    "DESTINATION_MISMATCH", "OK",
+    "ROOT_MISSING", "ROOT_CANONICAL_UNRESOLVED", "ROOT_CHAIN_UNSTABLE",
+)
+
+
+def swap_attempt_settled(verdict, reason):
+    """True when an ELV-06 attempt is a FINAL result to return, False when it is
+    a race loss to retry.
+
+    A PASS (the genuine ROOT_IDENTITY_CHANGED) is always final; any other outcome
+    is final only if its reason is NOT a race artifact.  Extracted from the retry
+    gate so the loop below and swap_classification_selftest() drive exactly the
+    same decision over exactly the same SWAP_RACE_LOST_REASONS.
+    """
+    return verdict == "PASS" or reason not in SWAP_RACE_LOST_REASONS
+
+
+def swap_classification_selftest():
+    """Deterministic, elevation-free proof of the ELV-06 race classification.
+
+    ELV-06's real body needs an elevated token and must WIN a filesystem race, so
+    it can never be a deterministic acceptance row - unelevated it is reported
+    BLOCKED.  This routine instead drives the EXACT production decision (the real
+    Result classifier, the real counts_as_failure, and the real
+    swap_attempt_settled gate over SWAP_RACE_LOST_REASONS) with synthesised launch
+    outcomes, so the three properties below hold identically on every invocation.
+
+    It adds NO scenario row and touches NO filesystem, so it cannot perturb the
+    scenario tally; it fails CLOSED - any broken property is returned as a
+    failure the caller folds into the certification count.  Returns the number of
+    failed properties (0 when all hold).
+    """
+    failed = [0]
+
+    def record(ok, description):
+        if not ok:
+            failed[0] += 1
+        print("    [%s] %s" % ("ok" if ok else "FAIL", description))
+
+    expected = "ROOT_IDENTITY_CHANGED"
+
+    def outcome(code, note="", checks_ok=True):
+        launch = Launch(code, "", True)
+        checks = [("synthetic evidence check", checks_ok)]
+        return Result("ELV-06", "identity classification self-test", expected,
+                      launch, checks, note=note)
+
+    print("SWAP CLASSIFICATION SELF-TEST  (ELV-06 race gate, deterministic)")
+    print("  Not a scenario row and not on the filesystem: it drives the real")
+    print("  classifier + retry gate with synthesised outcomes so the race")
+    print("  taxonomy is proven the same way on every run.")
+
+    # (a) the genuine result - the identical-content twin is caught, exit 52.
+    genuine = outcome(52)
+    record(genuine.launch.reason == expected,
+           "(a) exit 52 reads back as %s" % expected)
+    record(genuine.verdict == "PASS",
+           "(a) a genuine identity change is a PASS (got %s)" % genuine.verdict)
+    record(not genuine.counts_as_failure,
+           "(a) a PASS does not count against certification")
+    record(swap_attempt_settled(genuine.verdict, genuine.launch.reason),
+           "(a) the retry gate returns the genuine PASS immediately")
+    record("ROOT_IDENTITY_CHANGED" not in SWAP_RACE_LOST_REASONS,
+           "(a) the genuine result is never itself treated as a race loss")
+
+    # (b) a late swap caught in step 8 - each of the three chain-walk shapes is a
+    #     race loss the gate RETRIES within budget, never a defect it reports.
+    for code, name in ((47, "ROOT_MISSING"), (49, "ROOT_CANONICAL_UNRESOLVED"),
+                       (54, "ROOT_CHAIN_UNSTABLE")):
+        mid = outcome(code)
+        record(mid.launch.reason == name,
+               "(b) exit %d reads back as %s" % (code, name))
+        record(name in SWAP_RACE_LOST_REASONS,
+               "(b) %s is classified as a step-8 race artifact" % name)
+        record(not swap_attempt_settled(mid.verdict, mid.launch.reason),
+               "(b) a non-final %s consumes a retry instead of being returned" % name)
+        record(mid.verdict != "PASS",
+               "(b) %s is never mistaken for a PASS (got %s)" % (name, mid.verdict))
+
+    # (c) all five attempts race-lost - the post-loop fallback the scenario body
+    #     applies (INCONCLUSIVE note, re-classify) yields INCONCLUSIVE, which
+    #     counts as a certification FAILURE and can never be a pass.
+    exhausted = outcome(47)
+    record(not swap_attempt_settled(exhausted.verdict, exhausted.launch.reason),
+           "(c) the fifth race-lost attempt is still not a returnable result")
+    exhausted.note = ("INCONCLUSIVE: %d attempts all missed the window (%s)"
+                      % (5, ", ".join(["ROOT_MISSING"] * 5)))
+    exhausted.verdict = exhausted._classify()
+    record(exhausted.verdict == "INCONCLUSIVE",
+           "(c) an exhausted race settles as INCONCLUSIVE (got %s)" % exhausted.verdict)
+    record(exhausted.counts_as_failure,
+           "(c) an exhausted-race INCONCLUSIVE counts as a certification FAILURE")
+
+    # regression: the pre-existing step 6-7 race artifacts stay in the set.
+    for legacy in ("DESTINATION_UNREADABLE", "DESTINATION_MISSING", "COPY_FAILED",
+                   "DESTINATION_MISMATCH", "OK"):
+        record(legacy in SWAP_RACE_LOST_REASONS,
+               "the pre-existing race artifact %s is retained" % legacy)
+
+    print("  swap classification self-test: %s (%d checks failed)"
+          % ("PASS" if failed[0] == 0 else "FAIL", failed[0]))
+    return failed[0]
+
+
 @scenario("ELV-06", elevation=True,
           mechanism="the root's object identity is captured when it is verified and "
                     "re-read at the end; a replacement with identical CONTENT is caught "
@@ -3104,8 +3234,12 @@ def _root_identity_changed(base, image, work):
     # members on EVERY poll iteration, which cost hundreds of milliseconds per
     # poll and routinely put the swap on the far side of the identity read.  The
     # probe below is one existence check on the member the manifest orders last.
-    RACE_LOST = ("DESTINATION_UNREADABLE", "DESTINATION_MISSING", "COPY_FAILED",
-                 "DESTINATION_MISMATCH", "OK")
+    #
+    # The set of reasons that mean "the harness lost this race" is the module
+    # constant SWAP_RACE_LOST_REASONS - shared with the deterministic
+    # classification self-test so the taxonomy has ONE definition.  It now
+    # includes the step-8 chain-walk shapes (ROOT_MISSING / _CANONICAL_UNRESOLVED
+    # / _CHAIN_UNSTABLE) as well as the step 6-7 shapes.
     attempts = 5
     last = None
     history = []
@@ -3209,7 +3343,7 @@ def _root_identity_changed(base, image, work):
             last.verdict = last._classify()
             continue
 
-        if last.verdict == "PASS" or result.reason not in RACE_LOST:
+        if swap_attempt_settled(last.verdict, result.reason):
             if attempt:
                 last.note = ("the swap landed inside the window on attempt %d of %d; "
                              "earlier attempts (%s) missed it and were discarded rather "
@@ -4123,6 +4257,13 @@ def main():
           % (sorted(HOST.raw_processes.values()) or "none", HOST.raw_artifacts or "none"))
 
     failures = 0
+    # Deterministic, elevation-free proof of the ELV-06 race classification.  It
+    # adds no scenario row and no filesystem state, so it cannot move the
+    # scenario tally, but it fails CLOSED: a broken property counts against
+    # certification exactly like a failed row.
+    print()
+    failures += swap_classification_selftest()
+    print()
     try:
         selected = sorted((s for s in SCENARIOS if args.only.lower() in s["id"].lower()),
                           key=lambda s: s["id"])

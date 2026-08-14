@@ -325,12 +325,12 @@ structure through its own `ctypes` declaration — two implementations of one
 concept, and until this revision no row compared them. It mattered: the bootstrap
 read `nNumberOfLinks` and `nFileIndexHigh` (offsets 40 and 44) instead of
 `nFileIndexHigh` and `nFileIndexLow` (44 and 48), discarding the only per-file
-unique field in the common case. Measured on one NTFS volume, 128
-concurrently-existing directories produced **128** distinct correct identities and
-**around ten** distinct identities under the old offsets — an illustrative figure,
-not a constant. How far the old formula collapses depends on the volume and on how
-its MFT records happen to be laid out; observations range from about ten to about
-twenty. What does not vary is the direction.
+unique field in the common case. Over 128 concurrently-existing directories the
+correct identity separates all **128**, while the old offsets separate strictly
+fewer. How far the old formula collapses depends on the volume and on how its MFT
+records happen to be laid out, so **no fixed count is quoted here** — the guard
+measures it at runtime and prints what it observed on the machine in front of you.
+What does not vary is the direction.
 
 `IDN-01` compares the offsets in the pinned bytes against the harness's structure
 and fails on any disagreement. `IDN-02` measures the collapse above on live

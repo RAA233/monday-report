@@ -299,11 +299,11 @@ $ERROR_ALREADY_EXISTS           = 183
 # nFileIndexLow, the only field that distinguishes two files whose MFT records
 # share a high word.  The guard measures the collapse on 128 concurrently
 # existing directories: the correct identity separates all 128, the old offsets
-# separate only a handful.  How small that handful is depends on the volume and
-# on how its MFT records happen to be laid out - observations range from about
-# ten to about twenty - so no fixed figure is quoted here; the guard prints what
-# it measured on the machine in front of you.  nNumberOfLinks is not read at all
-# any more; it is listed above only so the arithmetic is checkable by eye.
+# separate strictly fewer.  How many fewer depends on the volume and on how its
+# MFT records happen to be laid out, so no fixed figure is quoted here; the guard
+# measures and prints the count at runtime on the machine in front of you.
+# nNumberOfLinks is not read at all any more; it is listed above only so the
+# arithmetic is checkable by eye.
 #
 # $BHFI_SIZE is the BUFFER, not the structure: 64 bytes, deliberately larger than
 # the 52 the structure needs, so a future Windows that appends a field cannot
