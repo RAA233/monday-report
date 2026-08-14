@@ -241,32 +241,66 @@ that boundary an unelevated run does prove the whole name and pin policy, the
 process-and-temp observation, the DOS-device chain bypass and the struct-offset
 half of the object-identity differential.
 
-To run all seven, open an **elevated** PowerShell (Run as administrator) and run
-exactly this:
+### Two-context certification: no single token certifies the whole table
+
+Each scenario carries **exactly one declared certification context**, and that
+declaration — not which rows happen to pass — is the only selector:
+
+- the seven `ELV-*` rows are **`elevated`**: they need the bootstrap to *accept*
+  a chain and *install*, which only a genuine elevated token can do on a fixture
+  a trusted principal (`BUILTIN\Administrators`) owns;
+- every `CTL-*`, `SCN-*` and `IDN-*` row is **`unelevated`**: its fixture is
+  built by, and owned by, the *unelevated* current account — an **untrusted**
+  owner — on purpose. Run those same fixtures under an elevated token and they
+  would be owned by `BUILTIN\Administrators` (trusted), so a refusal row would
+  *accept* and be mis-scored `FAIL-NO-REFUSAL` against a chain it was never
+  about.
+
+A row whose declared context is not the token running it is therefore **not
+executed**. Under an unelevated token the `ELV-*` rows report
+`BLOCKED_ELEVATION_REQUIRED`; under an elevated token the `CTL/SCN/IDN` rows
+report `BLOCKED_WRONG_CONTEXT`. **Both** counts count as failures, so **neither a
+lone unelevated run nor a lone elevated run can ever certify** — each covers only
+its own half.
+
+Certification is the **fail-closed combine of two head-bound evidence records**.
+Every whole-table run emits a machine-readable record — bound to the git head,
+git tree, bootstrap SHA-256, the token it read from its own process, a
+whole-table flag, a clean-worktree flag, every row's `{declared_context,
+verdict, expected/observed reason}`, and the mechanism-flip results — written to
+a directory **outside the git worktree** (default: a sibling `..\mr-offline-
+bootstrap-evidence\`; override with `--evidence-dir`). Records are never
+assembled from prose, and a malformed or partial record is a **FAIL**, never a
+lenient parse.
+
+**Do this in two steps, at one git head:**
 
 ```powershell
+# 1. UNELEVATED PowerShell — emit the unelevated record (fails alone, by design):
 cd <repo>
 python scripts\offline_bootstrap_guard.py --delete-mechanism
+#   -> writes ..\mr-offline-bootstrap-evidence\record-unelevated.json
+
+# 2. ELEVATED PowerShell (Run as administrator) — emit the elevated record AND
+#    combine it against the unelevated one in a SINGLE command:
+cd <repo>
+python scripts\offline_bootstrap_guard.py --delete-mechanism --combine ..\mr-offline-bootstrap-evidence\record-unelevated.json
+#   (equivalently: pnpm run audit:offline:certify, which passes --combine default)
 ```
 
-That single command runs the whole table — `CTL-*`, `SCN-*`, `IDN-*` and all
-seven `ELV-*` rows — and then the deletion experiments. **No flag substitutes for
-the elevated token.** The ELV bodies run when, and only when, the harness finds
-`BUILTIN\Administrators` in its own process token (`CheckTokenMembership` against
-`S-1-5-32-544`); it does not take anybody's word for it, and no argument supplies a
-principal. (`--only ELV` does *select* those rows, but unelevated they are still
-only *reported* as `BLOCKED_ELEVATION_REQUIRED` — selecting a row is not running
-it.)
-Elevated, the fixtures it creates are owned by `BUILTIN\Administrators`, which is
-in the production trust set — so no principal has to be invented for them to pass.
+The combiner certifies **only** when all of these hold, else it FAILs with the
+reason: both records are whole-table and from a clean worktree; their git head,
+git tree and bootstrap SHA-256 are identical; the unelevated record has every
+declared-unelevated row at `PASS`; the elevated record has `ELV-01..07` all
+`PASS`; every mechanism flip passed in its declared context (non-`ELV` flips from
+the unelevated record, `ELV` flips from the elevated record); and the two
+declared contexts **partition every scenario exactly once**. **No flag
+substitutes for the elevated token** — the `ELV-*` bodies run only when the
+harness finds `BUILTIN\Administrators` in its own process token
+(`CheckTokenMembership` against `S-1-5-32-544`). `--combine` requires a
+whole-table run and is rejected with `--only`.
 
-`--only` **does** narrow the table, and can therefore leave the `ELV-*` rows out of
-a run. So a filtered run computes **no verdict at all**: it prints
-`FILTERED RUN — NOT A CERTIFICATION`, lists every scenario it did not run, and
-exits non-zero however its selected rows turned out. `--only` is for working on one
-scenario; it can never produce evidence. Run the command above **without** it.
-
-Expected results when run elevated:
+Expected results in the **elevated** record:
 
 | Row | Property | Expected |
 | --- | --- | --- |
@@ -356,10 +390,14 @@ byte-identical to what the code generates, so it cannot drift. `CTL-COVERAGE` al
 checks the harness's copy of the taxonomy against the taxonomy in the pinned
 bootstrap bytes.
 
-The `ELV-*` rows execute their outcome **only when the harness runs elevated**;
-`CTL-PROGFILES` reaches `OK` only when elevated and `ROOT_CREATE_FAILED`
-otherwise. Each run prints this same table with the verdict each scenario actually
-got, so a claimed outcome whose scenario was blocked reads as blocked.
+The `ELV-*` rows execute their outcome **only when the harness runs elevated**.
+`CTL-PROGFILES` is declared **unelevated**: it runs only under the unelevated
+token, where it reaches `ROOT_CREATE_FAILED` (the OS-derived ProgramFiles chain
+is accepted all the way to the privilege-gated create). Outcome `OK` is reached
+only by `ELV-01` in the elevated record; a single-context run never demonstrates
+it, and the combiner draws it from the elevated half. Each run prints this same
+table with the verdict each scenario actually got, so a claimed outcome whose
+scenario was blocked reads as blocked.
 
 <!-- COVERAGE-TABLE:BEGIN -->
 | Code | Reason | Exercised by | If UNTESTED, why not |

@@ -1261,6 +1261,47 @@ class Blocked(object):
         return True
 
 
+class BlockedWrongContext(object):
+    """A row whose DECLARED certification context is not the token this process
+    is running under, so its fixture is NOT built and its body is NOT run.
+
+    This mirrors `Blocked`: it is NOT a pass and NOT quietly forgiven, so a
+    SINGLE-context run can never certify.  It exists because the two contexts
+    certify disjoint halves of the table, and running a row under the wrong
+    token does not merely fail to prove the property - it AFFIRMATIVELY
+    MISMEASURES it.  The CTL/SCN/IDN fixtures are built by, and owned by, an
+    UNELEVATED account (an untrusted owner) on purpose; run elevated, those same
+    fixtures would be owned by BUILTIN\\Administrators (trusted), so the row
+    would 'accept' and be scored FAIL-NO-REFUSAL against a chain that was never
+    the one the row is about.  Rather than execute-and-accuse, the row is left
+    open as BLOCKED_WRONG_CONTEXT and points at the token that CAN certify it.
+    The other context's record certifies it; this record does not.
+    """
+
+    def __init__(self, ident, declared_context, token_context, title=None, expected=None):
+        self.id = ident
+        self.declared_context = declared_context
+        self.token_context = token_context
+        self.title = title or ("declared %s-context row; not run under the %s token"
+                               % (declared_context, token_context))
+        self.expected = expected if expected is not None else "-"
+        self.verdict = "BLOCKED_WRONG_CONTEXT"
+        self.observed = "-"
+        self.checks = []
+        self.note = ""
+        self.launch = Launch(None, "", False,
+                             "not launched: declared context %s != token context %s"
+                             % (declared_context, token_context))
+
+    @property
+    def ok(self):
+        return False
+
+    @property
+    def counts_as_failure(self):
+        return True
+
+
 def stopped_in_source_stage(result):
     """A class-level safety statement, not a restatement of the expected reason.
 
@@ -1304,7 +1345,7 @@ SCENARIOS = []
 
 
 def scenario(ident, mechanism=None, mutations=(), elevation=False, reasons=(),
-             title=None, expected=None):
+             title=None, expected=None, context=None):
     """Register a scenario.
 
     `reasons` names the taxonomy outcomes this scenario EXECUTES.  It is not
@@ -1316,15 +1357,36 @@ def scenario(ident, mechanism=None, mutations=(), elevation=False, reasons=(),
     there: when the harness is unelevated the row must be REPORTED without being
     run, and a row that reported nothing at all would be a row nobody notices is
     missing.
+
+    `context` is the DECLARED certification context and the SINGLE source of
+    truth for which token may certify this row.  `elevation=True` IS that
+    declaration: the seven ELV rows need the bootstrap to ACCEPT a chain and
+    INSTALL, which only a genuine elevated token can do on a fixture a trusted
+    principal owns, so their context is "elevated"; every CTL/SCN/IDN row is
+    designed for - and can only be certified by - an UNELEVATED token whose
+    fixtures this account owns (an untrusted owner), so their context is
+    "unelevated".  The value is derived from `elevation` and stored per
+    scenario; an explicit `context=` is accepted but may NOT contradict the
+    elevation flag, so the two can never drift.  Selection reads ONLY this
+    stored field - never which rows happened to pass.
     """
     if elevation and (title is None or expected is None):
         raise SystemExit("elevation scenario %s must declare title= and expected=" % ident)
+
+    derived = "elevated" if elevation else "unelevated"
+    if context is None:
+        context = derived
+    if context not in ("elevated", "unelevated"):
+        raise SystemExit("scenario %s declares unknown context %r" % (ident, context))
+    if context != derived:
+        raise SystemExit("scenario %s context %r contradicts elevation=%s"
+                         % (ident, context, elevation))
 
     def register(function):
         SCENARIOS.append({"id": ident, "run": function, "mechanism": mechanism,
                           "mutations": tuple(mutations), "elevation": elevation,
                           "reasons": tuple(reasons), "title": title,
-                          "expected": expected})
+                          "expected": expected, "context": context})
         return function
     return register
 
@@ -3427,25 +3489,34 @@ def _copy_directory_occupied(base, image, work):
                   "COPY_DIRECTORY_OCCUPIED", result, checks)
 
 
-ELEVATED_COMMAND = (
-    "Start an ELEVATED PowerShell (Run as administrator) and run EXACTLY:\n"
-    "\n"
-    "    cd <repo>\n"
-    "    python scripts\\offline_bootstrap_guard.py --delete-mechanism\n"
-    "\n"
-    "That single command runs the WHOLE table - CTL-*, SCN-*, IDN-* and all seven\n"
-    "ELV-* rows - and then the deletion experiments.  NO FLAG SUBSTITUTES FOR THE\n"
-    "ELEVATED TOKEN: the ELV bodies run when, and only when, the harness finds\n"
-    "BUILTIN\\Administrators in its OWN process token (CheckTokenMembership against\n"
-    "S-1-5-32-544).  It takes nobody's word for that, and no argument supplies a\n"
-    "principal.  (--only ELV SELECTS those rows, but unelevated they are still only\n"
-    "REPORTED as BLOCKED - selecting a row is not running it.)\n"
-    "--only also narrows the table and can leave the ELV rows out entirely, so a\n"
-    "filtered run computes NO verdict, prints FILTERED RUN - NOT A CERTIFICATION and\n"
-    "exits non-zero however its rows turn out.  Run the command above WITHOUT --only.\n"
-    "Elevated, the fixtures it creates are owned by BUILTIN\\Administrators, which is\n"
-    "in the production trust set - so no principal has to be invented for them to pass."
-)
+def build_elevated_command(unelevated_record_path):
+    """The ONE elevated command, with the concrete unelevated-record path baked in.
+
+    Under the two-context model a lone elevated run does NOT certify: elevated,
+    the 33 CTL/SCN/IDN rows are BLOCKED_WRONG_CONTEXT (their fixtures need an
+    untrusted owner, which an elevated token cannot produce), so the elevated
+    run fails alone exactly as the unelevated run does.  Certification is the
+    fail-closed COMBINE of the two head-bound records.  The single command below
+    runs the whole table elevated, emits the elevated record, then combines it
+    against the unelevated record generated at this same git head.
+    """
+    return (
+        "Start an ELEVATED PowerShell (Run as administrator) and run EXACTLY:\n"
+        "\n"
+        "    cd <repo>\n"
+        "    python scripts\\offline_bootstrap_guard.py --delete-mechanism --combine \"%s\"\n"
+        "\n"
+        "That single command runs the WHOLE table - CTL-*, SCN-*, IDN-* and all seven\n"
+        "ELV-* rows - the deletion experiments, emits THIS run's elevated evidence\n"
+        "record, and then COMBINES it (fail-closed) against the unelevated record at\n"
+        "the path above.  NO FLAG SUBSTITUTES FOR THE ELEVATED TOKEN: the ELV bodies\n"
+        "run when, and only when, the harness finds BUILTIN\\Administrators in its OWN\n"
+        "process token (CheckTokenMembership against S-1-5-32-544).  It takes nobody's\n"
+        "word for that, and no argument supplies a principal.\n"
+        "The two records must share git head, git tree and bootstrap SHA-256, and each\n"
+        "must be a WHOLE-TABLE run; --only is rejected with --combine.  Neither record\n"
+        "alone certifies - only the combined verdict does." % unelevated_record_path
+    )
 
 
 CODE_OF = {name: code for code, name in REASONS.items()}
@@ -4047,6 +4118,10 @@ def print_table(results, show_stdout=False):
     print("                               INSTALL; this process is unelevated and no")
     print("                               principal was faked.  An unelevated run cannot")
     print("                               certify, by design.")
+    print("    BLOCKED_WRONG_CONTEXT      the row's DECLARED context is not this token, so")
+    print("                               its fixture was not built and it was not run.")
+    print("                               The OTHER context's record certifies it; this")
+    print("                               run cannot.  Counts as a FAILURE here.")
     print()
     header = ("%s  %-26s  %-30s  %s"
               % ("id".ljust(width), "verdict", "expected reason", "observed reason"))
@@ -4070,6 +4145,15 @@ def print_table(results, show_stdout=False):
             print("        cannot create a directory owned by a trusted principal.  Faking")
             print("        one is the defect this revision removed, so the row is left open")
             print("        AND COUNTS AS A FAILURE.  It is not a skip.")
+        if isinstance(r, BlockedWrongContext):
+            print("        BLOCKED - WRONG CONTEXT.  This row is declared %s but the token"
+                  % r.declared_context)
+            print("        is %s, so its fixture was NOT built and its body was NOT run -"
+                  % r.token_context)
+            print("        running it here would MISMEASURE it against a chain it is not")
+            print("        about.  The %s record certifies this row; this run counts it as"
+                  % r.declared_context)
+            print("        a FAILURE.  It is not a skip.")
         if show_stdout and r.launch.stdout:
             print("        --- bootstrap stdout, RECORDED BUT NOT EVIDENCE ---")
             for line in r.launch.stdout.splitlines():
@@ -4138,7 +4222,8 @@ def print_coverage(results):
     inconsistent = []
     for r in results:
         claims = declared.get(r.id, ())
-        if claims and r.expected not in claims and r.verdict != "BLOCKED_ELEVATION_REQUIRED":
+        if (claims and r.expected not in claims
+                and r.verdict not in ("BLOCKED_ELEVATION_REQUIRED", "BLOCKED_WRONG_CONTEXT")):
             inconsistent.append("%s declares %s but expected %s"
                                 % (r.id, list(claims), r.expected))
     if inconsistent:
@@ -4168,6 +4253,329 @@ def print_coverage(results):
     return len(inconsistent)
 
 
+# ---------------------------------------------------------------------------
+# Two-context certification: machine-readable evidence records + fail-closed
+# combiner.
+#
+# No single token can certify the whole table: the 33 CTL/SCN/IDN rows need an
+# untrusted (unelevated-owned) fixture and the 7 ELV rows need a trusted
+# (elevated-owned) one that actually INSTALLS.  So each whole-table run emits a
+# machine-readable record BOUND to git head + tree + bootstrap SHA + the token
+# it read from its own process, and the combiner certifies ONLY when a genuine
+# unelevated record and a genuine elevated record - at the SAME head - together
+# cover every row in its declared context.  A record is emitted by the guard at
+# run time; it is never assembled from prose, and a malformed record is a FAIL,
+# never a parse fallback.
+# ---------------------------------------------------------------------------
+
+import json
+import datetime
+
+EVIDENCE_SCHEMA = "offline-bootstrap-two-context-evidence/v1"
+COMBINED_SCHEMA = "offline-bootstrap-combined-verdict/v1"
+
+# Records live OUTSIDE the git worktree so the tree stays clean.  A sibling of
+# the repo root by default; overridable with --evidence-dir.
+DEFAULT_EVIDENCE_DIR = ROOT.parent / "mr-offline-bootstrap-evidence"
+
+# Every field the combiner treats as load-bearing.  A record missing any one of
+# them is invalid and the combiner FAILS on it - it does not guess a default.
+RECORD_BINDING_FIELDS = ("schema", "git_head", "git_tree", "bootstrap_sha256",
+                         "token_context", "elevated", "whole_table",
+                         "worktree_clean", "delete_mechanism", "rows", "flips")
+ROW_FIELDS = ("id", "declared_context", "verdict", "expected_reason", "observed_reason")
+
+
+def git_rev(spec):
+    """A git object id resolved in the repo worktree, or None if git cannot."""
+    try:
+        out = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", spec],
+                                      stderr=subprocess.DEVNULL)
+    except Exception:                                    # noqa: BLE001 - fail closed
+        return None
+    value = out.decode("utf-8", "replace").strip()
+    return value or None
+
+
+def worktree_is_clean():
+    """True only if `git status --porcelain -uno` is empty - i.e. the tracked
+    tree on disk is exactly the committed head the record binds.  A record whose
+    head/tree do not describe the code that actually ran is worthless, so this is
+    itself a binding field and the combiner requires it True on both sides."""
+    try:
+        out = subprocess.check_output(["git", "-C", str(ROOT), "status",
+                                       "--porcelain", "-uno"],
+                                      stderr=subprocess.DEVNULL)
+    except Exception:                                    # noqa: BLE001 - fail closed
+        return False
+    return out.decode("utf-8", "replace").strip() == ""
+
+
+def record_path_for(token_context, evidence_dir):
+    """The STABLE path for a context's record - last write at a head wins.  The
+    record is head-bound internally, so a stale file at an old head simply FAILS
+    the combiner's head-equality check rather than certifying anything."""
+    return Path(evidence_dir) / ("record-%s.json" % token_context)
+
+
+def build_record(image, results, flips, token_context, whole_table, delete_mechanism):
+    ctx = {s["id"]: s["context"] for s in SCENARIOS}
+    rows = []
+    for r in results:
+        rows.append({
+            "id": r.id,
+            "declared_context": ctx.get(r.id),
+            "verdict": r.verdict,
+            "expected_reason": getattr(r, "expected", None),
+            "observed_reason": getattr(r, "observed", None),
+        })
+    return {
+        "schema": EVIDENCE_SCHEMA,
+        "generated_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "git_head": git_rev("HEAD"),
+        "git_tree": git_rev("HEAD^{tree}"),
+        "bootstrap_sha256": image.sha256,
+        "token_context": token_context,
+        "elevated": bool(ELEVATED),
+        "whole_table": bool(whole_table),
+        "worktree_clean": worktree_is_clean(),
+        "delete_mechanism": bool(delete_mechanism),
+        "account_sid": ME,
+        "rows": rows,
+        "flips": flips,
+    }
+
+
+def write_record(record, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(path), "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(record, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return path
+
+
+def load_record(path):
+    """Return (record, None) on a fully-bound record, else (None, reason).
+
+    A record that will not parse, or is missing ANY binding field, or whose rows
+    or flips are malformed, is rejected here.  The combiner turns a rejection
+    straight into a FAIL - there is no lenient parse and no default value."""
+    path = Path(path)
+    if not path.is_file():
+        return None, "record file not found: %s" % path
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, "record unreadable: %s (%s)" % (path, exc)
+    try:
+        record = json.loads(text)
+    except ValueError as exc:
+        return None, "record is not valid JSON: %s (%s)" % (path, exc)
+    if not isinstance(record, dict):
+        return None, "record is not a JSON object: %s" % path
+    for field in RECORD_BINDING_FIELDS:
+        if field not in record:
+            return None, "record missing binding field %r: %s" % (field, path)
+    if record.get("schema") != EVIDENCE_SCHEMA:
+        return None, "record has wrong schema %r (want %r): %s" % (
+            record.get("schema"), EVIDENCE_SCHEMA, path)
+    if record["token_context"] not in ("unelevated", "elevated"):
+        return None, "record token_context %r is neither unelevated nor elevated" % (
+            record["token_context"],)
+    for binding in ("git_head", "git_tree", "bootstrap_sha256"):
+        if not isinstance(record[binding], str) or not record[binding]:
+            return None, "record binding field %r is empty: %s" % (binding, path)
+    if not isinstance(record["rows"], list) or not record["rows"]:
+        return None, "record rows is not a non-empty list: %s" % path
+    for row in record["rows"]:
+        if not isinstance(row, dict):
+            return None, "record row is not an object: %s" % path
+        for field in ROW_FIELDS:
+            if field not in row:
+                return None, "record row missing field %r: %s" % (field, path)
+    if not isinstance(record["flips"], dict):
+        return None, "record flips is not an object: %s" % path
+    return record, None
+
+
+def combine_records(this_record, other_path, evidence_dir):
+    """Fail-closed two-context certification.  Prints a human summary and a
+    machine-readable combined verdict; returns 0 only if ALL checks hold."""
+    print()
+    print("TWO-CONTEXT COMBINE  (fail-closed certification)")
+    print("  This run's record is combined against a second record on disk.  The")
+    print("  combined verdict is PASS only if every check below holds; a missing,")
+    print("  malformed, filtered, stale or cross-head record is a FAIL, never a")
+    print("  parse fallback.  Neither record alone can certify.")
+    print()
+
+    checks = []          # (id, description, ok)
+
+    def add(cid, description, ok):
+        checks.append((cid, description, ok))
+
+    # This run's own record must itself be a valid, fully-bound record.
+    write_record(this_record, evidence_dir / "_combine-this.json")
+    this_ok, this_err = load_record(evidence_dir / "_combine-this.json")
+    other, other_err = load_record(other_path)
+
+    fatal = None
+    if this_ok is None:
+        fatal = "this run's own record is invalid: %s" % this_err
+    elif other is None:
+        fatal = "the other record is invalid: %s" % other_err
+    if fatal is not None:
+        add("record-validity", fatal, False)
+        return _emit_combined(checks, None, None, evidence_dir)
+
+    # One must be unelevated, the other elevated (no duplicate context).
+    pair = {this_ok["token_context"], other["token_context"]}
+    if pair != {"unelevated", "elevated"}:
+        add("record-pairing",
+            "the two records are one unelevated + one elevated (got %s)"
+            % sorted([this_ok["token_context"], other["token_context"]]), False)
+        return _emit_combined(checks, None, None, evidence_dir)
+
+    unelev = this_ok if this_ok["token_context"] == "unelevated" else other
+    elev = this_ok if this_ok["token_context"] == "elevated" else other
+
+    # (1) both whole-table / unfiltered, and both from a clean worktree.
+    add("1-whole-table",
+        "both records are WHOLE-TABLE (unfiltered) runs",
+        bool(unelev["whole_table"]) and bool(elev["whole_table"]))
+    add("1-worktree-clean",
+        "both records were produced from a CLEAN worktree (tree matches head)",
+        bool(unelev["worktree_clean"]) and bool(elev["worktree_clean"]))
+
+    # (2) exact-equal head AND tree AND bootstrap SHA across both.
+    for binding, label in (("git_head", "git head"), ("git_tree", "git tree"),
+                           ("bootstrap_sha256", "bootstrap SHA-256")):
+        add("2-%s" % binding,
+            "%s is identical across both records (%s)"
+            % (label, unelev[binding] if unelev[binding] == elev[binding]
+               else "%s != %s" % (unelev[binding], elev[binding])),
+            bool(unelev[binding]) and unelev[binding] == elev[binding])
+
+    # Cross-check each record's rows against the live scenario table, so a
+    # relabelled declared_context in a tampered record cannot smuggle a row into
+    # the wrong half.
+    live_ctx = {s["id"]: s["context"] for s in SCENARIOS}
+    for label, rec in (("unelevated", unelev), ("elevated", elev)):
+        mislabelled = [row["id"] for row in rec["rows"]
+                       if row["id"] in live_ctx
+                       and row["declared_context"] != live_ctx[row["id"]]]
+        add("2-labels-%s" % label,
+            "every row in the %s record declares the context this harness declares "
+            "for it (%s)" % (label, mislabelled or "all match"),
+            not mislabelled)
+
+    unelev_rows = {row["id"]: row for row in unelev["rows"]}
+    elev_rows = {row["id"]: row for row in elev["rows"]}
+
+    # (3) unelevated record: every declared-unelevated scenario at PASS, zero
+    #     INCONCLUSIVE / BLOCKED among those required rows.
+    required_unelev = [s["id"] for s in SCENARIOS if s["context"] == "unelevated"]
+    bad_unelev = [ident for ident in required_unelev
+                  if unelev_rows.get(ident, {}).get("verdict") != "PASS"]
+    add("3-unelevated-pass",
+        "every one of the %d declared-unelevated rows is PASS in the unelevated "
+        "record (%s)" % (len(required_unelev),
+                         "all PASS" if not bad_unelev
+                         else "not PASS: " + ", ".join(sorted(bad_unelev))),
+        not bad_unelev)
+
+    # (4) elevated record: ELV-01..07 all PASS, zero BLOCKED/INCONCLUSIVE/FAIL.
+    required_elev = [s["id"] for s in SCENARIOS if s["context"] == "elevated"]
+    bad_elev = [ident for ident in required_elev
+                if elev_rows.get(ident, {}).get("verdict") != "PASS"]
+    add("4-elevated-pass",
+        "every one of the %d ELV rows is PASS in the elevated record (%s)"
+        % (len(required_elev), "all PASS" if not bad_elev
+           else "not PASS: " + ", ".join(sorted(bad_elev))),
+        not bad_elev)
+
+    # (5) required mechanism flips pass in their declared valid context: non-ELV
+    #     flips from the unelevated record, ELV flips from the elevated record.
+    flip_problems = []
+    for spec in SCENARIOS:
+        if not spec["mutations"]:
+            continue
+        src = unelev if spec["context"] == "unelevated" else elev
+        entry = src["flips"].get(spec["id"])
+        if entry is None or not entry.get("flipped"):
+            flip_problems.append("%s(%s)" % (spec["id"], spec["context"]))
+    add("5-flips",
+        "every mechanism flip passes in its declared context (%s)"
+        % ("all flipped" if not flip_problems
+           else "not flipped: " + ", ".join(flip_problems)),
+        not flip_problems)
+
+    # (6) the union of declared contexts covers EVERY scenario exactly once - no
+    #     row uncovered, no row double-covered.  A row is 'covered' by a PASS in
+    #     the record whose token matches its declared context.
+    covered = {}
+    for row in unelev["rows"]:
+        if row["declared_context"] == "unelevated" and row["verdict"] == "PASS":
+            covered[row["id"]] = covered.get(row["id"], 0) + 1
+    for row in elev["rows"]:
+        if row["declared_context"] == "elevated" and row["verdict"] == "PASS":
+            covered[row["id"]] = covered.get(row["id"], 0) + 1
+    expected_ids = set(live_ctx)
+    uncovered = sorted(expected_ids - set(covered))
+    doubled = sorted(ident for ident, n in covered.items() if n > 1)
+    unknown = sorted(set(covered) - expected_ids)
+    add("6-coverage",
+        "the two contexts partition all %d scenarios exactly once (%s)"
+        % (len(expected_ids),
+           "complete" if not (uncovered or doubled or unknown)
+           else "uncovered=%s doubled=%s unknown=%s" % (uncovered, doubled, unknown)),
+        not (uncovered or doubled or unknown))
+
+    return _emit_combined(checks, unelev, elev, evidence_dir)
+
+
+def _emit_combined(checks, unelev, elev, evidence_dir):
+    passed = all(ok for _cid, _desc, ok in checks)
+    print("  check results:")
+    for cid, description, ok in checks:
+        print("    [%s] %-14s %s" % ("ok" if ok else "NO", cid, description))
+    print()
+    verdict = {
+        "schema": COMBINED_SCHEMA,
+        "generated_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "verdict": "PASS" if passed else "FAIL",
+        "git_head": (unelev or {}).get("git_head") if unelev else None,
+        "git_tree": (unelev or {}).get("git_tree") if unelev else None,
+        "bootstrap_sha256": (unelev or {}).get("bootstrap_sha256") if unelev else None,
+        "unelevated_record": {
+            "token_context": unelev["token_context"], "git_head": unelev["git_head"],
+        } if unelev else None,
+        "elevated_record": {
+            "token_context": elev["token_context"], "git_head": elev["git_head"],
+        } if elev else None,
+        "checks": [{"id": cid, "ok": ok, "description": desc}
+                   for cid, desc, ok in checks],
+    }
+    out_path = Path(evidence_dir) / "combined-verdict.json"
+    write_record(verdict, out_path)
+    print("  combined verdict written: %s" % out_path)
+    print("  MACHINE VERDICT: %s" % json.dumps({"verdict": verdict["verdict"],
+                                                 "git_head": verdict["git_head"],
+                                                 "checks_failed": sum(
+                                                     1 for c in verdict["checks"]
+                                                     if not c["ok"])}))
+    print()
+    if passed:
+        print("COMBINED CERTIFICATION: PASS - a genuine unelevated record and a genuine")
+        print("elevated record at the same head together certify every row in its")
+        print("declared context.")
+        return 0
+    print("COMBINED CERTIFICATION: FAIL - the two records do not jointly certify the")
+    print("table.  See the failing checks above.  Neither record alone certifies.")
+    return 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="black-box guard for the offline bootstrap")
     parser.add_argument("--delete-mechanism", action="store_true",
@@ -4183,7 +4591,23 @@ def main():
                         help="DEVELOPMENT AID, NOT EVIDENCE: exercise the ELV bodies "
                              "unelevated against a bootstrap deliberately weakened to trust "
                              "this account.  Reported separately and never counted.")
+    parser.add_argument("--evidence-dir", default=str(DEFAULT_EVIDENCE_DIR),
+                        help="where head-bound evidence records are written; a directory "
+                             "OUTSIDE the git worktree so the tree stays clean "
+                             "(default: %s)" % DEFAULT_EVIDENCE_DIR)
+    parser.add_argument("--combine", default="",
+                        help="fail-closed two-context certification: run the whole table, "
+                             "emit THIS run's record, then combine it against the record at "
+                             "this path.  Requires a whole-table run (rejects --only).")
     args = parser.parse_args()
+
+    evidence_dir = Path(args.evidence_dir)
+    if args.combine and args.only:
+        print("FAIL: --combine certifies the WHOLE table and cannot be used with --only.")
+        return 2
+    token_context = "elevated" if ELEVATED else "unelevated"
+    unelevated_record_path = record_path_for("unelevated", evidence_dir)
+    elevated_command = build_elevated_command(unelevated_record_path)
 
     if args.coverage_table:
         print(COVERAGE_MARKER_BEGIN)
@@ -4242,6 +4666,24 @@ def main():
             print("  The filter selected NONE of the 7 properties that need the bootstrap to")
             print("  ACCEPT a chain and INSTALL, so no BLOCKED row appears below and this")
             print("  run says nothing whatever about them.")
+    else:
+        print()
+        print("  ELEVATED RUN.  The seven ELV rows RUN here (their fixtures are owned by")
+        print("  BUILTIN\\Administrators, in the trust set).  The %d CTL/SCN/IDN rows are"
+              % sum(1 for s in SCENARIOS if s["context"] == "unelevated"))
+        print("  declared UNELEVATED - their fixtures need an UNTRUSTED owner, which this")
+        print("  elevated token cannot produce - so they are reported BLOCKED_WRONG_CONTEXT")
+        print("  and NOT run (running them here would MISMEASURE them).  BECAUSE THEY ARE")
+        print("  BLOCKED AN ELEVATED RUN CANNOT CERTIFY ALONE, just as an unelevated run")
+        print("  cannot alone.")
+
+    print()
+    print("  TWO-CONTEXT CERTIFICATION.  No single token certifies the whole table.")
+    print("  Each row carries ONE declared context; a row not matching this token is")
+    print("  BLOCKED (and counts as a FAILURE for this single run).  Certification is")
+    print("  the fail-closed COMBINE of a genuine unelevated record and a genuine")
+    print("  elevated record at the SAME git head.  This run %s a --combine."
+          % ("PERFORMS" if args.combine else "does NOT perform"))
 
     base = str(Path(os.path.abspath(os.sep)) / ("mr-bootstrap-guard-" + uuid.uuid4().hex[:10]))
     os.makedirs(long_path(base), exist_ok=False)
@@ -4257,6 +4699,7 @@ def main():
           % (sorted(HOST.raw_processes.values()) or "none", HOST.raw_artifacts or "none"))
 
     failures = 0
+    flip_results = {}
     # Deterministic, elevation-free proof of the ELV-06 race classification.  It
     # adds no scenario row and no filesystem state, so it cannot move the
     # scenario tally, but it fails CLOSED: a broken property counts against
@@ -4272,13 +4715,23 @@ def main():
             if not image.reverify():
                 print("FAIL: the bootstrap changed on disk mid-run; refusing to continue")
                 return 1
-            # An elevation scenario is REPORTED either way.  Unelevated it is
-            # reported BLOCKED and counts as a failure; there is no branch in
-            # which it silently disappears, and no branch in which an unelevated
-            # process runs its body against the production bootstrap.
-            if spec["elevation"] and not ELEVATED:
-                results.append(Blocked(spec["id"], spec["title"], spec["expected"],
-                                       ELEVATED_COMMAND))
+            # Selection reads ONLY the row's DECLARED context, never which rows
+            # happened to pass.  A row is REPORTED either way; there is no branch
+            # in which it silently disappears, and no branch in which the wrong
+            # token runs its body against the production bootstrap.
+            if spec["context"] != token_context:
+                if spec["context"] == "elevated":
+                    # Unelevated token, ELV row: needs an elevated token to
+                    # ACCEPT a chain and INSTALL.  Left open, counts as failure.
+                    results.append(Blocked(spec["id"], spec["title"], spec["expected"],
+                                           elevated_command))
+                else:
+                    # Elevated token, CTL/SCN/IDN row: its fixture needs an
+                    # UNTRUSTED owner, which this token cannot produce.  Not run
+                    # (running it would mismeasure it); counts as failure.
+                    results.append(BlockedWrongContext(spec["id"], spec["context"],
+                                                       token_context, spec["title"],
+                                                       spec["expected"]))
                 continue
             results.append(spec["run"](base, image, work))
 
@@ -4294,8 +4747,18 @@ def main():
             for r in blocked:
                 print("  %-8s %-30s %s" % (r.id, r.expected, r.title))
             print()
-            for line in ELEVATED_COMMAND.splitlines():
+            for line in elevated_command.splitlines():
                 print("  " + line)
+            print()
+
+        wrong_context = [r for r in results if r.verdict == "BLOCKED_WRONG_CONTEXT"]
+        if wrong_context:
+            print("BLOCKED - WRONG CONTEXT (%d rows, each counting as a FAILURE)"
+                  % len(wrong_context))
+            print("  These rows are declared UNELEVATED and were NOT run under this elevated")
+            print("  token - their fixtures need an untrusted owner this token cannot make.")
+            print("  Certify them from an UNELEVATED whole-table run, then --combine the two")
+            print("  head-bound records.  This elevated run cannot certify them.")
             print()
 
         if args.elv_selftest:
@@ -4314,12 +4777,20 @@ def main():
             for spec in selected:
                 if not spec["mutations"]:
                     continue
-                if spec["elevation"] and not ELEVATED:
+                if spec["context"] != token_context:
+                    # A flip is only meaningful in the row's declared context.
+                    # The OTHER context's record carries it, so skipping it here
+                    # does NOT count as a flip failure - the combiner requires it
+                    # from the record whose token CAN run it.
                     print("  %-14s mechanism: %s" % (spec["id"], spec["mechanism"]))
-                    print("                 SKIPPED: the scenario itself is blocked on")
-                    print("                          elevation, so deleting its mechanism")
-                    print("                          would measure nothing.  The row above")
-                    print("                          already counts as a failure.")
+                    print("                 SKIPPED (wrong context): declared %s, this token %s."
+                          % (spec["context"], token_context))
+                    print("                          The %s record carries this flip."
+                          % spec["context"])
+                    flip_results[spec["id"]] = {
+                        "declared_context": spec["context"], "ran": False,
+                        "flipped": None, "skipped_wrong_context": True,
+                        "mutations": list(spec["mutations"])}
                     continue
                 print("  %-14s mechanism: %s" % (spec["id"], spec["mechanism"]))
                 if spec["mutations"] == ("harness_pin",):
@@ -4327,6 +4798,12 @@ def main():
                     print("                            this harness's pre-launch hash comparison)")
                     print("                 flipped  : YES - bypassing it means launching with the")
                     print("                            real hash, which is every other row here")
+                    flip_results[spec["id"]] = {
+                        "declared_context": spec["context"], "ran": True,
+                        "flipped": True, "skipped_wrong_context": False,
+                        "mutations": list(spec["mutations"]),
+                        "note": "harness pre-launch hash comparison; bypassing it is "
+                                "every other row"}
                     continue
                 mutated = mutate(image, spec["mutations"], workspace)
                 flip_base = base + "\\_flip-" + spec["id"].lower()
@@ -4365,16 +4842,31 @@ def main():
                     print("                     note: %s" % outcome.note)
                 if not flipped:
                     flip_failures += 1
+                flip_results[spec["id"]] = {
+                    "declared_context": spec["context"], "ran": True,
+                    "flipped": bool(flipped), "skipped_wrong_context": False,
+                    "mutations": list(spec["mutations"]),
+                    "with_reason": outcome.expected, "without_reason": outcome.observed}
             print()
             if flip_failures:
                 print("%d mechanism(s) did not flip." % flip_failures)
             failures += flip_failures
 
-            damage_base = base + "\\_damage"
-            os.makedirs(long_path(damage_base), exist_ok=False)
-            if not subst_damage_experiment(damage_base, image, workspace,
-                                           Workspace(damage_base)):
-                failures += 1
+            # The substitution-damage experiment builds fixtures OWNED BY THIS
+            # ACCOUNT and demonstrates the unelevated Critical-chain damage.  It
+            # is an unelevated-context experiment; under an elevated token the
+            # fixtures would be admin-owned and it would measure nothing, so it
+            # runs only in the unelevated context.
+            if token_context == "unelevated":
+                damage_base = base + "\\_damage"
+                os.makedirs(long_path(damage_base), exist_ok=False)
+                if not subst_damage_experiment(damage_base, image, workspace,
+                                               Workspace(damage_base)):
+                    failures += 1
+            else:
+                print("  SUBSTITUTION-DAMAGE EXPERIMENT skipped: it is an unelevated-context")
+                print("  demonstration (fixtures owned by this account); under an elevated")
+                print("  token it would measure nothing.")
     finally:
         if not args.keep:
             for path in Chain.ALL:
@@ -4386,6 +4878,40 @@ def main():
                 remove_tree(base)
             except OSError as exc:
                 print("(fixture cleanup left %s: %s)" % (base, exc))
+
+    # ---- evidence record -------------------------------------------------
+    # A WHOLE-TABLE run emits a machine-readable record BOUND to git head, tree,
+    # bootstrap SHA and the token this process read from itself - emitted even
+    # though the single-context run exits non-zero, because the certifying
+    # record comes precisely from a run that fails alone.  A filtered (--only)
+    # run emits NOTHING that could certify.  Records live OUTSIDE the worktree.
+    record = None
+    record_path = None
+    if not args.only:
+        record = build_record(image, results, flip_results, token_context,
+                              whole_table=True, delete_mechanism=args.delete_mechanism)
+        record_path = record_path_for(token_context, evidence_dir)
+        write_record(record, record_path)
+        print("EVIDENCE RECORD  (%s, whole table)" % token_context)
+        print("  written : %s" % record_path)
+        print("  git head: %s" % record["git_head"])
+        print("  git tree: %s" % record["git_tree"])
+        print("  bootstrap sha256: %s" % record["bootstrap_sha256"])
+        print("  worktree clean  : %s" % record["worktree_clean"])
+        print("  delete-mechanism: %s (flips %s)"
+              % (record["delete_mechanism"],
+                 "captured" if args.delete_mechanism
+                 else "NOT captured - record is not certifiable without --delete-mechanism"))
+        print()
+
+    if args.combine:
+        # Fail-closed two-context certification.  The exit code is the COMBINED
+        # verdict, not this single run's.  Neither record alone certifies.  The
+        # literal "default" resolves to the default unelevated record path, so
+        # the elevated `audit:offline:certify` needs no hand-typed path.
+        combine_path = (record_path_for("unelevated", evidence_dir)
+                        if args.combine == "default" else Path(args.combine))
+        return combine_records(record, combine_path, evidence_dir)
 
     # ---- certification ---------------------------------------------------
     # ONE rule: certification requires every row IN THE WHOLE TABLE to be a PASS.
@@ -4427,8 +4953,15 @@ def main():
         if any(r.verdict == "BLOCKED_ELEVATION_REQUIRED" for r in results):
             print("  The accept-and-install half of the bootstrap was NOT exercised.")
             print("  This run is not a certification of it and must not be read as one.")
+        if any(r.verdict == "BLOCKED_WRONG_CONTEXT" for r in results):
+            print("  The unelevated-context half of the table was NOT exercised under this")
+            print("  elevated token.  A single context cannot certify the whole table; use")
+            print("  --combine with the unelevated record to obtain a combined verdict.")
         return 1
     print("  VERDICT: PASS - every row in the table above is a PASS.")
+    print("  NOTE: a single whole-table run only ever reaches PASS here when BOTH halves")
+    print("  share this token, which never happens under the two-context model.  The")
+    print("  authoritative certification is the --combine of the two head-bound records.")
     return 0
 
 
