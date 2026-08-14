@@ -1445,15 +1445,19 @@ def _programfiles_control(base, image, work):
             "-ExpectedBundleHash", source.pin()]        # no -ParentPath: OS-derived
     result = launch(image, argv)
     target = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), root_name)
-    expected = "ROOT_CREATE_FAILED" if not ELEVATED else "OK"
+    # CTL-PROGFILES is declared UNELEVATED context, so its body runs ONLY under an
+    # unelevated token: under an elevated token the row is BLOCKED_WRONG_CONTEXT and
+    # is never run.  This account therefore cannot write under the real ProgramFiles,
+    # and the run stops at the privilege-gated create with ROOT_CREATE_FAILED.  The
+    # former `if ELEVATED` arms (expected "OK", exists(target), remove_tree) were on
+    # a branch this body can never take and are removed.
+    expected = "ROOT_CREATE_FAILED"
     checks = [
         ("harness sees nothing left behind under the real ProgramFiles",
-         (not exists(target)) if not ELEVATED else exists(target)),
+         not exists(target)),
         ("harness confirms the run passed the whole parent chain before stopping",
          result.code in (0, 41)),
     ]
-    if ELEVATED and exists(target):
-        remove_tree(target)
     return Result("CTL-PROGFILES",
                   "the production trust set ACCEPTS the real OS-derived ProgramFiles chain",
                   expected, result, checks)
@@ -3490,32 +3494,33 @@ def _copy_directory_occupied(base, image, work):
 
 
 def build_elevated_command(unelevated_record_path):
-    """The ONE elevated command, with the concrete unelevated-record path baked in.
+    """The ONE elevated certify command, with the concrete unelevated-record path
+    baked in.
 
-    Under the two-context model a lone elevated run does NOT certify: elevated,
-    the 33 CTL/SCN/IDN rows are BLOCKED_WRONG_CONTEXT (their fixtures need an
-    untrusted owner, which an elevated token cannot produce), so the elevated
-    run fails alone exactly as the unelevated run does.  Certification is the
-    fail-closed COMBINE of the two head-bound records.  The single command below
-    runs the whole table elevated, emits the elevated record, then combines it
-    against the unelevated record generated at this same git head.
+    Certification is LIVE-ELEVATED: the command below runs under a real elevated
+    token, executes ELV-01..07 LIVE in that same invocation, and certifies those
+    IN-MEMORY results against the unelevated record generated at this same git
+    head.  It NEVER accepts an elevated record as an input - a file may never
+    claim elevated authenticity.
     """
     return (
         "Start an ELEVATED PowerShell (Run as administrator) and run EXACTLY:\n"
         "\n"
         "    cd <repo>\n"
-        "    python scripts\\offline_bootstrap_guard.py --delete-mechanism --combine \"%s\"\n"
+        "    python scripts\\offline_bootstrap_guard.py --delete-mechanism --certify \"%s\"\n"
         "\n"
         "That single command runs the WHOLE table - CTL-*, SCN-*, IDN-* and all seven\n"
-        "ELV-* rows - the deletion experiments, emits THIS run's elevated evidence\n"
-        "record, and then COMBINES it (fail-closed) against the unelevated record at\n"
-        "the path above.  NO FLAG SUBSTITUTES FOR THE ELEVATED TOKEN: the ELV bodies\n"
-        "run when, and only when, the harness finds BUILTIN\\Administrators in its OWN\n"
-        "process token (CheckTokenMembership against S-1-5-32-544).  It takes nobody's\n"
-        "word for that, and no argument supplies a principal.\n"
-        "The two records must share git head, git tree and bootstrap SHA-256, and each\n"
-        "must be a WHOLE-TABLE run; --only is rejected with --combine.  Neither record\n"
-        "alone certifies - only the combined verdict does." % unelevated_record_path
+        "ELV-* rows - and the deletion experiments, EXECUTES ELV-01..07 live, and then\n"
+        "certifies those live in-memory results against the UNELEVATED record at the\n"
+        "path above.  NO FLAG SUBSTITUTES FOR THE ELEVATED TOKEN: the certify path\n"
+        "refuses unless the harness finds BUILTIN\\Administrators in its OWN process\n"
+        "token (CheckTokenMembership against S-1-5-32-544), read LIVE.  It takes\n"
+        "nobody's word for that, no argument supplies a principal, and no file's claim\n"
+        "of elevation is ever trusted.\n"
+        "The unelevated record must be token_context=unelevated / elevated=false and\n"
+        "share git head, git tree and bootstrap SHA-256 with the live run; it must be a\n"
+        "WHOLE-TABLE run; --only is rejected with --certify.  Neither half alone\n"
+        "certifies - only the live-elevated certification does." % unelevated_record_path
     )
 
 
@@ -4254,35 +4259,45 @@ def print_coverage(results):
 
 
 # ---------------------------------------------------------------------------
-# Two-context certification: machine-readable evidence records + fail-closed
-# combiner.
+# Live-elevated certification: an unelevated evidence record FILE + the elevated
+# half executed LIVE, never from a file.
 #
 # No single token can certify the whole table: the 33 CTL/SCN/IDN rows need an
 # untrusted (unelevated-owned) fixture and the 7 ELV rows need a trusted
-# (elevated-owned) one that actually INSTALLS.  So each whole-table run emits a
+# (elevated-owned) one that actually INSTALLS.  The unelevated half is a
 # machine-readable record BOUND to git head + tree + bootstrap SHA + the token
-# it read from its own process, and the combiner certifies ONLY when a genuine
-# unelevated record and a genuine elevated record - at the SAME head - together
-# cover every row in its declared context.  A record is emitted by the guard at
-# run time; it is never assembled from prose, and a malformed record is a FAIL,
-# never a parse fallback.
+# the run read from its own process; it is emitted by a whole-table unelevated
+# run, never assembled from prose, and a malformed record is a FAIL, never a
+# parse fallback.
+#
+# The elevated half is NOT a file.  A FILE MAY NEVER CLAIM ELEVATED AUTHENTICITY:
+# a hand-edited record could set token_context="elevated" and flip the seven ELV
+# verdicts to PASS with no elevated token behind it.  So the certify command
+# itself runs under a real elevated token (verified LIVE from its own process
+# token via CheckTokenMembership against S-1-5-32-544), executes ELV-01..07 LIVE
+# in that same invocation, and certifies those IN-MEMORY live results against the
+# unelevated record.  The certify path NEVER accepts an elevated record as input.
 # ---------------------------------------------------------------------------
 
 import json
 import datetime
 
 EVIDENCE_SCHEMA = "offline-bootstrap-two-context-evidence/v1"
-COMBINED_SCHEMA = "offline-bootstrap-combined-verdict/v1"
+CERTIFICATION_SCHEMA = "offline-bootstrap-live-elevated-certification/v1"
 
 # Records live OUTSIDE the git worktree so the tree stays clean.  A sibling of
 # the repo root by default; overridable with --evidence-dir.
 DEFAULT_EVIDENCE_DIR = ROOT.parent / "mr-offline-bootstrap-evidence"
 
-# Every field the combiner treats as load-bearing.  A record missing any one of
-# them is invalid and the combiner FAILS on it - it does not guess a default.
+# Every field a record must carry to be considered at all.  A record missing any
+# one of them is invalid and certification FAILS on it - it does not guess a
+# default.  `account_sid` is load-bearing: the unelevated fixtures require an
+# UNTRUSTED owner, so the capturing SID is checked to be a well-formed, untrusted
+# principal (a fabricated trusted SID is refused).
 RECORD_BINDING_FIELDS = ("schema", "git_head", "git_tree", "bootstrap_sha256",
                          "token_context", "elevated", "whole_table",
-                         "worktree_clean", "delete_mechanism", "rows", "flips")
+                         "worktree_clean", "delete_mechanism", "account_sid",
+                         "rows", "flips")
 ROW_FIELDS = ("id", "declared_context", "verdict", "expected_reason", "observed_reason")
 
 
@@ -4301,7 +4316,8 @@ def worktree_is_clean():
     """True only if `git status --porcelain -uno` is empty - i.e. the tracked
     tree on disk is exactly the committed head the record binds.  A record whose
     head/tree do not describe the code that actually ran is worthless, so this is
-    itself a binding field and the combiner requires it True on both sides."""
+    itself a binding field: the unelevated record must carry it True, and the
+    certify process re-checks its own live worktree the same way."""
     try:
         out = subprocess.check_output(["git", "-C", str(ROOT), "status",
                                        "--porcelain", "-uno"],
@@ -4314,7 +4330,7 @@ def worktree_is_clean():
 def record_path_for(token_context, evidence_dir):
     """The STABLE path for a context's record - last write at a head wins.  The
     record is head-bound internally, so a stale file at an old head simply FAILS
-    the combiner's head-equality check rather than certifying anything."""
+    the certify process's live head-equality check rather than certifying anything."""
     return Path(evidence_dir) / ("record-%s.json" % token_context)
 
 
@@ -4359,8 +4375,8 @@ def load_record(path):
     """Return (record, None) on a fully-bound record, else (None, reason).
 
     A record that will not parse, or is missing ANY binding field, or whose rows
-    or flips are malformed, is rejected here.  The combiner turns a rejection
-    straight into a FAIL - there is no lenient parse and no default value."""
+    or flips are malformed, is rejected here.  Certification turns a rejection
+    straight into a REFUSE - there is no lenient parse and no default value."""
     path = Path(path)
     if not path.is_file():
         return None, "record file not found: %s" % path
@@ -4399,181 +4415,451 @@ def load_record(path):
     return record, None
 
 
-def combine_records(this_record, other_path, evidence_dir):
-    """Fail-closed two-context certification.  Prints a human summary and a
-    machine-readable combined verdict; returns 0 only if ALL checks hold."""
-    print()
-    print("TWO-CONTEXT COMBINE  (fail-closed certification)")
-    print("  This run's record is combined against a second record on disk.  The")
-    print("  combined verdict is PASS only if every check below holds; a missing,")
-    print("  malformed, filtered, stale or cross-head record is a FAIL, never a")
-    print("  parse fallback.  Neither record alone can certify.")
-    print()
+SID_RE = re.compile(r"^S-1-\d+(?:-\d+)+$")
 
-    checks = []          # (id, description, ok)
+
+def _is_untrusted_sid(text):
+    """A well-formed SID string that is NOT one of the trusted principals.  The
+    unelevated fixtures require an UNTRUSTED owner, so the record's capturing SID
+    must look like a SID and must not be SYSTEM/Administrators/TrustedInstaller.
+    A fabricated trusted SID (e.g. S-1-5-32-544) therefore fails this."""
+    return (isinstance(text, str) and bool(SID_RE.match(text))
+            and text not in PRODUCTION_TRUSTED_SIDS)
+
+
+def validate_unelevated_record(record, live_head, live_tree, live_sha, live_ctx):
+    """Validate THE ONLY FILE INPUT to certification: the unelevated record.
+
+    Returns a list of (check_id, description, ok).  A FILE MAY NEVER CLAIM
+    ELEVATED AUTHENTICITY, so this REFUSES any record that is not
+    token_context='unelevated' / elevated is False, that carries a live ELV
+    result rather than the BLOCKED_ELEVATION_REQUIRED a genuine unelevated run
+    emits, or whose head/tree/SHA do not equal the values the certify process
+    observed LIVE.  Elevation for the certify itself is NOT read from here - it is
+    the live process token, checked by the caller.  Booleans are matched by
+    identity so a coerced 0/"false" cannot slip through.  This function is pure
+    (no I/O) so the adversarial battery can drive it directly, unelevated.
+    """
+    checks = []
 
     def add(cid, description, ok):
         checks.append((cid, description, ok))
 
-    # This run's own record must itself be a valid, fully-bound record.
-    write_record(this_record, evidence_dir / "_combine-this.json")
-    this_ok, this_err = load_record(evidence_dir / "_combine-this.json")
-    other, other_err = load_record(other_path)
+    # Token/elevation identity: the file may not claim elevated authenticity.
+    add("u-token-context",
+        "the record is declared token_context='unelevated' (got %r)"
+        % record.get("token_context"),
+        record.get("token_context") == "unelevated")
+    add("u-not-elevated",
+        "the record's own elevated flag is exactly False (got %r)"
+        % record.get("elevated"),
+        record.get("elevated") is False)
 
-    fatal = None
-    if this_ok is None:
-        fatal = "this run's own record is invalid: %s" % this_err
-    elif other is None:
-        fatal = "the other record is invalid: %s" % other_err
-    if fatal is not None:
-        add("record-validity", fatal, False)
-        return _emit_combined(checks, None, None, evidence_dir)
+    # Untrusted owner: a well-formed, non-trusted capturing SID.
+    add("u-account-sid",
+        "the capturing account_sid is a well-formed, UNTRUSTED SID (got %r)"
+        % record.get("account_sid"),
+        _is_untrusted_sid(record.get("account_sid")))
 
-    # One must be unelevated, the other elevated (no duplicate context).
-    pair = {this_ok["token_context"], other["token_context"]}
-    if pair != {"unelevated", "elevated"}:
-        add("record-pairing",
-            "the two records are one unelevated + one elevated (got %s)"
-            % sorted([this_ok["token_context"], other["token_context"]]), False)
-        return _emit_combined(checks, None, None, evidence_dir)
+    # Whole-table, clean worktree, delete-mechanism - all strict True.
+    add("u-whole-table", "the record is a WHOLE-TABLE (unfiltered) run",
+        record.get("whole_table") is True)
+    add("u-worktree-clean",
+        "the record was produced from a CLEAN worktree (tree matches head)",
+        record.get("worktree_clean") is True)
+    add("u-delete-mechanism",
+        "the record captured mechanism flips (--delete-mechanism)",
+        record.get("delete_mechanism") is True)
 
-    unelev = this_ok if this_ok["token_context"] == "unelevated" else other
-    elev = this_ok if this_ok["token_context"] == "elevated" else other
+    # Head/tree/SHA EXACTLY equal to the LIVE values the certify process observed.
+    for field, live, label in (("git_head", live_head, "git head"),
+                               ("git_tree", live_tree, "git tree"),
+                               ("bootstrap_sha256", live_sha, "bootstrap SHA-256")):
+        got = record.get(field)
+        add("u-%s" % field,
+            "the record's %s equals the LIVE value the certify process observed (%s)"
+            % (label, got if got == live else "%s != %s" % (got, live)),
+            bool(live) and got == live)
 
-    # (1) both whole-table / unfiltered, and both from a clean worktree.
-    add("1-whole-table",
-        "both records are WHOLE-TABLE (unfiltered) runs",
-        bool(unelev["whole_table"]) and bool(elev["whole_table"]))
-    add("1-worktree-clean",
-        "both records were produced from a CLEAN worktree (tree matches head)",
-        bool(unelev["worktree_clean"]) and bool(elev["worktree_clean"]))
+    rows = {row.get("id"): row for row in record.get("rows", [])
+            if isinstance(row, dict)}
 
-    # (2) exact-equal head AND tree AND bootstrap SHA across both.
-    for binding, label in (("git_head", "git head"), ("git_tree", "git tree"),
-                           ("bootstrap_sha256", "bootstrap SHA-256")):
-        add("2-%s" % binding,
-            "%s is identical across both records (%s)"
-            % (label, unelev[binding] if unelev[binding] == elev[binding]
-               else "%s != %s" % (unelev[binding], elev[binding])),
-            bool(unelev[binding]) and unelev[binding] == elev[binding])
+    # Every row declares the context this harness declares for it (relabel guard).
+    mislabelled = [rid for rid, row in rows.items()
+                   if rid in live_ctx and row.get("declared_context") != live_ctx[rid]]
+    add("u-labels",
+        "every row declares the context this harness declares for it (%s)"
+        % (sorted(mislabelled) or "all match"),
+        not mislabelled)
 
-    # Cross-check each record's rows against the live scenario table, so a
-    # relabelled declared_context in a tampered record cannot smuggle a row into
-    # the wrong half.
-    live_ctx = {s["id"]: s["context"] for s in SCENARIOS}
-    for label, rec in (("unelevated", unelev), ("elevated", elev)):
-        mislabelled = [row["id"] for row in rec["rows"]
-                       if row["id"] in live_ctx
-                       and row["declared_context"] != live_ctx[row["id"]]]
-        add("2-labels-%s" % label,
-            "every row in the %s record declares the context this harness declares "
-            "for it (%s)" % (label, mislabelled or "all match"),
-            not mislabelled)
-
-    unelev_rows = {row["id"]: row for row in unelev["rows"]}
-    elev_rows = {row["id"]: row for row in elev["rows"]}
-
-    # (3) unelevated record: every declared-unelevated scenario at PASS, zero
-    #     INCONCLUSIVE / BLOCKED among those required rows.
+    # All declared-unelevated rows PASS.
     required_unelev = [s["id"] for s in SCENARIOS if s["context"] == "unelevated"]
-    bad_unelev = [ident for ident in required_unelev
-                  if unelev_rows.get(ident, {}).get("verdict") != "PASS"]
-    add("3-unelevated-pass",
-        "every one of the %d declared-unelevated rows is PASS in the unelevated "
-        "record (%s)" % (len(required_unelev),
-                         "all PASS" if not bad_unelev
-                         else "not PASS: " + ", ".join(sorted(bad_unelev))),
-        not bad_unelev)
+    bad = [rid for rid in required_unelev
+           if rows.get(rid, {}).get("verdict") != "PASS"]
+    add("u-unelevated-pass",
+        "every one of the %d declared-unelevated rows is PASS (%s)"
+        % (len(required_unelev),
+           "all PASS" if not bad else "not PASS: " + ", ".join(sorted(bad))),
+        not bad)
 
-    # (4) elevated record: ELV-01..07 all PASS, zero BLOCKED/INCONCLUSIVE/FAIL.
+    # NO file may carry a live elevated result: every declared-elevated row in
+    # this UNELEVATED record must be exactly BLOCKED_ELEVATION_REQUIRED, which is
+    # what a genuine unelevated run emits.  A forged ELV=PASS row is refused here,
+    # not silently ignored.
     required_elev = [s["id"] for s in SCENARIOS if s["context"] == "elevated"]
-    bad_elev = [ident for ident in required_elev
-                if elev_rows.get(ident, {}).get("verdict") != "PASS"]
-    add("4-elevated-pass",
-        "every one of the %d ELV rows is PASS in the elevated record (%s)"
-        % (len(required_elev), "all PASS" if not bad_elev
-           else "not PASS: " + ", ".join(sorted(bad_elev))),
-        not bad_elev)
+    claims = [rid for rid in required_elev
+              if rows.get(rid, {}).get("verdict") != "BLOCKED_ELEVATION_REQUIRED"]
+    add("u-no-file-elevated-result",
+        "the file claims NO elevated result: every ELV row is "
+        "BLOCKED_ELEVATION_REQUIRED (%s)"
+        % ("all blocked" if not claims
+           else "claims a result: " + ", ".join(sorted(claims))),
+        not claims)
 
-    # (5) required mechanism flips pass in their declared valid context: non-ELV
-    #     flips from the unelevated record, ELV flips from the elevated record.
+    # Required unelevated-context flips present and flipped.
+    flips = record.get("flips", {})
+    if not isinstance(flips, dict):
+        flips = {}
     flip_problems = []
     for spec in SCENARIOS:
-        if not spec["mutations"]:
+        if spec["context"] != "unelevated" or not spec["mutations"]:
             continue
-        src = unelev if spec["context"] == "unelevated" else elev
-        entry = src["flips"].get(spec["id"])
-        if entry is None or not entry.get("flipped"):
-            flip_problems.append("%s(%s)" % (spec["id"], spec["context"]))
-    add("5-flips",
-        "every mechanism flip passes in its declared context (%s)"
+        entry = flips.get(spec["id"])
+        if not isinstance(entry, dict) or entry.get("flipped") is not True:
+            flip_problems.append(spec["id"])
+    add("u-flips",
+        "every unelevated-context mechanism flip is present and flipped (%s)"
         % ("all flipped" if not flip_problems
-           else "not flipped: " + ", ".join(flip_problems)),
+           else "not flipped: " + ", ".join(sorted(flip_problems))),
         not flip_problems)
 
-    # (6) the union of declared contexts covers EVERY scenario exactly once - no
-    #     row uncovered, no row double-covered.  A row is 'covered' by a PASS in
-    #     the record whose token matches its declared context.
+    return checks
+
+
+def certify_live(image, live_results, live_flips, delete_mechanism,
+                 unelevated_record_path, evidence_dir):
+    """LIVE-ELEVATED certification.  Returns 0 only if EVERY check holds.
+
+    The elevated half is executed NOW, in this process, under a token this
+    process reads LIVE from itself; it is NEVER loaded from a file.  The ONLY file
+    input is the unelevated record, required to be token_context='unelevated' /
+    elevated=false and head/tree/SHA-bound to the LIVE values.  A FILE MAY NEVER
+    CLAIM ELEVATED AUTHENTICITY.
+    """
+    print()
+    print("LIVE-ELEVATED CERTIFICATION  (fail-closed)")
+    print("  This command independently observed a real elevated token from its OWN")
+    print("  live process and executed ELV-01..07 live in THIS invocation; it did not")
+    print("  trust any file's claim of elevation.  The unelevated half is a")
+    print("  head/tree/SHA-bound record required to be token_context=unelevated /")
+    print("  elevated=false.")
+    print("  THREAT-MODEL HONESTY: this is NOT cryptographic proof against a malicious")
+    print("  local operator who controls the machine and its files.  The guarantee is")
+    print("  only that THIS certify command observes a live elevated token and runs the")
+    print("  elevated evidence live rather than trusting a file's claim of elevation;")
+    print("  the unelevated record binds to AN untrusted principal, and a forger who")
+    print("  substitutes a different valid untrusted SID is indistinguishable.")
+    print()
+
+    checks = []
+
+    def add(cid, description, ok):
+        checks.append((cid, description, ok))
+
+    # LIVE values observed by THIS certify process, at decision time.
+    live_elevated = is_elevated()          # fresh read of THIS process token
+    live_head = git_rev("HEAD")
+    live_tree = git_rev("HEAD^{tree}")
+    live_sha = image.sha256
+    live_clean = worktree_is_clean()
+    live_ctx = {s["id"]: s["context"] for s in SCENARIOS}
+
+    # (0) THE LIVE-TOKEN GATE.  Certification refuses unless THIS process holds a
+    #     real elevated Administrator token, read live from the process token
+    #     (CheckTokenMembership vs S-1-5-32-544).  No file and no flag supplies it.
+    add("0-live-elevated",
+        "this certify process holds a real elevated Administrator token, read LIVE "
+        "from its own process token (CheckTokenMembership vs S-1-5-32-544)",
+        live_elevated is True)
+    add("0-delete-mechanism",
+        "certification ran with --delete-mechanism so the live ELV flips executed",
+        delete_mechanism is True)
+    add("0-worktree-clean-live",
+        "the certify process observes a CLEAN worktree (tree matches head)",
+        live_clean is True)
+    add("0-live-bindings",
+        "the certify process resolved a live git head, tree and bootstrap SHA-256",
+        bool(live_head) and bool(live_tree) and bool(live_sha))
+
+    # ---- the unelevated half: THE ONLY FILE INPUT -------------------------
+    record, err = load_record(unelevated_record_path)
+    if record is None:
+        add("u-record-valid",
+            "the unelevated record file is a fully-bound record: %s" % err, False)
+    else:
+        add("u-record-valid", "the unelevated record file is a fully-bound record", True)
+        for cid, desc, ok in validate_unelevated_record(
+                record, live_head, live_tree, live_sha, live_ctx):
+            add(cid, desc, ok)
+
+    # ---- the elevated half: LIVE, IN-MEMORY, NEVER FROM A FILE ------------
+    live_rows = {r.id: r for r in live_results}
+    required_elev = [s["id"] for s in SCENARIOS if s["context"] == "elevated"]
+    bad_live = []
+    for rid in required_elev:
+        r = live_rows.get(rid)
+        verdict = getattr(r, "verdict", None) if r is not None else None
+        if verdict != "PASS":
+            bad_live.append("%s=%s" % (rid, verdict or "absent"))
+    add("e-live-elv-pass",
+        "ELV-01..07 EXECUTED LIVE in this elevated process and every one is PASS, "
+        "with zero BLOCKED/INCONCLUSIVE/FAIL (%s)"
+        % ("all PASS" if not bad_live else ", ".join(bad_live)),
+        not bad_live and len(required_elev) == 7)
+
+    # The live ELV flips ran in THIS process and flipped.
+    live_flip_problems = []
+    for spec in SCENARIOS:
+        if spec["context"] != "elevated" or not spec["mutations"]:
+            continue
+        entry = live_flips.get(spec["id"])
+        if (not isinstance(entry, dict) or entry.get("ran") is not True
+                or entry.get("flipped") is not True):
+            live_flip_problems.append(spec["id"])
+    add("e-live-flips",
+        "every elevated-context mechanism flip EXECUTED LIVE and flipped (%s)"
+        % ("all flipped" if not live_flip_problems
+           else "not flipped: " + ", ".join(sorted(live_flip_problems))),
+        not live_flip_problems)
+
+    # ---- coverage: unelevated record + live ELV cover all 40 exactly once --
     covered = {}
-    for row in unelev["rows"]:
-        if row["declared_context"] == "unelevated" and row["verdict"] == "PASS":
-            covered[row["id"]] = covered.get(row["id"], 0) + 1
-    for row in elev["rows"]:
-        if row["declared_context"] == "elevated" and row["verdict"] == "PASS":
-            covered[row["id"]] = covered.get(row["id"], 0) + 1
+    if record is not None:
+        for row in record.get("rows", []):
+            if (isinstance(row, dict) and row.get("declared_context") == "unelevated"
+                    and row.get("verdict") == "PASS"):
+                covered[row["id"]] = covered.get(row["id"], 0) + 1
+    for rid in required_elev:
+        r = live_rows.get(rid)
+        if r is not None and getattr(r, "verdict", None) == "PASS":
+            covered[rid] = covered.get(rid, 0) + 1
     expected_ids = set(live_ctx)
     uncovered = sorted(expected_ids - set(covered))
     doubled = sorted(ident for ident, n in covered.items() if n > 1)
     unknown = sorted(set(covered) - expected_ids)
-    add("6-coverage",
-        "the two contexts partition all %d scenarios exactly once (%s)"
+    add("cov-coverage",
+        "the unelevated record + the live ELV results partition all %d scenarios "
+        "exactly once (%s)"
         % (len(expected_ids),
            "complete" if not (uncovered or doubled or unknown)
            else "uncovered=%s doubled=%s unknown=%s" % (uncovered, doubled, unknown)),
         not (uncovered or doubled or unknown))
 
-    return _emit_combined(checks, unelev, elev, evidence_dir)
+    return _emit_certification(checks, record, live_results, live_head, live_tree,
+                               live_sha, live_elevated, delete_mechanism, evidence_dir)
 
 
-def _emit_combined(checks, unelev, elev, evidence_dir):
+def _emit_certification(checks, unelev_record, live_results, live_head, live_tree,
+                        live_sha, live_elevated, delete_mechanism, evidence_dir):
     passed = all(ok for _cid, _desc, ok in checks)
     print("  check results:")
     for cid, description, ok in checks:
-        print("    [%s] %-14s %s" % ("ok" if ok else "NO", cid, description))
+        print("    [%s] %-24s %s" % ("ok" if ok else "NO", cid, description))
     print()
     verdict = {
-        "schema": COMBINED_SCHEMA,
+        "schema": CERTIFICATION_SCHEMA,
         "generated_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "verdict": "PASS" if passed else "FAIL",
-        "git_head": (unelev or {}).get("git_head") if unelev else None,
-        "git_tree": (unelev or {}).get("git_tree") if unelev else None,
-        "bootstrap_sha256": (unelev or {}).get("bootstrap_sha256") if unelev else None,
+        "verdict": "PASS" if passed else "REFUSE",
+        "certified_by": "live-elevated certification: this certify process observed a "
+                        "real elevated token from its own live process token and executed "
+                        "ELV-01..07 live; it trusted no file's claim of elevation",
+        "live_elevated": bool(live_elevated),
+        "delete_mechanism": bool(delete_mechanism),
+        "git_head": live_head, "git_tree": live_tree, "bootstrap_sha256": live_sha,
         "unelevated_record": {
-            "token_context": unelev["token_context"], "git_head": unelev["git_head"],
-        } if unelev else None,
-        "elevated_record": {
-            "token_context": elev["token_context"], "git_head": elev["git_head"],
-        } if elev else None,
+            "token_context": unelev_record.get("token_context"),
+            "git_head": unelev_record.get("git_head"),
+            "account_sid": unelev_record.get("account_sid"),
+        } if unelev_record else None,
+        "live_elevated_rows_passed": sorted(
+            r.id for r in live_results
+            if str(r.id).startswith("ELV") and getattr(r, "verdict", None) == "PASS"),
         "checks": [{"id": cid, "ok": ok, "description": desc}
                    for cid, desc, ok in checks],
     }
-    out_path = Path(evidence_dir) / "combined-verdict.json"
+    out_path = Path(evidence_dir) / "certification-verdict.json"
     write_record(verdict, out_path)
-    print("  combined verdict written: %s" % out_path)
+    print("  certification verdict written: %s" % out_path)
     print("  MACHINE VERDICT: %s" % json.dumps({"verdict": verdict["verdict"],
+                                                 "live_elevated": verdict["live_elevated"],
                                                  "git_head": verdict["git_head"],
                                                  "checks_failed": sum(
                                                      1 for c in verdict["checks"]
                                                      if not c["ok"])}))
     print()
     if passed:
-        print("COMBINED CERTIFICATION: PASS - a genuine unelevated record and a genuine")
-        print("elevated record at the same head together certify every row in its")
-        print("declared context.")
+        print("LIVE-ELEVATED CERTIFICATION: PASS")
+        print("  This command independently observed a real elevated token from the LIVE")
+        print("  process and executed ELV-01..07 live; it did not trust any file's claim")
+        print("  of elevation.  The unelevated half is a head/tree/SHA-bound record")
+        print("  required to be token_context=unelevated / elevated=false.")
         return 0
-    print("COMBINED CERTIFICATION: FAIL - the two records do not jointly certify the")
-    print("table.  See the failing checks above.  Neither record alone certifies.")
+    print("LIVE-ELEVATED CERTIFICATION: REFUSE - one or more checks did not hold.")
+    print("  See the failing checks above.  A file can never stand in for the live")
+    print("  elevated token, and neither half alone certifies.")
     return 1
+
+
+def certify_selftest(evidence_dir):
+    """Fail-closed adversarial battery for live-elevated certification.
+
+    Designed to run UNELEVATED.  Tests 1-4/6-9 feed fabricated unelevated records
+    to validate_unelevated_record() and assert it REFUSES the specific defect.
+    Test 5 asserts the live-token gate refuses when this process is unelevated.
+    Test 10 asserts a VALID unelevated record passes its half AND that ELV
+    execution is gated behind the live ELEVATED check, so the operator's live
+    elevated run is the only PASS path.  Every test folds into the exit code.
+    """
+    import tempfile as _tempfile
+
+    print("LIVE-ELEVATED CERTIFICATION - adversarial fail-closed battery")
+    print("  Designed to run UNELEVATED.  Record-validation refusals are asserted")
+    print("  directly; the live-token refusal is asserted from this process's own")
+    print("  token.  The genuine live-elevated leg is the operator's run (test 10).")
+    print()
+
+    live_head = git_rev("HEAD")
+    live_tree = git_rev("HEAD^{tree}")
+    live_sha = Image(BOOTSTRAP).sha256
+    live_ctx = {s["id"]: s["context"] for s in SCENARIOS}
+    mut_ctx = {s["id"]: (s["context"], s["mutations"])
+               for s in SCENARIOS if s["mutations"]}
+
+    def base_rows(elv_verdict):
+        rows = []
+        for s in SCENARIOS:
+            v = "PASS" if s["context"] == "unelevated" else elv_verdict
+            rows.append({"id": s["id"], "declared_context": s["context"],
+                         "verdict": v, "expected_reason": None, "observed_reason": None})
+        return rows
+
+    def base_flips(context):
+        out = {}
+        for sid, (ctx, m) in mut_ctx.items():
+            if ctx == context:
+                out[sid] = {"declared_context": ctx, "ran": True, "flipped": True,
+                            "skipped_wrong_context": False, "mutations": list(m)}
+            else:
+                out[sid] = {"declared_context": ctx, "ran": False, "flipped": None,
+                            "skipped_wrong_context": True, "mutations": list(m)}
+        return out
+
+    def valid_unelevated():
+        return {
+            "schema": EVIDENCE_SCHEMA, "generated_at": "2026-01-01T00:00:00Z",
+            "git_head": live_head, "git_tree": live_tree, "bootstrap_sha256": live_sha,
+            "token_context": "unelevated", "elevated": False, "whole_table": True,
+            "worktree_clean": True, "delete_mechanism": True, "account_sid": ME,
+            "rows": base_rows("BLOCKED_ELEVATION_REQUIRED"),
+            "flips": base_flips("unelevated"),
+        }
+
+    def refuses(record):
+        checks = validate_unelevated_record(record, live_head, live_tree, live_sha, live_ctx)
+        return not all(ok for _c, _d, ok in checks)
+
+    results = []
+
+    def t(name, passed, detail=""):
+        results.append((name, bool(passed), detail))
+
+    # 1. hand-edited fake elevated record supplied as input => REFUSE.
+    fake = valid_unelevated()
+    fake["token_context"] = "elevated"; fake["elevated"] = True
+    fake["account_sid"] = "S-1-5-32-544"; fake["rows"] = base_rows("PASS")
+    fake["flips"] = base_flips("elevated")
+    t("1  fake elevated record as input", refuses(fake))
+
+    # 2. genuine unelevated record relabeled elevated => REFUSE.
+    r = valid_unelevated(); r["token_context"] = "elevated"
+    t("2  unelevated record relabeled elevated", refuses(r))
+
+    # 3. elevated:true flipped in JSON => REFUSE.
+    r = valid_unelevated(); r["elevated"] = True
+    t("3  elevated=true flipped", refuses(r))
+
+    # 4. fabricated account_sid (claims Administrators) => REFUSE.
+    r = valid_unelevated(); r["account_sid"] = "S-1-5-32-544"
+    t("4  fabricated trusted account_sid", refuses(r))
+
+    # 5. running certify UNELEVATED => REFUSE (live-token gate), asserted against
+    #    THIS process's own live token.
+    with _tempfile.TemporaryDirectory(prefix="certify-selftest-") as td:
+        rec_path = Path(td) / "record-unelevated.json"
+        write_record(valid_unelevated(), rec_path)
+        rc = certify_live(Image(BOOTSTRAP), [], {}, True, rec_path, Path(td))
+    if is_elevated():
+        t("5  certify unelevated (live-token gate)", True,
+          "N/A: this process is elevated; run the battery unelevated to exercise it")
+    else:
+        t("5  certify unelevated (live-token gate)", rc != 0)
+
+    # 6. stale head/tree/SHA => REFUSE.
+    r1 = valid_unelevated(); r1["git_head"] = "0" * 40
+    r2 = valid_unelevated(); r2["git_tree"] = "0" * 40
+    r3 = valid_unelevated(); r3["bootstrap_sha256"] = "0" * 64
+    t("6  stale head/tree/SHA", refuses(r1) and refuses(r2) and refuses(r3))
+
+    # 7. dirty worktree => REFUSE.
+    r = valid_unelevated(); r["worktree_clean"] = False
+    t("7  dirty worktree", refuses(r))
+
+    # 8. filtered/missing row => REFUSE; and a forged ELV=PASS row => REFUSE.
+    r = valid_unelevated()
+    r["rows"] = [row for row in r["rows"] if row["id"] != "SCN-15"]
+    forged = valid_unelevated()
+    for row in forged["rows"]:
+        if row["id"] == "ELV-01":
+            row["verdict"] = "PASS"
+    t("8  filtered/missing row + forged ELV result", refuses(r) and refuses(forged))
+
+    # 9. missing/forged flip => REFUSE.
+    r1 = valid_unelevated(); r1["flips"].pop("SCN-01", None)
+    r2 = valid_unelevated(); r2["flips"]["CTL-OWNER"]["flipped"] = False
+    t("9  missing/forged flip", refuses(r1) and refuses(r2))
+
+    # 10. valid unelevated record + live elevated execution => the ONLY PASS path.
+    #     The unelevated half is ACCEPTED; the sole remaining gate is the live
+    #     elevated token, which this battery does not fake.  ELV bodies run ONLY
+    #     when the token this process holds equals their declared context, and
+    #     that context is 'elevated' only when the live token is elevated.
+    valid_accepted = not refuses(valid_unelevated())
+    all_elv_elevated = all(s["context"] == "elevated"
+                           for s in SCENARIOS if str(s["id"]).startswith("ELV"))
+    token_context = "elevated" if is_elevated() else "unelevated"
+    elv_would_run = [s["id"] for s in SCENARIOS
+                     if str(s["id"]).startswith("ELV") and s["context"] == token_context]
+    gate_ok = (valid_accepted and all_elv_elevated
+               and (bool(elv_would_run) == is_elevated()))
+    t("10 valid record + live token is the ONLY PASS path", gate_ok,
+      "unelevated here: ELV bodies do not run; the operator's elevated run is required")
+
+    print("  battery results:")
+    failed = 0
+    for name, passed, detail in results:
+        print("    [%s] %s%s" % ("PASS" if passed else "FAIL", name,
+                                 ("  (%s)" % detail) if detail else ""))
+        if not passed:
+            failed += 1
+    print()
+    if failed:
+        print("ADVERSARIAL BATTERY: %d of %d test(s) did NOT fail closed as required."
+              % (failed, len(results)))
+        return 1
+    print("ADVERSARIAL BATTERY: all %d tests fail closed - only the operator's live "
+          "elevated run" % len(results))
+    print("  plus a valid head/tree/SHA-bound unelevated record can ever PASS.")
+    return 0
 
 
 def main():
@@ -4595,15 +4881,22 @@ def main():
                         help="where head-bound evidence records are written; a directory "
                              "OUTSIDE the git worktree so the tree stays clean "
                              "(default: %s)" % DEFAULT_EVIDENCE_DIR)
-    parser.add_argument("--combine", default="",
-                        help="fail-closed two-context certification: run the whole table, "
-                             "emit THIS run's record, then combine it against the record at "
-                             "this path.  Requires a whole-table run (rejects --only).")
+    parser.add_argument("--certify", default="", metavar="UNELEVATED_RECORD",
+                        help="LIVE-ELEVATED certification: run the whole table under a real "
+                             "elevated token (executing ELV-01..07 LIVE), then certify those "
+                             "IN-MEMORY live results against the unelevated record at this "
+                             "path ('default' resolves to the default unelevated record).  "
+                             "Requires an elevated token and --delete-mechanism; rejects "
+                             "--only.  It NEVER accepts an elevated record as an input.")
+    parser.add_argument("--certify-selftest", action="store_true",
+                        help="run the fail-closed adversarial battery for live-elevated "
+                             "certification and exit with its aggregate code.  Designed to "
+                             "run UNELEVATED; the live-elevated leg is the operator's run.")
     args = parser.parse_args()
 
     evidence_dir = Path(args.evidence_dir)
-    if args.combine and args.only:
-        print("FAIL: --combine certifies the WHOLE table and cannot be used with --only.")
+    if args.certify and args.only:
+        print("REFUSE: --certify certifies the WHOLE table and cannot be used with --only.")
         return 2
     token_context = "elevated" if ELEVATED else "unelevated"
     unelevated_record_path = record_path_for("unelevated", evidence_dir)
@@ -4614,6 +4907,9 @@ def main():
         print(coverage_markdown())
         print(COVERAGE_MARKER_END)
         return 0
+
+    if args.certify_selftest:
+        return certify_selftest(evidence_dir)
 
     if os.name != "nt":
         print("offline bootstrap guard: Windows only (this is the audit:offline:windows gate).")
@@ -4678,12 +4974,35 @@ def main():
         print("  cannot alone.")
 
     print()
-    print("  TWO-CONTEXT CERTIFICATION.  No single token certifies the whole table.")
+    print("  LIVE-ELEVATED CERTIFICATION.  No single token certifies the whole table.")
     print("  Each row carries ONE declared context; a row not matching this token is")
-    print("  BLOCKED (and counts as a FAILURE for this single run).  Certification is")
-    print("  the fail-closed COMBINE of a genuine unelevated record and a genuine")
-    print("  elevated record at the SAME git head.  This run %s a --combine."
-          % ("PERFORMS" if args.combine else "does NOT perform"))
+    print("  BLOCKED (and counts as a FAILURE for this single run).  Certification runs")
+    print("  the ELV half LIVE under a real elevated token and certifies it against the")
+    print("  unelevated record; a file may never claim elevated authenticity.  This run")
+    print("  %s --certify." % ("PERFORMS" if args.certify else "does NOT perform"))
+
+    # LIVE-TOKEN GATE, fail-fast.  --certify executes ELV-01..07 LIVE in THIS
+    # process, so it must refuse - before building any fixture or running the
+    # table - unless it holds a real elevated token and was asked to run the
+    # deletion experiments the live ELV flips depend on.  No file and no flag
+    # stands in for the token.
+    if args.certify:
+        if not args.delete_mechanism:
+            print()
+            print("LIVE-ELEVATED CERTIFICATION: REFUSE - --certify requires --delete-mechanism")
+            print("  so the live ELV mechanism flips execute in this same elevated invocation.")
+            return 2
+        if not is_elevated():
+            print()
+            print("LIVE-ELEVATED CERTIFICATION: REFUSE - this process does not hold a real")
+            print("  elevated Administrator token.  CheckTokenMembership against S-1-5-32-544,")
+            print("  read LIVE from this process, returned false.  Certification executes")
+            print("  ELV-01..07 LIVE in THIS invocation, so no file and no flag can stand in")
+            print("  for the token.  Run this from an ELEVATED PowerShell (Run as administrator):")
+            print()
+            for line in elevated_command.splitlines():
+                print("  " + line)
+            return 1
 
     base = str(Path(os.path.abspath(os.sep)) / ("mr-bootstrap-guard-" + uuid.uuid4().hex[:10]))
     os.makedirs(long_path(base), exist_ok=False)
@@ -4757,8 +5076,9 @@ def main():
                   % len(wrong_context))
             print("  These rows are declared UNELEVATED and were NOT run under this elevated")
             print("  token - their fixtures need an untrusted owner this token cannot make.")
-            print("  Certify them from an UNELEVATED whole-table run, then --combine the two")
-            print("  head-bound records.  This elevated run cannot certify them.")
+            print("  Certify them from an UNELEVATED whole-table record, which --certify")
+            print("  combines with this elevated run's LIVE ELV results.  This elevated run's")
+            print("  own CTL/SCN/IDN rows cannot certify them.")
             print()
 
         if args.elv_selftest:
@@ -4779,9 +5099,10 @@ def main():
                     continue
                 if spec["context"] != token_context:
                     # A flip is only meaningful in the row's declared context.
-                    # The OTHER context's record carries it, so skipping it here
-                    # does NOT count as a flip failure - the combiner requires it
-                    # from the record whose token CAN run it.
+                    # The OTHER context carries it, so skipping it here does NOT
+                    # count as a flip failure - certification requires it from the
+                    # half (the unelevated record, or the live elevated run) whose
+                    # token CAN run it.
                     print("  %-14s mechanism: %s" % (spec["id"], spec["mechanism"]))
                     print("                 SKIPPED (wrong context): declared %s, this token %s."
                           % (spec["context"], token_context))
@@ -4904,14 +5225,19 @@ def main():
                  else "NOT captured - record is not certifiable without --delete-mechanism"))
         print()
 
-    if args.combine:
-        # Fail-closed two-context certification.  The exit code is the COMBINED
-        # verdict, not this single run's.  Neither record alone certifies.  The
-        # literal "default" resolves to the default unelevated record path, so
-        # the elevated `audit:offline:certify` needs no hand-typed path.
-        combine_path = (record_path_for("unelevated", evidence_dir)
-                        if args.combine == "default" else Path(args.combine))
-        return combine_records(record, combine_path, evidence_dir)
+    if args.certify:
+        # LIVE-ELEVATED certification.  The exit code is the certification
+        # verdict, not this single run's.  The elevated half is the LIVE
+        # in-memory `results`/`flip_results` this elevated process just produced;
+        # the ONLY file input is the unelevated record.  The archive record
+        # written just above (token_context=elevated) is for audit only and is
+        # NEVER read back as a certification input.  The literal "default"
+        # resolves to the default unelevated record path, so the elevated
+        # `audit:offline:certify` needs no hand-typed path.
+        certify_path = (record_path_for("unelevated", evidence_dir)
+                        if args.certify == "default" else Path(args.certify))
+        return certify_live(image, results, flip_results, args.delete_mechanism,
+                            certify_path, evidence_dir)
 
     # ---- certification ---------------------------------------------------
     # ONE rule: certification requires every row IN THE WHOLE TABLE to be a PASS.
@@ -4956,12 +5282,14 @@ def main():
         if any(r.verdict == "BLOCKED_WRONG_CONTEXT" for r in results):
             print("  The unelevated-context half of the table was NOT exercised under this")
             print("  elevated token.  A single context cannot certify the whole table; use")
-            print("  --combine with the unelevated record to obtain a combined verdict.")
+            print("  --certify (elevated) to combine this run's LIVE ELV results with the")
+            print("  unelevated record and obtain a certification verdict.")
         return 1
     print("  VERDICT: PASS - every row in the table above is a PASS.")
     print("  NOTE: a single whole-table run only ever reaches PASS here when BOTH halves")
     print("  share this token, which never happens under the two-context model.  The")
-    print("  authoritative certification is the --combine of the two head-bound records.")
+    print("  authoritative certification is --certify (elevated): the live ELV half plus")
+    print("  the head-bound unelevated record.")
     return 0
 
 

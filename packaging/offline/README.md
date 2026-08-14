@@ -241,7 +241,7 @@ that boundary an unelevated run does prove the whole name and pin policy, the
 process-and-temp observation, the DOS-device chain bypass and the struct-offset
 half of the object-identity differential.
 
-### Two-context certification: no single token certifies the whole table
+### Live-elevated certification: no single token certifies, and no file may claim elevation
 
 Each scenario carries **exactly one declared certification context**, and that
 declaration — not which rows happen to pass — is the only selector:
@@ -263,15 +263,25 @@ report `BLOCKED_WRONG_CONTEXT`. **Both** counts count as failures, so **neither 
 lone unelevated run nor a lone elevated run can ever certify** — each covers only
 its own half.
 
-Certification is the **fail-closed combine of two head-bound evidence records**.
-Every whole-table run emits a machine-readable record — bound to the git head,
-git tree, bootstrap SHA-256, the token it read from its own process, a
-whole-table flag, a clean-worktree flag, every row's `{declared_context,
+The unelevated half is a **head-bound evidence record**. A whole-table
+unelevated run emits a machine-readable record — bound to the git head, git tree,
+bootstrap SHA-256, the token it read from its own process, a whole-table flag, a
+clean-worktree flag, the capturing account SID, every row's `{declared_context,
 verdict, expected/observed reason}`, and the mechanism-flip results — written to
 a directory **outside the git worktree** (default: a sibling `..\mr-offline-
 bootstrap-evidence\`; override with `--evidence-dir`). Records are never
-assembled from prose, and a malformed or partial record is a **FAIL**, never a
+assembled from prose, and a malformed or partial record is a **REFUSE**, never a
 lenient parse.
+
+**The elevated half is NOT a file. A file may never claim elevated
+authenticity.** A hand-edited record could set `token_context="elevated"` and
+flip the seven `ELV-*` verdicts to `PASS` with no elevated token behind it — the
+earlier two-file combiner accepted exactly that. So the **certify command itself
+runs under a real elevated token**, verified **live** from its own process token
+(`CheckTokenMembership` against `S-1-5-32-544` — read live, never from a file),
+**executes `ELV-01..07` live** in that same invocation, and certifies those
+**in-memory** live results against the unelevated record. **The certify path
+never accepts an elevated record as an input**, now or on a future run.
 
 **Do this in two steps, at one git head:**
 
@@ -281,26 +291,49 @@ cd <repo>
 python scripts\offline_bootstrap_guard.py --delete-mechanism
 #   -> writes ..\mr-offline-bootstrap-evidence\record-unelevated.json
 
-# 2. ELEVATED PowerShell (Run as administrator) — emit the elevated record AND
-#    combine it against the unelevated one in a SINGLE command:
+# 2. ELEVATED PowerShell (Run as administrator) — the ONE certify command. It runs
+#    the whole table live, executes ELV-01..07 under this real elevated token, and
+#    certifies those in-memory results against the unelevated record:
 cd <repo>
-python scripts\offline_bootstrap_guard.py --delete-mechanism --combine ..\mr-offline-bootstrap-evidence\record-unelevated.json
-#   (equivalently: pnpm run audit:offline:certify, which passes --combine default)
+python scripts\offline_bootstrap_guard.py --delete-mechanism --certify ..\mr-offline-bootstrap-evidence\record-unelevated.json
+#   (equivalently: pnpm run audit:offline:certify, which passes --certify default)
 ```
 
-The combiner certifies **only** when all of these hold, else it FAILs with the
-reason: both records are whole-table and from a clean worktree; their git head,
-git tree and bootstrap SHA-256 are identical; the unelevated record has every
-declared-unelevated row at `PASS`; the elevated record has `ELV-01..07` all
-`PASS`; every mechanism flip passed in its declared context (non-`ELV` flips from
-the unelevated record, `ELV` flips from the elevated record); and the two
-declared contexts **partition every scenario exactly once**. **No flag
+Certification is **PASS only** when all of these hold, else it **REFUSEs** with
+the failing checks: this certify process holds a **real elevated token, read live
+from its own process**; it was invoked with `--delete-mechanism`; its live
+worktree is clean; the unelevated record is a fully-bound record that is
+`token_context=unelevated` / `elevated=false`, whole-table, from a clean
+worktree, `--delete-mechanism`, with a **well-formed untrusted** `account_sid`,
+whose git head, git tree and bootstrap SHA-256 **equal the values the certify
+process observes live**, with every declared-unelevated row at `PASS`, every
+`ELV-*` row still `BLOCKED_ELEVATION_REQUIRED` (**the file claims no elevated
+result**), and every unelevated-context flip flipped; `ELV-01..07` **executed
+live** in this process and are all `PASS` with zero `BLOCKED/INCONCLUSIVE/FAIL`,
+their flips executed live and flipped; and the unelevated record plus the live
+`ELV` results **partition every scenario exactly once**. **No flag and no file
 substitutes for the elevated token** — the `ELV-*` bodies run only when the
-harness finds `BUILTIN\Administrators` in its own process token
-(`CheckTokenMembership` against `S-1-5-32-544`). `--combine` requires a
-whole-table run and is rejected with `--only`.
+harness finds `BUILTIN\Administrators` in its own process token, and running
+`--certify` unelevated **REFUSEs immediately** at the live-token gate.
+`--certify` requires a whole-table run and is rejected with `--only`.
 
-Expected results in the **elevated** record:
+> **Threat-model honesty.** This is **not** cryptographic proof against a
+> malicious local operator who controls the machine and its files. The guarantee
+> is only that the certify command *itself* observes a **live** elevated token and
+> runs the elevated evidence **live**, rather than trusting a file's claim of
+> elevation. The unelevated record binds to *an* untrusted principal; a forger who
+> substitutes a *different* valid untrusted SID is indistinguishable, and nothing
+> here defends against an operator who edits the harness or the records at will.
+
+An optional archive record (`record-elevated.json`) is emitted for audit, but the
+certify path **never reads it back** as a certification input. A runnable
+fail-closed adversarial battery — hand-edited fake elevated record, relabelled
+record, `elevated:true`, fabricated `account_sid`, unelevated certify, stale
+head/tree/SHA, dirty worktree, filtered/forged row, forged flip, and the
+operator-only live PASS path — is available with `--certify-selftest` and folds
+every case into its exit code.
+
+Expected results from the **live elevated run**:
 
 | Row | Property | Expected |
 | --- | --- | --- |
@@ -394,8 +427,8 @@ The `ELV-*` rows execute their outcome **only when the harness runs elevated**.
 `CTL-PROGFILES` is declared **unelevated**: it runs only under the unelevated
 token, where it reaches `ROOT_CREATE_FAILED` (the OS-derived ProgramFiles chain
 is accepted all the way to the privilege-gated create). Outcome `OK` is reached
-only by `ELV-01` in the elevated record; a single-context run never demonstrates
-it, and the combiner draws it from the elevated half. Each run prints this same
+only by `ELV-01` executed live; a single-context run never demonstrates it, and
+the live-elevated certification draws it from the live `ELV` run. Each run prints this same
 table with the verdict each scenario actually got, so a claimed outcome whose
 scenario was blocked reads as blocked.
 
