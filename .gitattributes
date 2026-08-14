@@ -60,6 +60,8 @@
 *.cfg  text eol=lf
 *.ini  text eol=lf
 *.example text eol=lf
+*.spec text eol=lf
+*.iss  text eol=lf
 .gitignore    text eol=lf
 .gitattributes text eol=lf
 .npmrc        text eol=lf
