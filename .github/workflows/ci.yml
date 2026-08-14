@@ -236,6 +236,16 @@ jobs:
           # provides the library the guards need to execute.
           python -m pip install httpx2
 
+      - name: Install ripgrep (a guard shells out to `rg` for a source scan)
+        run: |
+          # scripts/partner_preview_approval.py (audit:all --verify-only) runs a
+          # source-branding scan via `subprocess.run(["rg", ...])`. ripgrep is not
+          # guaranteed on the runner image; install it so the guard executes. This
+          # is a runner tool, not a product/guard change.
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+          rg --version | head -1
+
       - name: Install Node dependencies (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
