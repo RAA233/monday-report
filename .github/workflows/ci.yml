@@ -224,6 +224,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r backend/requirements.txt -r requirements-client.txt
+          # The guard suite drives the FastAPI app in-process via
+          # fastapi/starlette TestClient (e.g. signed_url_client_mode_guard.py),
+          # which requires an HTTP client library that the app's RUNTIME
+          # requirements (backend/requirements.txt) do not pull in. It is a
+          # test-only dependency, so it is installed here in CI config rather
+          # than added to the product requirements. The starlette version this
+          # environment resolves requires `httpx2` (per starlette's own
+          # testclient import error); install it so the TestClient guards run.
+          # This changes no product behaviour and weakens no guard -- it only
+          # provides the library the guards need to execute.
+          python -m pip install httpx2
 
       - name: Install Node dependencies (frozen lockfile)
         run: pnpm install --frozen-lockfile
