@@ -43,14 +43,29 @@ NO_SERVER_DSN = "postgresql://rt:pw@127.0.0.1:5999/monday_rt_test"
 
 RUN_ID = "a" * 64  # a stand-in >=128-bit run id for environment-predicate tests
 
+# Synthetic fixture paths for the isolation-boundary tests, built OS-natively so
+# `.local_data` (verification_boundary.LIVE_STATE_MARKER) is a genuine path
+# COMPONENT on BOTH Windows and Linux. Windows string literals (e.g.
+# r"C:\app\.local_data\state.json") must NOT be used: on POSIX a backslash is an
+# ordinary filename character, so `.local_data` would not be a separate component
+# and `_isolated_root` would wrongly accept a live-data path. These paths need not
+# exist on disk -- `_isolated_root` only canonicalises the string via realpath.
+_FS_ROOT = os.path.abspath(os.sep)  # 'C:\\' on Windows, '/' on POSIX
+
+
+def _fixture_path(*parts: str) -> str:
+    """An absolute, OS-native synthetic path whose components are exactly *parts*."""
+    return os.path.join(_FS_ROOT, *parts)
+
+
 ISOLATED_ENV = {
     "MONDAY_REPORT_VERIFICATION_ISOLATION": "1",
     "MONDAY_REPORT_VERIFICATION_RUN_ID": RUN_ID,
     "MONDAY_REPORT_REPOSITORY_BACKEND": "postgres",
     "MONDAY_REPORT_DATABASE_URL": NO_SERVER_DSN,
-    "MONDAY_REPORT_STATE_PATH": r"C:\scratch-verify\state\state.json",
-    "MONDAY_REPORT_STORAGE_ROOT": r"C:\scratch-verify\storage",
-    "MONDAY_REPORT_EXPORT_ROOT": r"C:\scratch-verify\exports",
+    "MONDAY_REPORT_STATE_PATH": _fixture_path("scratch-verify", "state", "state.json"),
+    "MONDAY_REPORT_STORAGE_ROOT": _fixture_path("scratch-verify", "storage"),
+    "MONDAY_REPORT_EXPORT_ROOT": _fixture_path("scratch-verify", "exports"),
     "MONDAY_REPORT_API_BASE": "http://127.0.0.1:8066",
     "MONDAY_REPORT_WEB_BASE": "http://127.0.0.1:5199",
 }
@@ -92,11 +107,11 @@ def main() -> int:
         "06 with a live API port 8000": {**ISOLATED_ENV, "MONDAY_REPORT_API_BASE": "http://127.0.0.1:8000"},
         "07 with a live web port 5173": {**ISOLATED_ENV, "MONDAY_REPORT_WEB_BASE": "http://127.0.0.1:5173"},
         "08 with a state root under .local_data":
-            {**ISOLATED_ENV, "MONDAY_REPORT_STATE_PATH": r"C:\app\.local_data\state.json"},
+            {**ISOLATED_ENV, "MONDAY_REPORT_STATE_PATH": _fixture_path("app", ".local_data", "state.json")},
         "09 with a storage root under .local_data":
-            {**ISOLATED_ENV, "MONDAY_REPORT_STORAGE_ROOT": r"C:\app\.local_data\storage"},
+            {**ISOLATED_ENV, "MONDAY_REPORT_STORAGE_ROOT": _fixture_path("app", ".local_data", "storage")},
         "10 with a relative root normalising into .local_data":
-            {**ISOLATED_ENV, "MONDAY_REPORT_EXPORT_ROOT": r"C:\scratch\..\app\.local_data\exports"},
+            {**ISOLATED_ENV, "MONDAY_REPORT_EXPORT_ROOT": _fixture_path("scratch", "..", "app", ".local_data", "exports")},
         "11 with an export root left unset": {k: v for k, v in ISOLATED_ENV.items()
                                               if k != "MONDAY_REPORT_EXPORT_ROOT"},
         "11b without a verification run id": {k: v for k, v in ISOLATED_ENV.items()
@@ -135,9 +150,9 @@ def main() -> int:
 
     # -- path canonicalisation ------------------------------------------------
     record("22 a root whose canonical path is under .local_data is rejected",
-           vb._isolated_root(r"C:\app\.local_data\storage") is False)
+           vb._isolated_root(_fixture_path("app", ".local_data", "storage")) is False)
     record("23 a relative root normalising into .local_data is rejected",
-           vb._isolated_root(r"C:\scratch\..\app\.local_data\x") is False)
+           vb._isolated_root(_fixture_path("scratch", "..", "app", ".local_data", "x")) is False)
     record("24 an unset root is rejected", vb._isolated_root(None) is False)
     record("25 an isolated scratch root is accepted",
            vb._isolated_root(str(Path(os.environ.get("TEMP", ".")) / "mr-verify-ok")) is True)
