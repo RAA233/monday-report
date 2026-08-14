@@ -13,6 +13,7 @@ existing app from the outside so v1 behavior stays byte-identical.
 from __future__ import annotations
 
 import argparse
+import contextvars
 import hashlib
 import json
 import os
@@ -46,13 +47,43 @@ BACKUP_SCHEMA_VERSION = "monday-report-backup.v1"
 DEFAULT_PORT_RANGE = tuple(range(47613, 47631))
 _DECISION_TTL_SECONDS = 5.0
 
-#: GET paths that are WRITES or licensed deliverable flows — blocked when the
-#: decision is read-only, in addition to every mutating method.
-_READ_ONLY_BLOCKED_GET_PREFIXES = (
+#: Licensed DELIVERABLE download flows (GET). These serve a licensed artifact —
+#: a signed report export or upload download — and are refused under a
+#: non-operational license as a PRODUCT POLICY, independent of whether they
+#: persist state (in the offline demo backend they do not: their audit write is
+#: client-mode-only). This is a small, stable, intentional policy set; it is NOT
+#: the defence against write-shaped GETs. The mutation defence is the store
+#: write-guard below, which refuses ANY durable state change under a
+#: non-operational license from ANY route (GET or otherwise) — so a future
+#: write-shaped GET is covered automatically, with no list to keep in sync.
+_LICENSED_DELIVERABLE_GET_PREFIXES = (
     "/signed/report-exports/",
     "/signed/upload-files/",
 )
-_READ_ONLY_BLOCKED_GET_SUFFIXES = ("/report-draft",)
+
+#: True while the CURRENT request runs under a non-operational (no-license or
+#: expired) decision. Set by the ASGI WriteBlock middleware and consumed by the
+#: store write-guard. Default False so the in-process worker and startup seeding
+#: — which run OUTSIDE any request context — are never blocked. Context-local,
+#: so concurrent requests do not race, and the value propagates into the sync
+#: endpoint's threadpool context.
+_WRITE_BLOCKED: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "monday_report_offline_write_blocked", default=False
+)
+
+
+class OfflineLicenseReadOnly(Exception):
+    """Raised by the store write-guard when a request under a NON-OPERATIONAL
+    license attempts a durable state mutation.
+
+    Every durable mutation in the v1 store writes an audit-chain entry via
+    ``store.audit`` (the documented audit invariant), so guarding that single
+    method refuses every mutating route — including write-shaped GETs like
+    ``/workspaces/{id}/benchmarking`` and ``/report-draft`` — without an
+    enumerated list. The guard raises at the ENTRY of ``audit`` (before any lock,
+    transaction, or in-memory append), so nothing is persisted and no in-memory
+    drift is left behind. Translated to a 423 read-only response by the inner
+    app's exception handler."""
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +398,15 @@ def _blocked_payload(decision: LicenseDecision) -> dict:
 
 
 def _is_blocked_request(method: str, path: str, decision: LicenseDecision) -> bool:
+    """Pre-emptive refusal in the middleware, BEFORE the handler runs.
+
+    Covers every mutating HTTP method and the licensed deliverable download
+    flows. Write-shaped GETs that MUTATE state (report-draft, benchmarking
+    status, and any future one) are NOT enumerated here — they are refused by the
+    store write-guard when their handler attempts the durable write, so this set
+    never has to be kept in sync with the v1 route table.
+    """
+
     if decision.operational:
         return False
     if path.startswith("/offline/") or path in ("/license", "/health", "/") or path.startswith(
@@ -375,11 +415,10 @@ def _is_blocked_request(method: str, path: str, decision: LicenseDecision) -> bo
         return False
     if method in ("POST", "PUT", "PATCH", "DELETE"):
         return True
-    if method == "GET":
-        if any(path.startswith(prefix) for prefix in _READ_ONLY_BLOCKED_GET_PREFIXES):
-            return True
-        if any(path.endswith(suffix) for suffix in _READ_ONLY_BLOCKED_GET_SUFFIXES):
-            return True
+    if method == "GET" and any(
+        path.startswith(prefix) for prefix in _LICENSED_DELIVERABLE_GET_PREFIXES
+    ):
+        return True
     return False
 
 
@@ -423,6 +462,57 @@ refresh();
 </script></body></html>"""
 
 
+def _install_store_write_guard(store_obj) -> None:
+    """Wrap the shared store's ``audit`` method so that, under a non-operational
+    license, any durable mutation is refused at its single choke point.
+
+    ``audit`` is the audit-chain writer that EVERY durable mutation in the v1
+    store calls (the documented audit invariant), so guarding it refuses
+    report-draft, benchmarking status, and any future write-shaped GET — as well
+    as any mutating method — from persisting under a non-operational license,
+    with no enumerated route list to keep in sync. It raises at ENTRY (before any
+    lock, transaction, or in-memory append), so nothing is written and no
+    in-memory drift is left behind. Installed on the instance and idempotent."""
+
+    if getattr(store_obj, "_offline_write_guard_installed", False):
+        return
+    original_audit = store_obj.audit
+
+    def guarded_audit(*args, **kwargs):
+        if _WRITE_BLOCKED.get():
+            raise OfflineLicenseReadOnly(
+                "durable state mutation refused under a non-operational license"
+            )
+        return original_audit(*args, **kwargs)
+
+    store_obj.audit = guarded_audit
+    store_obj._offline_write_guard_installed = True
+
+
+class _WriteBlockMiddleware:
+    """Pure-ASGI middleware that publishes the current request's license posture
+    to the ``_WRITE_BLOCKED`` contextvar so the store write-guard can enforce it.
+
+    Deliberately pure ASGI (not ``BaseHTTPMiddleware``): the contextvar set here
+    must propagate into the mounted v1 app's SYNC endpoints, which run in the
+    anyio threadpool. A ``BaseHTTPMiddleware`` dispatch runs the downstream app in
+    a separate task whose context does not observe values set inside dispatch."""
+
+    def __init__(self, app, decision_cache: "DecisionCache") -> None:
+        self.app = app
+        self.decision_cache = decision_cache
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        token = _WRITE_BLOCKED.set(not self.decision_cache.decision().operational)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _WRITE_BLOCKED.reset(token)
+
+
 def build_offline_app(paths: OfflinePaths | None = None):
     """Assemble the wrapper app. Importing this function's result imports the
     existing backend app with the offline environment already wired."""
@@ -434,8 +524,14 @@ def build_offline_app(paths: OfflinePaths | None = None):
     install = _load_or_create_install_config(paths)
     _wire_environment(paths, install)
 
+    from . import store as store_module
     from . import worker as worker_module
     from .main import app as inner_app
+
+    # Enforce the read-only license posture at the store's durable-write choke
+    # point so NO route (including write-shaped GETs) can mutate state under a
+    # non-operational license.
+    _install_store_write_guard(store_module.store)
 
     provider = build_provider(paths, install)
     cache = DecisionCache(provider)
@@ -451,6 +547,15 @@ def build_offline_app(paths: OfflinePaths | None = None):
         if _is_blocked_request(request.method, request.url.path, decision):
             return JSONResponse(status_code=423, content=_blocked_payload(decision))
         return await call_next(request)
+
+    # Publish the license posture to the write-guard contextvar (pure-ASGI so it
+    # reaches the mounted v1 app's threadpool endpoints), and translate a refused
+    # write into the same 423 read-only payload the pre-emptive path returns.
+    offline_app.add_middleware(_WriteBlockMiddleware, decision_cache=cache)
+
+    @inner_app.exception_handler(OfflineLicenseReadOnly)
+    async def _offline_readonly_handler(request: Request, exc: OfflineLicenseReadOnly):
+        return JSONResponse(status_code=423, content=_blocked_payload(cache.decision()))
 
     @offline_app.get("/offline/license/status")
     async def license_status():

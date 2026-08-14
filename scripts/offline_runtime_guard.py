@@ -139,6 +139,18 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
             "a licensed installation performs business mutations")
         workspace_id = created.json().get("id", "")
 
+        # POSITIVE CONTROL (makes the denied-license coverage check below
+        # load-bearing): under an OPERATIONAL license the write-shaped benchmarking
+        # status GET DOES persist an audit event, so a real mutation moves the
+        # audit counter the coverage assertion later checks.
+        bench_before = len(client.get("/audit-logs?limit=2000").json())
+        bench_probe = client.get(f"/workspaces/{uuid.uuid4()}/benchmarking")
+        bench_after = len(client.get("/audit-logs?limit=2000").json())
+        rec("RT06b write-shaped-GET-mutates-when-operational",
+            bench_probe.status_code == 200 and bench_after > bench_before,
+            "the benchmarking status GET persists an audit event when licensed -> it is a "
+            "genuine write-shaped GET and the coverage counter is sensitive to it")
+
         backup_created = client.post("/offline/backup").json()
         rec("RT07 backup-creates-archive", bool(backup_created.get("backup")),
             "manual backup produces a validated archive")
@@ -182,6 +194,51 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
         rec("RT13 expired-blocks-export-redemption",
             redemption.status_code == 423,
             "signed export redemption is blocked when expired")
+
+        # ---- EXHAUSTIVE write-shaped GET coverage under a DENIED license ----
+        # The write-shaped-GET refusal is NOT a hand-maintained list: the store
+        # write-guard refuses ANY durable mutation under a non-operational license.
+        # This walks the ENTIRE v1 GET surface and asserts that not one GET grows
+        # the audit chain or changes the state file while expired, so a future
+        # write-shaped GET that is not refused FAILS here rather than shipping.
+        import hashlib as _hl
+        import re as _re
+
+        from backend.app.main import app as inner_app  # enumerate the v1 route table
+
+        state_file = Path(os.environ["MONDAY_REPORT_STATE_PATH"])
+
+        def _audit_count() -> int:
+            resp = client.get("/audit-logs?limit=2000")
+            return len(resp.json()) if resp.status_code == 200 else -1
+
+        def _state_sha() -> str:
+            return _hl.sha256(state_file.read_bytes()).hexdigest() if state_file.exists() else ""
+
+        offending: list[tuple] = []
+        get_paths: list[str] = []
+        for route in inner_app.routes:
+            if "GET" not in (getattr(route, "methods", set()) or set()):
+                continue
+            concrete = _re.sub(r"\{[^}]+\}", lambda _m: str(uuid.uuid4()), route.path)
+            get_paths.append(route.path)
+            params = {"token": "invalid"} if "/signed/" in concrete else None
+            before = (_audit_count(), _state_sha())
+            resp = client.get(concrete, params=params)
+            after = (_audit_count(), _state_sha())
+            if after != before:
+                offending.append((route.path, resp.status_code, before, after))
+        rec("RT13b no-v1-GET-mutates-under-denied-license",
+            not offending and len(get_paths) >= 20,
+            f"all {len(get_paths)} v1 GET routes leave the audit chain and state file "
+            f"byte-unchanged under a denied license (offending: {offending or 'none'})")
+
+        before_sha = _state_sha()
+        bench = client.get(f"/workspaces/{uuid.uuid4()}/benchmarking")
+        rec("RT13c benchmarking-GET-refused-under-denied-license",
+            bench.status_code == 423 and _state_sha() == before_sha,
+            "the reported counterexample GET /workspaces/{id}/benchmarking is refused (423) and "
+            "persists nothing (state file byte-identical) under a denied license")
 
         backup_expired = client.post("/offline/backup")
         rec("RT14 expired-backup-still-allowed",
