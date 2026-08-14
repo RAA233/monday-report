@@ -128,9 +128,12 @@ jobs:
       # Isolated app stack (empirically validated locally). The verification-
       # isolation preflight fails closed unless every root is off .local_data and
       # the API/web ports are != 8000 / != 5173.
-      MONDAY_REPORT_STATE_PATH: ${{ runner.temp }}/iso/state.json
-      MONDAY_REPORT_STORAGE_ROOT: ${{ runner.temp }}/iso/storage
-      MONDAY_REPORT_EXPORT_ROOT: ${{ runner.temp }}/iso/exports
+      #
+      # NOTE: the three persistence-root paths are NOT declared here. The
+      # `runner` context is unavailable in job-level `env` and would render to an
+      # empty string, silently mis-pointing the roots. They are exported from the
+      # runtime `$RUNNER_TEMP` inside the audit run step instead. Only the
+      # context-free static values live at job level.
       MONDAY_REPORT_API_BASE: http://127.0.0.1:8010
       MONDAY_REPORT_WEB_BASE: http://127.0.0.1:8011
       MONDAY_REPORT_CLIENT_DATA_MODE: demo
@@ -146,8 +149,14 @@ jobs:
       MONDAY_REPORT_TEST_DATABASE_URL: postgresql://monday_report:monday_report_local_only@127.0.0.1:5432/monday_report
       CI: "true"
     steps:
-      - name: Checkout exact commit
+      - name: Checkout exact commit (full history)
         uses: actions/checkout@v4
+        with:
+          # Full history: several guards in the chain read git
+          # (migration_runner_guard, tenant_rls_enforcement_guard, and the GA
+          # gap-assessment whose GA50 check is an ANCESTRY test). A shallow clone
+          # could flip a history-dependent check for an environmental reason.
+          fetch-depth: 0
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -193,16 +202,24 @@ jobs:
       - name: Run audit:all against the DB + live stack, then assert the honest baseline
         run: |
           set -uo pipefail
-          mkdir -p "${{ runner.temp }}/iso/storage" "${{ runner.temp }}/iso/exports"
+
+          # Persistence roots: exported from the RUNTIME $RUNNER_TEMP (the
+          # `runner` context is not usable in job-level env). Exported shell vars
+          # propagate through pnpm -> python -> the worker subprocess, exactly as
+          # in the validated local run.
+          export MONDAY_REPORT_STATE_PATH="$RUNNER_TEMP/iso/state.json"
+          export MONDAY_REPORT_STORAGE_ROOT="$RUNNER_TEMP/iso/storage"
+          export MONDAY_REPORT_EXPORT_ROOT="$RUNNER_TEMP/iso/exports"
+          mkdir -p "$RUNNER_TEMP/iso/storage" "$RUNNER_TEMP/iso/exports"
 
           # Live isolated API server (local_json / demo / inline worker).
           python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8010 \
-            > "${{ runner.temp }}/backend.log" 2>&1 &
+            > "$RUNNER_TEMP/backend.log" 2>&1 &
           BACK_PID=$!
 
           # Live isolated web server: the built SPA, served on a non-5173 port.
           python -m http.server 8011 --bind 127.0.0.1 --directory dist \
-            > "${{ runner.temp }}/frontend.log" 2>&1 &
+            > "$RUNNER_TEMP/frontend.log" 2>&1 &
           FRONT_PID=$!
 
           # Wait for both to become healthy.
@@ -216,8 +233,8 @@ jobs:
           done
           if [ -z "$ok" ]; then
             echo "::error::isolated stack did not become healthy"
-            echo "----- backend.log -----"; cat "${{ runner.temp }}/backend.log" || true
-            echo "----- frontend.log -----"; cat "${{ runner.temp }}/frontend.log" || true
+            echo "----- backend.log -----"; cat "$RUNNER_TEMP/backend.log" || true
+            echo "----- frontend.log -----"; cat "$RUNNER_TEMP/frontend.log" || true
             kill "$BACK_PID" "$FRONT_PID" 2>/dev/null || true
             exit 1
           fi
@@ -225,7 +242,7 @@ jobs:
 
           # Run the full 73-step chain, capturing the REAL exit code through tee.
           set +e
-          pnpm run audit:all 2>&1 | tee "${{ runner.temp }}/audit_all.log"
+          pnpm run audit:all 2>&1 | tee "$RUNNER_TEMP/audit_all.log"
           AUDIT_EXIT=${PIPESTATUS[0]}
           set -e
           echo "audit:all raw exit code: ${AUDIT_EXIT}"
@@ -236,7 +253,7 @@ jobs:
           # known GA50 / GA_BLOCKED baseline; RED on exit 0, on an earlier-step
           # failure, on any extra failure, or on unparseable output.
           python .github/scripts/assert_audit_baseline.py \
-            "${{ runner.temp }}/audit_all.log" "${AUDIT_EXIT}"
+            "$RUNNER_TEMP/audit_all.log" "${AUDIT_EXIT}"
 
       - name: Standalone DB-strict coverage - migration runner (connects to the service DB)
         run: |
@@ -258,9 +275,9 @@ jobs:
       - name: Dump stack logs on failure
         if: failure()
         run: |
-          echo "----- backend.log -----"; cat "${{ runner.temp }}/backend.log" 2>/dev/null || true
-          echo "----- frontend.log -----"; cat "${{ runner.temp }}/frontend.log" 2>/dev/null || true
-          echo "----- tail of audit_all.log -----"; tail -n 120 "${{ runner.temp }}/audit_all.log" 2>/dev/null || true
+          echo "----- backend.log -----"; cat "$RUNNER_TEMP/backend.log" 2>/dev/null || true
+          echo "----- frontend.log -----"; cat "$RUNNER_TEMP/frontend.log" 2>/dev/null || true
+          echo "----- tail of audit_all.log -----"; tail -n 120 "$RUNNER_TEMP/audit_all.log" 2>/dev/null || true
 
   # ---------------------------------------------------------------------------
   # JOB 3 - WINDOWS DETERMINISTIC checks
