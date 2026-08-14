@@ -1,0 +1,309 @@
+name: CI
+
+# Production-grade CI baseline for the Monday Report Offline product.
+#
+# Release guarantee this enforces: no Offline customer package may be built or
+# released except from a source commit on which this CI is GREEN. See
+# docs/RELEASE_POLICY.md.
+#
+# Ground truth established empirically before this file was written (see the PR
+# description / commit body for the full report):
+#   * pnpm 9 REJECTS this repo's pnpm-workspace.yaml (it uses the pnpm 10+
+#     `allowBuilds` / `onlyBuiltDependencies` keys with no `packages:` field).
+#     The lockfile is v9.0, which pnpm 10 reads and writes -> pin pnpm 10.
+#   * `pnpm run audit:all` needs BOTH a live isolated app stack (an API server on
+#     a non-8000 port + a reachable web server on a non-5173 port; `phase_audit`
+#     / `e2e_mvp` make real HTTP calls) AND a real Postgres: step 56
+#     `client_mode_fail_closed_guard.py --require-db` HARD-FAILS (never skips)
+#     without `MONDAY_REPORT_TEST_DATABASE_URL`. It therefore lives in the DB
+#     job (job 2), not the hermetic job.
+#   * With the DB + stack present, every step 1-71 passes and the run stops at
+#     step 72 `audit:ga-gap-assessment` whose SOLE failure is the inherited,
+#     honest `GA50 commit-binding-is-ancestor` -> release_recommendation
+#     GA_BLOCKED. The baseline gate asserts exactly that and nothing else.
+#   * No secrets and no production credentials are required anywhere.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs for the same ref (a new push to a PR cancels the old run).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this workflow only reads the repository. Nothing here writes
+# to the repo, publishes, deploys, or releases.
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22.17.1"
+  PNPM_VERSION: "10.34.5"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # JOB 1 - FAST / HERMETIC
+  # No DB, no live servers, no secrets. Fast fail on dependency-graph drift and
+  # TypeScript/build breakage. `pnpm run build` == `tsc && vite build`, so this
+  # is also the type-check gate.
+  #
+  # audit:all is deliberately NOT here: it needs live servers (from step 2) and a
+  # Postgres DB (step 56 --require-db), so it runs in job 2. Individual guards are
+  # NOT cherry-picked into this job either -- none was proven server-free (the
+  # local hermetic checks were done with the isolated stack already running), so
+  # claiming any of them "hermetic" here would be dishonest.
+  # ---------------------------------------------------------------------------
+  fast-hermetic:
+    name: Fast / hermetic (build + typecheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Activate pnpm 10 via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+          pnpm --version
+
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build (tsc typecheck + vite production build)
+        run: pnpm run build
+
+  # ---------------------------------------------------------------------------
+  # JOB 2 - STRICT AUDIT with a DISPOSABLE pgvector POSTGRES + live isolated stack
+  #
+  # Runs the FULL `pnpm run audit:all` (73 steps) against:
+  #   * a runner-local disposable Postgres (pgvector image; the `vector`
+  #     extension is required by db/baseline/0001_foundation.sql -- stock
+  #     postgres lacks it),
+  #   * a live isolated API server (uvicorn on 127.0.0.1:8010, local_json repo
+  #     backend, inline worker, demo mode, task-owned state/storage/export roots),
+  #   * a live isolated web server (built dist/ served on 127.0.0.1:8011).
+  #
+  # The DB-strict guards inside audit:all (migration-runner, tenant-rls,
+  # normalized-persistence, persistence-atomicity, verification-boundary,
+  # postgres-malware-route, client-mode-fail-closed) CONNECT to the real DB via
+  # MONDAY_REPORT_TEST_DATABASE_URL and exercise it -- they do not skip. The
+  # guards self-provision (drop+recreate schema, apply baseline migrations
+  # 0001-0007, create the least-privilege / owner roles they need), so no
+  # migration pre-step is required; a pgvector smoke proves the extension first.
+  #
+  # Docker is available on GitHub-hosted ubuntu runners, so the report-create
+  # guards (steps 57/58) and the standalone restricted-postgres-runtime aggregate
+  # additionally spin their OWN disposable pgvector containers and run for real.
+  #
+  # No production DB, no production credentials, no secrets.
+  # ---------------------------------------------------------------------------
+  strict-audit-postgres:
+    name: Strict audit (disposable pgvector Postgres + live stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: monday_report
+          POSTGRES_USER: monday_report
+          POSTGRES_PASSWORD: monday_report_local_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U monday_report -d monday_report"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # Isolated app stack (empirically validated locally). The verification-
+      # isolation preflight fails closed unless every root is off .local_data and
+      # the API/web ports are != 8000 / != 5173.
+      MONDAY_REPORT_STATE_PATH: ${{ runner.temp }}/iso/state.json
+      MONDAY_REPORT_STORAGE_ROOT: ${{ runner.temp }}/iso/storage
+      MONDAY_REPORT_EXPORT_ROOT: ${{ runner.temp }}/iso/exports
+      MONDAY_REPORT_API_BASE: http://127.0.0.1:8010
+      MONDAY_REPORT_WEB_BASE: http://127.0.0.1:8011
+      MONDAY_REPORT_CLIENT_DATA_MODE: demo
+      MONDAY_REPORT_REPOSITORY_BACKEND: local_json
+      MONDAY_REPORT_QUEUE_BACKEND: inline_worker
+      MONDAY_REPORT_CORS_ORIGINS: http://127.0.0.1:8011,http://localhost:8011
+      # Consumed ONLY by the DB-strict guards. The app server/worker read
+      # MONDAY_REPORT_DATABASE_URL (unset), so they stay in local_json/demo mode;
+      # setting this does not push the app itself onto Postgres. Loopback host is
+      # required (migration_runner refuses non-loopback). Superuser role (the
+      # image's POSTGRES_USER) is required so the guards can create extensions and
+      # roles. This is a disposable, local-only credential -- NOT a secret.
+      MONDAY_REPORT_TEST_DATABASE_URL: postgresql://monday_report:monday_report_local_only@127.0.0.1:5432/monday_report
+      CI: "true"
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Activate pnpm 10 via corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@${{ env.PNPM_VERSION }} --activate
+          pnpm --version
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r backend/requirements.txt -r requirements-client.txt
+
+      - name: Install Node dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend (dist/ is served as the isolated web stack)
+        run: pnpm run build
+
+      - name: Smoke-check pgvector availability (fail fast before the long chain)
+        run: |
+          python - <<'PY'
+          import os, psycopg
+          url = os.environ["MONDAY_REPORT_TEST_DATABASE_URL"]
+          with psycopg.connect(url, connect_timeout=15, autocommit=True) as c:
+              c.execute("create extension if not exists vector")
+              row = c.execute(
+                  "select extversion from pg_extension where extname = 'vector'"
+              ).fetchone()
+          assert row, "pgvector extension is NOT available in the Postgres service image"
+          print(f"pgvector available: version {row[0]}")
+          PY
+
+      - name: Run audit:all against the DB + live stack, then assert the honest baseline
+        run: |
+          set -uo pipefail
+          mkdir -p "${{ runner.temp }}/iso/storage" "${{ runner.temp }}/iso/exports"
+
+          # Live isolated API server (local_json / demo / inline worker).
+          python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8010 \
+            > "${{ runner.temp }}/backend.log" 2>&1 &
+          BACK_PID=$!
+
+          # Live isolated web server: the built SPA, served on a non-5173 port.
+          python -m http.server 8011 --bind 127.0.0.1 --directory dist \
+            > "${{ runner.temp }}/frontend.log" 2>&1 &
+          FRONT_PID=$!
+
+          # Wait for both to become healthy.
+          ok=""
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8010/health >/dev/null \
+               && curl -sf http://127.0.0.1:8011/ >/dev/null; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::isolated stack did not become healthy"
+            echo "----- backend.log -----"; cat "${{ runner.temp }}/backend.log" || true
+            echo "----- frontend.log -----"; cat "${{ runner.temp }}/frontend.log" || true
+            kill "$BACK_PID" "$FRONT_PID" 2>/dev/null || true
+            exit 1
+          fi
+          echo "isolated stack healthy: API :8010, web :8011"
+
+          # Run the full 73-step chain, capturing the REAL exit code through tee.
+          set +e
+          pnpm run audit:all 2>&1 | tee "${{ runner.temp }}/audit_all.log"
+          AUDIT_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo "audit:all raw exit code: ${AUDIT_EXIT}"
+
+          kill "$BACK_PID" "$FRONT_PID" 2>/dev/null || true
+
+          # Honest expected-baseline gate: GREEN only if the SOLE failure is the
+          # known GA50 / GA_BLOCKED baseline; RED on exit 0, on an earlier-step
+          # failure, on any extra failure, or on unparseable output.
+          python .github/scripts/assert_audit_baseline.py \
+            "${{ runner.temp }}/audit_all.log" "${AUDIT_EXIT}"
+
+      - name: Standalone DB-strict coverage - migration runner (connects to the service DB)
+        run: |
+          # Independent proof that the migration-runner guard CONNECTS to and
+          # exercises the real Postgres (it self-provisions; it SKIPS -> non-
+          # certifying if the DB were absent, so a real DB here is load-bearing).
+          python scripts/migration_runner_guard.py
+
+      - name: Standalone DB-strict coverage - restricted-postgres-runtime matrix (Docker self-provisioned)
+        run: |
+          # The reserved complete restricted-PostgreSQL functional matrix (core /
+          # mutations / exports / isolation / worker-import). It provisions its OWN
+          # runner-owned disposable pgvector containers via Docker (available on
+          # GitHub-hosted runners) and certifies for real. Without --allow-
+          # unavailable it refuses to degrade to a skip. This path is exercised
+          # for real ONLY in CI (Docker is unavailable in the local dev sandbox).
+          pnpm run audit:restricted-postgres-runtime
+
+      - name: Dump stack logs on failure
+        if: failure()
+        run: |
+          echo "----- backend.log -----"; cat "${{ runner.temp }}/backend.log" 2>/dev/null || true
+          echo "----- frontend.log -----"; cat "${{ runner.temp }}/frontend.log" 2>/dev/null || true
+          echo "----- tail of audit_all.log -----"; tail -n 120 "${{ runner.temp }}/audit_all.log" 2>/dev/null || true
+
+  # ---------------------------------------------------------------------------
+  # JOB 3 - WINDOWS DETERMINISTIC checks
+  # Only checks that are stable on a shared Windows runner: Python byte-compile
+  # of scripts/ + backend/, a PARSE-ONLY tokenize of the offline bootstrap
+  # PowerShell (no execution), and the offline bootstrap guard's DETERMINISTIC
+  # certify self-test (adversarial battery; does NOT run the SCN-01/02 machine-
+  # wide process watcher and does NOT require Admin/Hyper-V).
+  #
+  # NOTE: the offline LIVE-ELEVATED certification (ELV-01..07, real elevated run)
+  # is an OPERATOR gate and is explicitly NOT CI evidence. Nothing here claims
+  # Admin, Hyper-V, or E1/E2 evidence.
+  # ---------------------------------------------------------------------------
+  windows-deterministic:
+    name: Windows deterministic (py-compile + ps parse + offline self-test)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Python byte-compile (syntax gate) over scripts/ and backend/
+        shell: bash
+        run: python -m compileall -q scripts backend
+
+      - name: PowerShell parse-only tokenize of the offline bootstrap script
+        shell: pwsh
+        run: |
+          $path = 'packaging/offline/Invoke-OfflineBootstrap.ps1'
+          $content = Get-Content -Raw -LiteralPath $path
+          $errors = $null
+          $tokens = [System.Management.Automation.PSParser]::Tokenize($content, [ref]$errors)
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error ("parse error: line {0}: {1}" -f $_.Token.StartLine, $_.Message) }
+            exit 1
+          }
+          Write-Host "PowerShell parse OK: $($tokens.Count) tokens, 0 errors (parse-only; nothing executed)"
+
+      - name: Offline bootstrap guard - deterministic certify self-test
+        shell: bash
+        run: python scripts/offline_bootstrap_guard.py --certify-selftest
