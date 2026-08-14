@@ -4,24 +4,40 @@ name: CI
 #
 # Release guarantee this enforces: no Offline customer package may be built or
 # released except from a source commit on which this CI is GREEN. See
-# docs/RELEASE_POLICY.md.
+# docs/RELEASE_POLICY.md. (Committed YAML is NOT evidence on its own -- the GA
+# control ga_ci_execution needs an OBSERVED, non-skipped run bound to an
+# immutable run id.)
 #
-# Ground truth established empirically before this file was written (see the PR
-# description / commit body for the full report):
+# Ground truth established empirically before this file was written:
 #   * pnpm 9 REJECTS this repo's pnpm-workspace.yaml (it uses the pnpm 10+
 #     `allowBuilds` / `onlyBuiltDependencies` keys with no `packages:` field).
 #     The lockfile is v9.0, which pnpm 10 reads and writes -> pin pnpm 10.
 #   * `pnpm run audit:all` needs BOTH a live isolated app stack (an API server on
 #     a non-8000 port + a reachable web server on a non-5173 port; `phase_audit`
-#     / `e2e_mvp` make real HTTP calls) AND a real Postgres: step 56
-#     `client_mode_fail_closed_guard.py --require-db` HARD-FAILS (never skips)
-#     without `MONDAY_REPORT_TEST_DATABASE_URL`. It therefore lives in the DB
-#     job (job 2), not the hermetic job.
-#   * With the DB + stack present, every step 1-71 passes and the run stops at
-#     step 72 `audit:ga-gap-assessment` whose SOLE failure is the inherited,
-#     honest `GA50 commit-binding-is-ancestor` -> release_recommendation
-#     GA_BLOCKED. The baseline gate asserts exactly that and nothing else.
-#   * No secrets and no production credentials are required anywhere.
+#     / `e2e_mvp` make real HTTP calls) AND a real Postgres. It therefore lives in
+#     the DB job (job 2), not the hermetic job.
+#   * The DB-strict guards require a TEST-MARKED, loopback database name:
+#     `migration_runner_guard` refuses destructive setup unless the DB name
+#     carries a `test` marker (it exits 1 -- an honest FAIL, never a silent skip).
+#     The service DB is therefore named `monday_report_test`.
+#   * `verification_boundary_guard` check 41 (an attestation cloned to ANOTHER
+#     cluster must not activate -- a security boundary) only EXECUTES when a
+#     SECOND, independent Postgres cluster is provided via
+#     MONDAY_REPORT_TEST_DATABASE_URL_B with the SAME database name on a DIFFERENT
+#     server. Without it the guard records that check as skipped. This job
+#     provisions that second cluster and then FAILS CLOSED if check 41 did not
+#     actually execute (see the "cross-cluster" step + assert_cross_cluster_executed.py).
+#
+# What the strict job asserts each run (it does not assume it): with the DB + the
+# live stack present, every audit:all step 1-71 passes and the run stops at step
+# 72 `audit:ga-gap-assessment` whose SOLE failure is the inherited, honest
+# `GA50 commit-binding-is-ancestor` -> release_recommendation GA_BLOCKED. The
+# baseline gate (assert_audit_baseline.py) asserts exactly that and nothing else;
+# any earlier/extra/different failure, or an exit 0, is RED.
+#
+# No secrets and no production credentials are required anywhere. A disposable
+# Docker Postgres is explicitly NON-QUALIFYING for the production-database
+# adapter, which stays NOT_ACCEPTED; nothing here claims otherwise.
 
 on:
   push:
@@ -82,57 +98,82 @@ jobs:
         run: pnpm run build
 
   # ---------------------------------------------------------------------------
-  # JOB 2 - STRICT AUDIT with a DISPOSABLE pgvector POSTGRES + live isolated stack
+  # JOB 2 - STRICT AUDIT with TWO DISPOSABLE pgvector POSTGRES clusters + live stack
   #
   # Runs the FULL `pnpm run audit:all` (73 steps) against:
-  #   * a runner-local disposable Postgres (pgvector image; the `vector`
-  #     extension is required by db/baseline/0001_foundation.sql -- stock
-  #     postgres lacks it),
+  #   * a runner-local disposable Postgres cluster A (pgvector image; the `vector`
+  #     extension is required by db/baseline/0001_foundation.sql -- stock postgres
+  #     lacks it), database `monday_report_test` (TEST-MARKED so the DB-strict
+  #     guards do not refuse destructive setup),
+  #   * a SECOND, independent disposable Postgres cluster B (distinct service /
+  #     host port 5433, SAME database name `monday_report_test` on a DIFFERENT
+  #     server) used by verification_boundary check 41 (cross-cluster attestation
+  #     rejection),
   #   * a live isolated API server (uvicorn on 127.0.0.1:8010, local_json repo
   #     backend, inline worker, demo mode, task-owned state/storage/export roots),
   #   * a live isolated web server (built dist/ served on 127.0.0.1:8011).
   #
   # The DB-strict guards inside audit:all (migration-runner, tenant-rls,
   # normalized-persistence, persistence-atomicity, verification-boundary,
-  # postgres-malware-route, client-mode-fail-closed) CONNECT to the real DB via
-  # MONDAY_REPORT_TEST_DATABASE_URL and exercise it -- they do not skip. The
-  # guards self-provision (drop+recreate schema, apply baseline migrations
-  # 0001-0007, create the least-privilege / owner roles they need), so no
-  # migration pre-step is required; a pgvector smoke proves the extension first.
+  # postgres-malware-route, client-mode-fail-closed) CONNECT to real Postgres via
+  # MONDAY_REPORT_TEST_DATABASE_URL (+ _B for the cross-cluster check) and
+  # exercise it -- they do not skip. The guards self-provision (drop+recreate
+  # schema, apply baseline migrations 0001-0007, create the least-privilege /
+  # owner roles they need), so no migration pre-step is required; a pgvector smoke
+  # proves the extension on BOTH clusters first.
   #
   # Docker is available on GitHub-hosted ubuntu runners, so the report-create
   # guards (steps 57/58) and the standalone restricted-postgres-runtime aggregate
   # additionally spin their OWN disposable pgvector containers and run for real.
   #
-  # No production DB, no production credentials, no secrets.
+  # No production DB, no production credentials, no secrets. Both DSNs are
+  # TEST-MARKED, disposable, local-only credentials -- NOT secrets.
   # ---------------------------------------------------------------------------
   strict-audit-postgres:
-    name: Strict audit (disposable pgvector Postgres + live stack)
+    name: Strict audit (two disposable pgvector clusters + live stack)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     services:
+      # Cluster A - primary disposable Postgres for the whole DB-strict chain.
       postgres:
         image: pgvector/pgvector:pg16
         env:
-          POSTGRES_DB: monday_report
+          POSTGRES_DB: monday_report_test
           POSTGRES_USER: monday_report
           POSTGRES_PASSWORD: monday_report_local_only
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U monday_report -d monday_report"
+          --health-cmd "pg_isready -U monday_report -d monday_report_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      # Cluster B - a SECOND, INDEPENDENT Postgres cluster (different container ->
+      # different server identity) with the SAME database name, on host port 5433.
+      # Used only by verification_boundary check 41 (cross-cluster / server-binding
+      # attestation rejection). Distinct cluster is the whole point of the check.
+      postgres_b:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: monday_report_test
+          POSTGRES_USER: monday_report
+          POSTGRES_PASSWORD: monday_report_local_only
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U monday_report -d monday_report_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
     env:
-      # Isolated app stack (empirically validated locally). The verification-
-      # isolation preflight fails closed unless every root is off .local_data and
-      # the API/web ports are != 8000 / != 5173.
+      # Isolated app stack. The verification-isolation preflight fails closed
+      # unless every root is off .local_data and the API/web ports are != 8000 /
+      # != 5173.
       #
-      # NOTE: the three persistence-root paths are NOT declared here. The
-      # `runner` context is unavailable in job-level `env` and would render to an
-      # empty string, silently mis-pointing the roots. They are exported from the
-      # runtime `$RUNNER_TEMP` inside the audit run step instead. Only the
+      # NOTE: the three persistence-root paths are NOT declared here. The `runner`
+      # context is unavailable in job-level `env` and would render to an empty
+      # string, silently mis-pointing the roots. They are exported from the
+      # runtime `$RUNNER_TEMP` inside the steps that need them instead. Only the
       # context-free static values live at job level.
       MONDAY_REPORT_API_BASE: http://127.0.0.1:8010
       MONDAY_REPORT_WEB_BASE: http://127.0.0.1:8011
@@ -142,11 +183,16 @@ jobs:
       MONDAY_REPORT_CORS_ORIGINS: http://127.0.0.1:8011,http://localhost:8011
       # Consumed ONLY by the DB-strict guards. The app server/worker read
       # MONDAY_REPORT_DATABASE_URL (unset), so they stay in local_json/demo mode;
-      # setting this does not push the app itself onto Postgres. Loopback host is
-      # required (migration_runner refuses non-loopback). Superuser role (the
-      # image's POSTGRES_USER) is required so the guards can create extensions and
-      # roles. This is a disposable, local-only credential -- NOT a secret.
-      MONDAY_REPORT_TEST_DATABASE_URL: postgresql://monday_report:monday_report_local_only@127.0.0.1:5432/monday_report
+      # setting these does not push the app itself onto Postgres. Loopback host is
+      # required (migration_runner refuses non-loopback). The database name carries
+      # a `test` marker so the destructive-setup guards do not refuse. Superuser
+      # role (the image's POSTGRES_USER) is required so the guards can create
+      # extensions and roles. Disposable, local-only credentials -- NOT secrets.
+      #
+      # _B is a SECOND cluster (port 5433) with the SAME database name on a
+      # DIFFERENT server, required by verification_boundary check 41.
+      MONDAY_REPORT_TEST_DATABASE_URL: postgresql://monday_report:monday_report_local_only@127.0.0.1:5432/monday_report_test
+      MONDAY_REPORT_TEST_DATABASE_URL_B: postgresql://monday_report:monday_report_local_only@127.0.0.1:5433/monday_report_test
       CI: "true"
     steps:
       - name: Checkout exact commit (full history)
@@ -185,28 +231,39 @@ jobs:
       - name: Build frontend (dist/ is served as the isolated web stack)
         run: pnpm run build
 
-      - name: Smoke-check pgvector availability (fail fast before the long chain)
+      - name: Smoke-check pgvector on BOTH clusters (fail fast before the long chain)
         run: |
           python - <<'PY'
           import os, psycopg
-          url = os.environ["MONDAY_REPORT_TEST_DATABASE_URL"]
-          with psycopg.connect(url, connect_timeout=15, autocommit=True) as c:
-              c.execute("create extension if not exists vector")
-              row = c.execute(
-                  "select extversion from pg_extension where extname = 'vector'"
-              ).fetchone()
-          assert row, "pgvector extension is NOT available in the Postgres service image"
-          print(f"pgvector available: version {row[0]}")
+          for label, key in (("A", "MONDAY_REPORT_TEST_DATABASE_URL"),
+                             ("B", "MONDAY_REPORT_TEST_DATABASE_URL_B")):
+              url = os.environ[key]
+              with psycopg.connect(url, connect_timeout=15, autocommit=True) as c:
+                  c.execute("create extension if not exists vector")
+                  row = c.execute(
+                      "select extversion from pg_extension where extname = 'vector'"
+                  ).fetchone()
+              assert row, f"pgvector extension is NOT available in cluster {label}"
+              print(f"cluster {label} ({key}) reachable; pgvector version {row[0]}")
+          # A and B must be DIFFERENT clusters (distinct system identifier) or
+          # check 41 would be testing a clone against its own origin.
+          import psycopg as _pg
+          def sysid(key):
+              with _pg.connect(os.environ[key], connect_timeout=15, autocommit=True) as c:
+                  return c.execute("select system_identifier from pg_control_system()").fetchone()[0]
+          a, b = sysid("MONDAY_REPORT_TEST_DATABASE_URL"), sysid("MONDAY_REPORT_TEST_DATABASE_URL_B")
+          assert a != b, f"clusters A and B share system_identifier {a} -- they are NOT independent clusters"
+          print(f"cluster A sysid={a}, cluster B sysid={b} (distinct -> cross-cluster check is meaningful)")
           PY
 
       - name: Run audit:all against the DB + live stack, then assert the honest baseline
         run: |
           set -uo pipefail
 
-          # Persistence roots: exported from the RUNTIME $RUNNER_TEMP (the
-          # `runner` context is not usable in job-level env). Exported shell vars
-          # propagate through pnpm -> python -> the worker subprocess, exactly as
-          # in the validated local run.
+          # Persistence roots: exported from the RUNTIME $RUNNER_TEMP (the `runner`
+          # context is not usable in job-level env). Exported shell vars propagate
+          # through pnpm -> python -> the worker subprocess, exactly as in the
+          # validated local run.
           export MONDAY_REPORT_STATE_PATH="$RUNNER_TEMP/iso/state.json"
           export MONDAY_REPORT_STORAGE_ROOT="$RUNNER_TEMP/iso/storage"
           export MONDAY_REPORT_EXPORT_ROOT="$RUNNER_TEMP/iso/exports"
@@ -255,11 +312,36 @@ jobs:
           python .github/scripts/assert_audit_baseline.py \
             "$RUNNER_TEMP/audit_all.log" "${AUDIT_EXIT}"
 
+      - name: Cross-cluster security boundary MUST execute (skipped => RED)
+        run: |
+          set -uo pipefail
+          # verification_boundary check 41 records skipped=True/ok=True when the
+          # second cluster is missing -- a silent pass. We provide cluster B (env
+          # MONDAY_REPORT_TEST_DATABASE_URL_B) and then FAIL CLOSED unless check 41
+          # ACTUALLY EXECUTED. The guard is run standalone here (it self-provisions
+          # and cleans A and B); its own exit code is honoured, and the assertion
+          # additionally forbids a skipped cross-cluster check.
+          export MONDAY_REPORT_STATE_PATH="$RUNNER_TEMP/vb/state.json"
+          export MONDAY_REPORT_STORAGE_ROOT="$RUNNER_TEMP/vb/storage"
+          export MONDAY_REPORT_EXPORT_ROOT="$RUNNER_TEMP/vb/exports"
+          mkdir -p "$RUNNER_TEMP/vb/storage" "$RUNNER_TEMP/vb/exports"
+
+          set +e
+          python scripts/verification_boundary_guard.py 2>&1 | tee "$RUNNER_TEMP/vb.log"
+          VB_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo "verification_boundary_guard raw exit code: ${VB_EXIT}"
+
+          python .github/scripts/assert_cross_cluster_executed.py \
+            "$RUNNER_TEMP/vb.log" "${VB_EXIT}"
+
       - name: Standalone DB-strict coverage - migration runner (connects to the service DB)
         run: |
-          # Independent proof that the migration-runner guard CONNECTS to and
-          # exercises the real Postgres (it self-provisions; it SKIPS -> non-
-          # certifying if the DB were absent, so a real DB here is load-bearing).
+          # With the TEST-MARKED loopback DSN the migration-runner guard no longer
+          # refuses on the database name; it CONNECTS to cluster A, applies the
+          # baseline migrations against real Postgres, and certifies. It records
+          # BLOCKED_SKIPPED_CHECKS (non-passing) if it cannot reach the DB, so a
+          # real reachable DB here is load-bearing -- not a formality.
           python scripts/migration_runner_guard.py
 
       - name: Standalone DB-strict coverage - restricted-postgres-runtime matrix (Docker self-provisioned)
@@ -278,6 +360,7 @@ jobs:
           echo "----- backend.log -----"; cat "$RUNNER_TEMP/backend.log" 2>/dev/null || true
           echo "----- frontend.log -----"; cat "$RUNNER_TEMP/frontend.log" 2>/dev/null || true
           echo "----- tail of audit_all.log -----"; tail -n 120 "$RUNNER_TEMP/audit_all.log" 2>/dev/null || true
+          echo "----- tail of vb.log -----"; tail -n 80 "$RUNNER_TEMP/vb.log" 2>/dev/null || true
 
   # ---------------------------------------------------------------------------
   # JOB 3 - WINDOWS DETERMINISTIC checks

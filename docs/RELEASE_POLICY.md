@@ -19,11 +19,16 @@ package chain below — it is not optional and is not waivable per-release.
    commit that will be built:
    - **Fast / hermetic** — frozen `pnpm install` + `pnpm run build` (`tsc`
      typecheck + `vite build`).
-   - **Strict audit (disposable pgvector Postgres + live stack)** — the full
-     `pnpm run audit:all` (73 steps) against a disposable pgvector Postgres and a
-     live isolated app stack, then the honest expected-baseline gate (see below),
-     plus the standalone DB-strict coverage (migration runner + the
-     restricted-postgres-runtime matrix).
+   - **Strict audit (two disposable pgvector clusters + live stack)** — the full
+     `pnpm run audit:all` (73 steps) against a disposable pgvector Postgres
+     (cluster A, a `test`-marked database so the DB-strict guards CONNECT and
+     exercise real Postgres rather than refuse/skip) and a live isolated app
+     stack, then the honest expected-baseline gate (see below); a SECOND,
+     independent pgvector cluster (cluster B) so `verification_boundary` check 41
+     (cross-cluster attestation rejection) actually executes — a skipped
+     cross-cluster check fails the job; plus the standalone DB-strict coverage
+     (migration runner + the restricted-postgres-runtime matrix). No DB-required
+     security check is accepted as SKIPPED.
    - **Windows deterministic** — Python byte-compile of `scripts/` + `backend/`,
      a parse-only tokenize of the offline bootstrap PowerShell, and the offline
      bootstrap guard's deterministic certify self-test.
@@ -50,7 +55,8 @@ CI does **not** mask this. The strict-audit job asserts, via
 `.github/scripts/assert_audit_baseline.py`, that this is the **only** deviation:
 
 - the run reached the terminal `audit:ga-gap-assessment` verdict (so every
-  earlier step, including the DB-strict guards, passed),
+  earlier step, including the DB-strict guards that connect to real Postgres,
+  passed — none skipped),
 - `summary.failed == 1` and the single failing check is exactly
   `GA50 commit-binding-is-ancestor`,
 - `release_recommendation == GA_BLOCKED`,
