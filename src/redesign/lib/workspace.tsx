@@ -424,11 +424,33 @@ function useGatedRead<T>(params: {
   return { value, reload };
 }
 
+/** The selected workspace is remembered on this machine so a reload returns to it.
+ *  Stored in localStorage — a UI preference, not a credential — and tolerant of
+ *  storage being unavailable (private mode). It is validated against the loaded
+ *  workspaces on connect, so a stale id falls back to the first workspace. */
+const WORKSPACE_STORAGE_KEY = "mr.activeWorkspace";
+
+function readStoredWorkspaceId(): string | null {
+  try {
+    return window.localStorage.getItem(WORKSPACE_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function storeWorkspaceId(id: string): void {
+  try {
+    window.localStorage.setItem(WORKSPACE_STORAGE_KEY, id);
+  } catch {
+    // Storage unavailable (private mode / disabled): selection still works in-session.
+  }
+}
+
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [apiStatus, setApiStatus] = useState<ApiStatus>("checking");
   const [session, setSession] = useState<ApiSession | null>(null);
   const [workspaces, setWorkspaces] = useState<ApiWorkspace[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeId, setActiveId] = useState<string | null>(() => readStoredWorkspaceId());
   const [validationTasks, setValidationTasks] = useState<Loadable<ApiValidationTask[]>>({
     state: "loading"
   });
@@ -561,7 +583,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         sessionRef.current = nextSession;
         setSession(nextSession);
         setWorkspaces(nextWorkspaces);
-        setActiveId((current) => current ?? nextWorkspaces[0]?.id ?? null);
+        // Restore the remembered workspace when it still exists; otherwise fall back
+        // to the first so a stale stored id never leaves the app with no selection.
+        setActiveId((current) =>
+          current && nextWorkspaces.some((workspace) => workspace.id === current)
+            ? current
+            : nextWorkspaces[0]?.id ?? null
+        );
         setApiStatus("connected");
       } catch (error) {
         if (cancelled) return;
@@ -683,6 +711,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     () => workspaces.find((workspace) => workspace.id === activeId) ?? workspaces[0] ?? null,
     [workspaces, activeId]
   );
+
+  const selectWorkspace = useCallback((id: string) => {
+    setActiveId(id);
+    storeWorkspaceId(id);
+  }, []);
 
   // Shared Stage 2 reads — see the WorkspaceContextValue doc block. Each checks the
   // permission map BEFORE issuing anything, so no navigation appends an audited
@@ -830,7 +863,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       session,
       workspaces,
       activeWorkspace,
-      selectWorkspace: setActiveId,
+      selectWorkspace,
       openQueueTasks,
       gate,
       reloadGate,

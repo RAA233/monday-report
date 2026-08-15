@@ -87,7 +87,7 @@ export function Settings() {
             min={150}
             items={[
               { label: "Signed in as", value: session.user.full_name, detail: session.user.email },
-              { label: "Tenant", value: session.tenant.name, detail: session.tenant.slug },
+              { label: "Organization", value: session.tenant.name, detail: session.tenant.slug },
               {
                 label: "Roles",
                 value: roles.length > 0 ? roles.join(", ") : "None",

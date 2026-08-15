@@ -41,7 +41,7 @@ export interface NavGroup {
 
 export const NAV_GROUPS: NavGroup[] = [
   {
-    label: "Operate",
+    label: "Work",
     items: [
       { path: "/app", label: "Ask", icon: MessageSquare },
       { path: "/app/reports", label: "Monday reports", icon: Calendar },
