@@ -82,13 +82,14 @@ class _FakeOllama(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/api/tags":
-            payload = json.dumps({"models": [{"name": n} for n in SERVER_STATE["models"]]}).encode()
-            self._send(200, payload)
+            self._send(200, json.dumps({"models": [{"name": n} for n in SERVER_STATE["models"]]}).encode())
+        elif self.path == "/v1/models":  # lm_studio / openai-compatible
+            self._send(200, json.dumps({"data": [{"id": n} for n in SERVER_STATE["models"]]}).encode())
         else:
             self._send(404, b"{}")
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/api/chat":
+        if self.path not in ("/api/chat", "/v1/chat/completions"):
             self._send(404, b"{}")
             return
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -114,17 +115,15 @@ class _FakeOllama(BaseHTTPRequestHandler):
             big = "x" * (LOCAL_GEN_MAX_RESPONSE_BYTES + 4096)
             self._send(200, json.dumps({"message": {"role": "assistant", "content": big}}).encode())
             return
-        if mode == "empty":
-            self._send(200, json.dumps({"message": {"role": "assistant", "content": "   "}}).encode())
-            return
+        # Shape the successful body for the runtime that posted (ollama vs openai-compatible).
+        content = "   " if mode == "empty" else SERVER_STATE["content"]
+        if self.path == "/v1/chat/completions":
+            body: dict = {"choices": [{"message": {"role": "assistant", "content": content}}]}
+        else:
+            body = {"message": {"role": "assistant", "content": content}, "done": True}
         if mode == "citations_field":
-            body = {
-                "message": {"role": "assistant", "content": SERVER_STATE["content"]},
-                "citations": [{"id": "FABRICATED-999", "snippet": "not grounded"}],
-            }
-            self._send(200, json.dumps(body).encode())
-            return
-        self._send(200, json.dumps({"message": {"role": "assistant", "content": SERVER_STATE["content"]}, "done": True}).encode())
+            body["citations"] = [{"id": "FABRICATED-999", "snippet": "not grounded"}]
+        self._send(200, json.dumps(body).encode())
 
     def log_message(self, *args: object) -> None:  # noqa: A002
         return
@@ -364,6 +363,16 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
         _reset_server(mode="empty")
         emp = make_provider().generate(_make_context("Summarize the NPT", with_evidence=True))
         check("24 empty content -> deterministic fallback", emp.answer == DETERMINISTIC_PROVIDER.generate(_make_context("Summarize the NPT", with_evidence=True)).answer)
+
+        # lm_studio / OpenAI-compatible shape: generation extractor + health.
+        def make_lm_provider(model: str = "qwen2.5:3b") -> LocalModelProvider:
+            return LocalModelProvider(runtime="lm_studio", endpoint=endpoint, model=model, fallback=DETERMINISTIC_PROVIDER)
+
+        _reset_server(content="LM: openai-compatible grounded prose.")
+        lm_gen = make_lm_provider().generate(_make_context("Summarize the failures", with_evidence=True))
+        check("24b lm_studio (openai-compatible) generation extractor works",
+              lm_gen.answer == "LM: openai-compatible grounded prose.")
+        check("24c lm_studio health via /v1/models", make_lm_provider().health().available is True)
 
         # ============ FALLBACK (25-27) ============
         _reset_server()

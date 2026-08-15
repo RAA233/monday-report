@@ -22,9 +22,11 @@ a request, header, or user payload can choose the provider or the endpoint.
 """
 from __future__ import annotations
 
+import os
+
 from ..local_ai import (
-    LOCAL_GEN_ENABLED_VALUES,
     AI_PROVIDER_ENV,
+    LOCAL_GEN_ENABLED_VALUES,
     generate_local_chat,
     is_loopback_endpoint,
     probe_local_generation,
@@ -33,8 +35,6 @@ from ..local_ai import (
 )
 from ..schemas import ChatResponse
 from .contract import AIProvider, GroundedContext, ProviderCapabilities, ProviderStatus
-
-import os
 
 
 # Prompt bounds (named so the guard can pin them; the total user message is truncated
