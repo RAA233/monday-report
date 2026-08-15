@@ -89,7 +89,10 @@ def _strip_comments(text: str) -> str:
     inspects only code + visible strings, never developer comments (which legitimately
     keep technical terms)."""
     text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
-    text = re.sub(r"//[^\n]*", " ", text)
+    # `(?<!:)` so a `//` that is part of a URL scheme (https://) inside a string is
+    # NOT treated as a line comment — otherwise a visible string after it would be
+    # stripped and a real leak could be masked.
+    text = re.sub(r"(?<!:)//[^\n]*", " ", text)
     return text
 
 
@@ -98,7 +101,13 @@ def _jargon_hits() -> list[str]:
     # Sweep the customer pages, the shell, AND src/redesign/lib (route titles,
     # workspace/license helper strings) — the tab-title map lives in lib and is a
     # customer surface too.
-    targets = [("pages", "*.tsx"), ("shell", "*.tsx"), ("lib", "*.tsx"), ("lib", "*.ts")]
+    targets = [
+        ("pages", "*.tsx"),
+        ("shell", "*.tsx"),
+        ("lib", "*.tsx"),
+        ("lib", "*.ts"),
+        ("components", "*.tsx"),
+    ]
     for sub, pattern in targets:
         directory = ROOT / "src" / "redesign" / sub
         for path in sorted(directory.glob(pattern)):
