@@ -1,0 +1,1090 @@
+{
+  "Draft the Monday report": {
+    "answer": "Draft Monday Report workflow is ready from 2 extracted failures and 9.5 NPT hours. Plan: normalize the source daily-report format into well/job information, present operations, drilling parameters, mud/BHA/survey, casing, timeline, NPT, risks, and approvals. Execute: generate the branded report, render the well schematic, attach citations, then export PDF/XLSX/HTML/CSV/JSON after the approval gate. Current gate: 1 validation task(s) must close before official issue.",
+    "citations": [
+      {
+        "confidence": 0.86,
+        "file_id": null,
+        "locator": {
+          "page": 3,
+          "section": "daily drilling report"
+        },
+        "locator_type": "pdf",
+        "snippet": "Stuck pipe at 8,420 ft created 6.5 h of NPT while drilling ahead."
+      }
+    ],
+    "confidence_notes": [
+      "Response uses local source chunks plus structured failure data.",
+      "AI may plan and draft immediately, but official exports stay blocked by validation policy."
+    ],
+    "export_actions": [
+      "monday_report_pdf",
+      "monday_report_xlsx",
+      "monday_report_html",
+      "monday_report_csv",
+      "monday_report_json"
+    ],
+    "followups": [
+      "Plan next morning report",
+      "Build casing schematic",
+      "Create draft report",
+      "Show unresolved validation tasks"
+    ],
+    "insight_cards": [
+      {
+        "detail": "Parsed source scope available to the local analyst.",
+        "label": "Evidence",
+        "tone": "warning",
+        "value": "0 docs / 0 chunks"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hours.",
+        "label": "Failures",
+        "tone": "danger",
+        "value": "2 records"
+      },
+      {
+        "detail": "Official exports remain validation-gated in client mode.",
+        "label": "Validation Gate",
+        "tone": "warning",
+        "value": "1 open"
+      },
+      {
+        "detail": "Signed exports are available after the approval gate.",
+        "label": "Export Stack",
+        "tone": "info",
+        "value": "PDF XLSX HTML CSV JSON"
+      }
+    ],
+    "risk_register": [
+      {
+        "detail": "1 validation task(s) are open.",
+        "mitigation": "Close or countersign validation tasks before official issue.",
+        "severity": "high",
+        "title": "Validation backlog"
+      },
+      {
+        "detail": "0 parsed document(s) are available for this workspace.",
+        "mitigation": "Import the latest DDR, BHA, mud, survey, and service-company files before client signoff.",
+        "severity": "medium",
+        "title": "Evidence coverage"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hour(s).",
+        "mitigation": "Prioritize high-NPT failures and confirm company/tool attribution with citations.",
+        "severity": "high",
+        "title": "Operational severity"
+      }
+    ],
+    "tool_actions": [
+      {
+        "detail": "Build the normal report section map and approval path.",
+        "kind": "plan",
+        "label": "Plan DDR",
+        "prompt": "Plan next morning report"
+      },
+      {
+        "detail": "Generate report language using current evidence and validation status.",
+        "kind": "draft",
+        "label": "Draft Report",
+        "prompt": "Create draft report"
+      },
+      {
+        "detail": "Create casing, hole-section, depth, and risk-marker instructions.",
+        "kind": "schematic",
+        "label": "Draw Schematic",
+        "prompt": "Build casing schematic"
+      },
+      {
+        "detail": "Review blockers before official export.",
+        "kind": "audit",
+        "label": "Audit Gate",
+        "prompt": "Show unresolved validation tasks"
+      }
+    ],
+    "workflow_steps": [
+      {
+        "command": "Show parsed source evidence",
+        "detail": "Parse uploaded reports, tables, email notes, OCR text, and source locators.",
+        "status": "watch",
+        "step": "Ingest"
+      },
+      {
+        "command": "Show high-NPT failures",
+        "detail": "Create structured failures, NPT, company/tool attribution, confidence, and citations.",
+        "status": "complete",
+        "step": "Extract"
+      },
+      {
+        "command": "Plan next morning report",
+        "detail": "Map evidence into normal daily-report sections, casing, risk, and next 24 hr plan.",
+        "status": "ready",
+        "step": "Plan"
+      },
+      {
+        "command": "Create draft report",
+        "detail": "Generate client-readable Monday Report language while preserving source-backed constraints.",
+        "status": "ready",
+        "step": "Draft"
+      },
+      {
+        "command": "Build casing schematic",
+        "detail": "Render casing strings, hole sections, current depth, shoe depths, and risk markers.",
+        "status": "ready",
+        "step": "Schematic"
+      },
+      {
+        "command": "Generate Monday Report",
+        "detail": "Package signed PDF/XLSX/HTML/CSV/JSON artifacts after validation closure.",
+        "status": "blocked",
+        "step": "Export"
+      }
+    ]
+  },
+  "Draft the NPT report": {
+    "answer": "Draft Monday Report workflow is ready from 2 extracted failures and 9.5 NPT hours. Plan: normalize the source daily-report format into well/job information, present operations, drilling parameters, mud/BHA/survey, casing, timeline, NPT, risks, and approvals. Execute: generate the branded report, render the well schematic, attach citations, then export PDF/XLSX/HTML/CSV/JSON after the approval gate. Current gate: 1 validation task(s) must close before official issue.",
+    "citations": [
+      {
+        "confidence": 0.86,
+        "file_id": null,
+        "locator": {
+          "page": 3,
+          "section": "daily drilling report"
+        },
+        "locator_type": "pdf",
+        "snippet": "Stuck pipe at 8,420 ft created 6.5 h of NPT while drilling ahead."
+      }
+    ],
+    "confidence_notes": [
+      "Response uses local source chunks plus structured failure data.",
+      "AI may plan and draft immediately, but official exports stay blocked by validation policy."
+    ],
+    "export_actions": [
+      "monday_report_pdf",
+      "monday_report_xlsx",
+      "monday_report_html",
+      "monday_report_csv",
+      "monday_report_json"
+    ],
+    "followups": [
+      "Plan next morning report",
+      "Build casing schematic",
+      "Create draft report",
+      "Show unresolved validation tasks"
+    ],
+    "insight_cards": [
+      {
+        "detail": "Parsed source scope available to the local analyst.",
+        "label": "Evidence",
+        "tone": "warning",
+        "value": "0 docs / 0 chunks"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hours.",
+        "label": "Failures",
+        "tone": "danger",
+        "value": "2 records"
+      },
+      {
+        "detail": "Official exports remain validation-gated in client mode.",
+        "label": "Validation Gate",
+        "tone": "warning",
+        "value": "1 open"
+      },
+      {
+        "detail": "Signed exports are available after the approval gate.",
+        "label": "Export Stack",
+        "tone": "info",
+        "value": "PDF XLSX HTML CSV JSON"
+      }
+    ],
+    "risk_register": [
+      {
+        "detail": "1 validation task(s) are open.",
+        "mitigation": "Close or countersign validation tasks before official issue.",
+        "severity": "high",
+        "title": "Validation backlog"
+      },
+      {
+        "detail": "0 parsed document(s) are available for this workspace.",
+        "mitigation": "Import the latest DDR, BHA, mud, survey, and service-company files before client signoff.",
+        "severity": "medium",
+        "title": "Evidence coverage"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hour(s).",
+        "mitigation": "Prioritize high-NPT failures and confirm company/tool attribution with citations.",
+        "severity": "high",
+        "title": "Operational severity"
+      }
+    ],
+    "tool_actions": [
+      {
+        "detail": "Build the normal report section map and approval path.",
+        "kind": "plan",
+        "label": "Plan DDR",
+        "prompt": "Plan next morning report"
+      },
+      {
+        "detail": "Generate report language using current evidence and validation status.",
+        "kind": "draft",
+        "label": "Draft Report",
+        "prompt": "Create draft report"
+      },
+      {
+        "detail": "Create casing, hole-section, depth, and risk-marker instructions.",
+        "kind": "schematic",
+        "label": "Draw Schematic",
+        "prompt": "Build casing schematic"
+      },
+      {
+        "detail": "Review blockers before official export.",
+        "kind": "audit",
+        "label": "Audit Gate",
+        "prompt": "Show unresolved validation tasks"
+      }
+    ],
+    "workflow_steps": [
+      {
+        "command": "Show parsed source evidence",
+        "detail": "Parse uploaded reports, tables, email notes, OCR text, and source locators.",
+        "status": "watch",
+        "step": "Ingest"
+      },
+      {
+        "command": "Show high-NPT failures",
+        "detail": "Create structured failures, NPT, company/tool attribution, confidence, and citations.",
+        "status": "complete",
+        "step": "Extract"
+      },
+      {
+        "command": "Plan next morning report",
+        "detail": "Map evidence into normal daily-report sections, casing, risk, and next 24 hr plan.",
+        "status": "ready",
+        "step": "Plan"
+      },
+      {
+        "command": "Create draft report",
+        "detail": "Generate client-readable Monday Report language while preserving source-backed constraints.",
+        "status": "ready",
+        "step": "Draft"
+      },
+      {
+        "command": "Build casing schematic",
+        "detail": "Render casing strings, hole sections, current depth, shoe depths, and risk markers.",
+        "status": "ready",
+        "step": "Schematic"
+      },
+      {
+        "command": "Generate Monday Report",
+        "detail": "Package signed PDF/XLSX/HTML/CSV/JSON artifacts after validation closure.",
+        "status": "blocked",
+        "step": "Export"
+      }
+    ]
+  },
+  "Show the market benchmark drilling rate": {
+    "answer": "Market benchmark status: current ft/day is missing, seven-day average is missing. feet_drilled_per_day vs Gordon average: Insufficient data; feet_drilled_per_day vs Noble top-quartile: Insufficient data; dogleg_severity vs No approved benchmark: Insufficient data; lateral_percentage vs No approved benchmark: Insufficient data 0 active benchmark anomaly/anomalies are in review.",
+    "citations": [
+      {
+        "confidence": 0.86,
+        "file_id": null,
+        "locator": {
+          "page": 3,
+          "section": "daily drilling report"
+        },
+        "locator_type": "pdf",
+        "snippet": "Stuck pipe at 8,420 ft created 6.5 h of NPT while drilling ahead."
+      }
+    ],
+    "confidence_notes": [
+      "Benchmark statements are categorized in the Benchmarking module and require review before client issue.",
+      "Top-quartile gaps are performance gaps and are not presented as confirmed operational failures."
+    ],
+    "export_actions": [
+      "benchmark_evidence_json",
+      "moc_evidence_pdf"
+    ],
+    "followups": [
+      "Show Market Benchmark",
+      "Explain active anomalies",
+      "Prepare Management of Change evidence"
+    ],
+    "insight_cards": [
+      {
+        "detail": "Parsed source scope available to the local analyst.",
+        "label": "Evidence",
+        "tone": "warning",
+        "value": "0 docs / 0 chunks"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hours.",
+        "label": "Failures",
+        "tone": "danger",
+        "value": "2 records"
+      },
+      {
+        "detail": "Official exports remain validation-gated in client mode.",
+        "label": "Validation Gate",
+        "tone": "warning",
+        "value": "1 open"
+      },
+      {
+        "detail": "Signed exports are available after the approval gate.",
+        "label": "Export Stack",
+        "tone": "info",
+        "value": "PDF XLSX HTML CSV JSON"
+      },
+      {
+        "detail": "0 active anomaly/anomalies, 9 comparison row(s).",
+        "label": "Benchmark",
+        "tone": "info",
+        "value": "missing"
+      }
+    ],
+    "risk_register": [
+      {
+        "detail": "1 validation task(s) are open.",
+        "mitigation": "Close or countersign validation tasks before official issue.",
+        "severity": "high",
+        "title": "Validation backlog"
+      },
+      {
+        "detail": "0 parsed document(s) are available for this workspace.",
+        "mitigation": "Import the latest DDR, BHA, mud, survey, and service-company files before client signoff.",
+        "severity": "medium",
+        "title": "Evidence coverage"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hour(s).",
+        "mitigation": "Prioritize high-NPT failures and confirm company/tool attribution with citations.",
+        "severity": "high",
+        "title": "Operational severity"
+      }
+    ],
+    "tool_actions": [
+      {
+        "detail": "Build the normal report section map and approval path.",
+        "kind": "plan",
+        "label": "Plan DDR",
+        "prompt": "Plan next morning report"
+      },
+      {
+        "detail": "Generate report language using current evidence and validation status.",
+        "kind": "draft",
+        "label": "Draft Report",
+        "prompt": "Create draft report"
+      },
+      {
+        "detail": "Create casing, hole-section, depth, and risk-marker instructions.",
+        "kind": "schematic",
+        "label": "Draw Schematic",
+        "prompt": "Build casing schematic"
+      },
+      {
+        "detail": "Review blockers before official export.",
+        "kind": "audit",
+        "label": "Audit Gate",
+        "prompt": "Show unresolved validation tasks"
+      }
+    ],
+    "workflow_steps": [
+      {
+        "command": "Show parsed source evidence",
+        "detail": "Parse uploaded reports, tables, email notes, OCR text, and source locators.",
+        "status": "watch",
+        "step": "Ingest"
+      },
+      {
+        "command": "Show high-NPT failures",
+        "detail": "Create structured failures, NPT, company/tool attribution, confidence, and citations.",
+        "status": "complete",
+        "step": "Extract"
+      },
+      {
+        "command": "Plan next morning report",
+        "detail": "Map evidence into normal daily-report sections, casing, risk, and next 24 hr plan.",
+        "status": "ready",
+        "step": "Plan"
+      },
+      {
+        "command": "Create draft report",
+        "detail": "Generate client-readable Monday Report language while preserving source-backed constraints.",
+        "status": "ready",
+        "step": "Draft"
+      },
+      {
+        "command": "Build casing schematic",
+        "detail": "Render casing strings, hole sections, current depth, shoe depths, and risk markers.",
+        "status": "ready",
+        "step": "Schematic"
+      },
+      {
+        "command": "Generate Monday Report",
+        "detail": "Package signed PDF/XLSX/HTML/CSV/JSON artifacts after validation closure.",
+        "status": "blocked",
+        "step": "Export"
+      }
+    ]
+  },
+  "Summarize the NPT": {
+    "answer": "Current extracted evidence shows 9.5 NPT hours linked to failure records.",
+    "citations": [
+      {
+        "confidence": 0.86,
+        "file_id": null,
+        "locator": {
+          "page": 3,
+          "section": "daily drilling report"
+        },
+        "locator_type": "pdf",
+        "snippet": "Stuck pipe at 8,420 ft created 6.5 h of NPT while drilling ahead."
+      }
+    ],
+    "confidence_notes": [],
+    "export_actions": [],
+    "followups": [
+      "Break NPT down by company",
+      "Show high-NPT failures"
+    ],
+    "insight_cards": [
+      {
+        "detail": "Parsed source scope available to the local analyst.",
+        "label": "Evidence",
+        "tone": "warning",
+        "value": "0 docs / 0 chunks"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hours.",
+        "label": "Failures",
+        "tone": "danger",
+        "value": "2 records"
+      },
+      {
+        "detail": "Official exports remain validation-gated in client mode.",
+        "label": "Validation Gate",
+        "tone": "warning",
+        "value": "1 open"
+      },
+      {
+        "detail": "Signed exports are available after the approval gate.",
+        "label": "Export Stack",
+        "tone": "info",
+        "value": "PDF XLSX HTML CSV JSON"
+      }
+    ],
+    "risk_register": [
+      {
+        "detail": "1 validation task(s) are open.",
+        "mitigation": "Close or countersign validation tasks before official issue.",
+        "severity": "high",
+        "title": "Validation backlog"
+      },
+      {
+        "detail": "0 parsed document(s) are available for this workspace.",
+        "mitigation": "Import the latest DDR, BHA, mud, survey, and service-company files before client signoff.",
+        "severity": "medium",
+        "title": "Evidence coverage"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hour(s).",
+        "mitigation": "Prioritize high-NPT failures and confirm company/tool attribution with citations.",
+        "severity": "high",
+        "title": "Operational severity"
+      }
+    ],
+    "tool_actions": [
+      {
+        "detail": "Build the normal report section map and approval path.",
+        "kind": "plan",
+        "label": "Plan DDR",
+        "prompt": "Plan next morning report"
+      },
+      {
+        "detail": "Generate report language using current evidence and validation status.",
+        "kind": "draft",
+        "label": "Draft Report",
+        "prompt": "Create draft report"
+      },
+      {
+        "detail": "Create casing, hole-section, depth, and risk-marker instructions.",
+        "kind": "schematic",
+        "label": "Draw Schematic",
+        "prompt": "Build casing schematic"
+      },
+      {
+        "detail": "Review blockers before official export.",
+        "kind": "audit",
+        "label": "Audit Gate",
+        "prompt": "Show unresolved validation tasks"
+      }
+    ],
+    "workflow_steps": [
+      {
+        "command": "Show parsed source evidence",
+        "detail": "Parse uploaded reports, tables, email notes, OCR text, and source locators.",
+        "status": "watch",
+        "step": "Ingest"
+      },
+      {
+        "command": "Show high-NPT failures",
+        "detail": "Create structured failures, NPT, company/tool attribution, confidence, and citations.",
+        "status": "complete",
+        "step": "Extract"
+      },
+      {
+        "command": "Plan next morning report",
+        "detail": "Map evidence into normal daily-report sections, casing, risk, and next 24 hr plan.",
+        "status": "ready",
+        "step": "Plan"
+      },
+      {
+        "command": "Create draft report",
+        "detail": "Generate client-readable Monday Report language while preserving source-backed constraints.",
+        "status": "ready",
+        "step": "Draft"
+      },
+      {
+        "command": "Build casing schematic",
+        "detail": "Render casing strings, hole sections, current depth, shoe depths, and risk markers.",
+        "status": "ready",
+        "step": "Schematic"
+      },
+      {
+        "command": "Generate Monday Report",
+        "detail": "Package signed PDF/XLSX/HTML/CSV/JSON artifacts after validation closure.",
+        "status": "blocked",
+        "step": "Export"
+      }
+    ]
+  },
+  "What is the rate of penetration trend?": {
+    "answer": "I found 2 extracted failure record(s). The current executable slice is API-ready for local AI extraction workers.",
+    "citations": [
+      {
+        "confidence": 0.86,
+        "file_id": null,
+        "locator": {
+          "page": 3,
+          "section": "daily drilling report"
+        },
+        "locator_type": "pdf",
+        "snippet": "Stuck pipe at 8,420 ft created 6.5 h of NPT while drilling ahead."
+      }
+    ],
+    "confidence_notes": [],
+    "export_actions": [],
+    "followups": [
+      "What failed this week?",
+      "Which company caused most NPT?",
+      "Generate Monday Report"
+    ],
+    "insight_cards": [
+      {
+        "detail": "Parsed source scope available to the local analyst.",
+        "label": "Evidence",
+        "tone": "warning",
+        "value": "0 docs / 0 chunks"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hours.",
+        "label": "Failures",
+        "tone": "danger",
+        "value": "2 records"
+      },
+      {
+        "detail": "Official exports remain validation-gated in client mode.",
+        "label": "Validation Gate",
+        "tone": "warning",
+        "value": "1 open"
+      },
+      {
+        "detail": "Signed exports are available after the approval gate.",
+        "label": "Export Stack",
+        "tone": "info",
+        "value": "PDF XLSX HTML CSV JSON"
+      }
+    ],
+    "risk_register": [
+      {
+        "detail": "1 validation task(s) are open.",
+        "mitigation": "Close or countersign validation tasks before official issue.",
+        "severity": "high",
+        "title": "Validation backlog"
+      },
+      {
+        "detail": "0 parsed document(s) are available for this workspace.",
+        "mitigation": "Import the latest DDR, BHA, mud, survey, and service-company files before client signoff.",
+        "severity": "medium",
+        "title": "Evidence coverage"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hour(s).",
+        "mitigation": "Prioritize high-NPT failures and confirm company/tool attribution with citations.",
+        "severity": "high",
+        "title": "Operational severity"
+      }
+    ],
+    "tool_actions": [
+      {
+        "detail": "Build the normal report section map and approval path.",
+        "kind": "plan",
+        "label": "Plan DDR",
+        "prompt": "Plan next morning report"
+      },
+      {
+        "detail": "Generate report language using current evidence and validation status.",
+        "kind": "draft",
+        "label": "Draft Report",
+        "prompt": "Create draft report"
+      },
+      {
+        "detail": "Create casing, hole-section, depth, and risk-marker instructions.",
+        "kind": "schematic",
+        "label": "Draw Schematic",
+        "prompt": "Build casing schematic"
+      },
+      {
+        "detail": "Review blockers before official export.",
+        "kind": "audit",
+        "label": "Audit Gate",
+        "prompt": "Show unresolved validation tasks"
+      }
+    ],
+    "workflow_steps": [
+      {
+        "command": "Show parsed source evidence",
+        "detail": "Parse uploaded reports, tables, email notes, OCR text, and source locators.",
+        "status": "watch",
+        "step": "Ingest"
+      },
+      {
+        "command": "Show high-NPT failures",
+        "detail": "Create structured failures, NPT, company/tool attribution, confidence, and citations.",
+        "status": "complete",
+        "step": "Extract"
+      },
+      {
+        "command": "Plan next morning report",
+        "detail": "Map evidence into normal daily-report sections, casing, risk, and next 24 hr plan.",
+        "status": "ready",
+        "step": "Plan"
+      },
+      {
+        "command": "Create draft report",
+        "detail": "Generate client-readable Monday Report language while preserving source-backed constraints.",
+        "status": "ready",
+        "step": "Draft"
+      },
+      {
+        "command": "Build casing schematic",
+        "detail": "Render casing strings, hole sections, current depth, shoe depths, and risk markers.",
+        "status": "ready",
+        "step": "Schematic"
+      },
+      {
+        "command": "Generate Monday Report",
+        "detail": "Package signed PDF/XLSX/HTML/CSV/JSON artifacts after validation closure.",
+        "status": "blocked",
+        "step": "Export"
+      }
+    ]
+  },
+  "What source evidence was uploaded?": {
+    "answer": "Parsed evidence is available from 0 uploaded document(s) with 0 source chunk(s). The worker stores chunk lineage by file, upload, workspace, and tenant before local AI extraction runs.",
+    "citations": [
+      {
+        "confidence": 0.86,
+        "file_id": null,
+        "locator": {
+          "page": 3,
+          "section": "daily drilling report"
+        },
+        "locator_type": "pdf",
+        "snippet": "Stuck pipe at 8,420 ft created 6.5 h of NPT while drilling ahead."
+      }
+    ],
+    "confidence_notes": [
+      "This answer uses parser-worker chunks plus seeded structured failure data."
+    ],
+    "export_actions": [],
+    "followups": [
+      "Show unresolved validation tasks",
+      "Generate Monday Report"
+    ],
+    "insight_cards": [
+      {
+        "detail": "Parsed source scope available to the local analyst.",
+        "label": "Evidence",
+        "tone": "warning",
+        "value": "0 docs / 0 chunks"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hours.",
+        "label": "Failures",
+        "tone": "danger",
+        "value": "2 records"
+      },
+      {
+        "detail": "Official exports remain validation-gated in client mode.",
+        "label": "Validation Gate",
+        "tone": "warning",
+        "value": "1 open"
+      },
+      {
+        "detail": "Signed exports are available after the approval gate.",
+        "label": "Export Stack",
+        "tone": "info",
+        "value": "PDF XLSX HTML CSV JSON"
+      }
+    ],
+    "risk_register": [
+      {
+        "detail": "1 validation task(s) are open.",
+        "mitigation": "Close or countersign validation tasks before official issue.",
+        "severity": "high",
+        "title": "Validation backlog"
+      },
+      {
+        "detail": "0 parsed document(s) are available for this workspace.",
+        "mitigation": "Import the latest DDR, BHA, mud, survey, and service-company files before client signoff.",
+        "severity": "medium",
+        "title": "Evidence coverage"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hour(s).",
+        "mitigation": "Prioritize high-NPT failures and confirm company/tool attribution with citations.",
+        "severity": "high",
+        "title": "Operational severity"
+      }
+    ],
+    "tool_actions": [
+      {
+        "detail": "Build the normal report section map and approval path.",
+        "kind": "plan",
+        "label": "Plan DDR",
+        "prompt": "Plan next morning report"
+      },
+      {
+        "detail": "Generate report language using current evidence and validation status.",
+        "kind": "draft",
+        "label": "Draft Report",
+        "prompt": "Create draft report"
+      },
+      {
+        "detail": "Create casing, hole-section, depth, and risk-marker instructions.",
+        "kind": "schematic",
+        "label": "Draw Schematic",
+        "prompt": "Build casing schematic"
+      },
+      {
+        "detail": "Review blockers before official export.",
+        "kind": "audit",
+        "label": "Audit Gate",
+        "prompt": "Show unresolved validation tasks"
+      }
+    ],
+    "workflow_steps": [
+      {
+        "command": "Show parsed source evidence",
+        "detail": "Parse uploaded reports, tables, email notes, OCR text, and source locators.",
+        "status": "watch",
+        "step": "Ingest"
+      },
+      {
+        "command": "Show high-NPT failures",
+        "detail": "Create structured failures, NPT, company/tool attribution, confidence, and citations.",
+        "status": "complete",
+        "step": "Extract"
+      },
+      {
+        "command": "Plan next morning report",
+        "detail": "Map evidence into normal daily-report sections, casing, risk, and next 24 hr plan.",
+        "status": "ready",
+        "step": "Plan"
+      },
+      {
+        "command": "Create draft report",
+        "detail": "Generate client-readable Monday Report language while preserving source-backed constraints.",
+        "status": "ready",
+        "step": "Draft"
+      },
+      {
+        "command": "Build casing schematic",
+        "detail": "Render casing strings, hole sections, current depth, shoe depths, and risk markers.",
+        "status": "ready",
+        "step": "Schematic"
+      },
+      {
+        "command": "Generate Monday Report",
+        "detail": "Package signed PDF/XLSX/HTML/CSV/JSON artifacts after validation closure.",
+        "status": "blocked",
+        "step": "Export"
+      }
+    ]
+  },
+  "What's the weather tomorrow?": {
+    "answer": "I found 2 extracted failure record(s). The current executable slice is API-ready for local AI extraction workers.",
+    "citations": [
+      {
+        "confidence": 0.86,
+        "file_id": null,
+        "locator": {
+          "page": 3,
+          "section": "daily drilling report"
+        },
+        "locator_type": "pdf",
+        "snippet": "Stuck pipe at 8,420 ft created 6.5 h of NPT while drilling ahead."
+      }
+    ],
+    "confidence_notes": [],
+    "export_actions": [],
+    "followups": [
+      "What failed this week?",
+      "Which company caused most NPT?",
+      "Generate Monday Report"
+    ],
+    "insight_cards": [
+      {
+        "detail": "Parsed source scope available to the local analyst.",
+        "label": "Evidence",
+        "tone": "warning",
+        "value": "0 docs / 0 chunks"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hours.",
+        "label": "Failures",
+        "tone": "danger",
+        "value": "2 records"
+      },
+      {
+        "detail": "Official exports remain validation-gated in client mode.",
+        "label": "Validation Gate",
+        "tone": "warning",
+        "value": "1 open"
+      },
+      {
+        "detail": "Signed exports are available after the approval gate.",
+        "label": "Export Stack",
+        "tone": "info",
+        "value": "PDF XLSX HTML CSV JSON"
+      }
+    ],
+    "risk_register": [
+      {
+        "detail": "1 validation task(s) are open.",
+        "mitigation": "Close or countersign validation tasks before official issue.",
+        "severity": "high",
+        "title": "Validation backlog"
+      },
+      {
+        "detail": "0 parsed document(s) are available for this workspace.",
+        "mitigation": "Import the latest DDR, BHA, mud, survey, and service-company files before client signoff.",
+        "severity": "medium",
+        "title": "Evidence coverage"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hour(s).",
+        "mitigation": "Prioritize high-NPT failures and confirm company/tool attribution with citations.",
+        "severity": "high",
+        "title": "Operational severity"
+      }
+    ],
+    "tool_actions": [
+      {
+        "detail": "Build the normal report section map and approval path.",
+        "kind": "plan",
+        "label": "Plan DDR",
+        "prompt": "Plan next morning report"
+      },
+      {
+        "detail": "Generate report language using current evidence and validation status.",
+        "kind": "draft",
+        "label": "Draft Report",
+        "prompt": "Create draft report"
+      },
+      {
+        "detail": "Create casing, hole-section, depth, and risk-marker instructions.",
+        "kind": "schematic",
+        "label": "Draw Schematic",
+        "prompt": "Build casing schematic"
+      },
+      {
+        "detail": "Review blockers before official export.",
+        "kind": "audit",
+        "label": "Audit Gate",
+        "prompt": "Show unresolved validation tasks"
+      }
+    ],
+    "workflow_steps": [
+      {
+        "command": "Show parsed source evidence",
+        "detail": "Parse uploaded reports, tables, email notes, OCR text, and source locators.",
+        "status": "watch",
+        "step": "Ingest"
+      },
+      {
+        "command": "Show high-NPT failures",
+        "detail": "Create structured failures, NPT, company/tool attribution, confidence, and citations.",
+        "status": "complete",
+        "step": "Extract"
+      },
+      {
+        "command": "Plan next morning report",
+        "detail": "Map evidence into normal daily-report sections, casing, risk, and next 24 hr plan.",
+        "status": "ready",
+        "step": "Plan"
+      },
+      {
+        "command": "Create draft report",
+        "detail": "Generate client-readable Monday Report language while preserving source-backed constraints.",
+        "status": "ready",
+        "step": "Draft"
+      },
+      {
+        "command": "Build casing schematic",
+        "detail": "Render casing strings, hole sections, current depth, shoe depths, and risk markers.",
+        "status": "ready",
+        "step": "Schematic"
+      },
+      {
+        "command": "Generate Monday Report",
+        "detail": "Package signed PDF/XLSX/HTML/CSV/JSON artifacts after validation closure.",
+        "status": "blocked",
+        "step": "Export"
+      }
+    ]
+  },
+  "Who is the rig supervisor?": {
+    "answer": "I found 2 extracted failure record(s). The current executable slice is API-ready for local AI extraction workers.",
+    "citations": [
+      {
+        "confidence": 0.86,
+        "file_id": null,
+        "locator": {
+          "page": 3,
+          "section": "daily drilling report"
+        },
+        "locator_type": "pdf",
+        "snippet": "Stuck pipe at 8,420 ft created 6.5 h of NPT while drilling ahead."
+      }
+    ],
+    "confidence_notes": [],
+    "export_actions": [],
+    "followups": [
+      "What failed this week?",
+      "Which company caused most NPT?",
+      "Generate Monday Report"
+    ],
+    "insight_cards": [
+      {
+        "detail": "Parsed source scope available to the local analyst.",
+        "label": "Evidence",
+        "tone": "warning",
+        "value": "0 docs / 0 chunks"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hours.",
+        "label": "Failures",
+        "tone": "danger",
+        "value": "2 records"
+      },
+      {
+        "detail": "Official exports remain validation-gated in client mode.",
+        "label": "Validation Gate",
+        "tone": "warning",
+        "value": "1 open"
+      },
+      {
+        "detail": "Signed exports are available after the approval gate.",
+        "label": "Export Stack",
+        "tone": "info",
+        "value": "PDF XLSX HTML CSV JSON"
+      }
+    ],
+    "risk_register": [
+      {
+        "detail": "1 validation task(s) are open.",
+        "mitigation": "Close or countersign validation tasks before official issue.",
+        "severity": "high",
+        "title": "Validation backlog"
+      },
+      {
+        "detail": "0 parsed document(s) are available for this workspace.",
+        "mitigation": "Import the latest DDR, BHA, mud, survey, and service-company files before client signoff.",
+        "severity": "medium",
+        "title": "Evidence coverage"
+      },
+      {
+        "detail": "1 high/critical item(s), 9.5 NPT hour(s).",
+        "mitigation": "Prioritize high-NPT failures and confirm company/tool attribution with citations.",
+        "severity": "high",
+        "title": "Operational severity"
+      }
+    ],
+    "tool_actions": [
+      {
+        "detail": "Build the normal report section map and approval path.",
+        "kind": "plan",
+        "label": "Plan DDR",
+        "prompt": "Plan next morning report"
+      },
+      {
+        "detail": "Generate report language using current evidence and validation status.",
+        "kind": "draft",
+        "label": "Draft Report",
+        "prompt": "Create draft report"
+      },
+      {
+        "detail": "Create casing, hole-section, depth, and risk-marker instructions.",
+        "kind": "schematic",
+        "label": "Draw Schematic",
+        "prompt": "Build casing schematic"
+      },
+      {
+        "detail": "Review blockers before official export.",
+        "kind": "audit",
+        "label": "Audit Gate",
+        "prompt": "Show unresolved validation tasks"
+      }
+    ],
+    "workflow_steps": [
+      {
+        "command": "Show parsed source evidence",
+        "detail": "Parse uploaded reports, tables, email notes, OCR text, and source locators.",
+        "status": "watch",
+        "step": "Ingest"
+      },
+      {
+        "command": "Show high-NPT failures",
+        "detail": "Create structured failures, NPT, company/tool attribution, confidence, and citations.",
+        "status": "complete",
+        "step": "Extract"
+      },
+      {
+        "command": "Plan next morning report",
+        "detail": "Map evidence into normal daily-report sections, casing, risk, and next 24 hr plan.",
+        "status": "ready",
+        "step": "Plan"
+      },
+      {
+        "command": "Create draft report",
+        "detail": "Generate client-readable Monday Report language while preserving source-backed constraints.",
+        "status": "ready",
+        "step": "Draft"
+      },
+      {
+        "command": "Build casing schematic",
+        "detail": "Render casing strings, hole sections, current depth, shoe depths, and risk markers.",
+        "status": "ready",
+        "step": "Schematic"
+      },
+      {
+        "command": "Generate Monday Report",
+        "detail": "Package signed PDF/XLSX/HTML/CSV/JSON artifacts after validation closure.",
+        "status": "blocked",
+        "step": "Export"
+      }
+    ]
+  }
+}
