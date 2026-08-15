@@ -114,11 +114,11 @@ export function Validation() {
         resolutionNote: note || undefined
       });
       const attribution = updated.reviewer_verified_at
-        ? `verified reviewer ${updated.reviewer_user_id ?? "unknown"}`
-        : `actor source ${updated.reviewer_actor_source ?? "unreported"} — not a verified reviewer`;
+        ? `a confirmed reviewer (${updated.reviewer_user_id ?? "unknown"})`
+        : `${sessionAttribution(updated.reviewer_actor_source)} — not attributed to a confirmed reviewer`;
       showToast(
         status === "validated" ? "Validated" : "Rejected",
-        `Decision recorded with ${attribution} and appended to the audit chain.`
+        `Decision recorded with ${attribution} and appended to the report integrity record.`
       );
       // Drop the decided task from the retained snapshot BEFORE the refetch. Retention
       // is what keeps the surrounding cards (and the keyboard user's place) on screen,
@@ -146,7 +146,7 @@ export function Validation() {
         refused ? "Not recorded" : "Outcome unknown",
         refused
           ? `The decision was not recorded, so the gate is unchanged. ${errorText(caught)}`
-          : `The request did not complete, so whether the decision reached the backend is unknown — reload the queue and check this task before deciding again. ${errorText(caught)}`
+          : `The request did not complete, so whether the decision was recorded is unknown — reload the queue and check this task before deciding again. ${errorText(caught)}`
       );
     } finally {
       setBusyId(null);
@@ -158,7 +158,7 @@ export function Validation() {
       <PageHeader
         kicker="Human-in-the-loop"
         title="Validation queue"
-        lede="A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each raise a task here. Decisions are recorded with server-derived reviewer attribution — verified-reviewer only when the session authenticates a per-user credential. The export gate counts only the failure- and anomaly-targeted tasks, so resolving one of those moves it; an OCR file task is queue work that export does not wait on."
+        lede="A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each raise a task here. Decisions are recorded with reviewer attribution — attributed to a confirmed reviewer only when the session authenticates a per-user credential. The export gate counts only the failure- and anomaly-targeted tasks, so resolving one of those moves it; an OCR file task is queue work that export does not wait on."
         actions={
           <Tag
             tone={openQueueTasks === null ? "neutral" : openQueueTasks > 0 ? "critical" : "outline"}
@@ -188,10 +188,9 @@ export function Validation() {
             </>
           ) : (
             <>
-              This session lacks the <strong>resolve_validation</strong> permission, so the queue is
+              This session does not have permission to resolve validation tasks, so the queue is
               read-only
-              {roles.length > 0 ? <> (roles: {roles.join(", ")})</> : null}. The backend refuses the
-              decision route without it.
+              {roles.length > 0 ? <> (roles: {roles.join(", ")})</> : null}.
             </>
           )}
         </p>
@@ -204,7 +203,7 @@ export function Validation() {
       {validationTasks.state === "unauthorized" ? (
         <ErrorState
           title="Queue not visible to this session"
-          message="This session lacks the view_validation_queue permission, so the validation queue cannot be read here. This is not a statement that the queue is empty, and retrying cannot change it — ask a workspace admin for validator access."
+          message="This session does not have validator access, so the validation queue cannot be read here. This is not a statement that the queue is empty, and retrying cannot change it — ask a workspace admin."
         />
       ) : null}
 
@@ -232,8 +231,8 @@ export function Validation() {
           title="All extracted events are resolved"
           body={
             validationTasks.data.length === 0
-              ? "No validation tasks exist for this tenant yet. This queue is tenant-wide; a task is raised for a high-severity extracted failure, for a file that needed OCR, and for a Critical benchmark anomaly."
-              : "Every task in the tenant queue is resolved. The export gate is evaluated per workspace on the Exports view."
+              ? "No validation tasks exist in this workspace yet. This queue covers the whole workspace; a task is raised for a high-severity extracted failure, for a file that needed OCR, and for a Critical benchmark anomaly."
+              : "Every task in this workspace's queue is resolved. The export gate is evaluated per workspace on the Exports view."
           }
           action={
             <Link className="btn btn-primary" to="/app/exports">
@@ -405,7 +404,7 @@ export function Validation() {
                     Reject
                   </button>
                   <span className="text-muted" style={{ fontSize: 10.5, lineHeight: 1.45, maxWidth: 150 }}>
-                    Recorded with reviewer attribution and appended to the audit chain.
+                    Recorded with reviewer attribution and appended to the report integrity record.
                   </span>
                 </div>
               </Frame>
@@ -415,6 +414,23 @@ export function Validation() {
       ) : null}
     </>
   );
+}
+
+// Humanize the raw attribution enum for the decision toast — the backend token
+// (authenticated / demo_bootstrap / configured / system) never reaches the customer.
+function sessionAttribution(source: string | null | undefined): string {
+  switch (source) {
+    case "authenticated":
+      return "a verified identity";
+    case "demo_bootstrap":
+      return "a shared demo session";
+    case "system":
+      return "a system action";
+    case "configured":
+      return "a configured session";
+    default:
+      return "an unreported session";
+  }
 }
 
 function Detail({ label, value }: { label: string; value: string }) {

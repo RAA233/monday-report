@@ -112,7 +112,7 @@ export function Benchmarking() {
       setMeasurementValue("");
       showToast(
         "Measurement recorded",
-        "The measurement was recorded, anomaly rules were evaluated, and the action was appended to the audit chain."
+        "The measurement was recorded, anomaly rules were evaluated, and the action was added to the report integrity record."
       );
       reloadBenchmarking();
     } catch (caught) {
@@ -121,7 +121,7 @@ export function Benchmarking() {
         refused ? "Not recorded" : "Outcome unknown",
         refused
           ? `The measurement was not recorded. ${errorText(caught)}`
-          : `The request did not complete, so whether the measurement reached the backend is unknown — it may have landed. Re-read the benchmarking status before recording it again. ${errorText(caught)}`
+          : `The request did not complete, so whether the measurement reached Monday Report is unknown — it may have landed. Re-read the benchmarking status before recording it again. ${errorText(caught)}`
       );
     } finally {
       setMutating(false);
@@ -132,7 +132,7 @@ export function Benchmarking() {
     if (dismissBlocked || mutating) return;
     const reason = dismissReasons[action.id]?.trim();
     if (!reason) {
-      showToast("Reason required", "Dismissing a diagnostic recommendation needs a written reason for the audit record.");
+      showToast("Reason required", "Dismissing a diagnostic recommendation needs a written reason for the report integrity record.");
       return;
     }
     setMutating(true);
@@ -140,7 +140,7 @@ export function Benchmarking() {
       await dismissBenchmarkDiagnostic({ anomalyId: anomaly.id, actionId: action.id, reason });
       showToast(
         "Dismissed",
-        `The ${action.module} recommendation was dismissed with your reason and appended to the audit chain.`
+        `The ${action.module} recommendation was dismissed with your reason and added to the report integrity record.`
       );
       reloadBenchmarking();
     } catch (caught) {
@@ -149,7 +149,7 @@ export function Benchmarking() {
         refused ? "Not recorded" : "Outcome unknown",
         refused
           ? `The dismissal was not recorded. ${errorText(caught)}`
-          : `The request did not complete, so whether the dismissal reached the backend is unknown — it may have landed. Re-read the benchmarking status before dismissing again. ${errorText(caught)}`
+          : `The request did not complete, so whether the dismissal reached Monday Report is unknown — it may have landed. Re-read the benchmarking status before dismissing again. ${errorText(caught)}`
       );
     } finally {
       setMutating(false);
@@ -169,7 +169,7 @@ export function Benchmarking() {
     }
     const reason = adjustReason.trim();
     if (!reason) {
-      showToast("Reason required", "Adjusting an approved benchmark needs a written reason for the audit record.");
+      showToast("Reason required", "Adjusting an approved benchmark needs a written reason for the report integrity record.");
       return;
     }
     setMutating(true);
@@ -179,7 +179,7 @@ export function Benchmarking() {
       setAdjustReason("");
       showToast(
         "Benchmark adjusted",
-        `${adjustTarget.benchmark_name} was updated with your reason and appended to the audit chain.`
+        `${adjustTarget.benchmark_name} was updated with your reason and added to the report integrity record.`
       );
       reloadBenchmarking();
     } catch (caught) {
@@ -188,7 +188,7 @@ export function Benchmarking() {
         refused ? "Not recorded" : "Outcome unknown",
         refused
           ? `The benchmark was not changed. ${errorText(caught)}`
-          : `The request did not complete, so whether the change reached the backend is unknown — it may have landed. Re-read the benchmarking status before adjusting again. ${errorText(caught)}`
+          : `The request did not complete, so whether the change reached Monday Report is unknown — it may have landed. Re-read the benchmarking status before adjusting again. ${errorText(caught)}`
       );
     } finally {
       setMutating(false);
@@ -200,7 +200,7 @@ export function Benchmarking() {
       <PageHeader
         kicker={`Review · ${activeWorkspace?.name ?? "no workspace"}`}
         title="Benchmarking"
-        lede="Current drilling performance against the tenant's approved benchmark configuration. Every mutation here — a recorded measurement, a dismissed diagnostic, an adjusted benchmark — is permission-gated by the backend and appended to the audit chain with your reason."
+        lede="Current drilling performance against this workspace's approved benchmark configuration. Every change here — a recorded measurement, a dismissed diagnostic, an adjusted benchmark — is added to the tamper-evident report integrity record with your reason."
         actions={
           <Tag
             tone={activeAnomalies.some((item) => item.severity === "Critical") ? "critical" : "outline"}
@@ -218,7 +218,7 @@ export function Benchmarking() {
       {benchmarking.state === "unauthorized" ? (
         <ErrorState
           title="Benchmarking not visible to this session"
-          message="This session lacks the view_benchmarks permission, so the benchmarking status cannot be read here. This is not a statement that no benchmarks or anomalies exist — ask a workspace admin for benchmark access."
+          message="This session does not have benchmark access, so the benchmarking status cannot be read here. This is not a statement that no benchmarks or anomalies exist — ask a workspace admin for benchmark access."
         />
       ) : null}
 
@@ -273,12 +273,12 @@ export function Benchmarking() {
               <p role="status" className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
                 {readOnly
                   ? `${apiUnreadReason(apiStatus) ?? "The workspace is not resolved"}, so no measurement can be recorded.`
-                  : "This session lacks the review_anomalies permission, so the backend would refuse a recorded measurement."}
+                  : "This session does not have permission to record measurements."}
               </p>
             ) : (
               <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
-                Recording evaluates the approved anomaly rules against the new reading and appends the
-                action to the audit chain.
+                Recording evaluates the approved anomaly rules against the new reading and adds the
+                action to the report integrity record.
               </p>
             )}
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end" }}>
@@ -411,7 +411,7 @@ export function Benchmarking() {
                               id={`dismiss-${action.id}`}
                               className="input"
                               value={dismissReasons[action.id] ?? ""}
-                              placeholder="Required — recorded in the audit chain."
+                              placeholder="Required — recorded in the report integrity record."
                               onChange={(event) =>
                                 setDismissReasons((current) => ({
                                   ...current,
@@ -440,7 +440,7 @@ export function Benchmarking() {
                     <p role="status" className="text-muted" style={{ fontSize: 12, margin: 0 }}>
                       {readOnly
                         ? `${apiUnreadReason(apiStatus) ?? "The workspace is not resolved"}, so no dismissal can be recorded.`
-                        : "This session lacks the dismiss_anomalies permission, so the backend would refuse a dismissal."}
+                        : "This session does not have permission to dismiss diagnostics."}
                     </p>
                   ) : null}
                 </div>
@@ -515,12 +515,12 @@ export function Benchmarking() {
                 <p role="status" className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
                   {readOnly
                     ? `${apiUnreadReason(apiStatus) ?? "The workspace is not resolved"}, so no benchmark can be adjusted.`
-                    : "This session lacks the manage_benchmark_config permission, so the backend would refuse a benchmark change."}
+                    : "This session does not have permission to adjust approved benchmarks."}
                 </p>
               ) : (
                 <p className="text-muted" style={{ fontSize: 12.5, margin: 0 }}>
-                  Changing an approved benchmark requires a written reason and is appended to the
-                  audit chain.
+                  Changing an approved benchmark requires a written reason and is added to the
+                  report integrity record.
                 </p>
               )}
               <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "end" }}>
@@ -557,7 +557,7 @@ export function Benchmarking() {
                   <input
                     id="bm-adjust-reason"
                     className="input"
-                    placeholder="Required — recorded in the audit chain."
+                    placeholder="Required — recorded in the report integrity record."
                     value={adjustReason}
                     onChange={(event) => setAdjustReason(event.target.value)}
                     disabled={adjustBlocked}

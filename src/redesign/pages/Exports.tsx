@@ -50,7 +50,7 @@ const FORMATS: Array<{ format: ApiReportExport["format"]; label: string; detail:
   { format: "pdf", label: "PDF", detail: "Issue-ready report document for client handoff." },
   { format: "xlsx", label: "XLSX", detail: "Workbook of report tables for operator systems." },
   { format: "html", label: "HTML", detail: "Self-contained rendering for review in a browser." },
-  { format: "json", label: "JSON", detail: "Full report payload for downstream integration." },
+  { format: "json", label: "JSON", detail: "The full report data for use in other tools." },
   { format: "csv", label: "CSV", detail: "Flat record extract for spreadsheets and pipelines." }
 ];
 
@@ -121,9 +121,9 @@ function GateBanner({
             the queue, which lists conflicts as live cards. */}
         <span style={{ fontSize: 13 }}>
           No open validation task for this workspace was found in the queue, failure and anomaly reads
-          this view made — applying the backend's own gate predicate, which counts open tasks only, so a
-          task parked as a conflict still needs a reviewer but does not hold the export. The backend
-          enforces the gate again on export.
+          this view made — applying Monday Report's own gate predicate, which counts open tasks only, so a
+          task parked as a conflict still needs a reviewer but does not hold the export. The validation
+          gate is enforced again on export.
         </span>
       </div>
     );
@@ -135,7 +135,7 @@ function GateBanner({
     return (
       <div role="status" style={frame(false)}>
         <strong style={heading(false)}>Checking the export gate</strong>
-        <span style={{ fontSize: 13 }}>Reading the gate from the backend…</span>
+        <span style={{ fontSize: 13 }}>Reading the gate from Monday Report…</span>
       </div>
     );
   }
@@ -148,8 +148,8 @@ function GateBanner({
             in report_json, not in the refusal. */}
         <span style={{ fontSize: 13 }}>
           This session may not read the validation gate, so it is not shown here. That is not a
-          statement that the queue is empty — the backend enforces the gate on every export and
-          refuses it while an open failure- or anomaly-targeted validation task exists for this
+          statement that the queue is empty — the validation gate is enforced on every export, and the
+          export is refused while an open failure- or anomaly-targeted validation task exists for this
           report's workspace.
         </span>
       </div>
@@ -161,8 +161,8 @@ function GateBanner({
         <strong style={heading(false)}>Export gate unknown</strong>
         <span style={{ fontSize: 13 }}>
           {retrying
-            ? "The gate is being read again. Until it answers this is not a statement that the queue is empty — the backend still enforces it on every export."
-            : "The gate could not be read, so it cannot be shown. This is not a statement that the queue is empty — the backend still enforces it on every export."}
+            ? "The gate is being read again. Until it answers this is not a statement that the queue is empty — it is still enforced on every export."
+            : "The gate could not be read, so it cannot be shown. This is not a statement that the queue is empty — it is still enforced on every export."}
         </span>
         <button
           type="button"
@@ -194,7 +194,7 @@ function GateBanner({
         {apiStatus === "checking"
           ? "The workspace API is still being reached, so the gate has not been read yet."
           : unread
-            ? `${unread}, so the gate has not been read. That is not a statement that the queue is empty — the backend enforces it on every export.`
+            ? `${unread}, so the gate has not been read. That is not a statement that the queue is empty — it is enforced on every export.`
             : "No workspace is resolved, so there is no gate to evaluate and nothing to export."}
       </span>
     </div>
@@ -381,7 +381,7 @@ export function Exports() {
           tone: "ok",
           // The ellipsis marks the truncation: 12 of 64 hex characters presented as
           // "SHA <value>" reads as a whole digest and silently fails a comparison.
-          text: `${format.toUpperCase()} ready · ${sizeLabel(result.byte_size)} · SHA ${shortSha(result.sha256)}…`,
+          text: `${format.toUpperCase()} ready · ${sizeLabel(result.byte_size)} · checksum ${shortSha(result.sha256)}…`,
           full: result.sha256
         }
       }));
@@ -390,7 +390,7 @@ export function Exports() {
       reload();
       showToast(
         "Export ready",
-        `${shortId(forReport)} ${format.toUpperCase()} export written, checksummed, and appended to the audit chain. Fetch it with an expiring signed URL.`
+        `${shortId(forReport)} ${format.toUpperCase()} export written, checksummed, and recorded in the report integrity record. Fetch it with an expiring signed link.`
       );
     } catch (caught) {
       if (forWorkspace !== workspaceIdRef.current) return;
@@ -409,7 +409,7 @@ export function Exports() {
         text =
           live.state === "ready" && live.openTasks > 0
             ? exportGateMessage(live.openTasks)
-            : "Export refused: the backend reports unresolved validation tasks for this report. Re-reading the gate — open Validation to resolve them.";
+            : "Export refused: Monday Report reports unresolved validation tasks for this report. Re-reading the gate — open Validation to resolve them.";
       } else {
         text = `Export refused. ${errorText(caught)}`;
       }
@@ -439,7 +439,7 @@ export function Exports() {
       );
       showToast(
         "Signed URL issued",
-        `A short-lived reference for the ${item.format.toUpperCase()} export was issued and audit-logged. It expires at ${signed.expires_at}.`
+        `A short-lived reference for the ${item.format.toUpperCase()} export was issued and recorded. It expires at ${signed.expires_at}.`
       );
     } catch (caught) {
       // Same guard as the success path: after a workspace switch this row is gone,
@@ -456,7 +456,7 @@ export function Exports() {
       <PageHeader
         kicker="Controlled handoff"
         title="Exports"
-        lede="Official exports are validation-gated, checksummed, audit-logged, and fetched only through expiring signed URLs."
+        lede="Official exports are validation-gated, checksummed, recorded in the report integrity record, and fetched only through expiring signed links."
       />
 
       <GateBanner gate={gate} onRetry={reloadGate} apiStatus={apiStatus} retrying={gateRetry.retrying} />
@@ -466,8 +466,8 @@ export function Exports() {
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          This session lacks <strong>issue_client_reports</strong>, so official exports stay disabled.
-          The backend refuses the export route without it.
+          You do not have permission to issue official exports, so they stay disabled. Monday Report
+          refuses the export without it.
         </p>
       ) : null}
 
@@ -476,7 +476,7 @@ export function Exports() {
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          This session can create exports but lacks <strong>export_evidence</strong>, so signed
+          This session can create exports but cannot export evidence, so signed
           references cannot be issued from here.
         </p>
       ) : null}
@@ -535,8 +535,8 @@ export function Exports() {
               : requestedButMissing
                 ? "The report named in the link is not in this workspace, so this is the newest report here instead."
                 : "No report was named, so this is the newest report in the workspace."}{" "}
-            Five official formats. Each export records byte size and SHA-256, and appends to the audit
-            chain. Report status: {target.status}.
+            Five official formats. Each export records its size and a checksum, and is added to the report
+            integrity record. Report status: {target.status}.
           </p>
           <div
             style={{
@@ -607,14 +607,14 @@ export function Exports() {
         {issued.length === 0 ? (
           <p className="text-muted" style={{ fontSize: 12.5, margin: "10px 0" }}>
             No export has been issued from this session. Exports issued earlier are recorded in the
-            audit chain rather than listed here.
+            report integrity record rather than listed here.
           </p>
         ) : (
           <GridTable
             label="Issued exports"
             template={TEMPLATE}
             minWidth={700}
-            columns={["Report", "Format", "Size", "SHA-256", "Created", "Access"]}
+            columns={["Report", "Format", "Size", "Checksum", "Created", "Access"]}
           >
             {issued.map((item) => (
               <GridRow template={TEMPLATE} key={item.id}>
@@ -685,7 +685,7 @@ export function Exports() {
         )}
         <p className="text-muted" style={{ fontSize: 12, margin: "10px 0 2px" }}>
           Storage paths are never exposed — access is only ever through short-lived signed URLs, and
-          every issuance is audit-logged.
+          every issuance is recorded in the report integrity record.
         </p>
       </Frame>
     </>

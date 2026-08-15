@@ -6,7 +6,9 @@ import {
   roadmapRisks,
   type RoadmapStatus
 } from "../../data/productRoadmap";
+import { Navigate } from "react-router-dom";
 import { Cells, Frame, GridCell, GridRow, GridTable, PageHeader, Tag } from "../components/primitives";
+import { SHOW_INTERNAL } from "../lib/build";
 
 /**
  * Product roadmap — ported from the v1 interface on the owner's instruction.
@@ -25,6 +27,10 @@ function statusTone(status: RoadmapStatus): "accent" | "neutral" | "outline" {
 }
 
 export function Roadmap() {
+  // Internal/program surface: hidden from the shipped customer build, retained in
+  // the codebase (and the internal build) so its guards keep exercising it.
+  if (!SHOW_INTERNAL) return <Navigate to="/app" replace />;
+
   const itemCount = roadmapLanes.reduce((total, lane) => total + lane.items.length, 0);
   const activeCount = roadmapLanes.reduce(
     (total, lane) => total + lane.items.filter((item) => item.status === "active").length,

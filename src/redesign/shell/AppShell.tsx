@@ -3,6 +3,8 @@ import { Link, Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { useWorkspace } from "../lib/workspace";
+import { SHOW_INTERNAL } from "../lib/build";
+import { LicenseBanner, LicenseProvider } from "../lib/license";
 
 /**
  * The authenticated application frame: rail + topbar + the offline banner + a
@@ -34,6 +36,7 @@ export function AppShell() {
   const degraded = unreachable || retrying;
 
   return (
+    <LicenseProvider>
     <div
       data-shell=""
       style={{
@@ -47,6 +50,8 @@ export function AppShell() {
 
       <div style={{ minWidth: 0, display: "flex", flexDirection: "column", minHeight: "100vh" }}>
         <Topbar />
+
+        <LicenseBanner />
 
         {degraded ? (
           <div
@@ -83,15 +88,18 @@ export function AppShell() {
               : refused
               ? "The workspace API answered and refused this session's credential, so no workspace data can be read and nothing can be recorded. The service is running — the API key or the role has to change. Empty lists below mean \"not read\", not \"none exist\"."
               : misconfigured
-                ? "The workspace API answered, but it is not configured to serve client data yet — it reports a missing client API key or audit key. Nothing can be read or recorded until that is configured on the backend. Empty lists below mean \"not read\", not \"none exist\"."
+                ? "The workspace API answered, but it is not configured to serve client data yet — it reports that a required configuration key is missing. Nothing can be read or recorded until that is configured. Empty lists below mean \"not read\", not \"none exist\"."
                 : "The workspace API is unreachable, so no workspace data can be read and nothing can be recorded. Empty lists below mean \"not read\", not \"none exist\"."}
             {refused || misconfigured ? (
               // No retry: neither a credential refusal nor an unconfigured backend can be
               // fixed by repeating the same request. The sign-in surface reports what the
-              // server actually said.
-              <Link className="btn btn-ghost" to="/app/signin" style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}>
-                Check the session
-              </Link>
+              // server actually said — but it is an internal-build surface, so the
+              // customer build shows the explanation without a link into it.
+              SHOW_INTERNAL ? (
+                <Link className="btn btn-ghost" to="/app/signin" style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}>
+                  Check the session
+                </Link>
+              ) : null
             ) : (
               <button
                 type="button"
@@ -184,5 +192,6 @@ export function AppShell() {
         ) : null}
       </div>
     </div>
+    </LicenseProvider>
   );
 }

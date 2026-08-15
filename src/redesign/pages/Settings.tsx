@@ -7,6 +7,7 @@ import {
   type CellSpec
 } from "../components/primitives";
 import { apiUnreadReason, useWorkspace } from "../lib/workspace";
+import { SHOW_INTERNAL } from "../lib/build";
 
 /**
  * Settings — a READ-ONLY disclosure surface.
@@ -20,6 +21,27 @@ import { apiUnreadReason, useWorkspace } from "../lib/workspace";
  * this page does not have. Changing a credential, role or runtime setting is an
  * operator action outside this interface.
  */
+
+/**
+ * Humanize the raw actor_source attribution enum for customer display. The raw
+ * enum value (authenticated / demo_bootstrap / system) is never shown; a demo or
+ * shared session is honestly labelled as not attributed to a confirmed reviewer.
+ */
+function actorSourceLabel(actorSource: string): string {
+  switch (actorSource) {
+    case "authenticated":
+      return "Verified identity";
+    case "demo_bootstrap":
+      return "Shared demo session";
+    case "system":
+      return "System";
+    case "configured":
+      return "Configured";
+    default:
+      return "Not reported";
+  }
+}
+
 export function Settings() {
   const { apiStatus, session, roles, localAi, runtimeBackends } = useWorkspace();
 
@@ -72,7 +94,7 @@ export function Settings() {
       <PageHeader
         kicker="Trust"
         title="Settings"
-        lede="What the backend reports about this session and this runtime — read-only. This page changes nothing: it has no save, no toggle and no form. The backend exposes administration routes, but no interface in this increment calls them."
+        lede="What Monday Report reports about this session and this runtime — read-only. This page changes nothing: it has no save, no toggle and no form. Administration routes exist, but no interface in this increment calls them."
         actions={<Tag tone="outline">Read-only</Tag>}
       />
 
@@ -86,28 +108,32 @@ export function Settings() {
             min={150}
             items={[
               { label: "Signed in as", value: session.user.full_name, detail: session.user.email },
-              { label: "Tenant", value: session.tenant.name, detail: session.tenant.slug },
+              { label: "Organization", value: session.tenant.name, detail: session.tenant.slug },
               {
                 label: "Roles",
                 value: roles.length > 0 ? roles.join(", ") : "None",
-                detail: "Server-derived; permissions below follow from these"
+                detail: "Determined by your role"
               },
               {
                 label: "Authentication",
                 value: identity ? identity.authentication_source.replace(/_/g, " ") : "Not reported",
                 detail: identity
                   ? identity.actor_source === "demo_bootstrap"
-                    ? "Demo bootstrap identity — not a verified per-user credential"
-                    : `Actor source: ${identity.actor_source}`
-                  : "The session payload carries no authenticated identity"
+                    ? "Shared demo session — its actions are not attributed to a confirmed individual reviewer"
+                    : `Session: ${actorSourceLabel(identity.actor_source)}`
+                  : "This session carries no confirmed identity"
               },
-              {
-                label: "Local LLM policy",
-                value: session.tenant.local_llm_policy.mode.replace(/_/g, " "),
-                detail: session.tenant.local_llm_policy.hosted_fallback_enabled
-                  ? "Hosted fallback enabled"
-                  : "Hosted fallback disabled"
-              }
+              ...(SHOW_INTERNAL
+                ? [
+                    {
+                      label: "Local LLM policy",
+                      value: session.tenant.local_llm_policy.mode.replace(/_/g, " "),
+                      detail: session.tenant.local_llm_policy.hosted_fallback_enabled
+                        ? "Hosted fallback enabled"
+                        : "Hosted fallback disabled"
+                    }
+                  ]
+                : [])
             ]}
           />
         ) : apiStatus === "checking" ? (
@@ -120,6 +146,9 @@ export function Settings() {
         )}
       </Frame>
 
+      {/* The raw RBAC permission map is an engineering/internal disclosure (snake_case
+          permission ids); the customer build hides it, the internal build keeps it. */}
+      {SHOW_INTERNAL ? (
       <Frame as="section" aria-label="Permission map" style={{ padding: 18, display: "grid", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
           <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: 0 }}>
@@ -132,7 +161,7 @@ export function Settings() {
           ) : null}
         </div>
         <p className="text-muted" style={{ fontSize: 12, margin: 0, maxWidth: "80ch" }}>
-          The backend's own permission map for this session's roles — the same model every route
+          Monday Report's own permission map for this session's roles — the same model every route
           enforces. Default-deny: what is not granted here is refused server-side, whatever any
           interface renders.
         </p>
@@ -166,7 +195,45 @@ export function Settings() {
           </p>
         )}
       </Frame>
+      ) : null}
 
+      <Frame as="section" aria-label="AI and model" style={{ padding: 18, display: "grid", gap: 12 }}>
+        <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: 0 }}>
+          AI &amp; model
+        </h2>
+        <p className="text-muted" style={{ fontSize: 12, margin: 0, maxWidth: "80ch" }}>
+          How Monday Report answers questions and drafts reports on this computer.
+        </p>
+        <Cells
+          label="AI and model"
+          min={160}
+          items={[
+            {
+              label: "Built-in analysis",
+              value: "Active",
+              detail: "On this computer · no language model",
+              ok: true
+            },
+            { label: "Local model", value: "Not configured", detail: "Planned for a future version" },
+            { label: "Online API", value: "Not configured", detail: "This version makes no external AI calls" }
+          ]}
+        />
+        <p style={{ fontSize: 12.5, lineHeight: 1.55, margin: 0, maxWidth: "80ch" }}>
+          Answers come from Monday Report's built-in analysis: deterministic reasoning over this
+          workspace's uploaded evidence. It runs entirely on this computer, uses no language model, and
+          cites the evidence each answer draws on — it does not invent citations, and shows when an answer
+          has none. Running a local model or connecting an online provider are planned for a future
+          version and are off here.
+        </p>
+        {localAi.state === "ready" && localAi.data.reachable ? (
+          <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.5, margin: 0, maxWidth: "80ch" }}>
+            A local model runtime was detected on this computer, but this version uses built-in analysis and
+            does not send your questions to it.
+          </p>
+        ) : null}
+      </Frame>
+
+      {SHOW_INTERNAL ? (
       <Frame as="section" aria-label="Runtime status" style={{ padding: 18, display: "grid", gap: 12 }}>
         <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: 0 }}>
           Runtime status
@@ -237,7 +304,7 @@ export function Settings() {
             <Skeleton rows={1} label="Reading the runtime backends" />
           ) : runtimeBackends.state === "unauthorized" ? (
             <p role="status" style={{ fontSize: 13, margin: 0 }}>
-              This session lacks the <strong>view_runtime_status</strong> permission, so the backend
+              This session lacks the <strong>view_runtime_status</strong> permission, so the runtime
               configuration was not read.
             </p>
           ) : (
@@ -247,6 +314,7 @@ export function Settings() {
           )}
         </div>
       </Frame>
+      ) : null}
     </>
   );
 }

@@ -2,7 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ChevronDown, ShieldCheck } from "lucide-react";
 import { apiUnreadReason, useWorkspace } from "../lib/workspace";
+import { integrityStateLabel } from "../pages/Audit";
 import { routeLabel } from "./navigation";
+import { SHOW_INTERNAL } from "../lib/build";
 
 /**
  * Topbar: workspace selector, the current route, and the trust chips.
@@ -121,14 +123,24 @@ export function Topbar() {
   // about it. An unread session is not a session with no identity - the rest of the
   // shell is careful about exactly this distinction, and this line was not.
   const actorSource = identity?.actor_source ?? (session ? "unreported" : null);
+  // Humanize the raw attribution enum for display — never print the backend's
+  // demo_bootstrap / authenticated / unreported token verbatim to a customer.
+  const sessionLabel =
+    actorSource === null
+      ? "Not read"
+      : actorSource === "authenticated"
+        ? "Verified identity"
+        : actorSource === "demo_bootstrap"
+          ? "Shared demo session"
+          : "Not reported";
   const actorNote =
     actorSource === null
       ? `not read — ${apiUnreadReason(apiStatus) ?? "the session has not resolved"}, so this session's identity is unknown.`
       : actorSource === "authenticated"
-        ? "actions are attributed to a verified authenticated identity."
+        ? "actions are attributed to a verified individual identity."
         : actorSource === "demo_bootstrap"
-          ? "a shared-key demo bootstrap, so actions are not verified-reviewer attributed."
-          : "the session reported no authenticated identity.";
+          ? "a shared demo session, so its actions are not attributed to a confirmed reviewer."
+          : "the session reported no confirmed identity.";
 
   const initials = displayName
     .split(/\s+/)
@@ -142,7 +154,7 @@ export function Topbar() {
   // the same as the read failing.
   const auditChipLabel =
     auditIntegrity.state === "ready"
-      ? `${auditIntegrity.data.status} · ${auditIntegrity.data.total_events} events`
+      ? `${integrityStateLabel(auditIntegrity.data.integrity_state ?? null)} · ${auditIntegrity.data.total_events} events`
       : auditIntegrity.state === "loading"
         ? "checking"
         : auditIntegrity.state === "unauthorized"
@@ -251,13 +263,13 @@ export function Topbar() {
         onClick={() => navigate("/app/audit")}
         // The accessible name must CONTAIN the visible label (WCAG 2.5.3), so it is
         // built by suffixing the exact visible string rather than paraphrasing it.
-        aria-label={`Audit · ${auditChipLabel} — open the audit chain`}
+        aria-label={`Report integrity · ${auditChipLabel} — open the report integrity record`}
         // No inline `background`: an inline value beats the stylesheet, which made
         // `.mr-hover-text:hover` inert. The class owns the resting fill and the tint.
         style={{ ...chipBase, color: "inherit", cursor: "pointer", fontFamily: "var(--font-body)" }}
       >
         <ShieldCheck size={13} strokeWidth={1.5} aria-hidden="true" />
-        Audit · {auditChipLabel}
+        Report integrity · {auditChipLabel}
       </button>
 
       <div ref={profileRef}>
@@ -339,7 +351,7 @@ export function Topbar() {
               </div>
             ) : null}
             <p className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5, margin: "10px 0 0" }}>
-              Actor source: <strong>{actorSource}</strong> — {actorNote}
+              Session: <strong>{sessionLabel}</strong> — {actorNote}
             </p>
             <hr className="hr" style={{ margin: "12px 0" }} />
             <div style={{ display: "grid", gap: 6 }}>
@@ -353,22 +365,30 @@ export function Topbar() {
               >
                 Settings &amp; session
               </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => {
-                  setProfileOpen(false);
-                  navigate("/app/signin");
-                }}
-              >
-                Sign out
-              </button>
-              {/* No logout endpoint exists and the credential is build-time, so
-                  "sign out" cannot revoke anything — say so instead of implying it. */}
-              <span className="text-muted" style={{ fontSize: 10.5, lineHeight: 1.45 }}>
-                Returns to the sign-in surface. The build-time credential stays active — there is no
-                session token to revoke.
-              </span>
+              {/* The sign-in surface is an internal-build affordance: there is
+                  no login endpoint and the credential is build-time, so a
+                  customer has nothing to sign into or out of. The customer build
+                  hides it (see src/redesign/lib/build.ts). */}
+              {SHOW_INTERNAL ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => {
+                      setProfileOpen(false);
+                      navigate("/app/signin");
+                    }}
+                  >
+                    Sign out
+                  </button>
+                  {/* No logout endpoint exists and the credential is build-time, so
+                      "sign out" cannot revoke anything — say so instead of implying it. */}
+                  <span className="text-muted" style={{ fontSize: 10.5, lineHeight: 1.45 }}>
+                    Returns to the sign-in surface. The build-time credential stays active — there is no
+                    session token to revoke.
+                  </span>
+                </>
+              ) : null}
             </div>
           </div>
         ) : null}

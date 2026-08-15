@@ -1,6 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
-import { BrandMark, Tag } from "../components/primitives";
-import { NAV_GROUPS, isCurrent } from "./navigation";
+import { BrandMark } from "../components/primitives";
+import { activeNavGroups, isCurrent } from "./navigation";
 import { useWorkspace } from "../lib/workspace";
 
 /**
@@ -53,7 +53,7 @@ export function Sidebar() {
       </div>
 
       <nav data-navgroups="" style={{ display: "grid", gap: 16 }} aria-label="Application">
-        {NAV_GROUPS.map((group) => (
+        {activeNavGroups().map((group) => (
           <div data-navgroup="" key={group.label} style={{ display: "grid", gap: 2 }}>
             <span
               data-navlabel=""
@@ -144,7 +144,7 @@ export function Sidebar() {
         className="blueprint"
         style={{ marginTop: "auto", padding: 12 }}
         role="group"
-        aria-label="Tenant status"
+        aria-label="Organization"
       >
         <i className="corner tl" />
         <i className="corner tr" />
@@ -159,7 +159,7 @@ export function Sidebar() {
             color: "var(--color-neutral-700)"
           }}
         >
-          Tenant
+          Organization
         </span>
         <strong
           style={{
@@ -170,21 +170,13 @@ export function Sidebar() {
             marginTop: 3
           }}
         >
-          {tenantName ?? (apiStatus === "connected" ? "No tenant" : "Tenant unavailable")}
+          {tenantName ?? (apiStatus === "connected" ? "No organization" : "Organization unavailable")}
         </strong>
         <span className="text-muted" style={{ display: "block", fontSize: 12, marginTop: 2 }}>
           {activeWorkspace
             ? [activeWorkspace.name, activeWorkspace.asset].filter(Boolean).join(" · ")
-            : "Connect the workspace API to read tenant scope"}
+            : "Connect to read your organization and workspace"}
         </span>
-        {/* Tenant-scoping properties describe a resolved tenant. With none
-            resolved there is nothing for them to be true of, so they are not shown. */}
-        {tenantName ? (
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-            <Tag tone="accent">Isolated</Tag>
-            <Tag tone="neutral">RLS-ready</Tag>
-          </div>
-        ) : null}
       </div>
     </aside>
   );

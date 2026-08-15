@@ -111,7 +111,7 @@ export function Reports() {
         "Report created",
         `${report.id} opened as a ${report.status} for ${isoDay(report.period_start)} – ${isoDay(
           report.period_end
-        )} and appended to the audit chain.`
+        )} and recorded in the report integrity record.`
       );
       reload();
     } catch (caught) {
@@ -130,7 +130,7 @@ export function Reports() {
       aria-disabled={creating || undefined}
       title={
         !readOnly && !canCreate
-          ? "This session lacks the generate_reports permission."
+          ? "This session cannot create reports."
           : undefined
       }
     >
@@ -156,8 +156,8 @@ export function Reports() {
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          This session lacks <strong>generate_reports</strong>, so new Monday reports cannot be
-          created here. The backend refuses the create route without it.
+          You do not have permission to create reports, so new Monday reports cannot be
+          created here.
         </p>
       ) : null}
 
@@ -171,7 +171,7 @@ export function Reports() {
           message={
             listRetry.retrying
               ? "The list is being read again."
-              : `${value.state === "error" ? value.message : ""} The list is unavailable — retry, or check that the backend is running.`
+              : `${value.state === "error" ? value.message : ""} The list is unavailable — retry, or check that Monday Report is running.`
           }
           onRetry={reload}
           retrying={listRetry.retrying}
@@ -254,7 +254,7 @@ export function Reports() {
             Recorded status: a report opens as a draft, or directly as review when the workspace
             already has open validation tasks. A refused export also moves one to review, and a
             completed export marks it exported. There is no approval step in this increment. Every
-            report creation and export is appended to the audit chain.
+            report creation and export is recorded in the report integrity record.
           </p>
 
           {gateIsClosed(gate) && gate.state === "ready" ? (

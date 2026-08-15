@@ -315,7 +315,7 @@ export function Studio() {
     setMessage((current) =>
       current === "" || current.startsWith("Source draft pulls") || current.startsWith("Build a source-backed draft")
         ? workspaceId && apiStatus === "connected"
-          ? "Build a source-backed draft to pull this workspace's parsed evidence into the report. Drafting is recorded in the audit chain, so it runs only when you ask for it."
+          ? "Build a source-backed draft to pull this workspace's parsed evidence into the report. Drafting is recorded in the report integrity record, so it runs only when you ask for it."
           : "Source draft pulls parsed workspace evidence into this editable report."
         : current
     );
@@ -409,11 +409,11 @@ export function Studio() {
         // in flight the cell says so instead.
         detail:
           boardGate.state === "loading"
-            ? "Reading the gate from the backend"
+            ? "Reading the gate from Monday Report"
             : !gateKnown
-              ? "The backend gate could not be read — not a claim that it is clear"
+              ? "The validation gate could not be read — not a claim that it is clear"
               : gateFromDraft
-                ? "The backend's own count for this workspace, from the draft you built"
+                ? "Monday Report's own count for this workspace, from the draft you built"
                 : gateBlocked
                   ? "Export blocked until resolved"
                   : "No open tasks for this workspace",
@@ -429,7 +429,7 @@ export function Studio() {
             : gateBlocked
               ? "Held by the validation gate"
               : !gateKnownAndClear
-                ? "Held open until the gate is read — the backend decides on export"
+                ? "Held open until the gate is read — this is decided on export"
                 : "Held by incomplete draft fields",
         ok: issueReady
       }
@@ -492,7 +492,7 @@ export function Studio() {
           content, which it never reads. The report id (when the route carries one)
           is disclosed below as the issue target instead. */}
       <PageHeader
-        kicker={`Report Studio · ${activeWorkspace?.name ?? "no workspace"} · ${reportVariantSchemaVersion}`}
+        kicker={`Report Studio · ${activeWorkspace?.name ?? "no workspace"} · Standard report format`}
         title={`${activeVariant.label} draft`}
         actions={
           <>
@@ -627,7 +627,7 @@ export function Studio() {
               onChange={(v) => update("dls", v)}
              
               placeholder="1.3 deg/100 ft"
-              hint="Operator-entered — the draft payload carries no DLS value."
+              hint="Operator-entered — the draft carries no DLS value."
             />
             <Field id="st-mud" label="Mud weight" value={form.mudWeight} onChange={(v) => update("mudWeight", v)} />
           </div>
@@ -654,13 +654,13 @@ export function Studio() {
             >
               Edits here stay in this browser session. {editedKeys.size > 0 ? `${editedKeys.size} field(s) changed locally. ` : ""}
               Recording a change against the report requires a field correction with a written reason,
-              which carries reviewer attribution into the audit chain — the recorded source value is
+              which carries reviewer attribution into the report integrity record — the recorded source value is
               never overwritten.
               {!canEdit ? (
                 <>
                   {" "}
-                  This session holds neither <strong>generate_reports</strong> nor{" "}
-                  <strong>record_field_corrections</strong>, so a correction could not be recorded even
+                  This session can neither <strong>generate reports</strong> nor{" "}
+                  <strong>record field corrections</strong>, so a correction could not be recorded even
                   with a reason.
                 </>
               ) : null}
@@ -852,7 +852,7 @@ export function Studio() {
                 <Tag tone={gateIsClear(boardGate) ? "accent" : "neutral"}>
                   Export · {gateIsClear(boardGate) ? "available" : gateBlocked ? "gated" : "gate not read"}
                 </Tag>
-                <Tag tone="outline">{reportVariantSchemaVersion}</Tag>
+                <Tag tone="outline">Standard report format</Tag>
               </div>
               {gateBlocked ? (
                 <p role="status" style={{ fontSize: 12, margin: "8px 0 0", color: "var(--color-accent-800)" }}>
@@ -1114,19 +1114,19 @@ export function Studio() {
         Required sections for {activeVariant.label}: {activeVariant.requiredSections.join(", ")}.
       </p>
 
-      {/* Reviewed schema variants — the committed MR-SCHEMA-1 coverage board.
+      {/* Reviewed report formats — the committed MR-SCHEMA-1 coverage board.
           Every figure is read from `src/data/reportVariantSchemas.ts`, the same
           module the selector above renders from, so this board cannot drift from
           the schema the backend and the guards pin. */}
-      <Frame as="section" aria-label="Reviewed schema variants" style={{ padding: 18, display: "grid", gap: 12 }}>
+      <Frame as="section" aria-label="Reviewed report formats" style={{ padding: 18, display: "grid", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <div>
-            <span className="mr-kicker">Reviewed schema variants</span>
+            <span className="mr-kicker">Reviewed report formats</span>
             <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: "2px 0 0" }}>
               Extraction and drafting targets
             </h2>
           </div>
-          <Tag tone="accent">{reportVariantSchemaVersion}</Tag>
+          <Tag tone="accent">Standard report format</Tag>
         </div>
         <div
           style={{
@@ -1161,7 +1161,6 @@ export function Studio() {
                 {variant.shortLabel}
               </span>
               <strong style={{ fontFamily: "var(--font-heading)", fontSize: 14.5 }}>{variant.label}</strong>
-              <code style={{ fontSize: 11 }}>{variant.schemaId}</code>
               <span className="text-muted" style={{ fontSize: 11.5 }}>
                 {variant.extractionMarkers.length} markers · {variant.draftingChecks.length} checks ·{" "}
                 {variant.outputSections.length} outputs
@@ -1170,7 +1169,7 @@ export function Studio() {
           ))}
         </div>
         <p className="text-muted" style={{ fontSize: 11.5, margin: 0, maxWidth: "80ch" }}>
-          Marker, check and output counts are read from the committed schema module, never a
+          Marker, check and output counts come from the reviewed report definitions, never a
           hand-typed figure.
         </p>
       </Frame>

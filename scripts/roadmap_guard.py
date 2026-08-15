@@ -83,7 +83,9 @@ CHECKS = [
             "Rig evidence in.",
             "Audited reports out.",
             "Open the app",
-            "MR-SCHEMA-1",
+            # MR-SCHEMA-1 pin dropped here (Phase-2 terminology cleanup): the schema id
+            # is no longer shown on the customer Landing page. It remains pinned in the
+            # data files (productRoadmap.ts, reportVariantSchemas.ts) where it belongs.
             "Source-cited drafting",
             "Audited exports",
             "Import the evidence",

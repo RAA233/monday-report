@@ -63,7 +63,7 @@ def main() -> int:
         assert_check(
             "Report Studio imports shared schemas",
             "reportVariantSchemas" in studio_text
-            and "Reviewed schema variants" in studio_text
+            and "Reviewed report formats" in studio_text
             and "reportVariantSchemaVersion" in studio_text
             and "variant.extractionMarkers.length" in studio_text,
             "shared schema import and schema board markers present",
@@ -73,7 +73,7 @@ def main() -> int:
         assert_check(
             "UI E2E covers Directional variant",
             "Directional steering report" in ui_text
-            and "Reviewed schema variants" in ui_text
+            and "Reviewed report formats" in ui_text
             and "DIR" in ui_text
             and "studio-schema-board-covers-variants" in ui_text
             and "studio-directional-variant-renders" in ui_text,

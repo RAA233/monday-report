@@ -1007,3 +1007,81 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   return response.json() as Promise<T>;
 }
+
+// ── Offline license (the localhost wrapper that serves this SPA) ───────────────
+// These endpoints live on the offline-runtime wrapper, NOT the workspace API, so
+// they use a BARE relative URL — in the packaged product the wrapper serves both
+// the SPA document and /offline/license/* on one loopback origin, so a relative
+// fetch reaches the wrapper. They carry no workspace credential (the wrapper does
+// not require one). In a dev/standalone setup the wrapper is absent and the SPA's
+// dev server answers these with its index.html fallback, so `.json()` rejects and
+// the caller treats the license as UNOBSERVABLE rather than inventing a state.
+
+export interface LicenseStatus {
+  state: string;
+  reason_code: string;
+  edition: string;
+  read_only: boolean;
+  issued_at: string | null;
+  not_before: string | null;
+  expires_at: string | null;
+  grace_until: string | null;
+  renewal_sequence: number;
+  license_id: string | null;
+  support_code: string;
+  product_version: string;
+  feature_flags: Record<string, boolean>;
+  machine_binding?: {
+    fingerprint_version: string;
+    eligible_components: number;
+    binding_confidence: string;
+    match: string;
+  };
+}
+
+export interface LicenseImportResult {
+  imported: boolean;
+  state?: string;
+  expires_at?: string | null;
+  reason_code?: string;
+  detail?: string;
+}
+
+/** The wrapper route that streams this machine's activation request (hashed machine
+ *  facts only). Rendered as a download link; the wrapper sets Content-Disposition. */
+export const LICENSE_ACTIVATION_REQUEST_PATH = "/offline/license/activation-request";
+
+/** Read the machine's license status from the offline-runtime wrapper. Rejects when
+ *  the wrapper is not present (dev/standalone), which the caller surfaces as
+ *  "license status unavailable here" — never a fabricated state. */
+export async function getLicenseStatus(): Promise<LicenseStatus> {
+  const response = await fetch("/offline/license/status", { headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error(`license status ${response.status}`);
+  // A dev SPA (no wrapper) returns index.html here; json() then throws, which the
+  // caller treats as "license unobservable in this environment".
+  return (await response.json()) as LicenseStatus;
+}
+
+/** Import a signed license file through the wrapper. The body is the raw license
+ *  JSON the operator selected; the wrapper performs the DPAPI-protected,
+ *  machine-bound validation on this computer. Returns the parsed result for BOTH
+ *  success (200) and refusal (400/503) so the caller can report the reason. */
+export async function importLicense(licenseJson: string): Promise<LicenseImportResult> {
+  const response = await fetch("/offline/license/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: licenseJson
+  });
+  // The documented outcomes (200/400/503) are all JSON. Guard the parse so a
+  // reachable-but-erroring wrapper (an unexpected 500, a proxy error page) is
+  // reported as a refusal with its status, not misread by the caller as an absent
+  // service — only a rejected fetch (below the caller) means genuinely unreachable.
+  try {
+    return (await response.json()) as LicenseImportResult;
+  } catch {
+    return {
+      imported: false,
+      detail: `The license service returned an unreadable response (HTTP ${response.status}).`
+    };
+  }
+}

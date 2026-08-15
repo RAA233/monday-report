@@ -152,7 +152,7 @@ try {
       ["Benchmarking", /^Benchmarking$/i],
       ["Validation", /^Validation queue$/i],
       ["Failures", /^Failure explorer$/i],
-      ["Audit chain", /^Audit chain$/i],
+      ["Report integrity", /^Report integrity$/i],
       ["Exports", /^Exports$/i],
       ["Settings", /^Settings$/i],
       ["Tracker", /^Project tracker$/i],

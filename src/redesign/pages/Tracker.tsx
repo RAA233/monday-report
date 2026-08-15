@@ -18,8 +18,10 @@ import {
   Tag,
   useRetryPresence
 } from "../components/primitives";
+import { Navigate } from "react-router-dom";
 import { integrityStateLabel } from "./Audit";
 import { apiUnreadReason, useWorkspace } from "../lib/workspace";
+import { SHOW_INTERNAL } from "../lib/build";
 
 /**
  * Project tracker — ported from the v1 interface on the owner's instruction.
@@ -49,6 +51,10 @@ function gateTone(status: GateStatus): "accent" | "neutral" | "outline" {
 }
 
 export function Tracker() {
+  // Internal/program surface: hidden from the shipped customer build, retained in
+  // the codebase (and the internal build) so its guards keep exercising it.
+  if (!SHOW_INTERNAL) return <Navigate to="/app" replace />;
+
   const summary = getTrackerSummary();
   const { apiStatus, auditIntegrity, processingJobs, reloadProcessingJobs } = useWorkspace();
   const jobsRetry = useRetryPresence(processingJobs.state);
