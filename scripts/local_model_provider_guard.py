@@ -443,18 +443,21 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
               "active_provider" in api_ts and "interface ApiLocalAiStatus" in api_ts)
 
         settings = (ROOT / "src/redesign/pages/Settings.tsx").read_text(encoding="utf-8")
-        check("38 Settings AI section is data-driven off active_provider",
+        check("38 Settings AI section is data-driven + honest about availability",
               "active_provider" in settings and "localModelActive" in settings
+              and "localModelServing" in settings and "model_available" in settings
               and "aiModelCells" in settings and "Local model" in settings
               and "Built-in analysis" in settings and "Not configured" in settings
-              and "not currently used" in settings)
+              and "not currently used" in settings
+              and "fall back to built-in analysis" in settings)
         check("39 Settings keeps the customer-surface pins",
               'aria-label="AI and model"' in settings and "{SHOW_INTERNAL ? (" in settings
               and 'aria-label="Runtime status"' in settings)
 
         ask = (ROOT / "src/redesign/pages/Ask.tsx").read_text(encoding="utf-8")
-        check("40 Ask shows a truthful provider indicator",
+        check("40 Ask shows a truthful provider indicator (gated on real availability)",
               "aiProviderLabel" in ask and "active_provider" in ask
+              and "aiProviderServing" in ask and "model_available" in ask
               and "Built-in analysis" in ask and "Local model" in ask)
 
         # ============ MUTATION / NON-VACUITY ============

@@ -59,7 +59,11 @@ export function Settings() {
   const localReady = localAi.state === "ready";
   const localData = localReady ? localAi.data : null;
   const activeProvider = localData?.active_provider ?? "deterministic";
-  const localModelActive = activeProvider === "local-model";
+  const localModelActive = activeProvider === "local-model"; // the resolver selected local
+  // "Serving" additionally requires the selected runtime AND model to actually be up. If
+  // they are not, the local provider falls back to built-in analysis for every answer, so
+  // we must NOT claim the local model as active merely because it was selected.
+  const localModelServing = localModelActive && !!localData?.reachable && !!localData?.model_available;
   const localRuntimeLabel =
     localData?.runtime === "lm_studio"
       ? "LM Studio"
@@ -68,21 +72,19 @@ export function Settings() {
         : "Local runtime";
   const localRuntimeDetected = localReady && !!localData?.reachable && !localModelActive;
 
-  const aiModelCells: CellSpec[] = [
-    {
-      label: "Built-in analysis",
-      value: localModelActive ? "Standby" : "Active",
-      detail: localModelActive
-        ? "Answers if the local model is unavailable"
-        : "On this computer · no language model",
-      ok: true
-    },
-    localModelActive
+  const localModelCell: CellSpec = localModelServing
+    ? {
+        label: "Local model",
+        value: "Active",
+        detail: `${localRuntimeLabel} · ${localData?.model ?? "model"} · runs on this computer`,
+        ok: true
+      }
+    : localModelActive
       ? {
           label: "Local model",
-          value: "Active",
-          detail: `${localRuntimeLabel} · ${localData?.model ?? "model"} · runs on this computer`,
-          ok: true
+          value: "Unavailable",
+          detail: "Selected, but the runtime or model is unavailable — answers fall back to built-in analysis",
+          ok: false
         }
       : localRuntimeDetected
         ? {
@@ -90,7 +92,18 @@ export function Settings() {
             value: "Detected",
             detail: "Local runtime detected — not currently used"
           }
-        : { label: "Local model", value: "Not configured", detail: "Off in this version" },
+        : { label: "Local model", value: "Not configured", detail: "Off in this version" };
+
+  const aiModelCells: CellSpec[] = [
+    {
+      label: "Built-in analysis",
+      value: localModelServing ? "Standby" : "Active",
+      detail: localModelServing
+        ? "Answers if the local model is unavailable"
+        : "On this computer · no language model",
+      ok: true
+    },
+    localModelCell,
     { label: "Online API", value: "Not configured", detail: "This version makes no external AI calls" }
   ];
 
@@ -251,7 +264,7 @@ export function Settings() {
           Answers are grounded in this workspace's uploaded evidence: Monday Report retrieves the relevant
           material, cites the evidence each answer draws on — it does not invent citations, and shows when
           an answer has none.{" "}
-          {localModelActive
+          {localModelServing
             ? `A local model on this computer (${localRuntimeLabel} · ${localData?.model ?? "model"}) writes the answer text from that evidence. It runs on this computer, and your questions and evidence are not sent to any online service.`
             : "The answer text is written by built-in analysis running entirely on this computer, with no language model and no external calls."}
         </p>

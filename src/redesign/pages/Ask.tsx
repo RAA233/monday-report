@@ -103,11 +103,15 @@ export function Ask() {
   const { activeWorkspace, apiStatus, session, gate, auditIntegrity, can, localAi } = useWorkspace();
 
   // A small, truthful indicator of which analysis writes the answer text. Claims
-  // "Local model" ONLY when the server-side resolver reports it active; otherwise the
-  // built-in analysis is answering (and is always at least the fallback). No marketing.
-  const aiProviderActive =
-    localAi.state === "ready" && localAi.data.active_provider === "local-model";
-  const aiProviderLabel = aiProviderActive ? "Local model" : "Built-in analysis";
+  // "Local model" ONLY when the resolver selected it AND the runtime + model are actually
+  // up (otherwise the local provider falls back to built-in analysis for every answer, so
+  // built-in is what's really answering). No marketing.
+  const aiProviderServing =
+    localAi.state === "ready" &&
+    localAi.data.active_provider === "local-model" &&
+    !!localAi.data.reachable &&
+    !!localAi.data.model_available;
+  const aiProviderLabel = aiProviderServing ? "Local model" : "Built-in analysis";
   // A license-blocked answer should surface the app-wide read-only banner promptly.
   const { refresh: refreshLicense } = useLicense();
 
