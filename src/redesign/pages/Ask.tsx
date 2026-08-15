@@ -115,6 +115,8 @@ export function Ask() {
   // Keeps the newest turn (and the docked composer above it) in view as the
   // transcript grows.
   const endRef = useRef<HTMLDivElement | null>(null);
+  // Kept mounted across the empty↔conversation switch so a send never blurs the caret.
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const workspaceId = activeWorkspace?.id ?? null;
   // Read inside async resolutions to detect a workspace switch mid-request.
@@ -203,6 +205,9 @@ export function Ask() {
       const askedFor = workspaceId; // captured: a late answer must not cross workspaces
       setError(null);
       setInput("");
+      // Keep the caret in the composer through the empty→conversation switch and after
+      // a guided-prompt click (whose button unmounts as the guide disappears).
+      textareaRef.current?.focus();
       setBusy(true);
       setTurns((current) => [...current, { id: `u-${id}`, role: "user", text: trimmed }]);
 
@@ -356,19 +361,21 @@ export function Ask() {
         }}
       >
         <textarea
+          ref={textareaRef}
           className="input"
           rows={1}
           // Overrides the base textarea.input (90px / resize:vertical): a compact,
           // non-resizable line that the operator can still grow with Shift+Enter.
           style={{ minHeight: 46, fontSize: 15, resize: "none", lineHeight: 1.5 }}
-          aria-label="Ask Monday Report"
+          aria-label="Ask the analyst"
           placeholder="Ask about failures, NPT, drilling rate, reports or sources…  (Enter to send · Shift+Enter for a new line)"
           value={input}
           onChange={(event) => setInput(event.target.value)}
           // Enter sends; Shift+Enter inserts a newline. submit() itself no-ops while
           // busy or empty, so a keystroke can never double-send.
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            // isComposing: an IME's confirm-Enter must commit the candidate, not send.
+            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               submit(input);
             }
@@ -436,7 +443,7 @@ export function Ask() {
           lede={
             hasConversation
               ? undefined
-              : "Ask about this workspace's evidence, reports, failures and benchmarks. Every answer cites the source it came from, and says so when there are none. Official exports stay gated until validation clears."
+              : "Ask about this workspace's evidence, reports, failures and benchmarks. Every answer cites the source it came from, and says so when there are none."
           }
         />
 
@@ -466,62 +473,69 @@ export function Ask() {
         </span>
 
         {hasConversation ? (
-          <>
-            {/* A plain labelled region, NOT role="log": log carries an implicit
-                aria-live=polite, so combining it with the status line above announced
-                every answer twice — once as a summary and once as the whole subtree. */}
-            <div style={{ display: "grid", alignContent: "start", gap: 16 }} role="group" aria-label="Conversation">
-              {turns.map((turn) => (
-                <ChatTurn
-                  key={turn.id}
-                  turn={turn}
-                  onNavigate={navigate}
-                  onSubmit={submit}
-                  standingDisabled={askUnavailable}
-                  busy={busy}
-                  gate={gate}
-                />
-              ))}
+          // A plain labelled region, NOT role="log": log carries an implicit
+          // aria-live=polite, so combining it with the status line above announced
+          // every answer twice — once as a summary and once as the whole subtree.
+          <div style={{ display: "grid", alignContent: "start", gap: 16 }} role="group" aria-label="Conversation">
+            {turns.map((turn) => (
+              <ChatTurn
+                key={turn.id}
+                turn={turn}
+                onNavigate={navigate}
+                onSubmit={submit}
+                standingDisabled={askUnavailable}
+                busy={busy}
+                gate={gate}
+              />
+            ))}
 
-              {busy ? (
-                // No data-skeleton on the text: the pulse animates opacity down to
-                // 0.45, which would drop this real sentence to ~2:1 for half of every
-                // cycle. The decorative dot pulses; the text stays legible.
-                <p style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
-                  <span data-skeleton="" aria-hidden="true" className="mr-pulse-dot" />
-                  <span className="text-muted" style={{ fontSize: 12.5 }}>
-                    Reasoning over workspace evidence…
-                  </span>
-                </p>
-              ) : null}
+            {busy ? (
+              // No data-skeleton on the text: the pulse animates opacity down to
+              // 0.45, which would drop this real sentence to ~2:1 for half of every
+              // cycle. The decorative dot pulses; the text stays legible.
+              <p style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+                <span data-skeleton="" aria-hidden="true" className="mr-pulse-dot" />
+                <span className="text-muted" style={{ fontSize: 12.5 }}>
+                  Reasoning over workspace evidence…
+                </span>
+              </p>
+            ) : null}
 
-              <div ref={endRef} aria-hidden="true" />
-            </div>
+            {/* scroll target for the newest turn; the bottom margin clears the sticky
+                composer's height so the newest answer is not hidden behind it. */}
+            <div ref={endRef} aria-hidden="true" style={{ scrollMarginBottom: 96 }} />
+          </div>
+        ) : null}
 
-            {/* The composer docks to the bottom of the scroll region so it stays
-                reachable however long the transcript grows. The spacer guarantees
-                clear space below the last answer. */}
-            <div
-              data-composer-dock=""
-              style={{
-                position: "sticky",
-                bottom: 0,
-                background: "var(--color-bg)",
-                borderBlockStart: "1px solid var(--color-divider)",
-                padding: "12px 0 6px",
-                marginTop: 4,
-                opacity: askUnavailable ? 0.85 : 1
-              }}
-            >
-              {composer}
-            </div>
-            <div style={{ height: 24 }} aria-hidden="true" />
-          </>
+        {/* The composer holds ONE fixed position in the tree (with a stable key) so it
+            is never unmounted when the layout switches between the empty and
+            conversation states — otherwise a send would blur the caret to <body>. It
+            only changes its wrapper: docked (sticky bottom) once a conversation exists,
+            inline in the empty state. */}
+        <div
+          key="composer"
+          data-composer-dock={hasConversation ? "" : undefined}
+          style={
+            hasConversation
+              ? {
+                  position: "sticky",
+                  bottom: 0,
+                  background: "var(--color-bg)",
+                  borderBlockStart: "1px solid var(--color-divider)",
+                  padding: "12px 0 6px",
+                  marginTop: 4,
+                  opacity: askUnavailable ? 0.85 : 1
+                }
+              : undefined
+          }
+        >
+          {composer}
+        </div>
+
+        {hasConversation ? (
+          <div style={{ height: 24 }} aria-hidden="true" />
         ) : (
-          <>
-            {composer}
-            <Guided disabled={askDisabled} onPick={submit} />
-          </>
+          <Guided disabled={askDisabled} onPick={submit} />
         )}
       </div>
     </section>
@@ -569,7 +583,15 @@ function SlimScope({ items }: { items: ScopeItem[] }) {
     <div
       role="group"
       aria-label="Workspace snapshot"
-      style={{ display: "flex", flexWrap: "wrap", gap: "4px 16px", fontSize: 12, alignItems: "baseline" }}
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: "4px 16px",
+        fontSize: 12,
+        alignItems: "baseline",
+        border: "1px solid var(--color-divider)",
+        padding: "7px 12px"
+      }}
     >
       {items.map((item) => (
         <Link
@@ -598,6 +620,9 @@ function SlimScope({ items }: { items: ScopeItem[] }) {
           >
             {item.value}
           </strong>
+          {item.detail ? (
+            <span style={{ color: "var(--color-neutral-700)", fontSize: 11 }}>{item.detail}</span>
+          ) : null}
         </Link>
       ))}
     </div>
@@ -942,7 +967,7 @@ function ChatTurn({
                 supports the prose without competing with it. Nothing is dropped. */}
             <details style={{ border: 0 }}>
               <summary
-                style={{ cursor: "pointer", listStyle: "none", fontSize: 11.5, color: "var(--color-neutral-600)" }}
+                style={{ cursor: "pointer", listStyle: "none", fontSize: 11.5, color: "var(--color-neutral-700)" }}
               >
                 ▸ Details
               </summary>
