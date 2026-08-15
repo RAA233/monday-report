@@ -9,7 +9,7 @@ import {
   type ApiCitation
 } from "../../lib/api";
 import { formatSourceCitation } from "../../lib/citationFormat";
-import { Cells, ErrorState, Frame, PageHeader, Tag } from "../components/primitives";
+import { Cells, ErrorState, PageHeader, Tag } from "../components/primitives";
 import {
   apiUnreadReason,
   errorText,
@@ -26,11 +26,13 @@ import {
 /**
  * Ask — the chat-first home.
  *
- * Every enriched block below is a real field of `ApiChatResponse`: `workflow_steps`
- * is the runway, `insight_cards` the cell grid, `risk_register` the risk list,
- * `citations` the source list, `tool_actions` the follow-on buttons, and
- * `followups` the suggestion chips. Nothing here is synthesised client-side, so an
- * answer can never display a citation or a confidence the backend did not return.
+ * Answer-first and evidence-grounded. Each answer renders its prose first, then a
+ * collapsed "Sources" disclosure (the API's own citations, opened through the
+ * expiring signed-URL route), then a collapsed "Details" disclosure that folds in
+ * every OTHER field of `ApiChatResponse` — `workflow_steps`, `insight_cards`,
+ * `risk_register`, `confidence_notes`, `tool_actions` and `export_actions`. Nothing
+ * here is synthesised client-side, so an answer can never display a citation or a
+ * confidence the backend did not return, and it says so when there are none.
  *
  * The transcript is scoped to one workspace: switching workspaces clears it, and a
  * late answer for the previous workspace is dropped rather than appended under the
@@ -52,42 +54,28 @@ const TOOL_ACTION_ROUTE: Record<string, string> = {
   source: "/app/validation"
 };
 
-const COMMANDS = [
+/**
+ * The guided empty state: four categories, at most two example prompts each. Picking
+ * one submits it as the first question. This replaces the always-on command dock and
+ * starter chips — once a conversation exists the guide is gone.
+ */
+const GUIDED_CATEGORIES: { heading: string; prompts: string[] }[] = [
   {
-    label: "Plan",
-    detail: "Map evidence into DDR sections.",
-    prompt: "Plan next morning report with source-backed sections and approval gates."
+    heading: "Reports",
+    prompts: ["Draft this week's Monday report", "Summarize this week's operations"]
   },
   {
-    label: "Extract",
-    detail: "Focus the data model.",
-    prompt: "Extract failures, NPT, tool attribution, and source gaps for this workspace."
+    heading: "Failures / NPT",
+    prompts: ["Which failures need attention first?", "Summarize NPT by service company"]
   },
   {
-    label: "Draft",
-    detail: "Generate report language.",
-    prompt: "Create draft report with executive summary, normal daily format, and next 24 hr plan."
+    heading: "Benchmarking",
+    prompts: ["Why is the drilling rate below benchmark?", "Are there active benchmark anomalies?"]
   },
   {
-    label: "Draw",
-    // Chat itself still only DESCRIBES a schematic; the drawing lives on the Well
-    // view, which is now implemented — the detail points there without claiming
-    // the answer will contain a figure.
-    detail: "Describe what a casing schematic needs — the drawn figure lives on the Well schematics view.",
-    prompt: "Build casing schematic with hole sections, shoe depths, current MD, and risk markers."
-  },
-  {
-    label: "Audit",
-    detail: "Harden the package.",
-    prompt: "Audit blockers, validation tasks, citations, export gate, and client issue checklist."
+    heading: "Evidence / Sources",
+    prompts: ["What files were uploaded and parsed?", "Which sources mention stuck pipe?"]
   }
-];
-
-const STARTERS = [
-  "Which failures need validation before Monday Report?",
-  "Draft a normal morning report from source evidence.",
-  "Compare NPT by service company.",
-  "Why is the drilling rate below benchmark?"
 ];
 
 interface Turn {
@@ -110,7 +98,7 @@ const STEP_TONE: Record<string, string> = {
 
 export function Ask() {
   const navigate = useNavigate();
-  const { activeWorkspace, apiStatus, session, gate, localAi, auditIntegrity, can } = useWorkspace();
+  const { activeWorkspace, apiStatus, session, gate, auditIntegrity, can } = useWorkspace();
 
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -124,6 +112,9 @@ export function Ask() {
     state: "loading"
   });
   const seq = useRef(0);
+  // Keeps the newest turn (and the docked composer above it) in view as the
+  // transcript grows.
+  const endRef = useRef<HTMLDivElement | null>(null);
 
   const workspaceId = activeWorkspace?.id ?? null;
   // Read inside async resolutions to detect a workspace switch mid-request.
@@ -231,10 +222,6 @@ export function Ask() {
           // refusal, a 423 is the client-data readiness gate, and a 503 is a backend
           // that is up but not configured for client data. The tail goes through
           // errorText so a raw `API <status>: <detail>` never reaches the transcript.
-          //
-          // The previous version tested a regex that commit fa63ea3 had written with
-          // two literal backspace bytes instead of the escape `\b`, so it matched
-          // nothing and even a real 403 rendered as "did not answer".
           const status = /^API (\d{3})\b/.exec(message)?.[1];
           // Scoped to what the client can actually know. The earlier blanket "nothing
           // was recorded" was false for a refusal: a 403 appends `permission_denied`
@@ -270,7 +257,6 @@ export function Ask() {
     [busy, workspaceId]
   );
 
-
   // The chat route is gated on generate_reports by the backend.
   // Two different reasons this composer goes inert, and they need different mechanisms.
   // `askUnavailable` is STANDING - nothing is focused at the moment it becomes true, so
@@ -283,6 +269,14 @@ export function Ask() {
 
   // The gate label is the backend's own report; Ask never re-derives it.
   const gateText = gateLabel(gate);
+
+  const hasConversation = turns.length > 0;
+
+  // Keep the newest turn in view (the composer docks at the bottom, so the operator
+  // should not have to scroll to see the answer that just arrived).
+  useEffect(() => {
+    if (hasConversation) endRef.current?.scrollIntoView({ block: "end" });
+  }, [turns, busy, hasConversation]);
 
   // Short, factual announcement derived from the newest assistant turn.
   const announcement = useMemo(() => {
@@ -298,14 +292,137 @@ export function Ask() {
     return `Answer received with ${citations} citation${citations === 1 ? "" : "s"}.`;
   }, [busy, turns]);
 
+  const scopeItems: ScopeItem[] = [
+    {
+      label: "Validation gate",
+      value: gateText,
+      detail: gate.state === "ready" ? undefined : "not a queue-empty claim",
+      emphasis: !gateIsClear(gate),
+      to: "/app/validation"
+    },
+    {
+      label: "Drilling rate",
+      value:
+        rate.state !== "ready"
+          ? unreadCellValue(rate)
+          : rate.data.current != null
+            ? `${Math.round(rate.data.current).toLocaleString()} ft/day`
+            : "Not recorded",
+      detail:
+        rate.state === "ready" && rate.data.current != null && rate.data.benchmark != null
+          ? `vs ${Math.round(rate.data.benchmark).toLocaleString()}`
+          : rate.state === "unauthorized"
+            ? "requires view_benchmarks"
+            : undefined,
+      to: "/app/benchmarking"
+    },
+    {
+      label: "Latest report",
+      value: latestReport.state !== "ready" ? unreadCellValue(latestReport) : (latestReport.data ?? "None yet"),
+      detail: latestReport.state === "unauthorized" ? "requires view_reports" : undefined,
+      to: "/app/reports"
+    },
+    {
+      // Renamed from "Audit chain" to the customer term used across the app.
+      label: "Report integrity",
+      value:
+        auditIntegrity.state === "ready"
+          ? `${auditIntegrity.data.status} · ${auditIntegrity.data.total_events}`
+          : unreadCellValue(auditIntegrity),
+      detail: auditIntegrity.state === "unauthorized" ? "requires view_audit_history" : undefined,
+      to: "/app/audit"
+    }
+  ];
+
+  const scopeHint = askUnavailable
+    ? "Asking is unavailable until the workspace API is connected and this session can generate reports."
+    : `Grounded in ${activeWorkspace?.name ?? "this workspace"}${
+        activeWorkspace?.asset ? ` · ${activeWorkspace.asset}` : ""
+      } — your uploaded evidence in this workspace only.`;
+
+  function newQuestion() {
+    setTurns([]);
+    setError(null);
+    setInput("");
+  }
+
+  const composer = (
+    <div style={{ display: "grid", gap: 6 }}>
+      <form
+        style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto", gap: 10 }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          submit(input);
+        }}
+      >
+        <textarea
+          className="input"
+          rows={1}
+          // Overrides the base textarea.input (90px / resize:vertical): a compact,
+          // non-resizable line that the operator can still grow with Shift+Enter.
+          style={{ minHeight: 46, fontSize: 15, resize: "none", lineHeight: 1.5 }}
+          aria-label="Ask Monday Report"
+          placeholder="Ask about failures, NPT, drilling rate, reports or sources…  (Enter to send · Shift+Enter for a new line)"
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          // Enter sends; Shift+Enter inserts a newline. submit() itself no-ops while
+          // busy or empty, so a keystroke can never double-send.
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              submit(input);
+            }
+          }}
+          disabled={askUnavailable}
+          readOnly={busy}
+          aria-busy={busy || undefined}
+          aria-disabled={busy || undefined}
+        />
+        <button
+          type="submit"
+          className="btn btn-primary"
+          style={{ minHeight: 46, paddingInline: 18 }}
+          disabled={askUnavailable}
+          aria-disabled={busy || undefined}
+        >
+          {busy ? "Asking…" : "Ask"}
+        </button>
+      </form>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        {hasConversation ? (
+          <>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ minHeight: 0, padding: "0 2px", fontSize: 12 }}
+              onClick={newQuestion}
+              disabled={busy}
+              aria-disabled={busy || undefined}
+            >
+              New question
+            </button>
+            <span aria-hidden="true" style={{ color: "var(--color-neutral-600)" }}>
+              ·
+            </span>
+          </>
+        ) : null}
+        <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.45 }}>
+          {scopeHint}
+        </span>
+      </div>
+    </div>
+  );
+
   return (
     <section
       data-askgrid=""
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(0,1fr) minmax(min(280px,100%),320px)",
-        gap: 24,
-        alignItems: "start"
+        gridTemplateColumns: "minmax(0,1fr)",
+        gap: 20,
+        alignItems: "start",
+        maxWidth: 860
       }}
     >
       <div style={{ display: "grid", gap: 16, minWidth: 0 }}>
@@ -316,119 +433,18 @@ export function Ask() {
               .join(" · ") || "No workspace resolved"
           }
           title="Ask Monday Report"
-          lede="Chat is the workflow: plan, extract, draft and audit from here. An answer carries whatever citations this workspace's parsed evidence supports, and says so when there are none. Official exports stay gated until validation clears."
+          lede={
+            hasConversation
+              ? undefined
+              : "Ask about this workspace's evidence, reports, failures and benchmarks. Every answer cites the source it came from, and says so when there are none. Official exports stay gated until validation clears."
+          }
         />
 
-        <form
-          style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto", gap: 10 }}
-          onSubmit={(event) => {
-            event.preventDefault();
-            submit(input);
-          }}
-        >
-          <input
-            className="input"
-            style={{ minHeight: 46, fontSize: 15 }}
-            aria-label="Ask the analyst"
-            placeholder="Ask about failures, NPT, tools, drilling rate, or source evidence…"
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            disabled={askUnavailable}
-            readOnly={busy}
-            aria-busy={busy || undefined}
-            aria-disabled={busy || undefined}
-          />
-          <button
-            type="submit"
-            className="btn btn-primary"
-            style={{ minHeight: 46, paddingInline: 18 }}
-            disabled={askUnavailable}
-            aria-disabled={busy || undefined}
-          >
-            {busy ? "Asking…" : "Ask"}
-          </button>
-        </form>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit,minmax(min(120px,100%),1fr))",
-            borderBlockStart: "1px solid var(--color-divider)",
-            borderInlineStart: "1px solid var(--color-divider)"
-          }}
-          role="group"
-          aria-label="AI command dock"
-        >
-          {COMMANDS.map((command) => (
-            <button
-              type="button"
-              key={command.label}
-              className="mr-hover-accent mr-cell-bg"
-              // The visible label is split across two elements, so the name is
-              // stated explicitly rather than left to content concatenation.
-              aria-label={`${command.label} — ${command.detail}`}
-              onClick={() => submit(command.prompt)}
-              disabled={askUnavailable}
-              aria-disabled={busy || undefined}
-              // No inline `background`: an inline value always beats the stylesheet,
-              // which made the .mr-hover-accent tint inert. `.mr-cell-bg` carries the
-              // resting fill instead.
-              style={{
-                display: "grid",
-                gap: 2,
-                border: "none",
-                borderInlineEnd: "1px solid var(--color-divider)",
-                borderBlockEnd: "1px solid var(--color-divider)",
-                padding: "10px 12px",
-                textAlign: "start",
-                // Inline, so it must be conditional: an inline `pointer` would beat
-                // the stylesheet's disabled cursor and keep advertising a live cell.
-                cursor: askDisabled ? "not-allowed" : "pointer",
-                fontFamily: "var(--font-body)",
-                color: "inherit"
-              }}
-            >
-              <strong
-                style={{
-                  fontFamily: "var(--font-heading)",
-                  fontSize: 13.5,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  color: "var(--color-accent-700)"
-                }}
-              >
-                {command.label}
-              </strong>
-              <span style={{ fontSize: 11, color: "var(--color-neutral-700)" }}>{command.detail}</span>
-            </button>
-          ))}
-        </div>
-
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }} role="group" aria-label="Starter prompts">
-          {STARTERS.map((starter) => (
-            <button
-              type="button"
-              key={starter}
-              className="mr-hover-accent"
-              onClick={() => submit(starter)}
-              disabled={askUnavailable}
-              aria-disabled={busy || undefined}
-              // neutral-600 (3.82:1), not --color-divider (1.38:1): this border is the
-              // only thing that identifies the chip as a control. No inline
-              // background, so the hover tint applies.
-              style={{
-                border: "1px solid var(--color-neutral-600)",
-                color: "var(--color-neutral-800)",
-                padding: "6px 11px",
-                fontSize: 12,
-                cursor: askDisabled ? "not-allowed" : "pointer",
-                fontFamily: "var(--font-body)"
-              }}
-            >
-              {starter}
-            </button>
-          ))}
-        </div>
+        {hasConversation ? (
+          <SlimScope items={scopeItems} />
+        ) : (
+          <FullScope items={scopeItems} unreadReason={apiUnreadReason(apiStatus)} />
+        )}
 
         {apiStatus === "connected" && !can("generate_reports") ? (
           <p
@@ -449,185 +465,153 @@ export function Ask() {
           {announcement}
         </span>
 
-        {/* A plain labelled region, NOT role="log": log carries an implicit
-            aria-live=polite, so combining it with the status line above announced
-            every answer twice — once as a summary and once as the whole subtree. */}
-        <div style={{ display: "grid", alignContent: "start", gap: 14 }} role="group" aria-label="Conversation">
-          {turns.length === 0 && !busy ? (
-            <Frame style={{ padding: 16 }}>
-              <p style={{ fontSize: 13.5, lineHeight: 1.55, margin: 0 }}>
-                Nothing has been asked yet.{" "}
-                {apiUnreadReason(apiStatus)
-                  ? `${apiUnreadReason(apiStatus)}, so questions cannot be answered right now.`
-                  : "Use a command above or ask a question — answers come from this workspace's parsed evidence, with the citations that evidence supports."}
-              </p>
-            </Frame>
-          ) : null}
+        {hasConversation ? (
+          <>
+            {/* A plain labelled region, NOT role="log": log carries an implicit
+                aria-live=polite, so combining it with the status line above announced
+                every answer twice — once as a summary and once as the whole subtree. */}
+            <div style={{ display: "grid", alignContent: "start", gap: 16 }} role="group" aria-label="Conversation">
+              {turns.map((turn) => (
+                <ChatTurn
+                  key={turn.id}
+                  turn={turn}
+                  onNavigate={navigate}
+                  onSubmit={submit}
+                  standingDisabled={askUnavailable}
+                  busy={busy}
+                  gate={gate}
+                />
+              ))}
 
-          {turns.map((turn) => (
-            <ChatTurn
-              key={turn.id}
-              turn={turn}
-              onNavigate={navigate}
-              onSubmit={submit}
-              standingDisabled={askUnavailable}
-              busy={busy}
-              gate={gate}
-            />
-          ))}
-        </div>
+              {busy ? (
+                // No data-skeleton on the text: the pulse animates opacity down to
+                // 0.45, which would drop this real sentence to ~2:1 for half of every
+                // cycle. The decorative dot pulses; the text stays legible.
+                <p style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+                  <span data-skeleton="" aria-hidden="true" className="mr-pulse-dot" />
+                  <span className="text-muted" style={{ fontSize: 12.5 }}>
+                    Reasoning over workspace evidence…
+                  </span>
+                </p>
+              ) : null}
 
-        {/* Outside the log container: its own status, not a logged entry. */}
-        {busy ? (
-          // No data-skeleton here: the pulse animates opacity down to 0.45, which
-          // drops this real sentence to about 2:1 for half of every cycle. The
-          // decorative bar pulses; the text stays legible.
-          <p style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
-            <span data-skeleton="" aria-hidden="true" className="mr-pulse-dot" />
-            <span className="text-muted" style={{ fontSize: 12.5 }}>
-              Reasoning over workspace evidence…
-            </span>
-          </p>
-        ) : null}
-      </div>
+              <div ref={endRef} aria-hidden="true" />
+            </div>
 
-      {/* Named: a page with two complementary landmarks needs them distinguishable. */}
-      <aside aria-label="Workspace snapshot and local AI status" style={{ display: "grid", gap: 16, minWidth: 0 }}>
-        <div
-          style={{
-            display: "grid",
-            borderBlockStart: "1px solid var(--color-divider)",
-            borderInlineStart: "1px solid var(--color-divider)"
-          }}
-          role="group"
-          aria-label="Workspace snapshot"
-        >
-          <SnapshotCell
-            label="Validation gate"
-            value={gateText}
-            detail={gate.state === "ready" ? undefined : "not a queue-empty claim"}
-            emphasis={!gateIsClear(gate)}
-            to="/app/validation"
-          />
-          {/* Each cell distinguishes an unread read from a read that came back
-              empty. "Not recorded" and "None yet" are claims about the workspace and
-              are reserved for `ready`. */}
-          <SnapshotCell
-            label="Drilling rate"
-            value={
-              rate.state !== "ready"
-                ? unreadCellValue(rate)
-                : rate.data.current != null
-                  ? `${Math.round(rate.data.current).toLocaleString()} ft/day`
-                  : "Not recorded"
-            }
-            detail={
-              rate.state === "ready" && rate.data.current != null && rate.data.benchmark != null
-                ? `vs ${Math.round(rate.data.benchmark).toLocaleString()}`
-                : rate.state === "unauthorized"
-                  ? "requires view_benchmarks"
-                  : undefined
-            }
-            to="/app/benchmarking"
-          />
-          <SnapshotCell
-            label="Latest report"
-            value={
-              latestReport.state !== "ready"
-                ? unreadCellValue(latestReport)
-                : (latestReport.data ?? "None yet")
-            }
-            detail={latestReport.state === "unauthorized" ? "requires view_reports" : undefined}
-            to="/app/reports"
-          />
-          <SnapshotCell
-            label="Audit chain"
-            value={
-              auditIntegrity.state === "ready"
-                ? `${auditIntegrity.data.status} · ${auditIntegrity.data.total_events}`
-                : unreadCellValue(auditIntegrity)
-            }
-            detail={auditIntegrity.state === "unauthorized" ? "requires view_audit_history" : undefined}
-            to="/app/audit"
-          />
-        </div>
-
-        {/* The handoff's rail also carries a well-schematic thumbnail. Its
-            casing/plan/profile SVG generators port with the Stage 2 Well view, so
-            rather than draw an unsourced picture the card states what is missing
-            and links to the destination. */}
-        <div style={{ border: "1px solid var(--color-divider)", padding: "12px 14px" }}>
-          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-            <strong
+            {/* The composer docks to the bottom of the scroll region so it stays
+                reachable however long the transcript grows. The spacer guarantees
+                clear space below the last answer. */}
+            <div
+              data-composer-dock=""
               style={{
-                fontFamily: "var(--font-heading)",
-                fontSize: 13,
-                letterSpacing: "0.04em",
-                textTransform: "uppercase"
+                position: "sticky",
+                bottom: 0,
+                background: "var(--color-bg)",
+                borderBlockStart: "1px solid var(--color-divider)",
+                padding: "12px 0 6px",
+                marginTop: 4,
+                opacity: askUnavailable ? 0.85 : 1
               }}
             >
-              Well schematics
-            </strong>
-            <Link className="btn btn-ghost" to="/app/well" style={{ minHeight: 0, padding: "0 4px", fontSize: 12 }}>
-              Open →
-            </Link>
-          </div>
-          <p className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5, margin: "6px 0 0" }}>
-            Casing, trajectory plan view, and vertical profile are drawn on the Well view, which is not
-            part of this increment. No thumbnail is shown here rather than an illustration that is not
-            this workspace's evidence.
-          </p>
-        </div>
-
-        <div style={{ border: "1px solid var(--color-divider)", padding: "12px 14px" }}>
-          <strong
-            style={{
-              display: "block",
-              fontFamily: "var(--font-heading)",
-              fontSize: 13,
-              letterSpacing: "0.04em",
-              textTransform: "uppercase"
-            }}
-          >
-            Local AI
-          </strong>
-          <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.55, margin: "6px 0 0" }}>
-            {localAi.state === "ready"
-              ? `${localAi.data.runtime} · ${localAi.data.model ?? "no model reported"} — ${
-                  localAi.data.reachable ? "reachable" : "not reachable"
-                }, hosted fallback ${localAi.data.hosted_fallback_enabled ? "enabled" : "disabled"}. ${localAi.data.detail}`
-              : localAi.state === "loading"
-                ? "Reading the local-AI status. Answers come from the workspace's deterministic analysis path either way."
-                : localAi.state === "unauthorized"
-                  ? "This session may not read runtime status (view_runtime_status), so it is not shown. Answers come from the workspace's deterministic analysis path either way."
-                  : "Local-AI status could not be read. Answers still come from the workspace's deterministic analysis path."}
-          </p>
-        </div>
-      </aside>
+              {composer}
+            </div>
+            <div style={{ height: 24 }} aria-hidden="true" />
+          </>
+        ) : (
+          <>
+            {composer}
+            <Guided disabled={askDisabled} onPick={submit} />
+          </>
+        )}
+      </div>
     </section>
   );
 }
 
-function SnapshotCell({
-  label,
-  value,
-  detail,
-  to,
-  emphasis = false
-}: {
+interface ScopeItem {
   label: string;
   value: string;
   detail?: string;
   to: string;
   emphasis?: boolean;
-}) {
+}
+
+/** The full four-cell scope shown in the empty state, above the composer. */
+function FullScope({ items, unreadReason }: { items: ScopeItem[]; unreadReason: string | null }) {
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit,minmax(min(150px,100%),1fr))",
+          borderBlockStart: "1px solid var(--color-divider)",
+          borderInlineStart: "1px solid var(--color-divider)"
+        }}
+        role="group"
+        aria-label="Workspace snapshot"
+      >
+        {items.map((item) => (
+          <SnapshotCell key={item.label} {...item} />
+        ))}
+      </div>
+      {unreadReason ? (
+        <span className="text-muted" style={{ fontSize: 11.5 }}>
+          {unreadReason}, so these read “not read”, not “none”.
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+/** The slim one-line scope shown once a conversation is underway. */
+function SlimScope({ items }: { items: ScopeItem[] }) {
+  return (
+    <div
+      role="group"
+      aria-label="Workspace snapshot"
+      style={{ display: "flex", flexWrap: "wrap", gap: "4px 16px", fontSize: 12, alignItems: "baseline" }}
+    >
+      {items.map((item) => (
+        <Link
+          key={item.label}
+          to={item.to}
+          className="mr-hover-text"
+          aria-label={`${item.label}: ${item.value}${item.detail ? ` ${item.detail}` : ""}`}
+          style={{
+            display: "inline-flex",
+            gap: 6,
+            alignItems: "baseline",
+            color: "inherit",
+            textDecoration: "none",
+            padding: "2px 4px"
+          }}
+        >
+          <span style={{ color: "var(--color-neutral-700)", textTransform: "uppercase", letterSpacing: "0.08em", fontSize: 10.5 }}>
+            {item.label}
+          </span>
+          <strong
+            style={{
+              fontFamily: "var(--font-heading)",
+              fontSize: 13,
+              color: item.emphasis ? "var(--color-accent-800)" : "inherit"
+            }}
+          >
+            {item.value}
+          </strong>
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+function SnapshotCell({ label, value, detail, to, emphasis = false }: ScopeItem) {
   return (
     <Link
       to={to}
       className="mr-hover-accent mr-cell-bg"
       aria-label={`${label}: ${value}${detail ? ` ${detail}` : ""}`}
-      // No inline `background` here either: this was the one call site the previous
-      // pass missed, so these four cells still had no hover state at all.
+      // No inline `background`: an inline value always beats the stylesheet, which
+      // makes the .mr-hover-accent tint inert. `.mr-cell-bg` carries the resting fill.
       style={{
         display: "flex",
         justifyContent: "space-between",
@@ -668,6 +652,70 @@ function SnapshotCell({
         ) : null}
       </span>
     </Link>
+  );
+}
+
+/** The guided 2×2 example-prompt grid — only rendered in the empty state. */
+function Guided({ disabled, onPick }: { disabled: boolean; onPick: (prompt: string) => void }) {
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <span style={{ fontSize: 13, color: "var(--color-neutral-800)" }}>
+        Choose a question below or type your own.
+      </span>
+      <div
+        style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 12 }}
+        role="group"
+        aria-label="Example questions"
+      >
+        {GUIDED_CATEGORIES.map((category) => (
+          <div
+            key={category.heading}
+            style={{
+              border: "1px solid var(--color-divider)",
+              padding: "11px 12px",
+              display: "grid",
+              gap: 7,
+              alignContent: "start"
+            }}
+          >
+            <strong
+              style={{
+                fontFamily: "var(--font-heading)",
+                fontSize: 12.5,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em",
+                color: "var(--color-accent-800)"
+              }}
+            >
+              {category.heading}
+            </strong>
+            {category.prompts.map((prompt) => (
+              <button
+                type="button"
+                key={prompt}
+                className="mr-hover-accent"
+                onClick={() => onPick(prompt)}
+                disabled={disabled}
+                // neutral-600 (3.82:1), not --color-divider: this border is the only
+                // thing that identifies the chip as a control. No inline background.
+                style={{
+                  border: "1px solid var(--color-neutral-600)",
+                  background: "transparent",
+                  color: "var(--color-neutral-800)",
+                  padding: "6px 10px",
+                  fontSize: 12.5,
+                  textAlign: "start",
+                  cursor: disabled ? "not-allowed" : "pointer",
+                  fontFamily: "var(--font-body)"
+                }}
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -750,6 +798,35 @@ function ChatTurn({
     }
   }
 
+  if (isUser) {
+    return (
+      <article aria-label="Your question" style={{ display: "grid", justifyItems: "end", gap: 2 }}>
+        <span
+          style={{
+            fontSize: 10,
+            textTransform: "uppercase",
+            letterSpacing: "0.08em",
+            color: "var(--color-neutral-700)"
+          }}
+        >
+          You asked
+        </span>
+        <div
+          style={{
+            maxWidth: "min(70%,46ch)",
+            textAlign: "end",
+            fontSize: 15.5,
+            fontWeight: 600,
+            lineHeight: 1.4,
+            whiteSpace: "pre-wrap"
+          }}
+        >
+          {turn.text}
+        </div>
+      </article>
+    );
+  }
+
   const exportTokens = answer?.export_actions ?? [];
   const issuableExports = exportTokens.flatMap((token) => {
     const match = MONDAY_REPORT_EXPORT.exec(token);
@@ -758,250 +835,317 @@ function ChatTurn({
   const otherExports = exportTokens.filter((token) => !MONDAY_REPORT_EXPORT.test(token));
   // Only a gate the backend reported CLOSED blocks the control. Unread is not closed.
   const exportGated = gateIsClosed(gate);
+  const sourceCount = answer?.citations.length ?? 0;
 
   return (
-    <article
-      // The avatar text is decorative and hidden, and the remaining cues (alignment,
-      // fill) are visual only, so the turn itself has to carry the attribution.
-      aria-label={isUser ? "Your question" : "Monday Report answer"}
-      style={{
-        display: "grid",
-        gridTemplateColumns: "30px minmax(0,1fr)",
-        gap: 10,
-        maxWidth: isUser ? "86%" : "100%",
-        marginInlineStart: isUser ? "auto" : 0
-      }}
-    >
-      <span
-        aria-hidden="true"
-        style={{
-          display: "grid",
-          placeItems: "center",
-          width: 30,
-          height: 30,
-          border: "1px solid var(--color-divider)",
-          fontFamily: "var(--font-heading)",
-          fontSize: 10.5,
-          color: isUser ? "var(--color-bg)" : "var(--color-accent-800)",
-          background: isUser ? "var(--color-accent-900)" : "transparent"
-        }}
-      >
-        {isUser ? "YOU" : "MR"}
-      </span>
+    <article aria-label="Monday Report answer" style={{ display: "grid", gap: 5 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          aria-hidden="true"
+          style={{
+            display: "grid",
+            placeItems: "center",
+            width: 24,
+            height: 24,
+            border: "1px solid var(--color-divider)",
+            fontFamily: "var(--font-heading)",
+            fontSize: 10,
+            color: "var(--color-accent-800)"
+          }}
+        >
+          MR
+        </span>
+        <span
+          style={{
+            fontFamily: "var(--font-heading)",
+            fontSize: 12.5,
+            textTransform: "uppercase",
+            letterSpacing: "0.04em",
+            color: "var(--color-neutral-700)"
+          }}
+        >
+          Monday Report
+        </span>
+      </div>
 
-      <div
-        style={{
-          border: "1px solid var(--color-divider)",
-          padding: "11px 13px",
-          background: isUser ? "var(--color-surface)" : "transparent"
-        }}
-      >
-        <p style={{ fontSize: 13.5, lineHeight: 1.55, margin: 0, whiteSpace: "pre-wrap" }}>{turn.text}</p>
+      <div style={{ border: "1px solid var(--color-divider)", padding: "10px 12px", display: "grid", gap: 9 }}>
+        {/* Answer prose first, at the house reading measure. */}
+        <div style={{ fontSize: 14.5, lineHeight: 1.6, maxWidth: "62ch", whiteSpace: "pre-wrap" }}>
+          {turn.text}
+        </div>
 
         {answer ? (
-          <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
-            {answer.workflow_steps.length > 0 ? (
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit,minmax(min(100px,100%),1fr))",
-                  borderBlockStart: "1px solid var(--color-divider)",
-                  borderInlineStart: "1px solid var(--color-divider)"
-                }}
-                role="group"
-                aria-label="Workflow runway"
+          <>
+            {/* Sources — collapsed by default so the answer reads first. */}
+            <details style={{ border: 0 }}>
+              <summary
+                style={{ cursor: "pointer", listStyle: "none", fontSize: 12, color: "var(--color-neutral-700)" }}
               >
-                {answer.workflow_steps.map((step) => (
+                {`▸ Sources (${sourceCount})`}
+              </summary>
+              {answer.citations.length > 0 ? (
+                <div style={{ display: "grid", gap: 6, marginTop: 6 }} role="group" aria-label="Source citations">
+                  {answer.citations.map((citation) => {
+                    const sourceStatus = sourceStatuses[citation.id];
+                    return (
+                      <div key={citation.id} className="citation-item">
+                        <div className="citation-line">
+                          <strong style={{ fontWeight: 600 }}>
+                            {formatSourceCitation(citation.locator_type, citation.locator)}
+                          </strong>
+                          <span className="text-muted">
+                            {Math.round(citation.confidence * 100)}% confidence
+                          </span>
+                          {/* Native `disabled` only for the STANDING condition (no file
+                              attached); the in-flight state stays focusable and is made
+                              inert by the handler, matching this entry's control rules. */}
+                          <button
+                            type="button"
+                            className="source-link-button"
+                            disabled={!citation.file_id}
+                            aria-disabled={sourceStatus?.state === "working" || undefined}
+                            aria-label={`Open source for ${formatSourceCitation(citation.locator_type, citation.locator)}`}
+                            onClick={() => {
+                              if (sourceStatus?.state === "working") return;
+                              void openSourceCitation(citation);
+                            }}
+                          >
+                            {sourceStatus?.state === "working" ? "Preparing…" : "Source"}
+                          </button>
+                        </div>
+                        {citation.snippet ? (
+                          <span style={{ display: "block" }}>“{citation.snippet}”</span>
+                        ) : null}
+                        {sourceStatus ? (
+                          <span role="status" className={`source-status source-status-${sourceStatus.state}`}>
+                            {sourceStatus.state === "done" ? (
+                              <a href={sourceStatus.url} rel="noreferrer" target="_blank">
+                                {sourceStatus.message} — opens the expiring signed URL
+                              </a>
+                            ) : (
+                              sourceStatus.message
+                            )}
+                          </span>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <span className="text-muted" style={{ display: "block", marginTop: 6, fontSize: 12 }}>
+                  No citations were returned with this answer — nothing here is invented.
+                </span>
+              )}
+            </details>
+
+            {/* Details — the rest of the backend's structured answer, folded away so it
+                supports the prose without competing with it. Nothing is dropped. */}
+            <details style={{ border: 0 }}>
+              <summary
+                style={{ cursor: "pointer", listStyle: "none", fontSize: 11.5, color: "var(--color-neutral-600)" }}
+              >
+                ▸ Details
+              </summary>
+              <div style={{ display: "grid", gap: 10, padding: "8px 0 2px" }}>
+                {answer.workflow_steps.length > 0 ? (
                   <div
-                    key={step.step}
                     style={{
-                      background: STEP_TONE[step.status] ?? "var(--color-bg)",
-                      borderInlineEnd: "1px solid var(--color-divider)",
-                      borderBlockEnd: "1px solid var(--color-divider)",
-                      padding: "8px 10px"
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit,minmax(min(100px,100%),1fr))",
+                      borderBlockStart: "1px solid var(--color-divider)",
+                      borderInlineStart: "1px solid var(--color-divider)"
                     }}
+                    role="group"
+                    aria-label="Workflow runway"
                   >
-                    <span
-                      style={{
-                        display: "block",
-                        fontSize: 9,
-                        letterSpacing: "0.08em",
-                        textTransform: "uppercase",
-                        color: "var(--color-accent-700)"
-                      }}
-                    >
-                      {step.status}
-                    </span>
-                    <strong
-                      style={{
-                        fontFamily: "var(--font-heading)",
-                        fontSize: 13.5,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.03em"
-                      }}
-                    >
-                      {step.step}
-                    </strong>
-                    <span
-                      style={{
-                        display: "block",
-                        fontSize: 10.5,
-                        color: "var(--color-neutral-700)",
-                        marginTop: 2
-                      }}
-                    >
-                      {step.detail}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            {answer.insight_cards.length > 0 ? (
-              <Cells
-                label="Answer measures"
-                min={120}
-                items={answer.insight_cards.map((card) => ({
-                  label: card.label,
-                  value: card.value,
-                  detail: card.detail
-                }))}
-              />
-            ) : null}
-
-            {answer.risk_register.length > 0 ? (
-              <div style={{ display: "grid", gap: 6 }}>
-                {answer.risk_register.map((risk) => (
-                  <div
-                    key={risk.title}
-                    style={{ border: "1px solid var(--color-divider)", padding: "8px 10px" }}
-                  >
-                    <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
-                      <strong style={{ fontFamily: "var(--font-heading)", fontSize: 13 }}>
-                        {risk.title}
-                      </strong>
-                      <Tag tone={risk.severity === "critical" ? "critical" : "outline"}>
-                        {risk.severity}
-                      </Tag>
-                    </div>
-                    <p
-                      style={{
-                        fontSize: 11.5,
-                        lineHeight: 1.5,
-                        margin: "4px 0 0",
-                        color: "var(--color-neutral-700)"
-                      }}
-                    >
-                      {risk.detail} Mitigation: {risk.mitigation}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            {answer.citations.length > 0 ? (
-              <div style={{ display: "grid", gap: 6 }} role="group" aria-label="Source citations">
-                {answer.citations.map((citation) => {
-                  const sourceStatus = sourceStatuses[citation.id];
-                  return (
-                    <div key={citation.id} className="citation-item">
-                      <div className="citation-line">
-                        <strong style={{ fontWeight: 600 }}>
-                          {formatSourceCitation(citation.locator_type, citation.locator)}
-                        </strong>
-                        <span className="text-muted">
-                          {Math.round(citation.confidence * 100)}% confidence
-                        </span>
-                        {/* Native `disabled` only for the STANDING condition (no file
-                            attached); the in-flight state stays focusable and is made
-                            inert by the handler, matching this entry's control rules. */}
-                        <button
-                          type="button"
-                          className="source-link-button"
-                          disabled={!citation.file_id}
-                          aria-disabled={sourceStatus?.state === "working" || undefined}
-                          aria-label={`Open source for ${formatSourceCitation(citation.locator_type, citation.locator)}`}
-                          onClick={() => {
-                            if (sourceStatus?.state === "working") return;
-                            void openSourceCitation(citation);
+                    {answer.workflow_steps.map((step) => (
+                      <div
+                        key={step.step}
+                        style={{
+                          background: STEP_TONE[step.status] ?? "var(--color-bg)",
+                          borderInlineEnd: "1px solid var(--color-divider)",
+                          borderBlockEnd: "1px solid var(--color-divider)",
+                          padding: "8px 10px"
+                        }}
+                      >
+                        <span
+                          style={{
+                            display: "block",
+                            fontSize: 9,
+                            letterSpacing: "0.08em",
+                            textTransform: "uppercase",
+                            color: "var(--color-accent-700)"
                           }}
                         >
-                          {sourceStatus?.state === "working" ? "Preparing…" : "Source"}
-                        </button>
-                      </div>
-                      {citation.snippet ? (
-                        <span style={{ display: "block" }}>“{citation.snippet}”</span>
-                      ) : null}
-                      {sourceStatus ? (
-                        <span role="status" className={`source-status source-status-${sourceStatus.state}`}>
-                          {sourceStatus.state === "done" ? (
-                            <a href={sourceStatus.url} rel="noreferrer" target="_blank">
-                              {sourceStatus.message} — opens the expiring signed URL
-                            </a>
-                          ) : (
-                            sourceStatus.message
-                          )}
+                          {step.status}
                         </span>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <span className="text-muted" style={{ fontSize: 11.5 }}>
-                No citations were returned with this answer.
-              </span>
-            )}
+                        <strong
+                          style={{
+                            fontFamily: "var(--font-heading)",
+                            fontSize: 13.5,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.03em"
+                          }}
+                        >
+                          {step.step}
+                        </strong>
+                        <span
+                          style={{ display: "block", fontSize: 10.5, color: "var(--color-neutral-700)", marginTop: 2 }}
+                        >
+                          {step.detail}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
 
-            {answer.confidence_notes.length > 0 ? (
-              <ul
-                className="text-muted"
-                style={{ fontSize: 11.5, lineHeight: 1.5, margin: 0, paddingInlineStart: 18 }}
-              >
-                {answer.confidence_notes.map((note) => (
-                  <li key={note}>{note}</li>
-                ))}
-              </ul>
-            ) : null}
+                {answer.insight_cards.length > 0 ? (
+                  <Cells
+                    label="Answer measures"
+                    min={120}
+                    items={answer.insight_cards.map((card) => ({
+                      label: card.label,
+                      value: card.value,
+                      detail: card.detail
+                    }))}
+                  />
+                ) : null}
 
-            {/* The follow-on buttons come from the response's own `tool_actions`
-                rather than a hard-coded client list. That is not command-aware
-                routing: `chat_tool_actions()` takes no arguments and returns the
-                same four kinds for every prompt — only the narrative, workflow
-                steps and insight cards vary with what was asked. */}
-            {answer.tool_actions.length > 0 ? (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                {answer.tool_actions.map((action) => {
-                  const route = TOOL_ACTION_ROUTE[action.kind];
-                  return (
-                    <button
-                      type="button"
-                      key={`${action.kind}-${action.label}`}
-                      className="btn btn-secondary"
-                      title={action.detail}
-                      aria-label={`${action.label} — ${action.detail}`}
-                      disabled={standingDisabled && !route}
-                      aria-disabled={(busy && !route) || undefined}
-                      onClick={() => (route ? onNavigate(route) : onSubmit(action.prompt))}
-                    >
-                      {action.label}
+                {answer.risk_register.length > 0 ? (
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {answer.risk_register.map((risk) => (
+                      <div key={risk.title} style={{ border: "1px solid var(--color-divider)", padding: "8px 10px" }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
+                          <strong style={{ fontFamily: "var(--font-heading)", fontSize: 13 }}>{risk.title}</strong>
+                          <Tag tone={risk.severity === "critical" ? "critical" : "outline"}>{risk.severity}</Tag>
+                        </div>
+                        <p
+                          style={{
+                            fontSize: 11.5,
+                            lineHeight: 1.5,
+                            margin: "4px 0 0",
+                            color: "var(--color-neutral-700)"
+                          }}
+                        >
+                          {risk.detail} Mitigation: {risk.mitigation}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {answer.confidence_notes.length > 0 ? (
+                  <ul
+                    className="text-muted"
+                    style={{ fontSize: 11.5, lineHeight: 1.5, margin: 0, paddingInlineStart: 18 }}
+                  >
+                    {answer.confidence_notes.map((note) => (
+                      <li key={note}>{note}</li>
+                    ))}
+                  </ul>
+                ) : null}
+
+                {/* The follow-on buttons come from the response's own `tool_actions`
+                    rather than a hard-coded client list. `chat_tool_actions()` takes no
+                    arguments and returns the same kinds for every prompt — only the
+                    narrative, workflow steps and insight cards vary with what was asked. */}
+                {answer.tool_actions.length > 0 ? (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    {answer.tool_actions.map((action) => {
+                      const route = TOOL_ACTION_ROUTE[action.kind];
+                      return (
+                        <button
+                          type="button"
+                          key={`${action.kind}-${action.label}`}
+                          className="btn btn-secondary"
+                          title={action.detail}
+                          aria-label={`${action.label} — ${action.detail}`}
+                          disabled={standingDisabled && !route}
+                          aria-disabled={(busy && !route) || undefined}
+                          onClick={() => (route ? onNavigate(route) : onSubmit(action.prompt))}
+                        >
+                          {action.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <button type="button" className="btn btn-secondary" onClick={() => onNavigate("/app/validation")}>
+                      Open validation
                     </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                <button type="button" className="btn btn-secondary" onClick={() => onNavigate("/app/validation")}>
-                  Open validation
-                </button>
-                <button type="button" className="btn btn-secondary" onClick={() => onNavigate("/app/studio")}>
-                  Open the draft
-                </button>
-              </div>
-            )}
+                    <button type="button" className="btn btn-secondary" onClick={() => onNavigate("/app/studio")}>
+                      Open the draft
+                    </button>
+                  </div>
+                )}
 
+                {answer.export_actions.length > 0 ? (
+                  <div style={{ display: "grid", gap: 6 }}>
+                    {issuableExports.length > 0 ? (
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                        {issuableExports.map(({ token, format }) =>
+                          // The gate, in the answer. A closed gate disables the control
+                          // and states the committed refusal copy; an unread gate leaves
+                          // it available, because the backend is the authority and
+                          // refuses on its own. Issuance itself happens on the Exports
+                          // view — that is where the report is named and the audit entry
+                          // is written.
+                          exportGated ? (
+                            <button
+                              key={token}
+                              type="button"
+                              className="btn btn-secondary"
+                              disabled
+                              title={exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)}
+                            >
+                              Export {format.toUpperCase()}
+                            </button>
+                          ) : (
+                            <Link
+                              key={token}
+                              className="btn btn-secondary"
+                              to="/app/exports"
+                              // Prefixed with the exact visible string (WCAG 2.5.3 Label
+                              // in Name), not paraphrased around it.
+                              aria-label={`Export ${format.toUpperCase()} — opens the Exports view to issue it`}
+                            >
+                              Export {format.toUpperCase()}
+                            </Link>
+                          )
+                        )}
+                      </div>
+                    ) : null}
+                    <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
+                      {/* Only claim an issuance path when a control for it is actually
+                          rendered. A benchmarking answer names only non-report artifacts,
+                          so the "Issued from the Exports view" sentence described a route
+                          that does not exist for anything on offer. */}
+                      {issuableExports.length > 0
+                        ? exportGated
+                          ? exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)
+                          : "Issued from the Exports view, where the validation gate is enforced, the SHA-256 is recorded, and the issuance is appended to the audit chain."
+                        : ""}
+                      {otherExports.length > 0
+                        ? `${issuableExports.length > 0 ? " This answer also names" : "This answer names"} ${otherExports.join(", ")}, which ${otherExports.length === 1 ? "is not a Monday-report export and is" : "are not Monday-report exports and are"} not issued from the Exports view.`
+                        : ""}
+                    </span>
+                  </div>
+                ) : null}
+
+                <span className="text-muted" style={{ fontSize: 11, lineHeight: 1.5 }}>
+                  Answers are drawn only from this workspace's uploaded evidence — never generated freely.
+                </span>
+              </div>
+            </details>
+
+            {/* Follow-up questions stay visible: they are the primary next step. */}
             {answer.followups.length > 0 ? (
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }} role="group" aria-label="Suggested follow-up questions">
+              <div
+                style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 2 }}
+                role="group"
+                aria-label="Suggested follow-up questions"
+              >
                 {answer.followups.map((followup) => (
                   <button
                     type="button"
@@ -1010,9 +1154,9 @@ function ChatTurn({
                     disabled={standingDisabled}
                     aria-disabled={busy || undefined}
                     onClick={() => onSubmit(followup)}
-                    // neutral-600 and no inline background: as the starter chips above.
                     style={{
                       border: "1px solid var(--color-neutral-600)",
+                      background: "transparent",
                       color: "var(--color-neutral-800)",
                       padding: "6px 11px",
                       fontSize: 12,
@@ -1026,59 +1170,7 @@ function ChatTurn({
                 ))}
               </div>
             ) : null}
-
-            {answer.export_actions.length > 0 ? (
-              <div style={{ display: "grid", gap: 6 }}>
-                {issuableExports.length > 0 ? (
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                    {issuableExports.map(({ token, format }) =>
-                      // The gate, in the answer. A closed gate disables the control and
-                      // states the committed refusal copy; an unread gate leaves it
-                      // available, because the backend is the authority and refuses on
-                      // its own. Issuance itself happens on the Exports view — that is
-                      // where the report is named and the audit entry is written.
-                      exportGated ? (
-                        <button
-                          key={token}
-                          type="button"
-                          className="btn btn-secondary"
-                          disabled
-                          title={exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)}
-                        >
-                          Export {format.toUpperCase()}
-                        </button>
-                      ) : (
-                        <Link
-                          key={token}
-                          className="btn btn-secondary"
-                          to="/app/exports"
-                          // Prefixed with the exact visible string (WCAG 2.5.3 Label
-                          // in Name), not paraphrased around it.
-                          aria-label={`Export ${format.toUpperCase()} — opens the Exports view to issue it`}
-                        >
-                          Export {format.toUpperCase()}
-                        </Link>
-                      )
-                    )}
-                  </div>
-                ) : null}
-                <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5 }}>
-                  {/* Only claim an issuance path when a control for it is actually
-                      rendered. A benchmarking answer names only non-report artifacts, so
-                      the "Issued from the Exports view" sentence described a route that
-                      does not exist for anything on offer. */}
-                  {issuableExports.length > 0
-                    ? exportGated
-                      ? exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)
-                      : "Issued from the Exports view, where the validation gate is enforced, the SHA-256 is recorded, and the issuance is appended to the audit chain."
-                    : ""}
-                  {otherExports.length > 0
-                    ? `${issuableExports.length > 0 ? " This answer also names" : "This answer names"} ${otherExports.join(", ")}, which ${otherExports.length === 1 ? "is not a Monday-report export and is" : "are not Monday-report exports and are"} not issued from the Exports view.`
-                    : ""}
-                </span>
-              </div>
-            ) : null}
-          </div>
+          </>
         ) : null}
       </div>
     </article>
