@@ -177,18 +177,21 @@ class LocalModelProvider(AIProvider):
         # If it raises, that surfaces (built-in analyst unavailable) rather than being hidden.
         baseline = self._fallback.generate(context)
 
-        if self._insufficient_evidence(context):
-            return baseline  # model is NOT invoked on empty evidence
-
-        messages = build_grounded_messages(context)
+        # Everything from here — the evidence-sufficiency decision, prompt assembly, and the
+        # model call — is inside the fallback boundary: insufficient evidence skips the model,
+        # and ANY failure (including a context that cannot be safely prepared) returns the
+        # deterministic answer. The provider never raises for its own (non-fallback) failure.
         try:
+            if self._insufficient_evidence(context):
+                return baseline  # model is NOT invoked on empty evidence
+            messages = build_grounded_messages(context)
             text = generate_local_chat(self._runtime, self._endpoint, self._model, messages)
         except Exception:
-            return baseline  # ANY model failure -> deterministic answer; never raise
+            return baseline
 
-        # Only the answer prose changes. Citations, followups, and every enrichment
-        # field stay exactly as the deterministic provider produced them; the model
-        # cannot introduce a citation because it only ever returns a string here.
+        # Only the answer prose changes. Citations, followups, and every enrichment field
+        # stay exactly as the deterministic provider produced them; the model cannot
+        # introduce a citation because it only ever returns a string here.
         baseline.answer = text
         return baseline
 

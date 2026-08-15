@@ -173,10 +173,15 @@ def is_loopback_endpoint(endpoint: str | None) -> bool:
     schemes — is rejected. Arbitrary hostnames are NOT DNS-resolved."""
     if not endpoint or not isinstance(endpoint, str):
         return False
-    parts = urlsplit(endpoint.strip())
-    if parts.scheme not in {"http", "https"}:
+    try:
+        parts = urlsplit(endpoint.strip())
+        if parts.scheme not in {"http", "https"}:
+            return False
+        host = parts.hostname  # strips [..] brackets and any user:pass@ prefix; may raise
+    except ValueError:
+        # A malformed authority (e.g. an unclosed IPv6 bracket) is not loopback and must
+        # never propagate — the resolver relies on this to fail closed to deterministic.
         return False
-    host = parts.hostname  # strips [..] brackets and any user:pass@ prefix
     if not host:
         return False
     host = host.lower()
@@ -188,10 +193,21 @@ def is_loopback_endpoint(endpoint: str | None) -> bool:
         return False
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse ALL HTTP redirects. A loopback model endpoint never legitimately redirects,
+    and following one would send the request to an un-revalidated (possibly off-box) host.
+    Returning ``None`` makes urllib not follow; the 3xx then surfaces as an ``HTTPError``,
+    which the caller treats as a failure and falls back to deterministic."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: A002
+        return None
+
+
 def _no_proxy_opener() -> urllib.request.OpenerDirector:
-    # ProxyHandler({}) installs NO proxy for any scheme and suppresses environment
-    # proxy discovery, so a configured system proxy cannot intercept a loopback call.
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    # ProxyHandler({}) installs NO proxy for any scheme and suppresses environment proxy
+    # discovery, so a configured system proxy cannot intercept a loopback call. The
+    # no-redirect handler prevents a loopback listener from bouncing the request off-box.
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
 
 
 def selected_generation_model() -> str | None:

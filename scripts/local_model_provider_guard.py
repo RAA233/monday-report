@@ -103,6 +103,13 @@ class _FakeOllama(BaseHTTPRequestHandler):
         mode = SERVER_STATE["mode"]
         if mode == "slow":
             time.sleep(SERVER_STATE["slow_seconds"])
+        if mode == "redirect":
+            # Bounce to a different (off-endpoint) host to prove redirects are not followed.
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:9/redirected")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if mode == "error500":
             self._send(500, b'{"error":"boom"}')
             return
@@ -257,17 +264,31 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
         _set_local_env(MONDAY_REPORT_AI_PROVIDER="local", MONDAY_REPORT_LOCAL_LLM_RUNTIME="ollama",
                        OLLAMA_HOST="ftp://127.0.0.1:11434", MONDAY_REPORT_LOCAL_LLM_MODEL="qwen2.5:3b")
         check("06 non-http scheme is refused -> deterministic", resolve_ai_provider(DETERMINISTIC_PROVIDER).name() == "deterministic")
+
+        # Malformed authority (unclosed IPv6 bracket) must fail closed to deterministic, not
+        # raise out of the resolver into the chat handler.
+        _set_local_env(MONDAY_REPORT_AI_PROVIDER="local", MONDAY_REPORT_LOCAL_LLM_RUNTIME="ollama",
+                       OLLAMA_HOST="http://[::1:11434", MONDAY_REPORT_LOCAL_LLM_MODEL="qwen2.5:3b")
+        malformed_raised = False
+        malformed_provider = None
+        try:
+            malformed_provider = resolve_ai_provider(DETERMINISTIC_PROVIDER)
+        except Exception:
+            malformed_raised = True
+        check("06b malformed endpoint env -> deterministic (resolver never raises)",
+              not malformed_raised and malformed_provider is not None and malformed_provider.name() == "deterministic")
         _set_local_env()
 
         check("07 is_loopback accepts loopback forms",
               all(is_loopback_endpoint(u) for u in [
                   "http://127.0.0.1:11434", "http://localhost:11434", "http://[::1]:11434",
                   "http://127.0.0.2:11434", "http://user@127.0.0.1:11434"]))
-        check("08 is_loopback rejects non-loopback forms",
+        check("08 is_loopback rejects non-loopback + malformed forms (no raise)",
               not any(is_loopback_endpoint(u) for u in [
                   "http://192.168.1.5:11434", "http://10.0.0.9", "http://172.17.0.1:11434",
                   "http://evil.com", "http://127.0.0.1.evil.com", "file:///etc/passwd",
-                  "ftp://127.0.0.1", "", "not-a-url"]))
+                  "ftp://127.0.0.1", "", "not-a-url",
+                  "http://[::1:11434", "http://[::1", "http://[gggg::1]:11434"]))
 
         sig = inspect.signature(resolve_ai_provider)
         no_request_field = "provider" not in ChatRequest.model_fields and "endpoint" not in ChatRequest.model_fields
@@ -393,6 +414,27 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
         _reset_server(mode="error500")
         fell_500 = make_provider().generate(_make_context("Summarize the NPT", with_evidence=True))
         check("27 runtime 500 error -> deterministic fallback", fell_500.answer == det.answer)
+
+        # An off-endpoint redirect must NOT be followed (no off-box egress) -> fallback.
+        _reset_server(mode="redirect")
+        fell_redirect = make_provider().generate(_make_context("Summarize the NPT", with_evidence=True))
+        check("27b off-loopback redirect is refused -> deterministic fallback", fell_redirect.answer == det.answer)
+
+        # A failure while PREPARING the prompt (context cannot be safely prepared) -> fallback.
+        import backend.app.ai.local_model_provider as _lmp
+
+        _reset_server()
+        _original_build = _lmp.build_grounded_messages
+
+        def _raising_build(_context):
+            raise RuntimeError("prompt build failed")
+
+        _lmp.build_grounded_messages = _raising_build
+        try:
+            fell_build = make_provider().generate(_make_context("Summarize the NPT", with_evidence=True))
+        finally:
+            _lmp.build_grounded_messages = _original_build
+        check("27c prompt-build failure -> deterministic fallback (no raise)", fell_build.answer == det.answer)
 
         # ============ GROUNDING (28-31) ============
         _reset_server()
