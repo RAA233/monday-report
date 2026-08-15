@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { getLicenseStatus, type LicenseStatus } from "../../lib/api";
 import type { Loadable } from "./workspace";
@@ -26,25 +26,40 @@ const LicenseContext = createContext<LicenseContextValue | null>(null);
 
 export function LicenseProvider({ children }: { children: ReactNode }) {
   const [license, setLicense] = useState<Loadable<LicenseStatus>>({ state: "loading" });
-  const [tick, setTick] = useState(0);
-  const refresh = useCallback(() => setTick((n) => n + 1), []);
+  const mounted = useRef(true);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLicense({ state: "loading" });
+  // `silent` re-reads WITHOUT flipping back to `loading`, so a re-validation never
+  // blanks the app-wide banner or tears down the License page mid-view.
+  const load = useCallback((silent: boolean) => {
+    if (!silent) setLicense({ state: "loading" });
     getLicenseStatus()
       .then((status) => {
-        if (!cancelled) setLicense({ state: "ready", data: status });
+        if (mounted.current) setLicense({ state: "ready", data: status });
       })
       .catch(() => {
-        if (!cancelled) {
-          setLicense({ state: "error", message: "The license service is not reachable from here." });
-        }
+        if (mounted.current) setLicense({ state: "error", message: "The license service could not be read." });
       });
-    return () => {
-      cancelled = true;
+  }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    load(false);
+    // A license can go read-only mid-session (grace→expired, clock change). Re-read
+    // when the operator returns to the app so the banner stays truthful; the silent
+    // read avoids flicker.
+    const revalidate = () => {
+      if (document.visibilityState === "visible") load(true);
     };
-  }, [tick]);
+    document.addEventListener("visibilitychange", revalidate);
+    window.addEventListener("focus", revalidate);
+    return () => {
+      mounted.current = false;
+      document.removeEventListener("visibilitychange", revalidate);
+      window.removeEventListener("focus", revalidate);
+    };
+  }, [load]);
+
+  const refresh = useCallback(() => load(true), [load]);
 
   return <LicenseContext.Provider value={{ license, refresh }}>{children}</LicenseContext.Provider>;
 }
@@ -73,6 +88,22 @@ export function formatLicenseDate(iso: string): string {
   return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
+/** Humanises the wrapper's machine-binding confidence enum for a customer surface. */
+export function bindingConfidenceLabel(confidence: string): string {
+  switch (confidence) {
+    case "strong":
+      return "Strong";
+    case "reduced_virtual_machine":
+      return "Reduced (virtual machine)";
+    case "degraded_few_components":
+      return "Reduced (few signals)";
+    case "unavailable":
+      return "Unavailable";
+    default:
+      return confidence.replace(/_/g, " ");
+  }
+}
+
 /**
  * Customer-facing wording for each license state the wrapper can report. The single
  * source of truth for both the app-wide banner and the License page, so they never
@@ -85,7 +116,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "Active",
         tone: "accent",
-        readOnly: false,
+        readOnly: status.read_only,
         advisory: false,
         description: status.expires_at
           ? `This machine's license is active, valid through ${when(status.expires_at)}.`
@@ -95,7 +126,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "Active — expiring soon",
         tone: "neutral",
-        readOnly: false,
+        readOnly: status.read_only,
         advisory: true,
         description: `This machine's license is active but expires ${when(status.expires_at) ?? "soon"}. Renew it to avoid an interruption.`
       };
@@ -103,7 +134,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "In grace period",
         tone: "neutral",
-        readOnly: false,
+        readOnly: status.read_only,
         advisory: true,
         description: `The license has expired but is in its grace period${
           status.grace_until ? ` until ${when(status.grace_until)}` : ""
@@ -113,7 +144,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "Read-only — license expired",
         tone: "critical",
-        readOnly: true,
+        readOnly: status.read_only,
         advisory: false,
         description:
           "The license has expired past its grace period, so new questions, reports and uploads are paused. Existing data, answers and backups stay available. Import a renewed license to resume."
@@ -122,7 +153,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "No license installed",
         tone: "critical",
-        readOnly: true,
+        readOnly: status.read_only,
         advisory: false,
         description:
           "No license is installed on this machine, so the app is read-only. Download the activation request below, obtain a signed license, and import it."
@@ -131,7 +162,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "License is for a different machine",
         tone: "critical",
-        readOnly: true,
+        readOnly: status.read_only,
         advisory: false,
         description:
           "This license was issued for a different installation or machine, so the app is read-only. Request a license for this machine using the activation request below."
@@ -140,7 +171,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "Not yet valid",
         tone: "critical",
-        readOnly: true,
+        readOnly: status.read_only,
         advisory: false,
         description: `This license is not valid yet${
           status.not_before ? ` (valid from ${when(status.not_before)})` : ""
@@ -150,7 +181,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "Clock rollback detected",
         tone: "critical",
-        readOnly: true,
+        readOnly: status.read_only,
         advisory: false,
         description:
           "This machine's clock appears to have moved backwards relative to the last trusted time, so the license cannot be trusted and the app is read-only. Correct the system clock."
@@ -159,7 +190,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "Licensing unavailable",
         tone: "critical",
-        readOnly: true,
+        readOnly: status.read_only,
         advisory: false,
         description: "The licensing component is not available in this build, so the app is read-only."
       };
@@ -169,7 +200,7 @@ export function presentLicense(status: LicenseStatus): LicensePresentation {
       return {
         label: "License not valid",
         tone: "critical",
-        readOnly: true,
+        readOnly: status.read_only,
         advisory: false,
         description:
           "The installed license could not be validated, so the app is read-only. Import a valid signed license, or contact support with the code shown on the License page."

@@ -1072,5 +1072,16 @@ export async function importLicense(licenseJson: string): Promise<LicenseImportR
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: licenseJson
   });
-  return (await response.json()) as LicenseImportResult;
+  // The documented outcomes (200/400/503) are all JSON. Guard the parse so a
+  // reachable-but-erroring wrapper (an unexpected 500, a proxy error page) is
+  // reported as a refusal with its status, not misread by the caller as an absent
+  // service — only a rejected fetch (below the caller) means genuinely unreachable.
+  try {
+    return (await response.json()) as LicenseImportResult;
+  } catch {
+    return {
+      imported: false,
+      detail: `The license service returned an unreadable response (HTTP ${response.status}).`
+    };
+  }
 }

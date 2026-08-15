@@ -22,6 +22,7 @@ import {
   type GateState,
   type Loadable
 } from "../lib/workspace";
+import { useLicense } from "../lib/license";
 
 /**
  * Ask — the chat-first home.
@@ -99,6 +100,8 @@ const STEP_TONE: Record<string, string> = {
 export function Ask() {
   const navigate = useNavigate();
   const { activeWorkspace, apiStatus, session, gate, auditIntegrity, can } = useWorkspace();
+  // A license-blocked answer should surface the app-wide read-only banner promptly.
+  const { refresh: refreshLicense } = useLicense();
 
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -228,6 +231,8 @@ export function Ask() {
           // that is up but not configured for client data. The tail goes through
           // errorText so a raw `API <status>: <detail>` never reaches the transcript.
           const status = /^API (\d{3})\b/.exec(message)?.[1];
+          // Re-read the license so the app-wide banner reflects a read-only refusal.
+          if (status === "423" && /licen[sc]e/i.test(message)) refreshLicense();
           // Scoped to what the client can actually know. The earlier blanket "nothing
           // was recorded" was false for a refusal: a 403 appends `permission_denied`
           // and a 423 appends `client_data.operation_blocked` to the audit chain.
@@ -246,7 +251,7 @@ export function Ask() {
                   // A license refusal is blocked at/before the audit write, so it has
                   // NO audit record — do not claim one; point to the License page.
                   /licen[sc]e/i.test(message)
-                  ? "Monday Report is read-only — its license is not active, so this question was not processed. Open the License page to activate; existing data, answers and exports stay available." +
+                  ? "Monday Report is read-only — its license is not active, so this question was not processed. Open the License page to activate; existing data, answers and backups stay available." +
                     nothingDrafted
                   : "The backend is holding client-data mutations until its readiness checks pass, so this question was not processed." +
                     refusalRecorded
@@ -267,7 +272,7 @@ export function Ask() {
           if (askedFor === workspaceIdRef.current) setBusy(false);
         });
     },
-    [busy, workspaceId]
+    [busy, workspaceId, refreshLicense]
   );
 
   // The chat route is gated on generate_reports by the backend.

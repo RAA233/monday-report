@@ -1,14 +1,22 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Cells, ErrorState, Frame, PageHeader, Skeleton, Tag } from "../components/primitives";
 import { importLicense, LICENSE_ACTIVATION_REQUEST_PATH, type LicenseImportResult, type LicenseStatus } from "../../lib/api";
-import { formatLicenseDate, presentLicense, useLicense } from "../lib/license";
+import { bindingConfidenceLabel, formatLicenseDate, presentLicense, useLicense } from "../lib/license";
+
+const SECTION_HEADING: CSSProperties = {
+  fontSize: 19,
+  letterSpacing: "0.03em",
+  textTransform: "uppercase",
+  margin: 0
+};
 
 /**
  * License — the in-SPA equivalent of the runtime wrapper's utilitarian /license
  * console, styled to match the app. Reads the machine's license status, offers the
  * (hashes-only) activation request as a download, and imports a signed license — all
  * through the wrapper's existing endpoints. When the wrapper is not present (a dev
- * SPA), it says the license service is unavailable rather than fabricating a status.
+ * SPA) or the status route errors, it says the status could not be read rather than
+ * fabricating one, and offers a retry.
  */
 export function License() {
   const { license, refresh } = useLicense();
@@ -16,7 +24,15 @@ export function License() {
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<LicenseImportResult | null>(null);
 
+  // Re-read on open: a license can have gone read-only since the shell mounted, so
+  // the page (and the "Open the License page" path from a read-only refusal) must
+  // show the current state, not a stale snapshot.
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
   async function onImport() {
+    if (importing) return; // in-flight re-entry guard (the button stays focusable)
     const file = fileRef.current?.files?.[0];
     if (!file) {
       setResult({ imported: false, detail: "Choose a license file first." });
@@ -35,12 +51,18 @@ export function License() {
     } catch {
       setResult({
         imported: false,
-        detail: "The license could not be imported here — the license service is not reachable in this environment."
+        detail: "The license could not be imported — the license service is not reachable in this environment."
       });
     } finally {
       setImporting(false);
     }
   }
+
+  const resultMessage = result
+    ? result.imported
+      ? "License imported. The updated status is shown above."
+      : `The license was not imported. ${result.detail ?? "The file was rejected."}`
+    : "";
 
   return (
     <section style={{ display: "grid", gap: 20, maxWidth: 760 }}>
@@ -54,8 +76,9 @@ export function License() {
 
       {license.state === "error" ? (
         <ErrorState
-          title="License status is not available here"
-          message="This environment is not served by the offline runtime, so the license service cannot be reached. In the installed Monday Report Offline app this page shows the machine's license status and lets you import a renewed license."
+          title="License status could not be read"
+          message="The license status is not available right now. In the installed Monday Report Offline app this page shows the machine's license status and lets you import a renewed license; if you are running the installed app, try again."
+          onRetry={refresh}
         />
       ) : null}
 
@@ -63,77 +86,53 @@ export function License() {
         <>
           <LicenseReady status={license.data} />
 
-          <Frame style={{ padding: 16 }}>
-            <div style={{ display: "grid", gap: 8 }}>
-              <strong
-                style={{
-                  fontFamily: "var(--font-heading)",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  fontSize: 13
-                }}
-              >
-                Activation request
-              </strong>
-              <p className="text-muted" style={{ fontSize: 12.5, lineHeight: 1.55, margin: 0 }}>
-                The activation request contains only hashed machine facts — no raw hardware identifiers — and
-                it never leaves this computer unless you send it. Give it to your vendor to obtain a signed
-                license, then import that license below.
-              </p>
-              <a className="btn btn-secondary" href={LICENSE_ACTIVATION_REQUEST_PATH} style={{ justifySelf: "start" }}>
-                Download activation request
-              </a>
-            </div>
+          <Frame as="section" aria-label="Activation request" style={{ padding: 16, display: "grid", gap: 8 }}>
+            <h2 style={SECTION_HEADING}>Activation request</h2>
+            <p className="text-muted" style={{ fontSize: 12.5, lineHeight: 1.55, margin: 0 }}>
+              The activation request contains only hashed machine facts — no raw hardware identifiers — and
+              it never leaves this computer unless you send it. Give it to your vendor to obtain a signed
+              license, then import that license below.
+            </p>
+            <a className="btn btn-secondary" href={LICENSE_ACTIVATION_REQUEST_PATH} style={{ justifySelf: "start" }}>
+              Download activation request
+            </a>
           </Frame>
 
-          <Frame style={{ padding: 16 }}>
-            <div style={{ display: "grid", gap: 8 }}>
-              <strong
-                style={{
-                  fontFamily: "var(--font-heading)",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  fontSize: 13
-                }}
+          <Frame as="section" aria-label="Import a license" style={{ padding: 16, display: "grid", gap: 8 }}>
+            <h2 style={SECTION_HEADING}>Import a license</h2>
+            <p className="text-muted" style={{ fontSize: 12.5, lineHeight: 1.55, margin: 0 }}>
+              Select the signed license file your vendor issued. It is validated on this machine; a valid,
+              newer license replaces the current one.
+            </p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <input ref={fileRef} type="file" accept="application/json,.json,.lic" aria-label="License file" />
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={onImport}
+                // In-flight (not a standing condition): the button must stay focusable,
+                // so aria-disabled + the onImport re-entry guard carry it, never native
+                // `disabled` (which would blur the caret to <body>).
+                aria-disabled={importing || undefined}
               >
-                Import a license
-              </strong>
-              <p className="text-muted" style={{ fontSize: 12.5, lineHeight: 1.55, margin: 0 }}>
-                Select the signed license file your vendor issued. It is validated on this machine; a valid,
-                newer license replaces the current one.
-              </p>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                <input ref={fileRef} type="file" accept="application/json,.json,.lic" aria-label="License file" />
-                <button
-                  type="button"
-                  className="btn btn-primary"
-                  onClick={onImport}
-                  disabled={importing}
-                  aria-disabled={importing || undefined}
-                >
-                  {importing ? "Importing…" : "Import license"}
-                </button>
-              </div>
-              {result ? (
-                <p
-                  role="status"
-                  style={{
-                    fontSize: 12.5,
-                    lineHeight: 1.55,
-                    margin: 0,
-                    color: result.imported ? "var(--color-accent-800)" : "var(--color-neutral-800)"
-                  }}
-                >
-                  {result.imported
-                    ? `License imported — the status is now “${result.state}”${
-                        result.expires_at ? `, valid through ${formatLicenseDate(result.expires_at)}` : ""
-                      }.`
-                    : `The license was not imported.${result.reason_code ? ` (${result.reason_code})` : ""}${
-                        result.detail ? ` ${result.detail}` : ""
-                      }`}
-                </p>
-              ) : null}
+                {importing ? "Importing…" : "Import license"}
+              </button>
             </div>
+            {/* Permanently mounted so the outcome is reliably announced (a region
+                created together with its content often is not). */}
+            <p
+              role="status"
+              aria-live="polite"
+              style={{
+                fontSize: 12.5,
+                lineHeight: 1.55,
+                margin: 0,
+                minHeight: 0,
+                color: result?.imported ? "var(--color-accent-800)" : "var(--color-neutral-800)"
+              }}
+            >
+              {resultMessage}
+            </p>
           </Frame>
         </>
       ) : null}
@@ -144,10 +143,12 @@ export function License() {
 function LicenseReady({ status }: { status: LicenseStatus }) {
   const presentation = presentLicense(status);
   return (
-    <Frame style={{ padding: 16 }}>
+    <Frame as="section" aria-label="License status" style={{ padding: 16 }}>
       <div style={{ display: "grid", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-          <strong style={{ fontFamily: "var(--font-heading)", fontSize: 18 }}>{presentation.label}</strong>
+          <h2 style={{ ...SECTION_HEADING, fontSize: 20, textTransform: "none", letterSpacing: 0 }}>
+            {presentation.label}
+          </h2>
           <Tag tone={presentation.tone}>{presentation.readOnly ? "Read-only" : "Operational"}</Tag>
         </div>
         <p style={{ fontSize: 13.5, lineHeight: 1.55, margin: 0 }}>{presentation.description}</p>
@@ -166,7 +167,7 @@ function LicenseReady({ status }: { status: LicenseStatus }) {
                   {
                     label: "Machine binding",
                     value: status.machine_binding.match === "match" ? "This machine" : "Mismatch",
-                    detail: status.machine_binding.binding_confidence
+                    detail: bindingConfidenceLabel(status.machine_binding.binding_confidence)
                   }
                 ]
               : [])
