@@ -126,6 +126,17 @@ def main() -> int:
         f"{audit} heading is \"Report integrity\"",
     )
 
+    # ── AI/Model settings: Built-in analysis only; runtime internals gated ─────
+    settings = "src/redesign/pages/Settings.tsx"
+    check(
+        "settings shows Built-in analysis only and gates runtime internals",
+        _contains(settings, 'aria-label="AI and model"')
+        and _contains(settings, "Built-in analysis")
+        and _contains(settings, "Not configured")
+        and _contains(settings, "SHOW_INTERNAL"),
+        f"{settings} shows Built-in analysis (Local/Online not configured) and gates runtime internals",
+    )
+
     # ── COVERAGE RETAINED: nothing deleted to achieve the hiding ──────────────
     for rel in (
         "src/redesign/pages/Tracker.tsx",

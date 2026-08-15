@@ -7,6 +7,7 @@ import {
   type CellSpec
 } from "../components/primitives";
 import { apiUnreadReason, useWorkspace } from "../lib/workspace";
+import { SHOW_INTERNAL } from "../lib/build";
 
 /**
  * Settings — a READ-ONLY disclosure surface.
@@ -101,13 +102,17 @@ export function Settings() {
                     : `Actor source: ${identity.actor_source}`
                   : "The session payload carries no authenticated identity"
               },
-              {
-                label: "Local LLM policy",
-                value: session.tenant.local_llm_policy.mode.replace(/_/g, " "),
-                detail: session.tenant.local_llm_policy.hosted_fallback_enabled
-                  ? "Hosted fallback enabled"
-                  : "Hosted fallback disabled"
-              }
+              ...(SHOW_INTERNAL
+                ? [
+                    {
+                      label: "Local LLM policy",
+                      value: session.tenant.local_llm_policy.mode.replace(/_/g, " "),
+                      detail: session.tenant.local_llm_policy.hosted_fallback_enabled
+                        ? "Hosted fallback enabled"
+                        : "Hosted fallback disabled"
+                    }
+                  ]
+                : [])
             ]}
           />
         ) : apiStatus === "checking" ? (
@@ -167,6 +172,43 @@ export function Settings() {
         )}
       </Frame>
 
+      <Frame as="section" aria-label="AI and model" style={{ padding: 18, display: "grid", gap: 12 }}>
+        <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: 0 }}>
+          AI &amp; model
+        </h2>
+        <p className="text-muted" style={{ fontSize: 12, margin: 0, maxWidth: "80ch" }}>
+          How Monday Report answers questions and drafts reports on this computer.
+        </p>
+        <Cells
+          label="AI and model"
+          min={160}
+          items={[
+            {
+              label: "Built-in analysis",
+              value: "Active",
+              detail: "On this computer · no language model",
+              ok: true
+            },
+            { label: "Local model", value: "Not configured", detail: "Planned for a future version" },
+            { label: "Online API", value: "Not configured", detail: "This version makes no external AI calls" }
+          ]}
+        />
+        <p style={{ fontSize: 12.5, lineHeight: 1.55, margin: 0, maxWidth: "80ch" }}>
+          Answers come from Monday Report's built-in analysis: deterministic reasoning over this
+          workspace's uploaded evidence. It runs entirely on this computer, uses no language model, and
+          never invents facts or citations — it says so when the evidence does not support an answer.
+          Running a local model or connecting an online provider are planned for a future version and are
+          off here.
+        </p>
+        {localAi.state === "ready" && localAi.data.reachable ? (
+          <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.5, margin: 0, maxWidth: "80ch" }}>
+            A local model runtime was detected on this computer, but this version uses built-in analysis and
+            does not send your questions to it.
+          </p>
+        ) : null}
+      </Frame>
+
+      {SHOW_INTERNAL ? (
       <Frame as="section" aria-label="Runtime status" style={{ padding: 18, display: "grid", gap: 12 }}>
         <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: 0 }}>
           Runtime status
@@ -247,6 +289,7 @@ export function Settings() {
           )}
         </div>
       </Frame>
+      ) : null}
     </>
   );
 }
