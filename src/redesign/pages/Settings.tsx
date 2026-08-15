@@ -52,6 +52,48 @@ export function Settings() {
     : null;
   const grantedCount = permissionEntries?.filter(([, granted]) => granted).length ?? 0;
 
+  // AI / model rows reflect the server-side resolver's decision (active_provider), not
+  // mere runtime reachability. "local-model" is shown as Active ONLY when the operator
+  // has validly selected the loopback local model; otherwise built-in analysis answers,
+  // and a reachable-but-unused runtime is honestly labelled "detected — not used".
+  const localReady = localAi.state === "ready";
+  const localData = localReady ? localAi.data : null;
+  const activeProvider = localData?.active_provider ?? "deterministic";
+  const localModelActive = activeProvider === "local-model";
+  const localRuntimeLabel =
+    localData?.runtime === "lm_studio"
+      ? "LM Studio"
+      : localData?.runtime === "ollama"
+        ? "Ollama"
+        : "Local runtime";
+  const localRuntimeDetected = localReady && !!localData?.reachable && !localModelActive;
+
+  const aiModelCells: CellSpec[] = [
+    {
+      label: "Built-in analysis",
+      value: localModelActive ? "Standby" : "Active",
+      detail: localModelActive
+        ? "Answers if the local model is unavailable"
+        : "On this computer · no language model",
+      ok: true
+    },
+    localModelActive
+      ? {
+          label: "Local model",
+          value: "Active",
+          detail: `${localRuntimeLabel} · ${localData?.model ?? "model"} · runs on this computer`,
+          ok: true
+        }
+      : localRuntimeDetected
+        ? {
+            label: "Local model",
+            value: "Detected",
+            detail: "Local runtime detected — not currently used"
+          }
+        : { label: "Local model", value: "Not configured", detail: "Off in this version" },
+    { label: "Online API", value: "Not configured", detail: "This version makes no external AI calls" }
+  ];
+
   const runtimeCells: CellSpec[] =
     runtimeBackends.state === "ready"
       ? [
@@ -204,28 +246,16 @@ export function Settings() {
         <p className="text-muted" style={{ fontSize: 12, margin: 0, maxWidth: "80ch" }}>
           How Monday Report answers questions and drafts reports on this computer.
         </p>
-        <Cells
-          label="AI and model"
-          min={160}
-          items={[
-            {
-              label: "Built-in analysis",
-              value: "Active",
-              detail: "On this computer · no language model",
-              ok: true
-            },
-            { label: "Local model", value: "Not configured", detail: "Planned for a future version" },
-            { label: "Online API", value: "Not configured", detail: "This version makes no external AI calls" }
-          ]}
-        />
+        <Cells label="AI and model" min={160} items={aiModelCells} />
         <p style={{ fontSize: 12.5, lineHeight: 1.55, margin: 0, maxWidth: "80ch" }}>
-          Answers come from Monday Report's built-in analysis: deterministic reasoning over this
-          workspace's uploaded evidence. It runs entirely on this computer, uses no language model, and
-          cites the evidence each answer draws on — it does not invent citations, and shows when an answer
-          has none. Running a local model or connecting an online provider are planned for a future
-          version and are off here.
+          Answers are grounded in this workspace's uploaded evidence: Monday Report retrieves the relevant
+          material, cites the evidence each answer draws on — it does not invent citations, and shows when
+          an answer has none.{" "}
+          {localModelActive
+            ? `A local model on this computer (${localRuntimeLabel} · ${localData?.model ?? "model"}) writes the answer text from that evidence. It runs on this computer, and your questions and evidence are not sent to any online service.`
+            : "The answer text is written by built-in analysis running entirely on this computer, with no language model and no external calls."}
         </p>
-        {localAi.state === "ready" && localAi.data.reachable ? (
+        {localRuntimeDetected ? (
           <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.5, margin: 0, maxWidth: "80ch" }}>
             A local model runtime was detected on this computer, but this version uses built-in analysis and
             does not send your questions to it.
