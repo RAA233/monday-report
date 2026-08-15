@@ -171,7 +171,7 @@ export function Reports() {
           message={
             listRetry.retrying
               ? "The list is being read again."
-              : `${value.state === "error" ? value.message : ""} The list is unavailable — retry, or check that the backend is running.`
+              : `${value.state === "error" ? value.message : ""} The list is unavailable — retry, or check that Monday Report is running.`
           }
           onRetry={reload}
           retrying={listRetry.retrying}

@@ -240,7 +240,7 @@ export function Ask() {
           const nothingDrafted = " No report, draft or extraction was produced.";
           // "is recorded" would be an absolute the client cannot observe: both refusal
           // audits are best-effort on the backend and their success is never reported.
-          const refusalRecorded = nothingDrafted + " The backend records refusals like this in the report integrity record.";
+          const refusalRecorded = nothingDrafted + " Refusals like this are recorded in the report integrity record.";
           const text =
             status === "403"
               ? "This session is not permitted to ask questions here." +
@@ -254,11 +254,11 @@ export function Ask() {
                   /licen[sc]e/i.test(message)
                   ? "Monday Report is read-only — its license is not active, so this question was not processed. Open the License page to activate; existing data, answers and backups stay available." +
                     nothingDrafted
-                  : "The backend is holding changes to client data until its readiness checks pass, so this question was not processed." +
+                  : "Monday Report is not ready to record changes yet, so this question was not processed." +
                     refusalRecorded
                 : status === "503"
                   ? /snapshot write conflict|please retry/i.test(message)
-                    ? "The backend hit a concurrent-write conflict and did not process this question. Ask again." +
+                    ? "Monday Report hit a temporary conflict and did not process this question. Ask again." +
                       nothingDrafted
                     : "The workspace API is not configured to serve client data yet, so this question was not processed." +
                       nothingDrafted
@@ -266,7 +266,7 @@ export function Ask() {
                     ? `The workspace API refused this question: ${errorText(caught)}.` + nothingDrafted
                     : "The workspace API did not answer, so this question was not processed." +
                       nothingDrafted +
-                      " Whether the request reached the backend is unknown.";
+                      " Whether the request reached Monday Report is unknown.";
           setTurns((current) => [...current, { id: `a-${id}`, role: "assistant", text, failed: true }]);
         })
         .finally(() => {

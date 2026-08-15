@@ -121,9 +121,9 @@ function GateBanner({
             the queue, which lists conflicts as live cards. */}
         <span style={{ fontSize: 13 }}>
           No open validation task for this workspace was found in the queue, failure and anomaly reads
-          this view made — applying the backend's own gate predicate, which counts open tasks only, so a
-          task parked as a conflict still needs a reviewer but does not hold the export. The backend
-          enforces the gate again on export.
+          this view made — applying Monday Report's own gate predicate, which counts open tasks only, so a
+          task parked as a conflict still needs a reviewer but does not hold the export. The validation
+          gate is enforced again on export.
         </span>
       </div>
     );
@@ -135,7 +135,7 @@ function GateBanner({
     return (
       <div role="status" style={frame(false)}>
         <strong style={heading(false)}>Checking the export gate</strong>
-        <span style={{ fontSize: 13 }}>Reading the gate from the backend…</span>
+        <span style={{ fontSize: 13 }}>Reading the gate from Monday Report…</span>
       </div>
     );
   }
@@ -148,8 +148,8 @@ function GateBanner({
             in report_json, not in the refusal. */}
         <span style={{ fontSize: 13 }}>
           This session may not read the validation gate, so it is not shown here. That is not a
-          statement that the queue is empty — the backend enforces the gate on every export and
-          refuses it while an open failure- or anomaly-targeted validation task exists for this
+          statement that the queue is empty — the validation gate is enforced on every export, and the
+          export is refused while an open failure- or anomaly-targeted validation task exists for this
           report's workspace.
         </span>
       </div>
@@ -161,8 +161,8 @@ function GateBanner({
         <strong style={heading(false)}>Export gate unknown</strong>
         <span style={{ fontSize: 13 }}>
           {retrying
-            ? "The gate is being read again. Until it answers this is not a statement that the queue is empty — the backend still enforces it on every export."
-            : "The gate could not be read, so it cannot be shown. This is not a statement that the queue is empty — the backend still enforces it on every export."}
+            ? "The gate is being read again. Until it answers this is not a statement that the queue is empty — it is still enforced on every export."
+            : "The gate could not be read, so it cannot be shown. This is not a statement that the queue is empty — it is still enforced on every export."}
         </span>
         <button
           type="button"
@@ -194,7 +194,7 @@ function GateBanner({
         {apiStatus === "checking"
           ? "The workspace API is still being reached, so the gate has not been read yet."
           : unread
-            ? `${unread}, so the gate has not been read. That is not a statement that the queue is empty — the backend enforces it on every export.`
+            ? `${unread}, so the gate has not been read. That is not a statement that the queue is empty — it is enforced on every export.`
             : "No workspace is resolved, so there is no gate to evaluate and nothing to export."}
       </span>
     </div>
@@ -409,7 +409,7 @@ export function Exports() {
         text =
           live.state === "ready" && live.openTasks > 0
             ? exportGateMessage(live.openTasks)
-            : "Export refused: the backend reports unresolved validation tasks for this report. Re-reading the gate — open Validation to resolve them.";
+            : "Export refused: Monday Report reports unresolved validation tasks for this report. Re-reading the gate — open Validation to resolve them.";
       } else {
         text = `Export refused. ${errorText(caught)}`;
       }
@@ -467,7 +467,6 @@ export function Exports() {
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
           You do not have permission to issue official exports, so they stay disabled.
-          The backend refuses the export route without it.
         </p>
       ) : null}
 

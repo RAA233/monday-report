@@ -123,14 +123,24 @@ export function Topbar() {
   // about it. An unread session is not a session with no identity - the rest of the
   // shell is careful about exactly this distinction, and this line was not.
   const actorSource = identity?.actor_source ?? (session ? "unreported" : null);
+  // Humanize the raw attribution enum for display — never print the backend's
+  // demo_bootstrap / authenticated / unreported token verbatim to a customer.
+  const sessionLabel =
+    actorSource === null
+      ? "Not read"
+      : actorSource === "authenticated"
+        ? "Verified identity"
+        : actorSource === "demo_bootstrap"
+          ? "Shared demo session"
+          : "Not reported";
   const actorNote =
     actorSource === null
       ? `not read — ${apiUnreadReason(apiStatus) ?? "the session has not resolved"}, so this session's identity is unknown.`
       : actorSource === "authenticated"
-        ? "actions are attributed to a verified authenticated identity."
+        ? "actions are attributed to a verified individual identity."
         : actorSource === "demo_bootstrap"
-          ? "a shared-key demo bootstrap, so actions are not verified-reviewer attributed."
-          : "the session reported no authenticated identity.";
+          ? "a shared demo session, so its actions are not attributed to a confirmed reviewer."
+          : "the session reported no confirmed identity.";
 
   const initials = displayName
     .split(/\s+/)
@@ -341,7 +351,7 @@ export function Topbar() {
               </div>
             ) : null}
             <p className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.5, margin: "10px 0 0" }}>
-              Actor source: <strong>{actorSource}</strong> — {actorNote}
+              Session: <strong>{sessionLabel}</strong> — {actorNote}
             </p>
             <hr className="hr" style={{ margin: "12px 0" }} />
             <div style={{ display: "grid", gap: 6 }}>

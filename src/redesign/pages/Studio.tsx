@@ -409,11 +409,11 @@ export function Studio() {
         // in flight the cell says so instead.
         detail:
           boardGate.state === "loading"
-            ? "Reading the gate from the backend"
+            ? "Reading the gate from Monday Report"
             : !gateKnown
-              ? "The backend gate could not be read — not a claim that it is clear"
+              ? "The validation gate could not be read — not a claim that it is clear"
               : gateFromDraft
-                ? "The backend's own count for this workspace, from the draft you built"
+                ? "Monday Report's own count for this workspace, from the draft you built"
                 : gateBlocked
                   ? "Export blocked until resolved"
                   : "No open tasks for this workspace",
@@ -429,7 +429,7 @@ export function Studio() {
             : gateBlocked
               ? "Held by the validation gate"
               : !gateKnownAndClear
-                ? "Held open until the gate is read — the backend decides on export"
+                ? "Held open until the gate is read — this is decided on export"
                 : "Held by incomplete draft fields",
         ok: issueReady
       }

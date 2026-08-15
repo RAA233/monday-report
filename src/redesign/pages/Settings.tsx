@@ -21,6 +21,23 @@ import { SHOW_INTERNAL } from "../lib/build";
  * this page does not have. Changing a credential, role or runtime setting is an
  * operator action outside this interface.
  */
+
+/**
+ * Humanize the raw actor_source attribution enum for customer display. The raw
+ * enum value (authenticated / demo_bootstrap / system) is never shown; a demo or
+ * shared session is honestly labelled as not attributed to a confirmed reviewer.
+ */
+function actorSourceLabel(actorSource: string): string {
+  switch (actorSource) {
+    case "authenticated":
+      return "Verified identity";
+    case "demo_bootstrap":
+      return "Shared demo session";
+    default:
+      return "Not reported";
+  }
+}
+
 export function Settings() {
   const { apiStatus, session, roles, localAi, runtimeBackends } = useWorkspace();
 
@@ -73,7 +90,7 @@ export function Settings() {
       <PageHeader
         kicker="Trust"
         title="Settings"
-        lede="What the backend reports about this session and this runtime — read-only. This page changes nothing: it has no save, no toggle and no form. The backend exposes administration routes, but no interface in this increment calls them."
+        lede="What Monday Report reports about this session and this runtime — read-only. This page changes nothing: it has no save, no toggle and no form. Administration routes exist, but no interface in this increment calls them."
         actions={<Tag tone="outline">Read-only</Tag>}
       />
 
@@ -98,8 +115,8 @@ export function Settings() {
                 value: identity ? identity.authentication_source.replace(/_/g, " ") : "Not reported",
                 detail: identity
                   ? identity.actor_source === "demo_bootstrap"
-                    ? "Demo bootstrap identity — not a verified per-user credential"
-                    : `Actor source: ${identity.actor_source}`
+                    ? "Shared demo session — its actions are not attributed to a confirmed individual reviewer"
+                    : `Session: ${actorSourceLabel(identity.actor_source)}`
                   : "The session payload carries no authenticated identity"
               },
               ...(SHOW_INTERNAL
@@ -140,7 +157,7 @@ export function Settings() {
           ) : null}
         </div>
         <p className="text-muted" style={{ fontSize: 12, margin: 0, maxWidth: "80ch" }}>
-          The backend's own permission map for this session's roles — the same model every route
+          Monday Report's own permission map for this session's roles — the same model every route
           enforces. Default-deny: what is not granted here is refused server-side, whatever any
           interface renders.
         </p>
@@ -283,7 +300,7 @@ export function Settings() {
             <Skeleton rows={1} label="Reading the runtime backends" />
           ) : runtimeBackends.state === "unauthorized" ? (
             <p role="status" style={{ fontSize: 13, margin: 0 }}>
-              This session lacks the <strong>view_runtime_status</strong> permission, so the backend
+              This session lacks the <strong>view_runtime_status</strong> permission, so the runtime
               configuration was not read.
             </p>
           ) : (

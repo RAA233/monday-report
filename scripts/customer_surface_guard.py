@@ -57,16 +57,24 @@ def _absent(rel: str, needle: str) -> bool:
 # or `can("view_reports")`), so a comment-stripped substring sweep is precise enough
 # to catch a leak without flagging code. This is the durable detector the shipped
 # customer build otherwise lacks (the UI e2e runs in internal mode).
+# Compared case-INSENSITIVELY (the body is lower-cased), so entries are lowercase.
 FORBIDDEN_JARGON = [
     "audit chain",
     "audit log",
     "audit-logged",
+    "audit key",
     "hash-chained",
     "row-level",
-    "RLS-ready",
-    "Tenant-scoped",
-    "HMAC",
-    "SHA-256",
+    "rls-ready",
+    "tenant-scoped",
+    "hmac",
+    "sha-256",
+    "the backend",
+    "actor source",
+    "readiness check",
+    "concurrent-write",
+    "verified-reviewer",
+    "shared-key",
 ]
 
 # Internal-only pages: hidden in the customer build (they early-return), so their
@@ -90,7 +98,7 @@ def _jargon_hits() -> list[str]:
         for path in sorted(directory.glob("*.tsx")):
             if path.name in INTERNAL_PAGES:
                 continue
-            body = _strip_comments(path.read_text(encoding="utf-8"))
+            body = _strip_comments(path.read_text(encoding="utf-8")).lower()
             for term in FORBIDDEN_JARGON:
                 if term in body:
                     hits.append(f"{sub}/{path.name}: {term!r}")

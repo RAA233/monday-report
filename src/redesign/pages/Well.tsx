@@ -119,7 +119,7 @@ export function Well() {
       <PageHeader
         kicker={`Well evidence · ${activeWorkspace?.name ?? "no workspace"}`}
         title="Well schematics"
-        lede="The casing program, directional survey and calculated trajectory from this workspace's parsed evidence — the same payload the Report Studio drafts from. Loading it is an audited action (the backend records report_draft.generate), so nothing is fetched until you ask."
+        lede="The casing program, directional survey and calculated trajectory from this workspace's parsed evidence — the same payload the Report Studio drafts from. Loading it is a recorded action, so nothing is fetched until you ask."
         actions={
           <>
             <button
@@ -310,7 +310,7 @@ export function Well() {
               <>
                 <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
                   Survey stations extracted from source evidence — source values are never overwritten
-                  by calculations. Calculated columns come from the backend's minimum-curvature run and
+                  by calculations. Calculated columns come from Monday Report's minimum-curvature run and
                   are review-required, not certified.
                 </p>
                 <GridTable

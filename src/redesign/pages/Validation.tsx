@@ -114,8 +114,8 @@ export function Validation() {
         resolutionNote: note || undefined
       });
       const attribution = updated.reviewer_verified_at
-        ? `verified reviewer ${updated.reviewer_user_id ?? "unknown"}`
-        : `actor source ${updated.reviewer_actor_source ?? "unreported"} — not a verified reviewer`;
+        ? `a confirmed reviewer (${updated.reviewer_user_id ?? "unknown"})`
+        : `${sessionAttribution(updated.reviewer_actor_source)} — not attributed to a confirmed reviewer`;
       showToast(
         status === "validated" ? "Validated" : "Rejected",
         `Decision recorded with ${attribution} and appended to the report integrity record.`
@@ -158,7 +158,7 @@ export function Validation() {
       <PageHeader
         kicker="Human-in-the-loop"
         title="Validation queue"
-        lede="A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each raise a task here. Decisions are recorded with server-derived reviewer attribution — verified-reviewer only when the session authenticates a per-user credential. The export gate counts only the failure- and anomaly-targeted tasks, so resolving one of those moves it; an OCR file task is queue work that export does not wait on."
+        lede="A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each raise a task here. Decisions are recorded with server-derived reviewer attribution — attributed to a confirmed reviewer only when the session authenticates a per-user credential. The export gate counts only the failure- and anomaly-targeted tasks, so resolving one of those moves it; an OCR file task is queue work that export does not wait on."
         actions={
           <Tag
             tone={openQueueTasks === null ? "neutral" : openQueueTasks > 0 ? "critical" : "outline"}
@@ -414,6 +414,19 @@ export function Validation() {
       ) : null}
     </>
   );
+}
+
+// Humanize the raw attribution enum for the decision toast — the backend token
+// (authenticated / demo_bootstrap / configured / system) never reaches the customer.
+function sessionAttribution(source: string | null | undefined): string {
+  switch (source) {
+    case "authenticated":
+      return "a verified identity";
+    case "demo_bootstrap":
+      return "a shared demo session";
+    default:
+      return "an unreported session";
+  }
 }
 
 function Detail({ label, value }: { label: string; value: string }) {

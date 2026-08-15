@@ -121,7 +121,7 @@ export function Benchmarking() {
         refused ? "Not recorded" : "Outcome unknown",
         refused
           ? `The measurement was not recorded. ${errorText(caught)}`
-          : `The request did not complete, so whether the measurement reached the backend is unknown — it may have landed. Re-read the benchmarking status before recording it again. ${errorText(caught)}`
+          : `The request did not complete, so whether the measurement reached Monday Report is unknown — it may have landed. Re-read the benchmarking status before recording it again. ${errorText(caught)}`
       );
     } finally {
       setMutating(false);
@@ -149,7 +149,7 @@ export function Benchmarking() {
         refused ? "Not recorded" : "Outcome unknown",
         refused
           ? `The dismissal was not recorded. ${errorText(caught)}`
-          : `The request did not complete, so whether the dismissal reached the backend is unknown — it may have landed. Re-read the benchmarking status before dismissing again. ${errorText(caught)}`
+          : `The request did not complete, so whether the dismissal reached Monday Report is unknown — it may have landed. Re-read the benchmarking status before dismissing again. ${errorText(caught)}`
       );
     } finally {
       setMutating(false);
@@ -188,7 +188,7 @@ export function Benchmarking() {
         refused ? "Not recorded" : "Outcome unknown",
         refused
           ? `The benchmark was not changed. ${errorText(caught)}`
-          : `The request did not complete, so whether the change reached the backend is unknown — it may have landed. Re-read the benchmarking status before adjusting again. ${errorText(caught)}`
+          : `The request did not complete, so whether the change reached Monday Report is unknown — it may have landed. Re-read the benchmarking status before adjusting again. ${errorText(caught)}`
       );
     } finally {
       setMutating(false);

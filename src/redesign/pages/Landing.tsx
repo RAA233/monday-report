@@ -53,7 +53,7 @@ const CAPABILITIES = [
   {
     title: "Validation workflow",
     body:
-      "A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly are each sent for human review. Decisions carry server-derived reviewer attribution into the record; verified-reviewer attribution requires a session authenticated with a per-user credential.",
+      "A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly are each sent for human review. Decisions carry server-derived reviewer attribution into the record; attribution to a confirmed reviewer requires a session authenticated with a per-user credential.",
     tags: ["Human-in-the-loop", "Reviewer attribution"]
   },
   {
