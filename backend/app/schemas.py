@@ -921,6 +921,9 @@ class LocalAIStatus(BaseModel):
     model: str | None = None
     hosted_fallback_enabled: bool = False
     detail: str
+    # Which provider actually answers Ask right now, from the server-side resolver's
+    # decision (not reachability): "deterministic" (built-in analysis) or "local-model".
+    active_provider: str = "deterministic"
 
 
 class RuntimeBackendStatus(BaseModel):

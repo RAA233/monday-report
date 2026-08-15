@@ -680,6 +680,9 @@ export interface ApiLocalAiStatus {
   model?: string | null;
   hosted_fallback_enabled: boolean;
   detail: string;
+  // Which provider actually answers right now, from the server-side resolver's decision
+  // (not reachability): "deterministic" (built-in analysis) or "local-model".
+  active_provider?: string;
 }
 
 export interface ApiRuntimeBackendStatus {

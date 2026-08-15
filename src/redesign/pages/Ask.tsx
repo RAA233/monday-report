@@ -100,7 +100,21 @@ const STEP_TONE: Record<string, string> = {
 
 export function Ask() {
   const navigate = useNavigate();
-  const { activeWorkspace, apiStatus, session, gate, auditIntegrity, can } = useWorkspace();
+  const { activeWorkspace, apiStatus, session, gate, auditIntegrity, can, localAi } = useWorkspace();
+
+  // A small, truthful indicator of which analysis writes the answer text. Shown ONLY when
+  // the provider state is readable — a role that can chat but lacks runtime-status access
+  // must not be shown a positive "Built-in analysis" claim, because a local model could be
+  // answering. Claims "Local model" only when it is selected AND the runtime + model are
+  // actually up; otherwise the local provider falls back to built-in for every answer. No
+  // marketing.
+  const aiProviderKnown = localAi.state === "ready";
+  const aiProviderServing =
+    localAi.state === "ready" &&
+    localAi.data.active_provider === "local-model" &&
+    !!localAi.data.reachable &&
+    !!localAi.data.model_available;
+  const aiProviderLabel = aiProviderServing ? "Local model" : "Built-in analysis";
   // A license-blocked answer should surface the app-wide read-only banner promptly.
   const { refresh: refreshLicense } = useLicense();
 
@@ -431,6 +445,20 @@ export function Ask() {
         <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.45 }}>
           {scopeHint}
         </span>
+        {aiProviderKnown ? (
+          <>
+            <span aria-hidden="true" style={{ color: "var(--color-neutral-600)" }}>
+              ·
+            </span>
+            <span
+              className="text-muted"
+              style={{ fontSize: 11.5, lineHeight: 1.45 }}
+              title="Which analysis writes the answer text"
+            >
+              {aiProviderLabel}
+            </span>
+          </>
+        ) : null}
       </div>
     </div>
   );

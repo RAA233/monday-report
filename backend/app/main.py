@@ -24,7 +24,13 @@ from .identity import (
 from .permissions import ALL_PERMISSIONS
 from .limits import max_upload_bytes, upload_too_large
 from .local_ai import evaluate_local_ai_status
-from .ai import DETERMINISTIC_PROVIDER, GroundedContext, dedupe_citations, validate_citations
+from .ai import (
+    DETERMINISTIC_PROVIDER,
+    GroundedContext,
+    dedupe_citations,
+    resolve_ai_provider,
+    validate_citations,
+)
 from .retention import retention_days
 from .schemas import (
     ActivitySegment,
@@ -386,7 +392,10 @@ def runtime_backends() -> RuntimeBackendStatus:
 def local_ai_status() -> LocalAIStatus:
     require_permission("view_runtime_status")
     store.refresh()
-    return evaluate_local_ai_status(store.tenant.local_llm_policy)
+    status = evaluate_local_ai_status(store.tenant.local_llm_policy)
+    # active_provider reflects the RESOLVER's decision (config), never mere reachability:
+    # "local-model" only when the operator has validly selected the loopback local model.
+    return status.model_copy(update={"active_provider": resolve_ai_provider(DETERMINISTIC_PROVIDER).name()})
 
 
 def require_client_data_ready(operation: str, resource_type: str, resource_id: UUID | None = None) -> None:
@@ -1822,7 +1831,14 @@ def chat(payload: ChatRequest) -> ChatResponse:
         for anomaly in (benchmark_status.active_anomalies if benchmark_status is not None else [])
         for citation in anomaly.supporting_citations
     ]
-    response = DETERMINISTIC_PROVIDER.generate(context)
+    # Server/operator-controlled provider selection. Unless the process environment
+    # explicitly (and validly) selects the loopback local model, this is the built-in
+    # deterministic provider. The deterministic provider passed in is the patchable
+    # module global, so a deterministic failure still surfaces; a *local model* failure
+    # falls back to deterministic inside the provider. Citations remain backend-owned
+    # and are validated below regardless of which provider produced the answer.
+    provider = resolve_ai_provider(DETERMINISTIC_PROVIDER)
+    response = provider.generate(context)
     response.citations = validate_citations(response.citations, allowed_citations)
     return response
 

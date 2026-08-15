@@ -7,6 +7,11 @@ the request handler. No model, no network, no behavior change.
 from .citations import citation_key, dedupe_citations, validate_citations
 from .contract import AIProvider, GroundedContext, ProviderCapabilities, ProviderStatus
 from .deterministic_provider import DETERMINISTIC_PROVIDER, DeterministicProvider
+from .local_model_provider import (
+    LocalModelProvider,
+    build_grounded_messages,
+    resolve_ai_provider,
+)
 
 __all__ = [
     "AIProvider",
@@ -15,6 +20,9 @@ __all__ = [
     "ProviderCapabilities",
     "DeterministicProvider",
     "DETERMINISTIC_PROVIDER",
+    "LocalModelProvider",
+    "resolve_ai_provider",
+    "build_grounded_messages",
     "citation_key",
     "dedupe_citations",
     "validate_citations",
