@@ -1,6 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
 import { BrandMark, Tag } from "../components/primitives";
-import { NAV_GROUPS, isCurrent } from "./navigation";
+import { activeNavGroups, isCurrent } from "./navigation";
 import { useWorkspace } from "../lib/workspace";
 
 /**
@@ -53,7 +53,7 @@ export function Sidebar() {
       </div>
 
       <nav data-navgroups="" style={{ display: "grid", gap: 16 }} aria-label="Application">
-        {NAV_GROUPS.map((group) => (
+        {activeNavGroups().map((group) => (
           <div data-navgroup="" key={group.label} style={{ display: "grid", gap: 2 }}>
             <span
               data-navlabel=""

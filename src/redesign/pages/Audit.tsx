@@ -89,7 +89,7 @@ export function Audit() {
     <>
       <PageHeader
         kicker="Trust"
-        title="Audit chain"
+        title="Report integrity"
         lede="The tenant's append-only, hash-chained audit log: every upload, decision, draft, correction and export lands here. The integrity verdict below is the backend's own — this view recomputes nothing."
         actions={
           integrity ? (
@@ -127,7 +127,7 @@ export function Audit() {
       {integrity ? (
         <>
           <Cells
-            label="Audit chain integrity"
+            label="Report integrity"
             min={130}
             items={[
               {

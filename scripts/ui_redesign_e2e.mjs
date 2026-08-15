@@ -223,7 +223,7 @@ const ROUTES = [
   { path: "/app/upload", heading: "Upload rig reports", label: "upload" },
   { path: "/app/benchmarking", heading: "Benchmarking", label: "benchmarking" },
   { path: "/app/failures", heading: "Failure explorer", label: "failures" },
-  { path: "/app/audit", heading: "Audit chain", label: "audit" },
+  { path: "/app/audit", heading: "Report integrity", label: "audit" },
   { path: "/app/settings", heading: "Settings", label: "settings" },
   { path: "/app/tracker", heading: "Project tracker", label: "tracker" },
   { path: "/app/roadmap", heading: "Product roadmap", label: "roadmap" }

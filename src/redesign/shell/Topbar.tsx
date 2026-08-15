@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { ChevronDown, ShieldCheck } from "lucide-react";
 import { apiUnreadReason, useWorkspace } from "../lib/workspace";
 import { routeLabel } from "./navigation";
+import { SHOW_INTERNAL } from "../lib/build";
 
 /**
  * Topbar: workspace selector, the current route, and the trust chips.
@@ -353,22 +354,30 @@ export function Topbar() {
               >
                 Settings &amp; session
               </button>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => {
-                  setProfileOpen(false);
-                  navigate("/app/signin");
-                }}
-              >
-                Sign out
-              </button>
-              {/* No logout endpoint exists and the credential is build-time, so
-                  "sign out" cannot revoke anything — say so instead of implying it. */}
-              <span className="text-muted" style={{ fontSize: 10.5, lineHeight: 1.45 }}>
-                Returns to the sign-in surface. The build-time credential stays active — there is no
-                session token to revoke.
-              </span>
+              {/* The sign-in surface is an internal-build affordance: there is
+                  no login endpoint and the credential is build-time, so a
+                  customer has nothing to sign into or out of. The customer build
+                  hides it (see src/redesign/lib/build.ts). */}
+              {SHOW_INTERNAL ? (
+                <>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={() => {
+                      setProfileOpen(false);
+                      navigate("/app/signin");
+                    }}
+                  >
+                    Sign out
+                  </button>
+                  {/* No logout endpoint exists and the credential is build-time, so
+                      "sign out" cannot revoke anything — say so instead of implying it. */}
+                  <span className="text-muted" style={{ fontSize: 10.5, lineHeight: 1.45 }}>
+                    Returns to the sign-in surface. The build-time credential stays active — there is no
+                    session token to revoke.
+                  </span>
+                </>
+              ) : null}
             </div>
           </div>
         ) : null}

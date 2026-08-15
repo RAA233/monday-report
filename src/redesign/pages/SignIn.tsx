@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate } from "react-router-dom";
 import { BrandMark, SegControl, Tag } from "../components/primitives";
 import { getSession } from "../../lib/api";
 import { errorText, useWorkspace } from "../lib/workspace";
+import { SHOW_INTERNAL } from "../lib/build";
 
 /**
  * Sign-in surface.
@@ -23,6 +24,11 @@ import { errorText, useWorkspace } from "../lib/workspace";
 type Mode = "configured" | "demo";
 
 export function SignIn() {
+  // The sign-in surface is an internal-build affordance (no login endpoint; the
+  // credential is build-time). The shipped customer build has nothing to sign
+  // into, so it is not reachable there — send the customer to the app home.
+  if (!SHOW_INTERNAL) return <Navigate to="/app" replace />;
+
   const navigate = useNavigate();
   const { retry } = useWorkspace();
   const [mode, setMode] = useState<Mode>("configured");

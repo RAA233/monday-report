@@ -3,6 +3,7 @@ import { Link, Outlet } from "react-router-dom";
 import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { useWorkspace } from "../lib/workspace";
+import { SHOW_INTERNAL } from "../lib/build";
 
 /**
  * The authenticated application frame: rail + topbar + the offline banner + a
@@ -88,10 +89,13 @@ export function AppShell() {
             {refused || misconfigured ? (
               // No retry: neither a credential refusal nor an unconfigured backend can be
               // fixed by repeating the same request. The sign-in surface reports what the
-              // server actually said.
-              <Link className="btn btn-ghost" to="/app/signin" style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}>
-                Check the session
-              </Link>
+              // server actually said — but it is an internal-build surface, so the
+              // customer build shows the explanation without a link into it.
+              SHOW_INTERNAL ? (
+                <Link className="btn btn-ghost" to="/app/signin" style={{ minHeight: 0, padding: "0 4px", fontSize: 13 }}>
+                  Check the session
+                </Link>
+              ) : null
             ) : (
               <button
                 type="button"

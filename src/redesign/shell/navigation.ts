@@ -14,6 +14,7 @@ import {
   UploadCloud,
   type LucideIcon
 } from "lucide-react";
+import { SHOW_INTERNAL } from "../lib/build";
 
 /**
  * The application navigation.
@@ -64,7 +65,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Trust",
     items: [
-      { path: "/app/audit", label: "Audit chain", icon: ShieldCheck },
+      { path: "/app/audit", label: "Report integrity", icon: ShieldCheck },
       { path: "/app/exports", label: "Exports", icon: Download },
       { path: "/app/settings", label: "Settings", icon: SlidersHorizontal }
     ]
@@ -77,6 +78,17 @@ export const NAV_GROUPS: NavGroup[] = [
     ]
   }
 ];
+
+/**
+ * The nav groups visible in the current build. The shipped CUSTOMER build hides
+ * the internal Program group (the ported tracker/roadmap records); an internal
+ * build (`VITE_MONDAY_REPORT_INTERNAL=1`) shows every group. `NAV_GROUPS` stays
+ * the full set, so the route-label / current-item resolution below still covers
+ * the internal paths in either build.
+ */
+export function activeNavGroups(): NavGroup[] {
+  return SHOW_INTERNAL ? NAV_GROUPS : NAV_GROUPS.filter((group) => group.label !== "Program");
+}
 
 const ALL_ITEMS = NAV_GROUPS.flatMap((group) => group.items);
 
