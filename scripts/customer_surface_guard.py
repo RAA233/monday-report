@@ -60,6 +60,7 @@ def _absent(rel: str, needle: str) -> bool:
 FORBIDDEN_JARGON = [
     "audit chain",
     "audit log",
+    "audit-logged",
     "hash-chained",
     "row-level",
     "RLS-ready",

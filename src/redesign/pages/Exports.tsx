@@ -381,7 +381,7 @@ export function Exports() {
           tone: "ok",
           // The ellipsis marks the truncation: 12 of 64 hex characters presented as
           // "SHA <value>" reads as a whole digest and silently fails a comparison.
-          text: `${format.toUpperCase()} ready · ${sizeLabel(result.byte_size)} · SHA ${shortSha(result.sha256)}…`,
+          text: `${format.toUpperCase()} ready · ${sizeLabel(result.byte_size)} · checksum ${shortSha(result.sha256)}…`,
           full: result.sha256
         }
       }));
@@ -439,7 +439,7 @@ export function Exports() {
       );
       showToast(
         "Signed URL issued",
-        `A short-lived reference for the ${item.format.toUpperCase()} export was issued and audit-logged. It expires at ${signed.expires_at}.`
+        `A short-lived reference for the ${item.format.toUpperCase()} export was issued and recorded. It expires at ${signed.expires_at}.`
       );
     } catch (caught) {
       // Same guard as the success path: after a workspace switch this row is gone,
@@ -456,7 +456,7 @@ export function Exports() {
       <PageHeader
         kicker="Controlled handoff"
         title="Exports"
-        lede="Official exports are validation-gated, checksummed, audit-logged, and fetched only through expiring signed URLs."
+        lede="Official exports are validation-gated, checksummed, recorded in the report integrity record, and fetched only through expiring signed links."
       />
 
       <GateBanner gate={gate} onRetry={reloadGate} apiStatus={apiStatus} retrying={gateRetry.retrying} />
@@ -466,7 +466,7 @@ export function Exports() {
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          This session lacks <strong>issue_client_reports</strong>, so official exports stay disabled.
+          You do not have permission to issue official exports, so they stay disabled.
           The backend refuses the export route without it.
         </p>
       ) : null}
@@ -476,7 +476,7 @@ export function Exports() {
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          This session can create exports but lacks <strong>export_evidence</strong>, so signed
+          This session can create exports but cannot export evidence, so signed
           references cannot be issued from here.
         </p>
       ) : null}
@@ -685,7 +685,7 @@ export function Exports() {
         )}
         <p className="text-muted" style={{ fontSize: 12, margin: "10px 0 2px" }}>
           Storage paths are never exposed — access is only ever through short-lived signed URLs, and
-          every issuance is audit-logged.
+          every issuance is recorded in the report integrity record.
         </p>
       </Frame>
     </>

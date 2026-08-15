@@ -72,10 +72,36 @@ function formatValue(value: unknown): string {
   return String(value);
 }
 
+/** Turns a backend snake_case/dotted token into a readable customer label, so a raw
+ *  event code or metadata key is never shown verbatim on this page. */
+function humanizeToken(raw: string): string {
+  const spaced = raw.replace(/[._]+/g, " ").trim();
+  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : raw;
+}
+
+/** Friendly names for the common activity types; anything else (including future
+ *  events) falls back to a humanized form of the raw token. */
+const ACTION_LABELS: Record<string, string> = {
+  "report.create": "Report created",
+  "report_draft.generate": "Report drafted",
+  "report_export.issue": "Export issued",
+  "upload.received": "Upload received",
+  "upload.processing_complete": "Upload processed",
+  "workspace.create": "Workspace created",
+  "validation_task.resolve": "Validation resolved",
+  "field_correction.record": "Correction recorded",
+  permission_denied: "Permission denied",
+  "client_data.operation_blocked": "Action blocked"
+};
+
+function humanizeAction(action: string): string {
+  return ACTION_LABELS[action] ?? humanizeToken(action);
+}
+
 function formatMetadata(metadata: Record<string, unknown>): string {
   const entries = Object.entries(metadata);
   if (entries.length === 0) return "No details recorded.";
-  return entries.map(([key, value]) => `${key}: ${formatValue(value)}`).join(" · ");
+  return entries.map(([key, value]) => `${humanizeToken(key)}: ${formatValue(value)}`).join(" · ");
 }
 
 export function Audit() {
@@ -136,10 +162,11 @@ export function Audit() {
                 detail:
                   integrity.integrity_state === "keyed_valid"
                     ? "Every entry is cryptographically sealed and verifies"
-                    : integrity.integrity_state === "mixed_valid" ||
-                        integrity.integrity_state === "legacy_valid"
+                    : integrity.integrity_state === "mixed_valid"
                       ? "Newer entries are sealed; older entries are hashed only and don't have the same protection against tampering"
-                      : "See the detail below",
+                      : integrity.integrity_state === "legacy_valid"
+                        ? "Entries are hashed and linked, but none are sealed, so they don't have the same protection against tampering as a sealed record"
+                        : "See the detail below",
                 ok:
                   integrity.integrity_state === "keyed_valid"
                     ? true
@@ -247,9 +274,9 @@ export function Audit() {
                   style={{ border: "1px solid var(--color-divider)", padding: "9px 12px", display: "grid", gap: 4, fontSize: 12.5 }}
                 >
                   <div style={{ display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" }}>
-                    <strong style={{ fontFamily: "var(--font-heading)" }}>{entry.action}</strong>
+                    <strong style={{ fontFamily: "var(--font-heading)" }}>{humanizeAction(entry.action)}</strong>
                     <span className="text-muted" style={{ fontSize: 11.5 }}>
-                      {entry.resource_type}
+                      {humanizeToken(entry.resource_type)}
                       {entry.resource_id ? ` · ${entry.resource_id.slice(0, 8)}…` : ""} ·{" "}
                       {new Date(entry.created_at).toLocaleString()}
                     </span>

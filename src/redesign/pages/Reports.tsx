@@ -130,7 +130,7 @@ export function Reports() {
       aria-disabled={creating || undefined}
       title={
         !readOnly && !canCreate
-          ? "This session lacks the generate_reports permission."
+          ? "This session cannot create reports."
           : undefined
       }
     >
@@ -156,8 +156,8 @@ export function Reports() {
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          This session lacks <strong>generate_reports</strong>, so new Monday reports cannot be
-          created here. The backend refuses the create route without it.
+          You do not have permission to create reports, so new Monday reports cannot be
+          created here.
         </p>
       ) : null}
 

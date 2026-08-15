@@ -1114,14 +1114,14 @@ export function Studio() {
         Required sections for {activeVariant.label}: {activeVariant.requiredSections.join(", ")}.
       </p>
 
-      {/* Reviewed schema variants — the committed MR-SCHEMA-1 coverage board.
+      {/* Reviewed report formats — the committed MR-SCHEMA-1 coverage board.
           Every figure is read from `src/data/reportVariantSchemas.ts`, the same
           module the selector above renders from, so this board cannot drift from
           the schema the backend and the guards pin. */}
-      <Frame as="section" aria-label="Reviewed schema variants" style={{ padding: 18, display: "grid", gap: 12 }}>
+      <Frame as="section" aria-label="Reviewed report formats" style={{ padding: 18, display: "grid", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <div>
-            <span className="mr-kicker">Reviewed schema variants</span>
+            <span className="mr-kicker">Reviewed report formats</span>
             <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: "2px 0 0" }}>
               Extraction and drafting targets
             </h2>
@@ -1161,7 +1161,6 @@ export function Studio() {
                 {variant.shortLabel}
               </span>
               <strong style={{ fontFamily: "var(--font-heading)", fontSize: 14.5 }}>{variant.label}</strong>
-              <code style={{ fontSize: 11 }}>{variant.schemaId}</code>
               <span className="text-muted" style={{ fontSize: 11.5 }}>
                 {variant.extractionMarkers.length} markers · {variant.draftingChecks.length} checks ·{" "}
                 {variant.outputSections.length} outputs

@@ -88,7 +88,7 @@ export function AppShell() {
               : refused
               ? "The workspace API answered and refused this session's credential, so no workspace data can be read and nothing can be recorded. The service is running — the API key or the role has to change. Empty lists below mean \"not read\", not \"none exist\"."
               : misconfigured
-                ? "The workspace API answered, but it is not configured to serve client data yet — it reports a missing client API key or audit key. Nothing can be read or recorded until that is configured on the backend. Empty lists below mean \"not read\", not \"none exist\"."
+                ? "The workspace API answered, but it is not configured to serve client data yet — it reports that a required configuration key is missing. Nothing can be read or recorded until that is configured. Empty lists below mean \"not read\", not \"none exist\"."
                 : "The workspace API is unreachable, so no workspace data can be read and nothing can be recorded. Empty lists below mean \"not read\", not \"none exist\"."}
             {refused || misconfigured ? (
               // No retry: neither a credential refusal nor an unconfigured backend can be

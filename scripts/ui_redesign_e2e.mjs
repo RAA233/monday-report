@@ -1435,7 +1435,7 @@ async function main() {
   // earlier in the run could mask a missing variant.
   {
     await page.goto(`${WEB}/app/studio`, { waitUntil: "networkidle" });
-    const board = page.locator('section[aria-label="Reviewed schema variants"]');
+    const board = page.locator('section[aria-label="Reviewed report formats"]');
     const boardPresent = (await board.count()) === 1;
     const cardCount = boardPresent ? await board.locator("article").count() : 0;
     const boardText = boardPresent ? await board.innerText() : "";
@@ -1450,7 +1450,7 @@ async function main() {
         ? `${cardCount} variant card(s); schema version shown: ${hasVersion}; ` +
           `${countLines} of 5 cards carry a "markers · checks · outputs" count line` +
           (missingLabels.length ? `; missing labels: ${missingLabels.join(", ")}` : "")
-        : 'no section labelled "Reviewed schema variants" rendered on /app/studio'
+        : 'no section labelled "Reviewed report formats" rendered on /app/studio'
     );
 
     // Select the Directional variant BEFORE any draft is built: the title and the

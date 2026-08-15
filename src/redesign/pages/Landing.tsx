@@ -35,7 +35,7 @@ const CAPABILITIES = [
   {
     title: "Structured Monday reporting",
     body:
-      "Weekly Monday reports and daily morning reports on a reviewed schema — five variants, period tracking, and a recorded status: a report opens as a draft, or directly as review when the workspace already has open validation tasks; a refused export also moves one to review, and a completed export marks it exported.",
+      "Weekly Monday reports and daily morning reports in a reviewed format — five variants, period tracking, and a recorded status: a report opens as a draft, or directly as review when the workspace already has open validation tasks; a refused export also moves one to review, and a completed export marks it exported.",
     tags: ["Reviewed format", "5 variants"]
   },
   {
