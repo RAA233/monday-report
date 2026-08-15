@@ -196,9 +196,9 @@ export function Settings() {
         <p style={{ fontSize: 12.5, lineHeight: 1.55, margin: 0, maxWidth: "80ch" }}>
           Answers come from Monday Report's built-in analysis: deterministic reasoning over this
           workspace's uploaded evidence. It runs entirely on this computer, uses no language model, and
-          never invents facts or citations — it says so when the evidence does not support an answer.
-          Running a local model or connecting an online provider are planned for a future version and are
-          off here.
+          cites the evidence each answer draws on — it does not invent citations, and shows when an answer
+          has none. Running a local model or connecting an online provider are planned for a future
+          version and are off here.
         </p>
         {localAi.state === "ready" && localAi.data.reachable ? (
           <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.5, margin: 0, maxWidth: "80ch" }}>

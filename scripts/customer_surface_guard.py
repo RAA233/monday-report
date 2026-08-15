@@ -133,8 +133,12 @@ def main() -> int:
         _contains(settings, 'aria-label="AI and model"')
         and _contains(settings, "Built-in analysis")
         and _contains(settings, "Not configured")
-        and _contains(settings, "SHOW_INTERNAL"),
-        f"{settings} shows Built-in analysis (Local/Online not configured) and gates runtime internals",
+        # Pin the ACTUAL gate wrapping the engineering Runtime-status section, not the
+        # bare identifier (which the import alone would satisfy) — this static guard is
+        # the sole detection layer for a customer-mode leak (the UI e2e runs internal).
+        and _contains(settings, "{SHOW_INTERNAL ? (")
+        and _contains(settings, 'aria-label="Runtime status"'),
+        f"{settings} shows Built-in analysis (Local/Online not configured) and gates the runtime-status section",
     )
 
     # ── COVERAGE RETAINED: nothing deleted to achieve the hiding ──────────────
