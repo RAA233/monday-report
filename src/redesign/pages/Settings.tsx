@@ -125,6 +125,9 @@ export function Settings() {
         )}
       </Frame>
 
+      {/* The raw RBAC permission map is an engineering/internal disclosure (snake_case
+          permission ids); the customer build hides it, the internal build keeps it. */}
+      {SHOW_INTERNAL ? (
       <Frame as="section" aria-label="Permission map" style={{ padding: 18, display: "grid", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
           <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: 0 }}>
@@ -171,6 +174,7 @@ export function Settings() {
           </p>
         )}
       </Frame>
+      ) : null}
 
       <Frame as="section" aria-label="AI and model" style={{ padding: 18, display: "grid", gap: 12 }}>
         <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: 0 }}>

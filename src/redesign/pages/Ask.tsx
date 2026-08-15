@@ -10,6 +10,7 @@ import {
 } from "../../lib/api";
 import { formatSourceCitation } from "../../lib/citationFormat";
 import { Cells, ErrorState, PageHeader, Tag } from "../components/primitives";
+import { integrityStateLabel } from "./Audit";
 import {
   apiUnreadReason,
   errorText,
@@ -239,10 +240,10 @@ export function Ask() {
           const nothingDrafted = " No report, draft or extraction was produced.";
           // "is recorded" would be an absolute the client cannot observe: both refusal
           // audits are best-effort on the backend and their success is never reported.
-          const refusalRecorded = nothingDrafted + " The backend records refusals like this in the audit chain.";
+          const refusalRecorded = nothingDrafted + " The backend records refusals like this in the report integrity record.";
           const text =
             status === "403"
-              ? "This session is not permitted to ask: the chat route requires the generate_reports permission." +
+              ? "This session is not permitted to ask questions here." +
                 refusalRecorded
               : status === "423"
                 ? // 423 is overloaded: the offline LICENSE read-only refusal (the
@@ -253,7 +254,7 @@ export function Ask() {
                   /licen[sc]e/i.test(message)
                   ? "Monday Report is read-only — its license is not active, so this question was not processed. Open the License page to activate; existing data, answers and backups stay available." +
                     nothingDrafted
-                  : "The backend is holding client-data mutations until its readiness checks pass, so this question was not processed." +
+                  : "The backend is holding changes to client data until its readiness checks pass, so this question was not processed." +
                     refusalRecorded
                 : status === "503"
                   ? /snapshot write conflict|please retry/i.test(message)
@@ -314,7 +315,7 @@ export function Ask() {
     {
       label: "Validation gate",
       value: gateText,
-      detail: gate.state === "ready" ? undefined : "not a queue-empty claim",
+      detail: gate.state === "ready" ? undefined : "not a tasks-cleared claim",
       emphasis: !gateIsClear(gate),
       to: "/app/validation"
     },
@@ -330,14 +331,14 @@ export function Ask() {
         rate.state === "ready" && rate.data.current != null && rate.data.benchmark != null
           ? `vs ${Math.round(rate.data.benchmark).toLocaleString()}`
           : rate.state === "unauthorized"
-            ? "requires view_benchmarks"
+            ? "requires benchmark access"
             : undefined,
       to: "/app/benchmarking"
     },
     {
       label: "Latest report",
       value: latestReport.state !== "ready" ? unreadCellValue(latestReport) : (latestReport.data ?? "None yet"),
-      detail: latestReport.state === "unauthorized" ? "requires view_reports" : undefined,
+      detail: latestReport.state === "unauthorized" ? "requires report access" : undefined,
       to: "/app/reports"
     },
     {
@@ -345,9 +346,9 @@ export function Ask() {
       label: "Report integrity",
       value:
         auditIntegrity.state === "ready"
-          ? `${auditIntegrity.data.status} · ${auditIntegrity.data.total_events}`
+          ? `${integrityStateLabel(auditIntegrity.data.integrity_state ?? null)} · ${auditIntegrity.data.total_events}`
           : unreadCellValue(auditIntegrity),
-      detail: auditIntegrity.state === "unauthorized" ? "requires view_audit_history" : undefined,
+      detail: auditIntegrity.state === "unauthorized" ? "requires report-integrity access" : undefined,
       to: "/app/audit"
     }
   ];
@@ -471,8 +472,8 @@ export function Ask() {
             role="status"
             style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
           >
-            This session lacks <strong>generate_reports</strong>, which the chat route requires, so
-            asking is disabled here.
+            This session does not have <strong>permission to ask questions</strong>, so asking is
+            disabled here.
           </p>
         ) : null}
 
@@ -1162,7 +1163,7 @@ function ChatTurn({
                       {issuableExports.length > 0
                         ? exportGated
                           ? exportGateMessage(gate.state === "ready" ? gate.openTasks : 0)
-                          : "Issued from the Exports view, where the validation gate is enforced, the SHA-256 is recorded, and the issuance is appended to the audit chain."
+                          : "Issued from the Exports view, where the validation gate is enforced, the file's digital fingerprint is recorded, and the issuance is added to the report integrity record."
                         : ""}
                       {otherExports.length > 0
                         ? `${issuableExports.length > 0 ? " This answer also names" : "This answer names"} ${otherExports.join(", ")}, which ${otherExports.length === 1 ? "is not a Monday-report export and is" : "are not Monday-report exports and are"} not issued from the Exports view.`

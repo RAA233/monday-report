@@ -36,7 +36,7 @@ const CAPABILITIES = [
     title: "Structured Monday reporting",
     body:
       "Weekly Monday reports and daily morning reports on a reviewed schema — five variants, period tracking, and a recorded status: a report opens as a draft, or directly as review when the workspace already has open validation tasks; a refused export also moves one to review, and a completed export marks it exported.",
-    tags: ["MR-SCHEMA-1", "5 variants"]
+    tags: ["Reviewed format", "5 variants"]
   },
   {
     title: "Source-cited drafting",
@@ -53,20 +53,20 @@ const CAPABILITIES = [
   {
     title: "Validation workflow",
     body:
-      "A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each queue for human review. Decisions carry server-derived reviewer attribution into the record; verified-reviewer attribution requires a session authenticated with a per-user credential.",
+      "A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly are each sent for human review. Decisions carry server-derived reviewer attribution into the record; verified-reviewer attribution requires a session authenticated with a per-user credential.",
     tags: ["Human-in-the-loop", "Reviewer attribution"]
   },
   {
-    title: "Tenant isolation",
+    title: "Organization isolation",
     body:
-      "Every table, endpoint, and workspace is tenant-scoped, and the schema is written for row-level security. One tenant's evidence never leaks into another's answers.",
-    tags: ["Tenant-scoped", "RLS-ready"]
+      "Every report, upload, and workspace stays isolated to your organization, so one organization's evidence never appears in another's answers.",
+    tags: ["Organization-scoped", "Isolated by design"]
   },
   {
     title: "Audited exports",
     body:
       "Official PDF, XLSX, HTML, JSON, and CSV exports are blocked while an open failure- or anomaly-targeted validation task exists for the workspace — then checksummed and served by expiring signed URL.",
-    tags: ["SHA-256", "Signed URLs"]
+    tags: ["Checksummed", "Signed URLs"]
   }
 ];
 
@@ -101,28 +101,28 @@ const WORKFLOW = [
   },
   {
     num: "05",
-    title: "Export with the audit chain",
+    title: "Export with the integrity record",
     body:
-      "Reports export in five formats once the validation gate is clear — checksummed, signed-URL served, and written into the hash-chained audit log.",
+      "Reports export in five formats once the validation gate is clear — checksummed, served by a signed link, and written into the tamper-evident report integrity record.",
     surface: "Exports"
   }
 ];
 
 const TRUST = [
   {
-    title: "Tenant-scoped behavior",
+    title: "Organization-scoped behavior",
     body:
-      "Requests resolve to one tenant; workspaces, uploads, failures, reports, and audit events all carry the tenant ID end to end."
+      "Requests resolve to one organization; workspaces, uploads, failures, reports, and activity records all stay tied to your organization end to end."
   },
   {
-    title: "Audit-chain visibility",
+    title: "Report integrity visibility",
     body:
-      "Every action appends to a hash-chained audit log — keyed with HMAC when a signing key is configured — and the app shows the chain's sealed, legacy, or broken state instead of hiding it."
+      "Every action appends to a tamper-evident report integrity record — cryptographically sealed when a signing key is configured — and the app shows the record's integrity state with a clear status label instead of hiding it."
   },
   {
     title: "Local-first AI",
     body:
-      "Classification, extraction and drafting are deterministic and run fully offline — no request leaves the tenant. A local model runtime (Ollama or LM Studio) is detected and its status reported, but it does not yet perform the analysis. Hosted fallback stays policy-controlled per tenant and off by default. No training by default."
+      "Classification, extraction and drafting are deterministic and run fully offline — no request leaves your organization. A local model runtime is detected and its status reported, but it does not yet perform the analysis. Hosted fallback stays policy-controlled per organization and off by default. No training by default."
   },
   {
     title: "Controlled evidence and exports",
@@ -208,7 +208,7 @@ export function Landing() {
               Monday Report drafts morning and Monday drilling reports for rig teams and operator HQ —
               from the paperwork the rig already produces. A local-first, deterministic engine
               extracts and cites the evidence, people validate it, and official exports stay gated
-              behind the audit chain.
+              behind the report integrity record.
             </p>
             <div style={{ display: "flex", gap: "var(--space-3)", flexWrap: "wrap", marginTop: 28 }}>
               <Link className="btn btn-primary" to="/app" style={{ textDecoration: "none" }}>
@@ -397,7 +397,7 @@ export function Landing() {
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
                       <span className="tag tag-neutral">Validation · 2 open</span>
                       <span className="tag tag-neutral">Export · gated</span>
-                      <span className="tag tag-accent">Audit · sealed</span>
+                      <span className="tag tag-accent">Integrity · Verified</span>
                     </div>
                   </div>
                 </div>
@@ -646,11 +646,10 @@ export function Landing() {
                   color: BODY_TEXT
                 }}
               >
-                This workspace runs on demo data: draft a DDR from parsed evidence, clear the
-                validation queue, and issue a checksummed, gated export. Well schematics, upload,
-                benchmarking, the failure explorer, the audit-chain view and read-only settings are
-                implemented in this redesign, alongside the ported project tracker and product
-                roadmap — two committed program records, labelled as such on their own pages.
+                This workspace runs on demo data: draft a DDR from parsed evidence, clear the open
+                validation tasks, and issue a checksummed, gated export. Well schematics, upload,
+                benchmarking, the failure explorer, the report integrity view and read-only settings
+                are implemented in this redesign.
               </p>
             </div>
             <Link className="btn btn-primary" to="/app" style={{ textDecoration: "none" }}>
@@ -698,10 +697,10 @@ export function Landing() {
             </Link>
           </div>
           <span>
-            Tenant-scoped drilling-report drafting on a local-first, deterministic engine. This
+            Organization-scoped drilling-report drafting on a local-first, deterministic engine. This
             preview runs on demo
             data only — no client data is stored, and official exports remain gated behind validation
-            and the audit chain.
+            and the report integrity record.
           </span>
         </footer>
       </div>

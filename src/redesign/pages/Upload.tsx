@@ -108,7 +108,7 @@ export function Upload() {
           name,
           bytes: file.size,
           status: "stored",
-          detail: `Stored, hashed (sha256 ${created.file.sha256.slice(0, 12)}…), audited, and queued for the worker. Malware check: ${created.file.malware_status}.`
+          detail: `Stored, hashed (${created.file.sha256.slice(0, 12)}…), recorded, and queued for processing. Malware check: ${created.file.malware_status}.`
         });
       } catch (caught) {
         // Only a 4xx proves the backend rejected the upload before applying it.
@@ -119,14 +119,14 @@ export function Upload() {
             name,
             bytes: file.size,
             status: "refused",
-            detail: `The backend refused this upload, so it was not stored. ${errorText(caught)}`
+            detail: `This upload was refused, so it was not stored. ${errorText(caught)}`
           });
         } else {
           results.push({
             name,
             bytes: file.size,
             status: "unknown",
-            detail: `The request did not complete, so whether this file was stored is unknown — it may have landed. Re-read the processing queue below before uploading it again. ${errorText(caught)}`
+            detail: `The request did not complete, so whether this file was stored is unknown — it may have landed. Check the processing list below before uploading it again. ${errorText(caught)}`
           });
         }
       }
@@ -138,8 +138,8 @@ export function Upload() {
     showToast(
       unknown > 0 ? "Outcome partly unknown" : stored === results.length ? "Stored" : "Some uploads refused",
       unknown > 0
-        ? `${stored} of ${results.length} file(s) stored; ${unknown} did not complete and may have landed — re-read the queue before retrying.`
-        : `${stored} of ${results.length} file(s) stored, hashed and queued for the worker.`
+        ? `${stored} of ${results.length} file(s) stored; ${unknown} did not complete and may have landed — check the processing list before retrying.`
+        : `${stored} of ${results.length} file(s) stored, hashed and queued for processing.`
     );
     // One user intent (the upload) invalidates the queue snapshot it feeds.
     reloadProcessingJobs();
@@ -167,7 +167,7 @@ export function Upload() {
       <PageHeader
         kicker={`Intake · ${activeWorkspace?.name ?? "no workspace"}`}
         title="Upload rig reports"
-        lede="Register PDFs, spreadsheets, text reports, emails, images and ZIPs into the audited intake path: each file is stored, hashed, malware-checked, audit-logged and queued. Parsing runs in the out-of-process worker, so a queued job stays queued until the worker drains it — nothing here simulates progress."
+        lede="Register PDFs, spreadsheets, text reports, emails, images and ZIPs into the audited intake path: each file is stored, hashed, malware-checked, recorded and queued for processing. Parsing runs separately in the background, so a queued file stays queued until Monday Report processes it — nothing here simulates progress."
         actions={
           <>
             <button
@@ -234,10 +234,7 @@ export function Upload() {
           ) : apiStatus !== "connected" ? (
             <>{apiUnreadReason(apiStatus)}, so nothing can be uploaded.</>
           ) : !canUpload ? (
-            <>
-              This session lacks the <strong>manage_uploads</strong> permission, so nothing can be
-              uploaded here. The backend refuses the intake route without it.
-            </>
+            <>This session does not have upload access, so nothing can be uploaded here.</>
           ) : (
             <>No workspace is resolved, so there is no intake scope to upload into.</>
           )}
@@ -287,10 +284,10 @@ export function Upload() {
         </Frame>
       ) : null}
 
-      <Frame as="section" aria-label="Processing queue" style={{ padding: 18, display: "grid", gap: 12 }}>
+      <Frame as="section" aria-label="Processing" style={{ padding: 18, display: "grid", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: 0 }}>
-            Processing queue
+            Processing
           </h2>
           <button
             type="button"
@@ -303,27 +300,27 @@ export function Upload() {
             disabled={apiStatus !== "connected" || !can("view_processing_status")}
             aria-disabled={jobsRetry.retrying || undefined}
           >
-            Re-read the queue
+            Refresh
           </button>
         </div>
         <p className="text-muted" style={{ fontSize: 12, margin: 0, maxWidth: "80ch" }}>
-          Jobs are drained by the out-of-process worker, which this interface cannot run. A queued
-          job here means the worker has not processed it yet — not that intake failed.
+          Files are processed in the background; processing cannot be started from this screen. A
+          queued file here means it has not been processed yet — not that intake failed.
         </p>
-        {processingJobs.state === "loading" ? <Skeleton rows={2} label="Loading the processing queue" /> : null}
+        {processingJobs.state === "loading" ? <Skeleton rows={2} label="Loading processing" /> : null}
         {processingJobs.state === "unauthorized" ? (
           <ErrorState
-            title="Queue not visible to this session"
-            message="This session lacks the view_processing_status permission, so the processing queue cannot be read here. This is not a statement that the queue is empty."
+            title="Processing not visible to this session"
+            message="This session does not have processing access, so the processing list cannot be read here. This is not a statement that it is empty."
           />
         ) : null}
         {jobsRetry.show ? (
           <ErrorState
-            title="Processing queue not read"
+            title="Processing not read"
             message={
               jobsRetry.retrying
-                ? "The queue is being read again."
-                : `${processingJobs.state === "error" ? processingJobs.message : ""} This is not a statement that the queue is empty.`
+                ? "The processing list is being read again."
+                : `${processingJobs.state === "error" ? processingJobs.message : ""} This is not a statement that it is empty.`
             }
             onRetry={apiStatus === "connected" ? reloadProcessingJobs : undefined}
             retrying={jobsRetry.retrying}
@@ -349,7 +346,7 @@ export function Upload() {
         {processingJobs.state === "ready" && processingJobs.data.length === 0 ? (
           <EmptyState
             title="No processing jobs"
-            body="The tenant queue was read and holds no jobs. Uploading a file queues one for the worker."
+            body="The processing list is empty. Uploading a file queues one for processing."
           />
         ) : null}
         {processingJobs.state === "ready" && processingJobs.data.length > 0 ? (
@@ -399,7 +396,7 @@ export function Upload() {
         {documents.state === "unauthorized" ? (
           <ErrorState
             title="Documents not visible to this session"
-            message="This session lacks the view_source_documents permission, so the parsed-document list cannot be read here. This is not a statement that no documents exist."
+            message="This session does not have source access, so the parsed-document list cannot be read here. This is not a statement that no documents exist."
           />
         ) : null}
         {docsRetry.show ? (
@@ -417,7 +414,7 @@ export function Upload() {
         {documents.state === "ready" && documents.data.length === 0 ? (
           <EmptyState
             title="No parsed documents"
-            body="The tenant document list was read and is empty. Documents appear here after the worker parses an uploaded file."
+            body="The document list for this workspace was read and is empty. Documents appear here after Monday Report processes an uploaded file."
           />
         ) : null}
         {documents.state === "ready" && documents.data.length > 0 ? (

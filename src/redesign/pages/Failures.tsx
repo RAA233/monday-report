@@ -73,7 +73,7 @@ export function Failures() {
       <PageHeader
         kicker={`Investigation · ${activeWorkspace?.name ?? "no workspace"}`}
         title="Failure explorer"
-        lede="Every extracted failure event in the tenant, with its severity, NPT, extraction confidence and validation state. Filters run over the list already read — refining one issues no further request."
+        lede="Every extracted failure event in this workspace, with its severity, NPT, extraction confidence and validation state. Filters run over the list already read — refining one issues no further request."
         actions={
           <Tag tone="outline" style={{ fontSize: 13, padding: "6px 12px" }}>
             {all ? `${filtered.length} of ${all.length} shown` : "Not read"}
@@ -131,7 +131,7 @@ export function Failures() {
       {failures.state === "unauthorized" ? (
         <ErrorState
           title="Failures not visible to this session"
-          message="This session lacks the view_source_documents permission, so the failure list cannot be read here. This is not a statement that no failures exist — ask a workspace admin for source-document access."
+          message="This session does not have source access, so the failure list cannot be read here. This is not a statement that no failures exist — ask a workspace admin to grant it."
         />
       ) : null}
 
@@ -151,7 +151,7 @@ export function Failures() {
       {all && all.length === 0 ? (
         <EmptyState
           title="No failure records"
-          body="The tenant failure list was read and is empty. Failure records are extracted from uploaded reports by the worker's deterministic extractor."
+          body="The failure list for this workspace was read and is empty. Failure records are extracted from uploaded reports by the Monday Report extractor."
           action={
             <Link className="btn btn-primary" to="/app/upload">
               Go to upload

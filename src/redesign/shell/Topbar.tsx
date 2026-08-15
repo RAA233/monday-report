@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ChevronDown, ShieldCheck } from "lucide-react";
 import { apiUnreadReason, useWorkspace } from "../lib/workspace";
+import { integrityStateLabel } from "../pages/Audit";
 import { routeLabel } from "./navigation";
 import { SHOW_INTERNAL } from "../lib/build";
 
@@ -143,7 +144,7 @@ export function Topbar() {
   // the same as the read failing.
   const auditChipLabel =
     auditIntegrity.state === "ready"
-      ? `${auditIntegrity.data.status} · ${auditIntegrity.data.total_events} events`
+      ? `${integrityStateLabel(auditIntegrity.data.integrity_state ?? null)} · ${auditIntegrity.data.total_events} events`
       : auditIntegrity.state === "loading"
         ? "checking"
         : auditIntegrity.state === "unauthorized"
@@ -252,13 +253,13 @@ export function Topbar() {
         onClick={() => navigate("/app/audit")}
         // The accessible name must CONTAIN the visible label (WCAG 2.5.3), so it is
         // built by suffixing the exact visible string rather than paraphrasing it.
-        aria-label={`Audit · ${auditChipLabel} — open the audit chain`}
+        aria-label={`Report integrity · ${auditChipLabel} — open the report integrity record`}
         // No inline `background`: an inline value beats the stylesheet, which made
         // `.mr-hover-text:hover` inert. The class owns the resting fill and the tint.
         style={{ ...chipBase, color: "inherit", cursor: "pointer", fontFamily: "var(--font-body)" }}
       >
         <ShieldCheck size={13} strokeWidth={1.5} aria-hidden="true" />
-        Audit · {auditChipLabel}
+        Report integrity · {auditChipLabel}
       </button>
 
       <div ref={profileRef}>

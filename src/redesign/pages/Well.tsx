@@ -84,7 +84,7 @@ export function Well() {
       setDraft(next);
       setState("ready");
       setMessage(
-        `Evidence loaded from ${next.source_document_count} document(s) and ${next.citation_count} citation(s). The read was recorded in the audit chain.`
+        `Evidence loaded from ${next.source_document_count} document(s) and ${next.citation_count} citation(s). The read was recorded in the report integrity record.`
       );
     } catch (caught) {
       if (askedFor !== workspaceIdRef.current) return;
@@ -152,7 +152,7 @@ export function Well() {
           {state === "error"
             ? "The evidence was not loaded — see the message below."
             : message ||
-              "Loading pulls this workspace's parsed evidence and is recorded in the audit chain, so it runs only when you ask for it."}
+              "Loading pulls this workspace's parsed evidence and is recorded in the report integrity record, so it runs only when you ask for it."}
         </StatusLine>
       </div>
 
@@ -168,7 +168,7 @@ export function Well() {
       {apiStatus === "connected" && !canRead ? (
         <ErrorState
           title="Well evidence not visible to this session"
-          message="This session lacks the view_reports permission, which GET /workspaces/{id}/report-draft requires, so the well evidence cannot be read here. This is not a statement that the workspace holds no evidence — ask a workspace admin for report access."
+          message="This session does not have report access, so the well evidence cannot be read here. This is not a statement that the workspace holds no evidence — ask a workspace admin for report access."
         />
       ) : null}
 
@@ -184,7 +184,7 @@ export function Well() {
       {state === "idle" && apiStatus === "connected" && canRead ? (
         <EmptyState
           title="No evidence loaded yet"
-          body="Nothing on this page reflects workspace data until you load it. Loading reads the workspace's parsed evidence through the draft endpoint, which appends one report_draft.generate event to the audit chain."
+          body="Nothing on this page reflects workspace data until you load it. Loading reads the workspace's parsed evidence, which records one entry in the report integrity record."
           action={
             <button type="button" className="btn btn-primary" onClick={() => void loadEvidence()}>
               Load well evidence

@@ -27,6 +27,7 @@ Two halves, both required:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -49,6 +50,50 @@ def _contains(rel: str, needle: str) -> bool:
 def _absent(rel: str, needle: str) -> bool:
     text = _text(rel)
     return text is not None and needle not in text
+
+
+# Engineering/GA jargon that must NOT appear in a customer surface's VISIBLE strings.
+# These are multi-word prose phrases (not code identifiers like `session.tenant.name`
+# or `can("view_reports")`), so a comment-stripped substring sweep is precise enough
+# to catch a leak without flagging code. This is the durable detector the shipped
+# customer build otherwise lacks (the UI e2e runs in internal mode).
+FORBIDDEN_JARGON = [
+    "audit chain",
+    "audit log",
+    "hash-chained",
+    "row-level",
+    "RLS-ready",
+    "Tenant-scoped",
+    "HMAC",
+    "SHA-256",
+]
+
+# Internal-only pages: hidden in the customer build (they early-return), so their
+# body copy is not a customer surface and is exempt from the sweep.
+INTERNAL_PAGES = {"Tracker.tsx", "Roadmap.tsx", "SignIn.tsx"}
+
+
+def _strip_comments(text: str) -> str:
+    """Remove /* ... */ (also JSX {/* ... */}) and // ... comments so the jargon sweep
+    inspects only code + visible strings, never developer comments (which legitimately
+    keep technical terms)."""
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+    text = re.sub(r"//[^\n]*", " ", text)
+    return text
+
+
+def _jargon_hits() -> list[str]:
+    hits: list[str] = []
+    for sub in ("pages", "shell"):
+        directory = ROOT / "src" / "redesign" / sub
+        for path in sorted(directory.glob("*.tsx")):
+            if path.name in INTERNAL_PAGES:
+                continue
+            body = _strip_comments(path.read_text(encoding="utf-8"))
+            for term in FORBIDDEN_JARGON:
+                if term in body:
+                    hits.append(f"{sub}/{path.name}: {term!r}")
+    return hits
 
 
 def main() -> int:
@@ -160,6 +205,14 @@ def main() -> int:
         _contains(router, "<Route path=\"tracker\" element={<Tracker />} />")
         and _contains(router, "<Route path=\"roadmap\" element={<Roadmap />} />"),
         f"{router} keeps the tracker/roadmap route literals",
+    )
+
+    # ── no engineering/GA jargon in customer-surface VISIBLE strings ──────────
+    jargon = _jargon_hits()
+    check(
+        "no engineering jargon on customer surfaces",
+        not jargon,
+        "customer pages/shell are jargon-clean" if not jargon else f"jargon found -> {'; '.join(jargon)}",
     )
 
     failed = [c for c in checks if not c[1]]

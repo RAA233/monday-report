@@ -111,7 +111,7 @@ export function Reports() {
         "Report created",
         `${report.id} opened as a ${report.status} for ${isoDay(report.period_start)} – ${isoDay(
           report.period_end
-        )} and appended to the audit chain.`
+        )} and recorded in the report integrity record.`
       );
       reload();
     } catch (caught) {
@@ -254,7 +254,7 @@ export function Reports() {
             Recorded status: a report opens as a draft, or directly as review when the workspace
             already has open validation tasks. A refused export also moves one to review, and a
             completed export marks it exported. There is no approval step in this increment. Every
-            report creation and export is appended to the audit chain.
+            report creation and export is recorded in the report integrity record.
           </p>
 
           {gateIsClosed(gate) && gate.state === "ready" ? (

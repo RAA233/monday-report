@@ -390,7 +390,7 @@ export function Exports() {
       reload();
       showToast(
         "Export ready",
-        `${shortId(forReport)} ${format.toUpperCase()} export written, checksummed, and appended to the audit chain. Fetch it with an expiring signed URL.`
+        `${shortId(forReport)} ${format.toUpperCase()} export written, checksummed, and recorded in the report integrity record. Fetch it with an expiring signed link.`
       );
     } catch (caught) {
       if (forWorkspace !== workspaceIdRef.current) return;
@@ -535,8 +535,8 @@ export function Exports() {
               : requestedButMissing
                 ? "The report named in the link is not in this workspace, so this is the newest report here instead."
                 : "No report was named, so this is the newest report in the workspace."}{" "}
-            Five official formats. Each export records byte size and SHA-256, and appends to the audit
-            chain. Report status: {target.status}.
+            Five official formats. Each export records its size and a checksum, and is added to the report
+            integrity record. Report status: {target.status}.
           </p>
           <div
             style={{
@@ -607,14 +607,14 @@ export function Exports() {
         {issued.length === 0 ? (
           <p className="text-muted" style={{ fontSize: 12.5, margin: "10px 0" }}>
             No export has been issued from this session. Exports issued earlier are recorded in the
-            audit chain rather than listed here.
+            report integrity record rather than listed here.
           </p>
         ) : (
           <GridTable
             label="Issued exports"
             template={TEMPLATE}
             minWidth={700}
-            columns={["Report", "Format", "Size", "SHA-256", "Created", "Access"]}
+            columns={["Report", "Format", "Size", "Checksum", "Created", "Access"]}
           >
             {issued.map((item) => (
               <GridRow template={TEMPLATE} key={item.id}>

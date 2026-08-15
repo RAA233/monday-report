@@ -315,7 +315,7 @@ export function Studio() {
     setMessage((current) =>
       current === "" || current.startsWith("Source draft pulls") || current.startsWith("Build a source-backed draft")
         ? workspaceId && apiStatus === "connected"
-          ? "Build a source-backed draft to pull this workspace's parsed evidence into the report. Drafting is recorded in the audit chain, so it runs only when you ask for it."
+          ? "Build a source-backed draft to pull this workspace's parsed evidence into the report. Drafting is recorded in the report integrity record, so it runs only when you ask for it."
           : "Source draft pulls parsed workspace evidence into this editable report."
         : current
     );
@@ -492,7 +492,7 @@ export function Studio() {
           content, which it never reads. The report id (when the route carries one)
           is disclosed below as the issue target instead. */}
       <PageHeader
-        kicker={`Report Studio · ${activeWorkspace?.name ?? "no workspace"} · ${reportVariantSchemaVersion}`}
+        kicker={`Report Studio · ${activeWorkspace?.name ?? "no workspace"} · Standard report format`}
         title={`${activeVariant.label} draft`}
         actions={
           <>
@@ -654,13 +654,13 @@ export function Studio() {
             >
               Edits here stay in this browser session. {editedKeys.size > 0 ? `${editedKeys.size} field(s) changed locally. ` : ""}
               Recording a change against the report requires a field correction with a written reason,
-              which carries reviewer attribution into the audit chain — the recorded source value is
+              which carries reviewer attribution into the report integrity record — the recorded source value is
               never overwritten.
               {!canEdit ? (
                 <>
                   {" "}
-                  This session holds neither <strong>generate_reports</strong> nor{" "}
-                  <strong>record_field_corrections</strong>, so a correction could not be recorded even
+                  This session can neither <strong>generate reports</strong> nor{" "}
+                  <strong>record field corrections</strong>, so a correction could not be recorded even
                   with a reason.
                 </>
               ) : null}
@@ -852,7 +852,7 @@ export function Studio() {
                 <Tag tone={gateIsClear(boardGate) ? "accent" : "neutral"}>
                   Export · {gateIsClear(boardGate) ? "available" : gateBlocked ? "gated" : "gate not read"}
                 </Tag>
-                <Tag tone="outline">{reportVariantSchemaVersion}</Tag>
+                <Tag tone="outline">Standard report format</Tag>
               </div>
               {gateBlocked ? (
                 <p role="status" style={{ fontSize: 12, margin: "8px 0 0", color: "var(--color-accent-800)" }}>
@@ -1126,7 +1126,7 @@ export function Studio() {
               Extraction and drafting targets
             </h2>
           </div>
-          <Tag tone="accent">{reportVariantSchemaVersion}</Tag>
+          <Tag tone="accent">Standard report format</Tag>
         </div>
         <div
           style={{

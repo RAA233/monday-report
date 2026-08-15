@@ -27,19 +27,19 @@ import { apiUnreadReason, useWorkspace } from "../lib/workspace";
 export function integrityStateLabel(state: ApiAuditIntegrityStatus["integrity_state"]): string {
   switch (state) {
     case "keyed_valid":
-      return "keyed (HMAC)";
+      return "Verified";
     case "mixed_valid":
-      return "mixed — keyed suffix, unkeyed history";
+      return "Partly sealed";
     case "legacy_valid":
-      return "legacy — unkeyed";
+      return "Linked, not sealed";
     case "key_unavailable":
-      return "key unavailable";
+      return "Seal key unavailable";
     case "broken":
-      return "broken";
+      return "Break detected";
     case "empty":
-      return "empty";
+      return "No entries yet";
     default:
-      return "unknown";
+      return "Unknown";
   }
 }
 
@@ -74,7 +74,7 @@ function formatValue(value: unknown): string {
 
 function formatMetadata(metadata: Record<string, unknown>): string {
   const entries = Object.entries(metadata);
-  if (entries.length === 0) return "No metadata recorded.";
+  if (entries.length === 0) return "No details recorded.";
   return entries.map(([key, value]) => `${key}: ${formatValue(value)}`).join(" · ");
 }
 
@@ -90,7 +90,7 @@ export function Audit() {
       <PageHeader
         kicker="Trust"
         title="Report integrity"
-        lede="The tenant's append-only, hash-chained audit log: every upload, decision, draft, correction and export lands here. The integrity verdict below is the backend's own — this view recomputes nothing."
+        lede="This workspace's activity record — every upload, decision, draft, correction and export lands here, and entries are only ever added, never changed or removed. The integrity result below is Monday Report's own; this page recomputes nothing."
         actions={
           integrity ? (
             <Tag
@@ -108,19 +108,19 @@ export function Audit() {
         }
       />
 
-      {auditIntegrity.state === "loading" ? <Skeleton rows={1} label="Reading the integrity verdict" /> : null}
+      {auditIntegrity.state === "loading" ? <Skeleton rows={1} label="Reading the integrity result" /> : null}
 
       {auditIntegrity.state === "unauthorized" ? (
         <ErrorState
-          title="Audit history not visible to this session"
-          message="This session lacks the view_audit_history permission, so neither the integrity verdict nor the entries can be read here. This is not a statement about the chain's state — ask a workspace admin for audit access."
+          title="Report integrity record not available here"
+          message="This session doesn't have report-integrity access, so neither the integrity result nor the entries can be shown here. This doesn't say anything about the record's state — ask a workspace admin for report-integrity access."
         />
       ) : null}
 
       {auditIntegrity.state === "error" ? (
         <ErrorState
-          title="Integrity verdict not read"
-          message={`${auditIntegrity.message} This is not a statement that the chain is intact or broken — it was not read.`}
+          title="Integrity result not read"
+          message={`${auditIntegrity.message} This doesn't say the record is intact or broken — it just wasn't read.`}
         />
       ) : null}
 
@@ -135,11 +135,11 @@ export function Audit() {
                 value: integrityStateLabel(integrity.integrity_state ?? null),
                 detail:
                   integrity.integrity_state === "keyed_valid"
-                    ? "Every event verifies under the active HMAC key"
+                    ? "Every entry is cryptographically sealed and verifies"
                     : integrity.integrity_state === "mixed_valid" ||
                         integrity.integrity_state === "legacy_valid"
-                      ? "The chain links, but unkeyed history is not tamper-evident against a writer who can recompute hashes"
-                      : "See the backend detail below",
+                      ? "Newer entries are sealed; older entries are hashed only and don't have the same protection against tampering"
+                      : "See the detail below",
                 ok:
                   integrity.integrity_state === "keyed_valid"
                     ? true
@@ -148,43 +148,43 @@ export function Audit() {
                       ? false
                       : undefined
               },
-              { label: "Events", value: String(integrity.total_events) },
+              { label: "Entries", value: String(integrity.total_events) },
               {
-                label: "Keyed",
+                label: "Sealed",
                 value: String(integrity.keyed_event_count ?? 0),
-                detail: "HMAC-signed events"
+                detail: "Cryptographically sealed entries"
               },
               {
-                label: "Legacy",
+                label: "Hashed",
                 value: String(integrity.legacy_event_count ?? integrity.legacy_events),
-                detail: "Unkeyed SHA-256 events"
+                detail: "Hashed but not sealed"
               },
               {
-                label: "Broken",
+                label: "Breaks",
                 value: String(integrity.broken_events),
                 ok: integrity.broken_events === 0,
                 detail: integrity.first_broken_event_id
-                  ? `First broken: ${integrity.first_broken_event_id.slice(0, 8)}…`
+                  ? `First break: ${integrity.first_broken_event_id.slice(0, 8)}…`
                   : "No break detected"
               },
               {
-                label: "Active key",
+                label: "Active seal",
                 value: integrity.active_key_id
                   ? `${integrity.active_key_id} v${integrity.active_key_version ?? "?"}`
                   : "None",
                 detail: integrity.active_key_id
-                  ? "New events sign under this key"
-                  : "No active audit key is configured"
+                  ? "New entries are sealed with this key"
+                  : "No active seal key is configured"
               }
             ]}
           />
           <p className="text-muted" style={{ fontSize: 12, margin: 0, maxWidth: "90ch" }}>
-            Backend detail: {integrity.detail}
+            Details: {integrity.detail}
           </p>
         </>
       ) : null}
 
-      <Frame as="section" aria-label="Recent audit entries" style={{ padding: 18, display: "grid", gap: 12 }}>
+      <Frame as="section" aria-label="Recent activity entries" style={{ padding: 18, display: "grid", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
           <h2 style={{ fontSize: 19, letterSpacing: "0.03em", textTransform: "uppercase", margin: 0 }}>
             Recent entries
@@ -200,16 +200,16 @@ export function Audit() {
             disabled={apiStatus !== "connected" || auditLogs.state === "unauthorized"}
             aria-disabled={logsRetry.retrying || undefined}
           >
-            Re-read the log
+            Re-read the record
           </button>
         </div>
 
-        {auditLogs.state === "loading" ? <Skeleton rows={3} label="Loading audit entries" /> : null}
+        {auditLogs.state === "loading" ? <Skeleton rows={3} label="Loading entries" /> : null}
 
         {auditLogs.state === "unauthorized" ? (
           <p role="status" style={{ fontSize: 13, margin: 0 }}>
-            This session lacks the <strong>view_audit_history</strong> permission, so the entries
-            cannot be read here.
+            This session doesn't have <strong>report-integrity access</strong>, so the entries
+            can't be shown here.
           </p>
         ) : null}
 
@@ -218,8 +218,8 @@ export function Audit() {
             title="Entries not read"
             message={
               logsRetry.retrying
-                ? "The log is being read again."
-                : `${auditLogs.state === "error" ? auditLogs.message : ""} This is not a statement that the log is empty.`
+                ? "The record is being read again."
+                : `${auditLogs.state === "error" ? auditLogs.message : ""} This doesn't mean the record is empty.`
             }
             onRetry={apiStatus === "connected" ? reloadAuditLogs : undefined}
             retrying={logsRetry.retrying}
@@ -228,17 +228,17 @@ export function Audit() {
 
         {logs && logs.length === 0 ? (
           <EmptyState
-            title="No audit entries"
-            body="The tenant audit log was read and holds no entries yet. Every audited action appends one."
+            title="No entries yet"
+            body="This workspace's activity record was read and holds no entries yet. Every recorded action adds one."
           />
         ) : null}
 
         {logs && logs.length > 0 ? (
           <>
             <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
-              Newest {logs.length} entr{logs.length === 1 ? "y" : "ies"} (the API caps this read at
-              200). Redacted metadata values show their recorded digest — the original value is not
-              retrievable here.
+              Newest {logs.length} entr{logs.length === 1 ? "y" : "ies"} (this list is capped at the
+              newest 200). Redacted values show only their recorded fingerprint — the original can't
+              be recovered here.
             </p>
             <div style={{ display: "grid", gap: 8 }}>
               {logs.map((entry) => (
@@ -255,11 +255,11 @@ export function Audit() {
                     </span>
                     <span style={{ marginInlineStart: "auto", display: "flex", gap: 6 }}>
                       {entry.integrity_version === 2 ? (
-                        <Tag tone="accent">keyed{entry.key_id ? ` · ${entry.key_id}` : ""}</Tag>
+                        <Tag tone="accent">Sealed{entry.key_id ? ` · ${entry.key_id}` : ""}</Tag>
                       ) : entry.entry_hash ? (
-                        <Tag tone="outline">legacy hash</Tag>
+                        <Tag tone="outline">Hashed</Tag>
                       ) : (
-                        <Tag tone="neutral">unhashed</Tag>
+                        <Tag tone="neutral">No hash</Tag>
                       )}
                     </span>
                   </div>
