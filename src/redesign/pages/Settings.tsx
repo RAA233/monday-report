@@ -58,6 +58,11 @@ export function Settings() {
   // and a reachable-but-unused runtime is honestly labelled "detected — not used".
   const localReady = localAi.state === "ready";
   const localData = localReady ? localAi.data : null;
+  // We only KNOW which on-computer engine answers when the provider status is readable. A
+  // role that can chat but lacks runtime-status access (localAi unauthorized) must NOT be
+  // shown a positive "built-in analysis / no language model" claim — a local model could be
+  // answering. When unknown, we show provider-agnostic truthful copy instead of a false one.
+  const providerKnown = localReady;
   const activeProvider = localData?.active_provider ?? "deterministic";
   const localModelActive = activeProvider === "local-model"; // the resolver selected local
   // "Serving" additionally requires the selected runtime AND model to actually be up. If
@@ -94,18 +99,28 @@ export function Settings() {
           }
         : { label: "Local model", value: "Not configured", detail: "Off in this version" };
 
-  const aiModelCells: CellSpec[] = [
-    {
-      label: "Built-in analysis",
-      value: localModelServing ? "Standby" : "Active",
-      detail: localModelServing
-        ? "Answers if the local model is unavailable"
-        : "On this computer · no language model",
-      ok: true
-    },
-    localModelCell,
-    { label: "Online API", value: "Not configured", detail: "This version makes no external AI calls" }
-  ];
+  const aiModelCells: CellSpec[] = providerKnown
+    ? [
+        {
+          label: "Built-in analysis",
+          value: localModelServing ? "Standby" : "Active",
+          detail: localModelServing
+            ? "Answers if the local model is unavailable"
+            : "On this computer · no language model",
+          ok: true
+        },
+        localModelCell,
+        { label: "Online API", value: "Not configured", detail: "This version makes no external AI calls" }
+      ]
+    : [
+        {
+          label: "Answers",
+          value: "On this computer",
+          detail: "Grounded in this workspace's evidence · runtime access needed to name the engine",
+          ok: true
+        },
+        { label: "Online API", value: "Not configured", detail: "This version makes no external AI calls" }
+      ];
 
   const runtimeCells: CellSpec[] =
     runtimeBackends.state === "ready"
@@ -266,7 +281,9 @@ export function Settings() {
           an answer has none.{" "}
           {localModelServing
             ? `A local model on this computer (${localRuntimeLabel} · ${localData?.model ?? "model"}) writes the answer text from that evidence. It runs on this computer, and your questions and evidence are not sent to any online service.`
-            : "The answer text is written by built-in analysis running entirely on this computer, with no language model and no external calls."}
+            : providerKnown
+              ? "The answer text is written by built-in analysis running entirely on this computer, with no language model and no external calls."
+              : "Answers run entirely on this computer and are grounded in this workspace's evidence, with citations. Which on-computer engine writes them is shown with runtime access."}
         </p>
         {localRuntimeDetected ? (
           <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.5, margin: 0, maxWidth: "80ch" }}>

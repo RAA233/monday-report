@@ -102,10 +102,13 @@ export function Ask() {
   const navigate = useNavigate();
   const { activeWorkspace, apiStatus, session, gate, auditIntegrity, can, localAi } = useWorkspace();
 
-  // A small, truthful indicator of which analysis writes the answer text. Claims
-  // "Local model" ONLY when the resolver selected it AND the runtime + model are actually
-  // up (otherwise the local provider falls back to built-in analysis for every answer, so
-  // built-in is what's really answering). No marketing.
+  // A small, truthful indicator of which analysis writes the answer text. Shown ONLY when
+  // the provider state is readable — a role that can chat but lacks runtime-status access
+  // must not be shown a positive "Built-in analysis" claim, because a local model could be
+  // answering. Claims "Local model" only when it is selected AND the runtime + model are
+  // actually up; otherwise the local provider falls back to built-in for every answer. No
+  // marketing.
+  const aiProviderKnown = localAi.state === "ready";
   const aiProviderServing =
     localAi.state === "ready" &&
     localAi.data.active_provider === "local-model" &&
@@ -442,16 +445,20 @@ export function Ask() {
         <span className="text-muted" style={{ fontSize: 11.5, lineHeight: 1.45 }}>
           {scopeHint}
         </span>
-        <span aria-hidden="true" style={{ color: "var(--color-neutral-600)" }}>
-          ·
-        </span>
-        <span
-          className="text-muted"
-          style={{ fontSize: 11.5, lineHeight: 1.45 }}
-          title="Which analysis writes the answer text"
-        >
-          {aiProviderLabel}
-        </span>
+        {aiProviderKnown ? (
+          <>
+            <span aria-hidden="true" style={{ color: "var(--color-neutral-600)" }}>
+              ·
+            </span>
+            <span
+              className="text-muted"
+              style={{ fontSize: 11.5, lineHeight: 1.45 }}
+              title="Which analysis writes the answer text"
+            >
+              {aiProviderLabel}
+            </span>
+          </>
+        ) : null}
       </div>
     </div>
   );
