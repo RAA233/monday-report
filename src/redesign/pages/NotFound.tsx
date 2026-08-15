@@ -12,9 +12,9 @@ export function NotFound() {
 
   return (
     <>
-      <PageHeader kicker="Route not found" title="No such view" />
+      <PageHeader kicker="Page not found" title="No such view" />
       <EmptyState
-        title="This route does not exist"
+        title="This page does not exist"
         body={`Nothing is mapped to ${pathname}. Use the navigation to reach a view, or start from Ask.`}
         action={
           <Link className="btn btn-primary" to="/app">

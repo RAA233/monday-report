@@ -158,7 +158,7 @@ export function Validation() {
       <PageHeader
         kicker="Human-in-the-loop"
         title="Validation queue"
-        lede="A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each raise a task here. Decisions are recorded with server-derived reviewer attribution — attributed to a confirmed reviewer only when the session authenticates a per-user credential. The export gate counts only the failure- and anomaly-targeted tasks, so resolving one of those moves it; an OCR file task is queue work that export does not wait on."
+        lede="A high-severity extracted failure, a file that needed OCR before its text could be read, and a Critical benchmark anomaly each raise a task here. Decisions are recorded with reviewer attribution — attributed to a confirmed reviewer only when the session authenticates a per-user credential. The export gate counts only the failure- and anomaly-targeted tasks, so resolving one of those moves it; an OCR file task is queue work that export does not wait on."
         actions={
           <Tag
             tone={openQueueTasks === null ? "neutral" : openQueueTasks > 0 ? "critical" : "outline"}
@@ -424,6 +424,10 @@ function sessionAttribution(source: string | null | undefined): string {
       return "a verified identity";
     case "demo_bootstrap":
       return "a shared demo session";
+    case "system":
+      return "a system action";
+    case "configured":
+      return "a configured session";
     default:
       return "an unreported session";
   }

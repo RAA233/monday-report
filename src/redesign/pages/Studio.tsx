@@ -627,7 +627,7 @@ export function Studio() {
               onChange={(v) => update("dls", v)}
              
               placeholder="1.3 deg/100 ft"
-              hint="Operator-entered — the draft payload carries no DLS value."
+              hint="Operator-entered — the draft carries no DLS value."
             />
             <Field id="st-mud" label="Mud weight" value={form.mudWeight} onChange={(v) => update("mudWeight", v)} />
           </div>
@@ -1169,7 +1169,7 @@ export function Studio() {
           ))}
         </div>
         <p className="text-muted" style={{ fontSize: 11.5, margin: 0, maxWidth: "80ch" }}>
-          Marker, check and output counts are read from the committed schema module, never a
+          Marker, check and output counts come from the reviewed report definitions, never a
           hand-typed figure.
         </p>
       </Frame>

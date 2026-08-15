@@ -75,6 +75,8 @@ FORBIDDEN_JARGON = [
     "concurrent-write",
     "verified-reviewer",
     "shared-key",
+    "server-derived",
+    "payload",
 ]
 
 # Internal-only pages: hidden in the customer build (they early-return), so their
@@ -93,9 +95,13 @@ def _strip_comments(text: str) -> str:
 
 def _jargon_hits() -> list[str]:
     hits: list[str] = []
-    for sub in ("pages", "shell"):
+    # Sweep the customer pages, the shell, AND src/redesign/lib (route titles,
+    # workspace/license helper strings) — the tab-title map lives in lib and is a
+    # customer surface too.
+    targets = [("pages", "*.tsx"), ("shell", "*.tsx"), ("lib", "*.tsx"), ("lib", "*.ts")]
+    for sub, pattern in targets:
         directory = ROOT / "src" / "redesign" / sub
-        for path in sorted(directory.glob("*.tsx")):
+        for path in sorted(directory.glob(pattern)):
             if path.name in INTERNAL_PAGES:
                 continue
             body = _strip_comments(path.read_text(encoding="utf-8")).lower()

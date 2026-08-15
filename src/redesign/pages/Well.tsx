@@ -119,7 +119,7 @@ export function Well() {
       <PageHeader
         kicker={`Well evidence · ${activeWorkspace?.name ?? "no workspace"}`}
         title="Well schematics"
-        lede="The casing program, directional survey and calculated trajectory from this workspace's parsed evidence — the same payload the Report Studio drafts from. Loading it is a recorded action, so nothing is fetched until you ask."
+        lede="The casing program, directional survey and calculated trajectory from this workspace's parsed evidence — the same evidence the Report Studio drafts from. Loading it is a recorded action, so nothing is fetched until you ask."
         actions={
           <>
             <button

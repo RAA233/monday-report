@@ -33,6 +33,10 @@ function actorSourceLabel(actorSource: string): string {
       return "Verified identity";
     case "demo_bootstrap":
       return "Shared demo session";
+    case "system":
+      return "System";
+    case "configured":
+      return "Configured";
     default:
       return "Not reported";
   }
@@ -108,7 +112,7 @@ export function Settings() {
               {
                 label: "Roles",
                 value: roles.length > 0 ? roles.join(", ") : "None",
-                detail: "Server-derived; permissions below follow from these"
+                detail: "Determined by your role"
               },
               {
                 label: "Authentication",
@@ -117,7 +121,7 @@ export function Settings() {
                   ? identity.actor_source === "demo_bootstrap"
                     ? "Shared demo session — its actions are not attributed to a confirmed individual reviewer"
                     : `Session: ${actorSourceLabel(identity.actor_source)}`
-                  : "The session payload carries no authenticated identity"
+                  : "This session carries no confirmed identity"
               },
               ...(SHOW_INTERNAL
                 ? [

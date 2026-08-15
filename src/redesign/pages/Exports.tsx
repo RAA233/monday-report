@@ -50,7 +50,7 @@ const FORMATS: Array<{ format: ApiReportExport["format"]; label: string; detail:
   { format: "pdf", label: "PDF", detail: "Issue-ready report document for client handoff." },
   { format: "xlsx", label: "XLSX", detail: "Workbook of report tables for operator systems." },
   { format: "html", label: "HTML", detail: "Self-contained rendering for review in a browser." },
-  { format: "json", label: "JSON", detail: "Full report payload for downstream integration." },
+  { format: "json", label: "JSON", detail: "The full report data for use in other tools." },
   { format: "csv", label: "CSV", detail: "Flat record extract for spreadsheets and pipelines." }
 ];
 
@@ -466,7 +466,8 @@ export function Exports() {
           role="status"
           style={{ fontSize: 13, border: "1px solid var(--color-divider)", padding: "10px 14px", margin: 0 }}
         >
-          You do not have permission to issue official exports, so they stay disabled.
+          You do not have permission to issue official exports, so they stay disabled. Monday Report
+          refuses the export without it.
         </p>
       ) : null}
 

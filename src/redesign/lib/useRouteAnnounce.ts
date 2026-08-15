@@ -35,7 +35,7 @@ const TITLES: Array<[RegExp, string]> = [
   [/^\/app\/upload\/?$/, "Upload"],
   [/^\/app\/benchmarking\/?$/, "Benchmarking"],
   [/^\/app\/failures\/?$/, "Failures"],
-  [/^\/app\/audit\/?$/, "Audit chain"],
+  [/^\/app\/audit\/?$/, "Report integrity"],
   [/^\/app\/settings\/?$/, "Settings"],
   [/^\/app\/tracker\/?$/, "Project tracker"],
   [/^\/app\/roadmap\/?$/, "Product roadmap"]
