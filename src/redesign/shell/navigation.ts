@@ -5,6 +5,7 @@ import {
   ClipboardCheck,
   Download,
   FileText,
+  KeyRound,
   ListChecks,
   MessageSquare,
   Route,
@@ -67,6 +68,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { path: "/app/audit", label: "Report integrity", icon: ShieldCheck },
       { path: "/app/exports", label: "Exports", icon: Download },
+      { path: "/app/license", label: "License", icon: KeyRound },
       { path: "/app/settings", label: "Settings", icon: SlidersHorizontal }
     ]
   },

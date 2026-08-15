@@ -4,6 +4,7 @@ import { Sidebar } from "./Sidebar";
 import { Topbar } from "./Topbar";
 import { useWorkspace } from "../lib/workspace";
 import { SHOW_INTERNAL } from "../lib/build";
+import { LicenseBanner, LicenseProvider } from "../lib/license";
 
 /**
  * The authenticated application frame: rail + topbar + the offline banner + a
@@ -35,6 +36,7 @@ export function AppShell() {
   const degraded = unreachable || retrying;
 
   return (
+    <LicenseProvider>
     <div
       data-shell=""
       style={{
@@ -48,6 +50,8 @@ export function AppShell() {
 
       <div style={{ minWidth: 0, display: "flex", flexDirection: "column", minHeight: "100vh" }}>
         <Topbar />
+
+        <LicenseBanner />
 
         {degraded ? (
           <div
@@ -188,5 +192,6 @@ export function AppShell() {
         ) : null}
       </div>
     </div>
+    </LicenseProvider>
   );
 }

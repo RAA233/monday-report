@@ -240,8 +240,16 @@ export function Ask() {
               ? "This session is not permitted to ask: the chat route requires the generate_reports permission." +
                 refusalRecorded
               : status === "423"
-                ? "The backend is holding client-data mutations until its readiness checks pass, so this question was not processed." +
-                  refusalRecorded
+                ? // 423 is overloaded: the offline LICENSE read-only refusal (the
+                  // runtime wrapper's middleware; its body names the license) vs. the
+                  // client-data readiness gate (the main API, and only in client mode).
+                  // A license refusal is blocked at/before the audit write, so it has
+                  // NO audit record — do not claim one; point to the License page.
+                  /licen[sc]e/i.test(message)
+                  ? "Monday Report is read-only — its license is not active, so this question was not processed. Open the License page to activate; existing data, answers and exports stay available." +
+                    nothingDrafted
+                  : "The backend is holding client-data mutations until its readiness checks pass, so this question was not processed." +
+                    refusalRecorded
                 : status === "503"
                   ? /snapshot write conflict|please retry/i.test(message)
                     ? "The backend hit a concurrent-write conflict and did not process this question. Ask again." +

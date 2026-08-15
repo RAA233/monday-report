@@ -14,6 +14,7 @@ import { Benchmarking } from "./pages/Benchmarking";
 import { Failures } from "./pages/Failures";
 import { Audit } from "./pages/Audit";
 import { Settings } from "./pages/Settings";
+import { License } from "./pages/License";
 import { Tracker } from "./pages/Tracker";
 import { Roadmap } from "./pages/Roadmap";
 import { NotFound } from "./pages/NotFound";
@@ -85,6 +86,7 @@ export function AppRoutes() {
           <Route path="failures" element={<Failures />} />
           <Route path="audit" element={<Audit />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="license" element={<License />} />
 
           {/* Ported program surfaces: the committed tracker/roadmap records. */}
           <Route path="tracker" element={<Tracker />} />
