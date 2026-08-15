@@ -504,7 +504,12 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
               # provenance honesty: the positive built-in claim is gated on providerKnown, so
               # a chat-capable role without runtime-status access is not told a false engine.
               and "providerKnown" in settings
-              and "Which on-computer engine writes them is shown with runtime access" in settings)
+              and "Which on-computer engine writes them is shown with runtime access" in settings
+              # Pin that the per-engine CELLS array itself is gated on providerKnown, so the
+              # concrete "revert only aiModelCells to unconditional" regression (which would
+              # re-expose the false built-in cell to a role that cannot read the provider)
+              # cannot slip past while the other literals survive.
+              and "const aiModelCells: CellSpec[] = providerKnown" in settings)
         check("39 Settings keeps the customer-surface pins",
               'aria-label="AI and model"' in settings and "{SHOW_INTERNAL ? (" in settings
               and 'aria-label="Runtime status"' in settings)
@@ -544,6 +549,14 @@ def main() -> int:  # noqa: PLR0915 - one linear battery
         _reset_server(content="MODEL: distinctive-sentinel-8823.")
         nv3 = make_provider().generate(_make_context("What failed?", with_evidence=True))
         check("NV3 generation reflects live server output", nv3.answer == "MODEL: distinctive-sentinel-8823.")
+
+        # NV4: the provenance-honesty pin (check 38) is non-vacuous. The gated cells form is
+        # present AND the unconditional cells form is absent, so re-exposing the false
+        # built-in cell (unconditional aiModelCells) would flip check 38 to FAIL.
+        settings_src = (ROOT / "src/redesign/pages/Settings.tsx").read_text(encoding="utf-8")
+        check("NV4 provenance pin is non-vacuous (unconditional-cells form is absent)",
+              "const aiModelCells: CellSpec[] = providerKnown" in settings_src
+              and "const aiModelCells: CellSpec[] = [" not in settings_src)
 
     finally:
         server.shutdown()
