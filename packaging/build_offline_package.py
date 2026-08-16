@@ -101,13 +101,104 @@ def _run(command: list[str], *, env: dict | None = None) -> None:
         raise SystemExit(f"step failed: {' '.join(command[:3])}")
 
 
+def _resolve_node() -> str:
+    node = shutil.which("node")
+    if not node:
+        raise SystemExit("node is required to build the frontend and was not found on PATH")
+    return node
+
+
+def production_frontend_env() -> dict:
+    """Environment for the production offline frontend build. Forced here so an
+    operator's ambient shell variables cannot leak into the shipped bundle:
+
+    * ``VITE_API_BASE_URL=""`` -- SAME-ORIGIN. The offline backend serves UI + API
+      from one localhost origin, so the SPA must issue relative requests. A baked dev
+      host (``http://127.0.0.1:8000``) yields a UI that cannot reach its own backend
+      -- the P4/E1 release blocker this pipeline fix closes.
+    * ``VITE_MONDAY_REPORT_INTERNAL`` unset -- CUSTOMER build: the internal
+      Tracker / Roadmap / SignIn surfaces stay hidden (they redirect to /app).
+    """
+    env = dict(os.environ)
+    env["CI"] = "true"
+    env["VITE_API_BASE_URL"] = ""
+    env.pop("VITE_MONDAY_REPORT_INTERNAL", None)
+    return env
+
+
+def _run_ok(command: list[str], *, env: dict | None = None) -> bool:
+    """Like ``_run`` but returns success instead of raising, so a primary build
+    attempt can fall back to an alternate invocation without aborting."""
+    resolved = shutil.which(command[0])
+    if resolved:
+        command = [resolved, *command[1:]]
+    completed = subprocess.run(command, cwd=str(ROOT), env=env, capture_output=True, text=True)
+    if completed.returncode != 0:
+        sys.stderr.write(completed.stdout[-2000:] + "\n" + completed.stderr[-2000:] + "\n")
+    return completed.returncode == 0
+
+
 def build_frontend(skip: bool) -> None:
     if skip and (ROOT / "dist" / "index.html").exists():
         return
-    env = dict(os.environ)
-    env["CI"] = "true"
-    env["VITE_API_BASE_URL"] = ""  # same-origin: the offline backend serves the UI
-    _run(["corepack", "pnpm", "run", "build"], env=env)
+    env = production_frontend_env()
+    # Primary path: the package.json "build" script (tsc && vite build) via pnpm.
+    if _run_ok(["corepack", "pnpm", "run", "build"], env=env):
+        return
+    # Fallback: corepack/pnpm launcher shims can fail with EPERM on some Windows
+    # shells. Run the SAME build (tsc typecheck, then vite build) directly through
+    # node with the SAME production env. Fail closed if this path also fails.
+    node = _resolve_node()
+    _run([node, str(ROOT / "node_modules" / "typescript" / "bin" / "tsc")], env=env)
+    _run([node, str(ROOT / "node_modules" / "vite" / "bin" / "vite.js"), "build"], env=env)
+
+
+def reject_reuse_frontend_for_production(key_label: str, reuse_frontend: bool) -> None:
+    """A production package MUST bundle a freshly-built same-origin CUSTOMER frontend.
+    Reusing an existing ``dist/`` risks shipping a dev-configured bundle (wrong API
+    base, or an internal build), so refuse ``--reuse-frontend`` for a production build."""
+    if key_label == "production" and reuse_frontend:
+        raise SystemExit(
+            "--reuse-frontend is refused for a production build (--key-label production): "
+            "the production frontend must be freshly built same-origin. Remove --reuse-frontend."
+        )
+
+
+FORBIDDEN_FRONTEND_API_BASES = ("127.0.0.1:8000", "localhost:8000")
+
+
+def assert_frontend_same_origin(app_dir: Path) -> int:
+    """Fail closed if the SHIPPED frontend bundle carries a hardcoded dev API base.
+
+    Scans every packaged ``dist`` asset and returns the number of files scanned, so a
+    caller can prove the check was not vacuous. The offline SPA must use relative
+    (same-origin) requests; a baked ``http://127.0.0.1:8000`` means a reused dev dist
+    and a UI that cannot reach its own backend. On a hit, the surrounding context is
+    printed so a human can adjudicate the rare "unrelated test text" case."""
+    scanned = 0
+    # Only the SPA dist (a Vite build has an index.html); this ignores any
+    # incidentally-named ``dist`` directory that a bundled dependency might carry.
+    spa_dists = [p for p in app_dir.rglob("dist") if p.is_dir() and (p / "index.html").is_file()]
+    for dist in sorted(spa_dists):
+        for asset in sorted(dist.rglob("*")):
+            if asset.is_file() and asset.suffix in (".js", ".mjs", ".html", ".css"):
+                scanned += 1
+                text = asset.read_text(encoding="utf-8", errors="replace")
+                for marker in FORBIDDEN_FRONTEND_API_BASES:
+                    hit = text.find(marker)
+                    if hit >= 0:
+                        ctx = text[max(0, hit - 80):hit + 40].replace("\n", " ")
+                        raise SystemExit(
+                            f"packaged frontend carries a hardcoded API base {marker!r} in "
+                            f"{asset}: the offline SPA must use same-origin requests. "
+                            f"Context: ...{ctx}..."
+                        )
+    if scanned == 0:
+        raise SystemExit(
+            "assert_frontend_same_origin found no packaged frontend assets to scan under "
+            f"{app_dir} -- refusing to certify a package with no verifiable UI."
+        )
+    return scanned
 
 
 def run_pyinstaller() -> Path:
@@ -119,6 +210,10 @@ def run_pyinstaller() -> Path:
 
 
 def assemble(app_dir: Path, public_key_file: Path, *, key_label: str = "unspecified") -> Path:
+    # Fail closed BEFORE embedding the key / zipping: the shipped SPA must reach its
+    # own backend same-origin. This catches a dev-configured (``:8000``) dist that a
+    # reuse or a leaked env var could otherwise smuggle into the package.
+    same_origin_assets = assert_frontend_same_origin(app_dir)
     public_key_hex = public_key_file.read_text(encoding="utf-8").strip()
     if len(bytes.fromhex(public_key_hex)) != 32:
         raise SystemExit("public key must be 32 Ed25519 public bytes (hex)")
@@ -143,6 +238,7 @@ def assemble(app_dir: Path, public_key_file: Path, *, key_label: str = "unspecif
         "source_dirty": bool(_git("status", "--porcelain")),
         "runtime": runtime,
         "frontend": frontend,
+        "frontend_same_origin_assets_scanned": same_origin_assets,
         # Public-key IDENTITY needed to verify licenses. The private signing key
         # is never read, never required, and never present in the package.
         "license_public_key": public_key_hex,
@@ -204,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    reject_reuse_frontend_for_production(args.key_label, args.reuse_frontend)
     build_frontend(skip=args.reuse_frontend)
     app_dir = run_pyinstaller()
     assemble(app_dir, Path(args.public_key), key_label=args.key_label)
