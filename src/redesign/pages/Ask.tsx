@@ -100,21 +100,29 @@ const STEP_TONE: Record<string, string> = {
 
 export function Ask() {
   const navigate = useNavigate();
-  const { activeWorkspace, apiStatus, session, gate, auditIntegrity, can, localAi } = useWorkspace();
+  const { activeWorkspace, apiStatus, session, gate, auditIntegrity, can, localAi, providerStatus } =
+    useWorkspace();
 
-  // A small, truthful indicator of which analysis writes the answer text. Shown ONLY when
-  // the provider state is readable — a role that can chat but lacks runtime-status access
-  // must not be shown a positive "Built-in analysis" claim, because a local model could be
-  // answering. Claims "Local model" only when it is selected AND the runtime + model are
-  // actually up; otherwise the local provider falls back to built-in for every answer. No
-  // marketing.
-  const aiProviderKnown = localAi.state === "ready";
+  // A small, truthful indicator of which analysis writes the answer text. Driven by the
+  // chat-role-readable provenance (providerStatus, gated on generate_reports) so it is
+  // honest for EVERY role that can chat — the chip is shown only when that is readable.
+  // "Online AI" is claimed whenever online is the selected engine (the privacy-material
+  // signal that evidence may be sent off this computer). "Local model" keeps the stricter
+  // rule: claimed only when the local runtime + model are actually up (from the operator
+  // localAi status); otherwise the local provider falls back to built-in for every answer.
+  const aiProviderKnown = providerStatus.state === "ready";
+  const activeProvider = aiProviderKnown ? providerStatus.data.active_provider : "";
   const aiProviderServing =
     localAi.state === "ready" &&
     localAi.data.active_provider === "local-model" &&
     !!localAi.data.reachable &&
     !!localAi.data.model_available;
-  const aiProviderLabel = aiProviderServing ? "Local model" : "Built-in analysis";
+  const aiProviderLabel =
+    activeProvider === "online-api"
+      ? "Online AI"
+      : aiProviderServing
+        ? "Local model"
+        : "Built-in analysis";
   // A license-blocked answer should surface the app-wide read-only banner promptly.
   const { refresh: refreshLicense } = useLicense();
 
