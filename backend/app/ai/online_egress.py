@@ -75,18 +75,28 @@ def is_allowed_online_endpoint(base_url: str | None) -> bool:
     host = host.lower().rstrip(".")  # a trailing dot ("127.0.0.1.") still resolves to the IP
     if not host or host == "localhost":
         return False
+    if not host.isascii():
+        return False  # a non-ASCII host (unicode-digit / homograph) is never a legit endpoint
     # A standard IP literal (v4 or v6) — judge directly.
     try:
         return not _is_blocked_ip(ipaddress.ip_address(host))
     except ValueError:
         pass
     # Not a standard literal. Encoded IP forms are never real hostnames and can smuggle
-    # loopback/metadata: a decimal integer (2130706433 == 127.0.0.1), a 0x-hex form, or a
-    # dotted all-numeric form (octal "0177.0.0.1"). Judge the decimal integer as IPv4;
-    # refuse the rest.
+    # loopback/metadata: a decimal integer (2130706433 == 127.0.0.1), an octal integer
+    # (leading zero, inet_aton), a 0x-hex form, or a dotted all-numeric form ("0177.0.0.1",
+    # short "127.1"). Judge a plain 32-bit decimal integer as IPv4; refuse everything else.
     if host.isdigit():
+        if (len(host) > 1 and host[0] == "0"):  # leading zero -> octal encoding, do not decimal-decode
+            return False
         try:
-            return not _is_blocked_ip(ipaddress.ip_address(int(host)))
+            value = int(host)
+        except ValueError:
+            return False
+        if value > 0xFFFFFFFF:  # not a 32-bit IPv4 integer -> not a normal endpoint
+            return False
+        try:
+            return not _is_blocked_ip(ipaddress.ip_address(value))
         except (ValueError, ipaddress.AddressValueError, OverflowError):
             return False
     if host.startswith("0x") or ("." in host and host.replace(".", "").isdigit()):

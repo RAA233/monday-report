@@ -296,7 +296,9 @@ def main() -> int:  # noqa: PLR0915
                        # encoded loopback/metadata bypasses (trailing dot, IPv4-mapped IPv6,
                        # decimal/hex/dotted-octal integer forms) must ALL be refused.
                        "https://127.0.0.1./v1", "https://169.254.169.254./v1", "https://[::ffff:127.0.0.1]/v1",
-                       "https://2130706433/v1", "https://0x7f000001/v1", "https://0177.0.0.1/v1"])
+                       "https://2130706433/v1", "https://0x7f000001/v1", "https://0177.0.0.1/v1",
+                       "https://017700000001/v1", "https://127.1/v1", "https://[::ffff:169.254.169.254]/v1",
+                       "https://２１３０７０６４３３/v1"])  # fullwidth 2130706433
               and is_allowed_online_endpoint("https://api.openai.com/v1")  # a real remote host still allowed
               and is_allowed_online_endpoint("https://8.8.8.8/v1"))
 
