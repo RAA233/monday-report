@@ -44,6 +44,10 @@ MAX_EVIDENCE_SNIPPETS = 6
 MAX_SNIPPET_CHARS = 600
 MAX_FAILURE_LINES = 8
 
+#: Explicit, trusted env values that select the optional online provider (Phase 4).
+#: Distinct from the local-generation set; the resolver keys the online branch on this.
+ONLINE_ENABLED_VALUES = frozenset({"online", "online-api", "online_api"})
+
 SYSTEM_PROMPT = (
     "You are the built-in analyst for an offline drilling-operations reporting tool. "
     "Answer ONLY using the evidence provided in the user message. "
@@ -206,6 +210,14 @@ def resolve_ai_provider(default: AIProvider) -> AIProvider:
     than imported) so the built-in provider a caller actually uses — including a test
     double — is the one wrapped as the fallback."""
     mode = os.getenv(AI_PROVIDER_ENV, "").strip().lower()
+    if mode in ONLINE_ENABLED_VALUES:
+        # Optional, default-OFF online provider. Selected ONLY by this explicit env value
+        # plus a valid sealed config; never automatically, never because local failed, and
+        # never from a request/header/payload. Any invalid/incomplete config -> default.
+        from ..online_ai_settings import get_active  # lazy: avoid an import cycle
+        from .online_api_provider import build_online_provider
+
+        return build_online_provider(get_active(), fallback=default) or default
     if mode not in LOCAL_GEN_ENABLED_VALUES:
         return default
     runtime, endpoint = _runtime_and_endpoint()

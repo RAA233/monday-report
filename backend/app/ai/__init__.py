@@ -12,6 +12,11 @@ from .local_model_provider import (
     build_grounded_messages,
     resolve_ai_provider,
 )
+from .online_api_provider import (
+    OnlineAPIProvider,
+    build_online_messages,
+    build_online_provider,
+)
 
 __all__ = [
     "AIProvider",
@@ -21,8 +26,11 @@ __all__ = [
     "DeterministicProvider",
     "DETERMINISTIC_PROVIDER",
     "LocalModelProvider",
+    "OnlineAPIProvider",
     "resolve_ai_provider",
     "build_grounded_messages",
+    "build_online_messages",
+    "build_online_provider",
     "citation_key",
     "dedupe_citations",
     "validate_citations",
