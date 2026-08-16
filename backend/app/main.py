@@ -31,6 +31,8 @@ from .ai import (
     resolve_ai_provider,
     validate_citations,
 )
+from .ai.online_egress import is_allowed_online_endpoint, online_test_connection
+from . import online_ai_settings
 from .retention import retention_days
 from .schemas import (
     ActivitySegment,
@@ -62,6 +64,10 @@ from .schemas import (
     FieldCorrectionRevert,
     HydraulicObservation,
     LocalAIStatus,
+    OnlineAiConfigView,
+    OnlineAiSettingsRequest,
+    OnlineTestConnectionResult,
+    ProviderStatusView,
     MondayReport,
     MondayReportCreate,
     ParsedDocument,
@@ -396,6 +402,117 @@ def local_ai_status() -> LocalAIStatus:
     # active_provider reflects the RESOLVER's decision (config), never mere reachability:
     # "local-model" only when the operator has validly selected the loopback local model.
     return status.model_copy(update={"active_provider": resolve_ai_provider(DETERMINISTIC_PROVIDER).name()})
+
+
+@app.get("/ai/provider-status", response_model=ProviderStatusView)
+def ai_provider_status() -> ProviderStatusView:
+    # Chat-role-readable provenance so the Ask surface is honest for EVERY role that can
+    # chat (never a false "no external calls" claim): which engine writes answers now.
+    require_permission("generate_reports")
+    return ProviderStatusView(active_provider=resolve_ai_provider(DETERMINISTIC_PROVIDER).name())
+
+
+def _endpoint_host(base_url: str) -> str:
+    try:
+        from urllib.parse import urlsplit
+
+        return (urlsplit(base_url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _online_config_view() -> OnlineAiConfigView:
+    settings = online_ai_settings.get_active()
+    if settings is None:
+        return OnlineAiConfigView(
+            configured=False,
+            storage_available=online_ai_settings.storage_available(),
+            detail="No online AI provider is configured.",
+        )
+    return OnlineAiConfigView(
+        configured=True,
+        provider=settings.provider,
+        base_url=settings.base_url,
+        model=settings.model,
+        has_key=bool(settings.api_key),  # never the key itself
+        updated_at=settings.updated_at or None,
+        storage_available=True,
+        detail="An online AI provider is configured.",
+    )
+
+
+@app.get("/online-ai/config", response_model=OnlineAiConfigView)
+def online_ai_config() -> OnlineAiConfigView:
+    require_permission("view_runtime_status")
+    return _online_config_view()
+
+
+@app.post("/online-ai/config", response_model=OnlineAiConfigView)
+def save_online_ai_config(payload: OnlineAiSettingsRequest) -> OnlineAiConfigView:
+    require_admin()
+    # Validate the endpoint on the WRITE path too (not only at resolve time): reject a
+    # non-https / credential-bearing (userinfo/query/fragment) / loopback base_url so a
+    # secret or an invalid target can never be sealed, echoed back in the config view, or
+    # audited. The dedicated api_key field is the only place a secret belongs.
+    if not is_allowed_online_endpoint(payload.base_url.strip()):
+        raise HTTPException(
+            status_code=422,
+            detail="The endpoint must be a plain https URL with no credential in it (no user:pass@, ?query, or #fragment) and must not be a loopback address.",
+        )
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    existing = online_ai_settings.get_active()
+    created = existing.created_at if existing is not None else now
+    settings = online_ai_settings.OnlineAiSettings(
+        provider=payload.provider.strip(),
+        base_url=payload.base_url.strip(),
+        model=payload.model.strip(),
+        api_key=payload.api_key,
+        created_at=created,
+        updated_at=now,
+    )
+    try:
+        online_ai_settings.save(settings)
+    except online_ai_settings.OnlineSettingsUnavailable as exc:
+        raise HTTPException(status_code=503, detail="Secure secret storage is unavailable on this system.") from exc
+    # Audit with SAFE metadata only — never the API key.
+    _best_effort_audit(
+        "online_ai.config.updated",
+        "tenant",
+        store.tenant.id,
+        {
+            "provider": settings.provider,
+            "model": settings.model,
+            "endpoint_host": _endpoint_host(settings.base_url),
+            "has_key": bool(settings.api_key),
+        },
+    )
+    return _online_config_view()
+
+
+@app.delete("/online-ai/config", response_model=OnlineAiConfigView)
+def delete_online_ai_config() -> OnlineAiConfigView:
+    require_admin()
+    online_ai_settings.delete()
+    _best_effort_audit("online_ai.config.removed", "tenant", store.tenant.id, {"removed": True})
+    return _online_config_view()
+
+
+@app.post("/online-ai/test-connection", response_model=OnlineTestConnectionResult)
+def test_online_ai_connection(payload: OnlineAiSettingsRequest) -> OnlineTestConnectionResult:
+    require_admin()
+    # A fixed one-token probe with NO workspace evidence; returns a status class only.
+    status_class, detail = online_test_connection(
+        payload.base_url.strip(), payload.model.strip(), payload.api_key
+    )
+    _best_effort_audit(
+        "online_ai.test_connection",
+        "tenant",
+        store.tenant.id,
+        {"endpoint_host": _endpoint_host(payload.base_url), "status": status_class},  # never the key
+    )
+    return OnlineTestConnectionResult(status=status_class, detail=detail)
 
 
 def require_client_data_ready(operation: str, resource_type: str, resource_id: UUID | None = None) -> None:
@@ -801,6 +918,12 @@ ROUTE_ACCESS_POLICY: dict[tuple[str, str], dict[str, str]] = {
     ("GET", "/readiness/client-data"): _enforced("view_runtime_status"),
     ("GET", "/runtime/backends"): _enforced("view_runtime_status"),
     ("GET", "/local-ai/status"): _enforced("view_runtime_status"),
+    # Chat-role-readable provenance; operator-gated online config read + admin-gated writes.
+    ("GET", "/ai/provider-status"): _enforced("generate_reports"),
+    ("GET", "/online-ai/config"): _enforced("view_runtime_status"),
+    ("POST", "/online-ai/config"): _enforced(ADMIN_PERMISSION),
+    ("DELETE", "/online-ai/config"): _enforced(ADMIN_PERMISSION),
+    ("POST", "/online-ai/test-connection"): _enforced(ADMIN_PERMISSION),
     ("GET", "/audit-logs"): _enforced("view_audit_history"),
     ("GET", "/audit-logs/integrity"): _enforced("view_audit_history"),
     # --- permission_required / enforced: workspace/source/report reads ---

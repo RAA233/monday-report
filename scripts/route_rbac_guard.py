@@ -79,7 +79,7 @@ def main() -> int:
         # ---- Policy structure (1-12) ----
         routes = set(m.audited_routes())
         errs = m.validate_route_access_policy()
-        check("1 All routes inventoried", len(m.ROUTE_ACCESS_POLICY) == len(routes) and len(routes) == 48, len(routes))
+        check("1 All routes inventoried", len(m.ROUTE_ACCESS_POLICY) == len(routes) and len(routes) == 53, len(routes))
         check("2 No duplicate route entry", len(m.ROUTE_ACCESS_POLICY) == len(set(m.ROUTE_ACCESS_POLICY)))
         cats = {e["classification"] for e in m.ROUTE_ACCESS_POLICY.values()}
         check("3 No unapproved category", cats <= m.ROUTE_ACCESS_CLASSIFICATIONS and "authenticated_write" not in cats)

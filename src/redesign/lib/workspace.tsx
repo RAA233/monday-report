@@ -14,7 +14,9 @@ import {
   getDocuments,
   getFailures,
   getLocalAiStatus,
+  getOnlineConfig,
   getProcessingJobs,
+  getProviderStatus,
   getRuntimeBackends,
   getSession,
   getValidationTasks,
@@ -25,8 +27,10 @@ import {
   type ApiBenchmarkingStatus,
   type ApiFailureRecord,
   type ApiLocalAiStatus,
+  type ApiOnlineConfig,
   type ApiParsedDocument,
   type ApiProcessingJob,
+  type ApiProviderStatus,
   type ApiRuntimeBackendStatus,
   type ApiSession,
   type ApiValidationTask,
@@ -150,6 +154,17 @@ export interface WorkspaceContextValue {
    */
   auditIntegrity: Loadable<ApiAuditIntegrityStatus>;
   localAi: Loadable<ApiLocalAiStatus>;
+  /**
+   * Which engine writes answers right now, from the server-side resolver's decision.
+   * Gated on `generate_reports` (the chat permission) so it is READABLE BY EVERY ROLE
+   * THAT CAN CHAT — the Ask/Settings provenance is then honest for an engineer too, and
+   * never falsely claims "no external calls" when an online model is active.
+   */
+  providerStatus: Loadable<ApiProviderStatus>;
+  reloadProviderStatus: () => void;
+  /** Non-secret Online AI config (operator-gated on view_runtime_status). */
+  onlineConfig: Loadable<ApiOnlineConfig>;
+  reloadOnlineConfig: () => void;
   /**
    * Shared, permission-gated reads for the Stage 2 surfaces. One provider-owned
    * read per surface class, never a per-page fetch: a refused GET appends a
@@ -761,6 +776,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     permission: "view_runtime_status",
     load: getRuntimeBackends
   });
+  const providerStatusRead = useGatedRead({
+    apiStatus,
+    session,
+    permission: "generate_reports",
+    load: getProviderStatus
+  });
+  const onlineConfigRead = useGatedRead({
+    apiStatus,
+    session,
+    permission: "view_runtime_status",
+    load: getOnlineConfig
+  });
 
   // Reconstruct the gate with the backend's own predicate, from READ-ONLY reads.
   // Tokened so a slow read for a previous workspace cannot publish over a newer one.
@@ -883,6 +910,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       reloadBenchmarking: benchmarkingRead.reload,
       runtimeBackends: runtimeBackendsRead.value,
       reloadRuntimeBackends: runtimeBackendsRead.reload,
+      providerStatus: providerStatusRead.value,
+      reloadProviderStatus: providerStatusRead.reload,
+      onlineConfig: onlineConfigRead.value,
+      reloadOnlineConfig: onlineConfigRead.reload,
       readOnly,
       can,
       roles,
@@ -917,6 +948,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       benchmarkingRead.reload,
       runtimeBackendsRead.value,
       runtimeBackendsRead.reload,
+      providerStatusRead.value,
+      providerStatusRead.reload,
+      onlineConfigRead.value,
+      onlineConfigRead.reload,
       readOnly,
       can,
       roles,

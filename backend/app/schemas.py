@@ -926,6 +926,40 @@ class LocalAIStatus(BaseModel):
     active_provider: str = "deterministic"
 
 
+class ProviderStatusView(BaseModel):
+    # Minimal, chat-role-readable provenance: which engine writes answers right now.
+    # "deterministic" | "local-model" | "online-api". Readable by anyone who can chat so
+    # the Ask surface is honest for every role (never a false "no external calls" claim).
+    active_provider: str = "deterministic"
+
+
+class OnlineAiConfigView(BaseModel):
+    # Non-secret view of the optional Online AI config. The API key is NEVER included —
+    # only ``has_key`` reports whether one is stored.
+    configured: bool = False
+    provider: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+    has_key: bool = False
+    updated_at: str | None = None
+    storage_available: bool = True
+    detail: str = ""
+
+
+class OnlineAiSettingsRequest(BaseModel):
+    provider: str
+    base_url: str
+    model: str
+    api_key: str
+
+
+class OnlineTestConnectionResult(BaseModel):
+    # status ∈ connected | auth_failed | rate_limited | unavailable | misconfigured.
+    # Never carries a raw provider body, exception, or the API key.
+    status: str
+    detail: str
+
+
 class RuntimeBackendStatus(BaseModel):
     requested_repository_backend: str
     active_repository_backend: str

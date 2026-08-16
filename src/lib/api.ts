@@ -719,6 +719,56 @@ export async function getLocalAiStatus(): Promise<ApiLocalAiStatus> {
   return request<ApiLocalAiStatus>("/local-ai/status");
 }
 
+// Chat-role-readable provenance: which engine writes answers right now.
+export interface ApiProviderStatus {
+  active_provider: string; // "deterministic" | "local-model" | "online-api"
+}
+
+// Non-secret view of the optional Online AI config. The API key is NEVER returned —
+// only `has_key` reports whether one is stored.
+export interface ApiOnlineConfig {
+  configured: boolean;
+  provider?: string | null;
+  base_url?: string | null;
+  model?: string | null;
+  has_key: boolean;
+  updated_at?: string | null;
+  storage_available: boolean;
+  detail: string;
+}
+
+export interface ApiOnlineSettingsInput {
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key: string;
+}
+
+export interface ApiOnlineTestResult {
+  status: string; // connected | auth_failed | rate_limited | unavailable | misconfigured
+  detail: string;
+}
+
+export async function getProviderStatus(): Promise<ApiProviderStatus> {
+  return request<ApiProviderStatus>("/ai/provider-status");
+}
+
+export async function getOnlineConfig(): Promise<ApiOnlineConfig> {
+  return request<ApiOnlineConfig>("/online-ai/config");
+}
+
+export async function saveOnlineConfig(input: ApiOnlineSettingsInput): Promise<ApiOnlineConfig> {
+  return request<ApiOnlineConfig>("/online-ai/config", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function removeOnlineConfig(): Promise<ApiOnlineConfig> {
+  return request<ApiOnlineConfig>("/online-ai/config", { method: "DELETE" });
+}
+
+export async function testOnlineConnection(input: ApiOnlineSettingsInput): Promise<ApiOnlineTestResult> {
+  return request<ApiOnlineTestResult>("/online-ai/test-connection", { method: "POST", body: JSON.stringify(input) });
+}
+
 export async function getRuntimeBackends(): Promise<ApiRuntimeBackendStatus> {
   return request<ApiRuntimeBackendStatus>("/runtime/backends");
 }
