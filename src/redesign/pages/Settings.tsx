@@ -92,12 +92,22 @@ export function Settings() {
         ok: true
       }
     : localModelActive
-      ? {
-          label: "Local model",
-          value: "Unavailable",
-          detail: "Selected, but the runtime or model is unavailable — answers fall back to built-in analysis",
-          ok: false
-        }
+      ? localReady
+        ? {
+            // We READ the local runtime status and it is not up.
+            label: "Local model",
+            value: "Unavailable",
+            detail: "Selected, but the runtime or model is unavailable — answers fall back to built-in analysis",
+            ok: false
+          }
+        : {
+            // Selected, but this role cannot read the runtime status — do not assert it is
+            // down (the unread-vs-down distinction), just say the status is not visible here.
+            label: "Local model",
+            value: "Selected",
+            detail: "Runtime access is needed to show its status",
+            ok: true
+          }
       : localRuntimeDetected
         ? {
             label: "Local model",
