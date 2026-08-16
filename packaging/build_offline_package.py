@@ -26,9 +26,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# This file lives in ``packaging/`` which collides with the PyPI ``packaging``
+# package, so import the sibling helper by its bare name from this directory rather
+# than as ``packaging.frontend_same_origin`` (which would resolve to the PyPI lib).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 from backend.app.licensing.contract import PRODUCT_VERSION  # noqa: E402
 from backend.app.licensing.update_format import CURRENT_DATA_VERSION  # noqa: E402
+from frontend_same_origin import (  # noqa: E402
+    FORBIDDEN_FRONTEND_API_BASES,
+    assert_frontend_same_origin,
+    production_frontend_env,
+    reject_reuse_frontend_for_production,
+)
 
 OUTPUT_DIR = ROOT / "output" / "offline-package"
 
@@ -108,24 +120,6 @@ def _resolve_node() -> str:
     return node
 
 
-def production_frontend_env() -> dict:
-    """Environment for the production offline frontend build. Forced here so an
-    operator's ambient shell variables cannot leak into the shipped bundle:
-
-    * ``VITE_API_BASE_URL=""`` -- SAME-ORIGIN. The offline backend serves UI + API
-      from one localhost origin, so the SPA must issue relative requests. A baked dev
-      host (``http://127.0.0.1:8000``) yields a UI that cannot reach its own backend
-      -- the P4/E1 release blocker this pipeline fix closes.
-    * ``VITE_MONDAY_REPORT_INTERNAL`` unset -- CUSTOMER build: the internal
-      Tracker / Roadmap / SignIn surfaces stay hidden (they redirect to /app).
-    """
-    env = dict(os.environ)
-    env["CI"] = "true"
-    env["VITE_API_BASE_URL"] = ""
-    env.pop("VITE_MONDAY_REPORT_INTERNAL", None)
-    return env
-
-
 def _run_ok(command: list[str], *, env: dict | None = None) -> bool:
     """Like ``_run`` but returns success instead of raising, so a primary build
     attempt can fall back to an alternate invocation without aborting."""
@@ -153,52 +147,8 @@ def build_frontend(skip: bool) -> None:
     _run([node, str(ROOT / "node_modules" / "vite" / "bin" / "vite.js"), "build"], env=env)
 
 
-def reject_reuse_frontend_for_production(key_label: str, reuse_frontend: bool) -> None:
-    """A production package MUST bundle a freshly-built same-origin CUSTOMER frontend.
-    Reusing an existing ``dist/`` risks shipping a dev-configured bundle (wrong API
-    base, or an internal build), so refuse ``--reuse-frontend`` for a production build."""
-    if key_label == "production" and reuse_frontend:
-        raise SystemExit(
-            "--reuse-frontend is refused for a production build (--key-label production): "
-            "the production frontend must be freshly built same-origin. Remove --reuse-frontend."
-        )
-
-
-FORBIDDEN_FRONTEND_API_BASES = ("127.0.0.1:8000", "localhost:8000")
-
-
-def assert_frontend_same_origin(app_dir: Path) -> int:
-    """Fail closed if the SHIPPED frontend bundle carries a hardcoded dev API base.
-
-    Scans every packaged ``dist`` asset and returns the number of files scanned, so a
-    caller can prove the check was not vacuous. The offline SPA must use relative
-    (same-origin) requests; a baked ``http://127.0.0.1:8000`` means a reused dev dist
-    and a UI that cannot reach its own backend. On a hit, the surrounding context is
-    printed so a human can adjudicate the rare "unrelated test text" case."""
-    scanned = 0
-    # Only the SPA dist (a Vite build has an index.html); this ignores any
-    # incidentally-named ``dist`` directory that a bundled dependency might carry.
-    spa_dists = [p for p in app_dir.rglob("dist") if p.is_dir() and (p / "index.html").is_file()]
-    for dist in sorted(spa_dists):
-        for asset in sorted(dist.rglob("*")):
-            if asset.is_file() and asset.suffix in (".js", ".mjs", ".html", ".css"):
-                scanned += 1
-                text = asset.read_text(encoding="utf-8", errors="replace")
-                for marker in FORBIDDEN_FRONTEND_API_BASES:
-                    hit = text.find(marker)
-                    if hit >= 0:
-                        ctx = text[max(0, hit - 80):hit + 40].replace("\n", " ")
-                        raise SystemExit(
-                            f"packaged frontend carries a hardcoded API base {marker!r} in "
-                            f"{asset}: the offline SPA must use same-origin requests. "
-                            f"Context: ...{ctx}..."
-                        )
-    if scanned == 0:
-        raise SystemExit(
-            "assert_frontend_same_origin found no packaged frontend assets to scan under "
-            f"{app_dir} -- refusing to certify a package with no verifiable UI."
-        )
-    return scanned
+# The same-origin invariants live in a dependency-free module so the audit-chain
+# guard can import them without dragging in the app's crypto dependencies.
 
 
 def run_pyinstaller() -> Path:

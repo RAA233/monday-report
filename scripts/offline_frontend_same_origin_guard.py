@@ -24,9 +24,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _load_build_module():
-    path = ROOT / "packaging" / "build_offline_package.py"
-    spec = importlib.util.spec_from_file_location("mr_build_offline_package", path)
+def _load_same_origin_module():
+    # Load the dependency-free same-origin helper by FILE PATH. Importing the full
+    # build_offline_package module would pull in backend.app.licensing -> cryptography,
+    # which is absent in the hermetic audit env; and ``packaging`` collides with the
+    # PyPI package. Loading this stdlib-only file directly avoids both.
+    path = ROOT / "packaging" / "frontend_same_origin.py"
+    spec = importlib.util.spec_from_file_location("mr_frontend_same_origin", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -46,7 +50,7 @@ def _make_dist(root: Path, js_body: str) -> Path:
 
 def main() -> int:
     checks: list[dict] = []
-    bm = _load_build_module()
+    bm = _load_same_origin_module()
 
     # ---- 1. Release-pipeline source invariants ----
     env = bm.production_frontend_env()
