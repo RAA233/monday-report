@@ -28,7 +28,9 @@ def production_frontend_env() -> dict:
     env = dict(os.environ)
     env["CI"] = "true"
     env["VITE_API_BASE_URL"] = ""
-    env.pop("VITE_MONDAY_REPORT_INTERNAL", None)
+    # Set (not just pop) to "" so Vite's process.env priority overrides even a repo
+    # .env carrying VITE_MONDAY_REPORT_INTERNAL=1; SHOW_INTERNAL only turns on for "1".
+    env["VITE_MONDAY_REPORT_INTERNAL"] = ""
     return env
 
 

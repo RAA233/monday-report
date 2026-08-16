@@ -122,11 +122,18 @@ def _resolve_node() -> str:
 
 def _run_ok(command: list[str], *, env: dict | None = None) -> bool:
     """Like ``_run`` but returns success instead of raising, so a primary build
-    attempt can fall back to an alternate invocation without aborting."""
+    attempt can fall back to an alternate invocation without aborting. A missing
+    launcher or an EPERM that surfaces as an ``OSError`` (rather than a nonzero exit)
+    must ALSO fall back -- that is the exact pnpm/corepack failure this exists for --
+    so treat any spawn error as a failed attempt rather than letting it propagate."""
     resolved = shutil.which(command[0])
     if resolved:
         command = [resolved, *command[1:]]
-    completed = subprocess.run(command, cwd=str(ROOT), env=env, capture_output=True, text=True)
+    try:
+        completed = subprocess.run(command, cwd=str(ROOT), env=env, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        sys.stderr.write(f"primary build attempt could not run ({command[0]}): {exc}\n")
+        return False
     if completed.returncode != 0:
         sys.stderr.write(completed.stdout[-2000:] + "\n" + completed.stderr[-2000:] + "\n")
     return completed.returncode == 0

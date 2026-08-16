@@ -61,8 +61,8 @@ def main() -> int:
     ))
     checks.append(assert_check(
         "production build forces a CUSTOMER build (internal surfaces hidden)",
-        "VITE_MONDAY_REPORT_INTERNAL" not in env,
-        f"VITE_MONDAY_REPORT_INTERNAL present={('VITE_MONDAY_REPORT_INTERNAL' in env)}",
+        env.get("VITE_MONDAY_REPORT_INTERNAL") != "1",
+        f"VITE_MONDAY_REPORT_INTERNAL={env.get('VITE_MONDAY_REPORT_INTERNAL')!r} (customer unless '1')",
     ))
 
     # production build refuses --reuse-frontend; non-production keeps it usable
