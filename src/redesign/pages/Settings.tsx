@@ -92,12 +92,22 @@ export function Settings() {
         ok: true
       }
     : localModelActive
-      ? {
-          label: "Local model",
-          value: "Unavailable",
-          detail: "Selected, but the runtime or model is unavailable — answers fall back to built-in analysis",
-          ok: false
-        }
+      ? localReady
+        ? {
+            // We READ the local runtime status and it is not up.
+            label: "Local model",
+            value: "Unavailable",
+            detail: "Selected, but the runtime or model is unavailable — answers fall back to built-in analysis",
+            ok: false
+          }
+        : {
+            // Selected, but this role cannot read the runtime status — do not assert it is
+            // down (the unread-vs-down distinction), just say the status is not visible here.
+            label: "Local model",
+            value: "Selected",
+            detail: "Runtime access is needed to show its status",
+            ok: true
+          }
       : localRuntimeDetected
         ? {
             label: "Local model",
@@ -310,10 +320,10 @@ export function Settings() {
                 ? "The answer text is written by built-in analysis running entirely on this computer, with no language model and no external calls."
                 : "Answers are grounded in this workspace's evidence, with citations. Which on-computer engine writes them is shown with runtime access."}
         </p>
-        {localRuntimeDetected ? (
+        {localRuntimeDetected && !onlineActive ? (
           <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.5, margin: 0, maxWidth: "80ch" }}>
-            A local model runtime was detected on this computer, but this version uses built-in analysis and
-            does not send your questions to it.
+            A local model runtime was detected on this computer, but answers here use built-in analysis and
+            are not sent to it.
           </p>
         ) : null}
         <Link to="/app/online-ai" className="text-muted" style={{ fontSize: 12.5, textDecoration: "underline" }}>

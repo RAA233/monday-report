@@ -122,7 +122,7 @@ const TRUST = [
   {
     title: "Local-first AI",
     body:
-      "Classification, extraction and drafting are deterministic and run fully offline — no request leaves your organization. A local model runtime is detected and its status reported, but it does not yet perform the analysis. Hosted fallback stays policy-controlled per organization and off by default. No training by default."
+      "Classification, extraction and drafting are deterministic and run fully offline — no request leaves your organization. In Ask, built-in analysis writes answers by default; you can optionally run a local model on this computer, or explicitly turn on an online AI provider (which then sends your question and selected evidence to that provider). Citations are always selected and verified on this computer. Online AI is off by default. No training by default."
   },
   {
     title: "Controlled evidence and exports",

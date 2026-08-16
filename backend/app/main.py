@@ -1929,7 +1929,7 @@ def chat(payload: ChatRequest) -> ChatResponse:
         "chat.message",
         "workspace",
         payload.workspace_id,
-        {"prompt": payload.content[:180], "mode": "local_ai_api_scaffold"},
+        {"prompt": payload.content[:180], "mode": "chat"},
     )
 
     # Grounding is backend-owned and stays here; the provider only turns the grounded
