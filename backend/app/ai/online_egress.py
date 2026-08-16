@@ -49,6 +49,17 @@ def _is_blocked_ip(address) -> bool:
     return address.is_loopback or address.is_link_local or address.is_unspecified
 
 
+def _numeric_ip_label(label: str) -> bool:
+    """A single dotted label that a resolver's inet_aton reads as a number: decimal, octal
+    (leading zero), or ``0x``-hex. A real DNS label has at least one non-numeric label."""
+    if not label:
+        return False
+    if label.startswith("0x"):
+        rest = label[2:]
+        return bool(rest) and all(character in "0123456789abcdef" for character in rest)
+    return label.isdigit()
+
+
 def is_allowed_online_endpoint(base_url: str | None) -> bool:
     """True only for an ``https`` URL with a real REMOTE host and no embedded credential.
     Rejects non-https schemes, userinfo/query/fragment credentials, malformed authorities,
@@ -99,8 +110,15 @@ def is_allowed_online_endpoint(base_url: str | None) -> bool:
             return not _is_blocked_ip(ipaddress.ip_address(value))
         except (ValueError, ipaddress.AddressValueError, OverflowError):
             return False
-    if host.startswith("0x") or ("." in host and host.replace(".", "").isdigit()):
+    if host.startswith("0x"):
         return False
+    # A dotted host whose EVERY label is a decimal / octal (leading-zero) / 0x-hex integer is
+    # a non-canonical encoded IP that inet_aton may decode to loopback ("127.0.0.0x1",
+    # "0177.0.0.1", "0250.0xFE.169.254") — refuse. A real hostname has a non-numeric label.
+    if "." in host:
+        labels = host.split(".")
+        if labels and all(_numeric_ip_label(label) for label in labels):
+            return False
     return True  # a DNS hostname
 
 
