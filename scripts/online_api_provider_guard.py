@@ -88,7 +88,7 @@ class _FakeOpenAI(BaseHTTPRequestHandler):
             return
         if mode == "redirect":
             self.send_response(302)
-            self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+            self.send_header("Location", SERVER_STATE.get("redirect_to") or "http://127.0.0.1:9/elsewhere")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -108,6 +108,41 @@ class _FakeOpenAI(BaseHTTPRequestHandler):
 
 def _start_server() -> ThreadingHTTPServer:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeOpenAI)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+REDIRECT_SENTINEL = "REDIRECT-SENTINEL-7788"
+
+
+class _RedirectTarget(BaseHTTPRequestHandler):
+    """A LIVE off-origin server the main fake 302-redirects to; it returns valid chat JSON
+    with a recognizable sentinel so check 18 can distinguish 'refused' from 'followed'."""
+
+    def _respond(self) -> None:
+        body = json.dumps({"choices": [{"message": {"content": REDIRECT_SENTINEL}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+
+    # A 302 converts POST -> GET, so the followed request arrives as a GET.
+    def do_POST(self) -> None:  # noqa: N802
+        self._respond()
+
+    def do_GET(self) -> None:  # noqa: N802
+        self._respond()
+
+    def log_message(self, *args: object) -> None:  # noqa: A002
+        return
+
+
+def _start_target() -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectTarget)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -254,10 +289,16 @@ def main() -> int:  # noqa: PLR0915
         check("17b loopback + malformed refused (online is remote)",
               not any(is_allowed_online_endpoint(u) for u in
                       ["https://127.0.0.1/v1", "https://localhost/v1", "https://[::1]/v1", "https://0.0.0.0/v1", "https://[::1"]))
-        check("17c credential-in-url (query/fragment) + link-local refused",
+        check("17c credential-in-url + link-local + ENCODED loopback/metadata refused",
               not any(is_allowed_online_endpoint(u) for u in
                       ["https://api.example.com/v1?api-key=SECRET", "https://api.example.com/v1#tok=SECRET",
-                       "https://169.254.169.254/v1", "https://[fe80::1]/v1"]))
+                       "https://169.254.169.254/v1", "https://[fe80::1]/v1",
+                       # encoded loopback/metadata bypasses (trailing dot, IPv4-mapped IPv6,
+                       # decimal/hex/dotted-octal integer forms) must ALL be refused.
+                       "https://127.0.0.1./v1", "https://169.254.169.254./v1", "https://[::ffff:127.0.0.1]/v1",
+                       "https://2130706433/v1", "https://0x7f000001/v1", "https://0177.0.0.1/v1"])
+              and is_allowed_online_endpoint("https://api.openai.com/v1")  # a real remote host still allowed
+              and is_allowed_online_endpoint("https://8.8.8.8/v1"))
 
         # Transport tests need a loopback fake, which the validator refuses by design; patch
         # the validator IN THE GUARD (no production seam). NV1 below proves the unpatched
@@ -265,19 +306,46 @@ def main() -> int:  # noqa: PLR0915
         _orig_validator = egress.is_allowed_online_endpoint
         egress.is_allowed_online_endpoint = lambda url: True
         try:
-            _reset_server(mode="redirect")
-            redirect_refused = False
-            try:
-                online_chat_completion(fake_base, "m", "k", [{"role": "user", "content": "x"}], timeout=5)
-            except OnlineEgressError:
-                redirect_refused = True
-            check("18 off-origin redirect refused", redirect_refused)
+            # Non-vacuous redirect test: the fake 302s to a LIVE off-origin target returning a
+            # recognizable sentinel. The production client (has _NoRedirect) must REFUSE and
+            # never surface the sentinel; a redirect-FOLLOWING opener reaches it (mutation
+            # control), so removing _NoRedirect would flip this check.
+            import ssl as _ssl
+            import urllib.request as _u
 
+            target = _start_target()
+            try:
+                _reset_server(mode="redirect")
+                SERVER_STATE["redirect_to"] = f"http://127.0.0.1:{target.server_port}/v1/chat/completions"
+                refused = leaked = False
+                try:
+                    ans = online_chat_completion(fake_base, "m", "k", [{"role": "user", "content": "x"}], timeout=5)
+                    leaked = REDIRECT_SENTINEL in ans
+                except OnlineEgressError:
+                    refused = True
+                follow_opener = _u.build_opener(_u.ProxyHandler({}), _u.HTTPSHandler(context=_ssl.create_default_context()))
+                req = _u.Request(fake_base.rstrip("/") + "/chat/completions", data=b"{}",
+                                 headers={"Content-Type": "application/json"}, method="POST")
+                followed = follow_opener.open(req, timeout=5).read().decode()
+                mutation_reaches = REDIRECT_SENTINEL in followed
+                check("18 off-origin redirect refused (non-vacuous vs a live target)",
+                      refused and not leaked and mutation_reaches)
+            finally:
+                target.shutdown()
+                target.server_close()
+
+            # Clear NO_PROXY (CI runners often export NO_PROXY=127.0.0.1, which would bypass the
+            # dead proxy regardless of the handler and make the check vacuous). With it cleared,
+            # a dead proxy WOULD break the call unless ProxyHandler({}) suppresses it.
+            for pk in ("NO_PROXY", "no_proxy", "HTTPS_PROXY", "https_proxy"):
+                os.environ.pop(pk, None)
             os.environ["HTTP_PROXY"] = "http://127.0.0.1:9"
+            os.environ["http_proxy"] = "http://127.0.0.1:9"
             _reset_server(content="ONLINE: proxy-bypassed.")
             proxied = online_chat_completion(fake_base, "m", "k", [{"role": "user", "content": "x"}], timeout=5)
-            os.environ.pop("HTTP_PROXY", None)
-            check("19 proxy cannot substitute host (no-proxy)", proxied == "ONLINE: proxy-bypassed.")
+            for pk in ("HTTP_PROXY", "http_proxy"):
+                os.environ.pop(pk, None)
+            check("19 proxy cannot substitute host (no-proxy; NO_PROXY cleared)", proxied == "ONLINE: proxy-bypassed.")
 
             _reset_server(mode="slow", slow_seconds=0.6)
             timed_out = False
@@ -377,25 +445,27 @@ def main() -> int:  # noqa: PLR0915
                   "Failure records:" in user_msg and "Stuck pipe" in user_msg and "What failed" in user_msg
                   and "locator" not in user_msg and "file_id" not in user_msg and "signed" not in user_msg.lower(), user_msg[:160])
 
-            # 36 tenant isolation at the PROVIDER: it transmits ONLY the GroundedContext it was
-            # given and fetches nothing else. Hold a DISTINCT foreign context carrying a unique
-            # marker, generate with the OWN context, and assert the marker never appears in the
-            # transmitted body. (Cross-tenant scoping of the context itself is enforced upstream
-            # by the chat handler / tenant_authorization_guard.)
+            # 36 the provider transmits ONLY the GroundedContext of the CURRENT call and fetches
+            # nothing else — no cross-call/state bleed. Generate with two distinct marked
+            # contexts back-to-back; each transmitted body must carry ONLY its own marker.
+            # (Cross-tenant scoping of the context itself is enforced upstream by the chat
+            # handler / tenant_authorization_guard.) A caching/state-bleed regression flips this.
             from backend.app.ai import GroundedContext as _GC
             from backend.app.schemas import Citation as _Cit
 
-            foreign = _GC(content="foreign", workspace_id=uuid4(), failures=[], documents=[], chunk_count=1,
-                          base_citations=[_Cit(locator_type="pdf", locator={"page": 1},
-                                               snippet="FOREIGN-TENANT-MARKER-999", confidence=0.5)],
-                          open_tasks=[], benchmark_status=None)
-            assert "FOREIGN-TENANT-MARKER-999" in json.dumps(foreign.base_citations[0].model_dump(), default=str)  # marker really exists
-            _ = foreign  # held but deliberately NOT passed to the provider
+            def _marked_ctx(marker):
+                return _GC(content="q", workspace_id=uuid4(), failures=[], documents=[], chunk_count=1,
+                           base_citations=[_Cit(locator_type="pdf", locator={"page": 1}, snippet=marker, confidence=0.5)],
+                           open_tasks=[], benchmark_status=None)
+
             SERVER_STATE["last_body"] = None
-            prov2.generate(_make_context("q", with_evidence=True))
-            body36 = json.dumps(SERVER_STATE["last_body"] or {})
-            check("36 provider transmits only the supplied context (no foreign evidence)",
-                  "Stuck pipe" in body36 and "FOREIGN-TENANT-MARKER-999" not in body36)
+            prov2.generate(_marked_ctx("MARKER-AAA-111"))
+            body_a = json.dumps(SERVER_STATE["last_body"] or {})
+            SERVER_STATE["last_body"] = None
+            prov2.generate(_marked_ctx("MARKER-BBB-222"))
+            body_b = json.dumps(SERVER_STATE["last_body"] or {})
+            check("36 each call transmits ONLY its own context (no cross-call / state bleed)",
+                  "MARKER-AAA-111" in body_a and "MARKER-BBB-222" in body_b and "MARKER-AAA-111" not in body_b)
 
             # 37 provider citations ignored + 38 backend citations preserved
             _reset_server(content="Cite source FAKE-999 which proves nothing.")

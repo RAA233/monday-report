@@ -31,7 +31,7 @@ from .ai import (
     resolve_ai_provider,
     validate_citations,
 )
-from .ai.online_egress import online_test_connection
+from .ai.online_egress import is_allowed_online_endpoint, online_test_connection
 from . import online_ai_settings
 from .retention import retention_days
 from .schemas import (
@@ -450,6 +450,15 @@ def online_ai_config() -> OnlineAiConfigView:
 @app.post("/online-ai/config", response_model=OnlineAiConfigView)
 def save_online_ai_config(payload: OnlineAiSettingsRequest) -> OnlineAiConfigView:
     require_admin()
+    # Validate the endpoint on the WRITE path too (not only at resolve time): reject a
+    # non-https / credential-bearing (userinfo/query/fragment) / loopback base_url so a
+    # secret or an invalid target can never be sealed, echoed back in the config view, or
+    # audited. The dedicated api_key field is the only place a secret belongs.
+    if not is_allowed_online_endpoint(payload.base_url.strip()):
+        raise HTTPException(
+            status_code=422,
+            detail="The endpoint must be a plain https URL with no credential in it (no user:pass@, ?query, or #fragment) and must not be a loopback address.",
+        )
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).isoformat()

@@ -117,7 +117,9 @@ export function Settings() {
       }
     : onlineConfigured
       ? { label: "Online API", value: "Configured", detail: "Configured, but not the active engine" }
-      : { label: "Online API", value: "Not configured", detail: "No external AI calls unless you configure one" };
+      : onlineReady
+        ? { label: "Online API", value: "Not configured", detail: "No external AI calls unless you configure one" }
+        : { label: "Online API", value: "—", detail: "Runtime access is needed to show online AI status" };
 
   const aiModelCells: CellSpec[] = providerKnown
     ? [

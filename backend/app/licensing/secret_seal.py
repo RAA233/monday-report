@@ -96,29 +96,33 @@ def _test_key() -> bytes:
     return key.encode("utf-8")
 
 
-def _keystream(key: bytes, length: int) -> bytes:
+def _keystream(key: bytes, nonce: bytes, length: int) -> bytes:
     out = bytearray()
     counter = 0
     while len(out) < length:
-        out += hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha256).digest()
+        out += hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
         counter += 1
     return bytes(out[:length])
 
 
 def _test_seal(plaintext: bytes) -> bytes:
+    # Per-seal random nonce so two sealings under one test key are not a two-time pad.
     key = _test_key()
-    keystream = _keystream(key, len(plaintext))
+    nonce = os.urandom(16)
+    keystream = _keystream(key, nonce, len(plaintext))
     ciphertext = bytes(a ^ b for a, b in zip(plaintext, keystream))
-    tag = hmac.new(key, ciphertext, hashlib.sha256).digest()
-    return tag + ciphertext
+    tag = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+    return nonce + tag + ciphertext
 
 
 def _test_unseal(body: bytes) -> bytes:
     key = _test_key()
-    tag, ciphertext = body[:32], body[32:]
-    if len(tag) != 32 or not hmac.compare_digest(tag, hmac.new(key, ciphertext, hashlib.sha256).digest()):
+    nonce, tag, ciphertext = body[:16], body[16:48], body[48:]
+    if len(nonce) != 16 or len(tag) != 32 or not hmac.compare_digest(
+        tag, hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
+    ):
         raise SecretUnsealError("test seal MAC mismatch (tamper or wrong key)")
-    keystream = _keystream(key, len(ciphertext))
+    keystream = _keystream(key, nonce, len(ciphertext))
     return bytes(a ^ b for a, b in zip(ciphertext, keystream))
 
 

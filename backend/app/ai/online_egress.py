@@ -40,19 +40,30 @@ class OnlineEgressError(RuntimeError):
     oversized/malformed/empty response. The provider catches this and falls back."""
 
 
+def _is_blocked_ip(address) -> bool:
+    """Loopback, unspecified (0.0.0.0), or link-local (incl. cloud-metadata 169.254.0.0/16
+    and fe80::/10), judging an IPv4-mapped IPv6 (``::ffff:a.b.c.d``) by its embedded v4."""
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    return address.is_loopback or address.is_link_local or address.is_unspecified
+
+
 def is_allowed_online_endpoint(base_url: str | None) -> bool:
     """True only for an ``https`` URL with a real REMOTE host and no embedded credential.
-    Rejects non-https schemes, loopback/unspecified addresses and ``localhost``, userinfo
-    URLs, and malformed authorities. Hostnames (resolved later under cert verification)
-    are allowed; the exact host becomes the allowlist."""
+    Rejects non-https schemes, userinfo/query/fragment credentials, malformed authorities,
+    and — after normalizing the host — loopback / unspecified / link-local addresses in ANY
+    encoding (trailing dot, IPv4-mapped IPv6, decimal/hex/octal integer forms). A DNS
+    hostname is allowed and becomes the exact-host allowlist (resolved later under cert
+    verification)."""
     if not base_url or not isinstance(base_url, str):
         return False
     try:
         parts = urlsplit(base_url.strip())
         host = parts.hostname
-        # Credential-in-URL in ANY form: userinfo (user:pass@) or a query/fragment that
-        # vendors use to carry a key (?api-key=..., #token=...). Refuse all of them so a
-        # secret can never ride in the stored/displayed/audited endpoint.
+        # Credential-in-URL in ANY form: userinfo (user:pass@) or a query/fragment vendors
+        # use to carry a key (?api-key=..., #token=...). Refuse so a secret can never ride
+        # in the stored / displayed / audited endpoint.
         if parts.username or parts.password or parts.query or parts.fragment:
             return False
     except ValueError:
@@ -61,16 +72,26 @@ def is_allowed_online_endpoint(base_url: str | None) -> bool:
         return False
     if not host:
         return False
-    host = host.lower()
-    if host == "localhost":
+    host = host.lower().rstrip(".")  # a trailing dot ("127.0.0.1.") still resolves to the IP
+    if not host or host == "localhost":
         return False
+    # A standard IP literal (v4 or v6) — judge directly.
     try:
-        address = ipaddress.ip_address(host)
+        return not _is_blocked_ip(ipaddress.ip_address(host))
     except ValueError:
-        return True  # a hostname (not an IP literal) — allowed as the allowlist host
-    # Reject loopback, unspecified (0.0.0.0), and link-local (incl. cloud-metadata
-    # 169.254.169.254) IP literals.
-    return not (address.is_loopback or address.is_unspecified or address.is_link_local)
+        pass
+    # Not a standard literal. Encoded IP forms are never real hostnames and can smuggle
+    # loopback/metadata: a decimal integer (2130706433 == 127.0.0.1), a 0x-hex form, or a
+    # dotted all-numeric form (octal "0177.0.0.1"). Judge the decimal integer as IPv4;
+    # refuse the rest.
+    if host.isdigit():
+        try:
+            return not _is_blocked_ip(ipaddress.ip_address(int(host)))
+        except (ValueError, ipaddress.AddressValueError, OverflowError):
+            return False
+    if host.startswith("0x") or ("." in host and host.replace(".", "").isdigit()):
+        return False
+    return True  # a DNS hostname
 
 
 def _host(url: str) -> str | None:

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .licensing.secret_seal import SecretSealUnavailable, seal_available, seal_secret, unseal_secret
@@ -41,7 +41,9 @@ class OnlineAiSettings:
     provider: str
     base_url: str
     model: str
-    api_key: str            # plaintext lives here ONLY in process memory
+    # plaintext lives here ONLY in process memory; repr=False keeps it out of any
+    # accidental repr()/str()/locals-including traceback formatter.
+    api_key: str = field(repr=False)
     created_at: str = ""
     updated_at: str = ""
 
