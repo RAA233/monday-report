@@ -254,6 +254,10 @@ def main() -> int:  # noqa: PLR0915
         check("17b loopback + malformed refused (online is remote)",
               not any(is_allowed_online_endpoint(u) for u in
                       ["https://127.0.0.1/v1", "https://localhost/v1", "https://[::1]/v1", "https://0.0.0.0/v1", "https://[::1"]))
+        check("17c credential-in-url (query/fragment) + link-local refused",
+              not any(is_allowed_online_endpoint(u) for u in
+                      ["https://api.example.com/v1?api-key=SECRET", "https://api.example.com/v1#tok=SECRET",
+                       "https://169.254.169.254/v1", "https://[fe80::1]/v1"]))
 
         # Transport tests need a loopback fake, which the validator refuses by design; patch
         # the validator IN THE GUARD (no production seam). NV1 below proves the unpatched
@@ -373,13 +377,25 @@ def main() -> int:  # noqa: PLR0915
                   "Failure records:" in user_msg and "Stuck pipe" in user_msg and "What failed" in user_msg
                   and "locator" not in user_msg and "file_id" not in user_msg and "signed" not in user_msg.lower(), user_msg[:160])
 
-            # 36 tenant isolation: a provider for tenant A, given tenant A's context, never
-            # transmits tenant B evidence (the context is the ONLY input; the provider fetches
-            # nothing). Send a context whose only snippet is tenant-A text; assert B-text absent.
+            # 36 tenant isolation at the PROVIDER: it transmits ONLY the GroundedContext it was
+            # given and fetches nothing else. Hold a DISTINCT foreign context carrying a unique
+            # marker, generate with the OWN context, and assert the marker never appears in the
+            # transmitted body. (Cross-tenant scoping of the context itself is enforced upstream
+            # by the chat handler / tenant_authorization_guard.)
+            from backend.app.ai import GroundedContext as _GC
+            from backend.app.schemas import Citation as _Cit
+
+            foreign = _GC(content="foreign", workspace_id=uuid4(), failures=[], documents=[], chunk_count=1,
+                          base_citations=[_Cit(locator_type="pdf", locator={"page": 1},
+                                               snippet="FOREIGN-TENANT-MARKER-999", confidence=0.5)],
+                          open_tasks=[], benchmark_status=None)
+            assert "FOREIGN-TENANT-MARKER-999" in json.dumps(foreign.base_citations[0].model_dump(), default=str)  # marker really exists
+            _ = foreign  # held but deliberately NOT passed to the provider
             SERVER_STATE["last_body"] = None
             prov2.generate(_make_context("q", with_evidence=True))
             body36 = json.dumps(SERVER_STATE["last_body"] or {})
-            check("36 tenant isolation (only supplied evidence leaves)", "Stuck pipe" in body36 and "FOREIGN-TENANT" not in body36)
+            check("36 provider transmits only the supplied context (no foreign evidence)",
+                  "Stuck pipe" in body36 and "FOREIGN-TENANT-MARKER-999" not in body36)
 
             # 37 provider citations ignored + 38 backend citations preserved
             _reset_server(content="Cite source FAKE-999 which proves nothing.")

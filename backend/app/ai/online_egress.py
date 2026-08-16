@@ -50,7 +50,10 @@ def is_allowed_online_endpoint(base_url: str | None) -> bool:
     try:
         parts = urlsplit(base_url.strip())
         host = parts.hostname
-        if parts.username or parts.password:  # credential in URL
+        # Credential-in-URL in ANY form: userinfo (user:pass@) or a query/fragment that
+        # vendors use to carry a key (?api-key=..., #token=...). Refuse all of them so a
+        # secret can never ride in the stored/displayed/audited endpoint.
+        if parts.username or parts.password or parts.query or parts.fragment:
             return False
     except ValueError:
         return False
@@ -65,7 +68,9 @@ def is_allowed_online_endpoint(base_url: str | None) -> bool:
         address = ipaddress.ip_address(host)
     except ValueError:
         return True  # a hostname (not an IP literal) — allowed as the allowlist host
-    return not (address.is_loopback or address.is_unspecified)
+    # Reject loopback, unspecified (0.0.0.0), and link-local (incl. cloud-metadata
+    # 169.254.169.254) IP literals.
+    return not (address.is_loopback or address.is_unspecified or address.is_link_local)
 
 
 def _host(url: str) -> str | None:

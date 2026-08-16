@@ -497,6 +497,12 @@ def test_online_ai_connection(payload: OnlineAiSettingsRequest) -> OnlineTestCon
     status_class, detail = online_test_connection(
         payload.base_url.strip(), payload.model.strip(), payload.api_key
     )
+    _best_effort_audit(
+        "online_ai.test_connection",
+        "tenant",
+        store.tenant.id,
+        {"endpoint_host": _endpoint_host(payload.base_url), "status": status_class},  # never the key
+    )
     return OnlineTestConnectionResult(status=status_class, detail=detail)
 
 
