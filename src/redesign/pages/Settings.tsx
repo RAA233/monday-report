@@ -320,10 +320,10 @@ export function Settings() {
                 ? "The answer text is written by built-in analysis running entirely on this computer, with no language model and no external calls."
                 : "Answers are grounded in this workspace's evidence, with citations. Which on-computer engine writes them is shown with runtime access."}
         </p>
-        {localRuntimeDetected ? (
+        {localRuntimeDetected && !onlineActive ? (
           <p className="text-muted" style={{ fontSize: 12, lineHeight: 1.5, margin: 0, maxWidth: "80ch" }}>
-            A local model runtime was detected on this computer, but this version uses built-in analysis and
-            does not send your questions to it.
+            A local model runtime was detected on this computer, but answers here use built-in analysis and
+            are not sent to it.
           </p>
         ) : null}
         <Link to="/app/online-ai" className="text-muted" style={{ fontSize: 12.5, textDecoration: "underline" }}>
