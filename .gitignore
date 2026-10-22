@@ -1,12 +1,58 @@
+# Dependencies and build output
 node_modules/
 dist/
+build/
+*.tsbuildinfo
+# emitted if tsc is run in build mode against the Node-side config
+vite.config.js
+vite.config.d.ts
+# npm is not this project's package manager (pnpm is)
+package-lock.json
+
+# Runtime state, uploads, generated exports
 .local_data/
 output/
 tmp/
+*_Daily_Reports/
+*.sqlite
+*.sqlite3
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Secrets and key material — never commit these
 .env
 .env.local
 .env.*.local
-*_Daily_Reports/
+*.pem
+*.key
+*.hex
+*.p12
+*.pfx
+secrets/
+
+# Packaged offline builds and their artefacts
+packaging/out/
+packaging/_work/
+*.msix
+installer-*.zip
+
+# Agent/editor/local tooling (see docs/unfinished/agent-tooling-skills.md)
+.claude/
+.vscode/
+.idea/
+
+# Design handoff scratch
+design_handoff_monday_report_redesign/
+
+# Logs and OS noise
+*.log
 .DS_Store
+Thumbs.db

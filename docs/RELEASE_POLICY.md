@@ -20,7 +20,7 @@ package chain below — it is not optional and is not waivable per-release.
    - **Fast / hermetic** — frozen `pnpm install` + `pnpm run build` (`tsc`
      typecheck + `vite build`).
    - **Strict audit (two disposable pgvector clusters + live stack)** — the full
-     `pnpm run audit:all` (73 steps) against a disposable pgvector Postgres
+     `pnpm run audit:all` (77 steps) against a disposable pgvector Postgres
      (cluster A, a `test`-marked database so the DB-strict guards CONNECT and
      exercise real Postgres rather than refuse/skip) and a live isolated app
      stack, then the honest expected-baseline gate (see below); a SECOND,
@@ -47,9 +47,16 @@ package built from an un-green or drifted commit must not proceed.
 ## The honest GA_BLOCKED baseline (why CI is green while the product is GA_BLOCKED)
 
 `pnpm run audit:all` currently exits **non-zero** by design: the inherited GA
-gap-assessment check **`GA50 commit-binding-is-ancestor`** fails because the
-tracked acceptance artifact is not an ancestor of the exact head, so the suite's
+gap-assessment check **`GA50 commit-binding-is-ancestor`** fails, so the suite's
 `release_recommendation` is **`GA_BLOCKED`**.
+
+The precise reason matters, because the check's name is misleading. GA50 asserts
+a conjunction: the commit recorded in the tracked acceptance artifact must be an
+ancestor of `HEAD` **and** be at most `MAX_COMMITS_BEHIND = 1` commits behind it
+(`scripts/ga_gap_assessment_guard.py`). The recorded commit *is* an ancestor; it
+is simply far behind the current head. So this is a **staleness** failure, not an
+ancestry failure — the acceptance evidence is real but was bound to an older
+commit, and the gate refuses to let old evidence vouch for new code.
 
 CI does **not** mask this. The strict-audit job asserts, via
 `.github/scripts/assert_audit_baseline.py`, that this is the **only** deviation:
