@@ -26,9 +26,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# This file lives in ``packaging/`` which collides with the PyPI ``packaging``
+# package, so import the sibling helper by its bare name from this directory rather
+# than as ``packaging.frontend_same_origin`` (which would resolve to the PyPI lib).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 from backend.app.licensing.contract import PRODUCT_VERSION  # noqa: E402
 from backend.app.licensing.update_format import CURRENT_DATA_VERSION  # noqa: E402
+from frontend_same_origin import (  # noqa: E402
+    FORBIDDEN_FRONTEND_API_BASES,
+    assert_frontend_same_origin,
+    production_frontend_env,
+    reject_reuse_frontend_for_production,
+)
 
 OUTPUT_DIR = ROOT / "output" / "offline-package"
 
@@ -101,13 +113,49 @@ def _run(command: list[str], *, env: dict | None = None) -> None:
         raise SystemExit(f"step failed: {' '.join(command[:3])}")
 
 
+def _resolve_node() -> str:
+    node = shutil.which("node")
+    if not node:
+        raise SystemExit("node is required to build the frontend and was not found on PATH")
+    return node
+
+
+def _run_ok(command: list[str], *, env: dict | None = None) -> bool:
+    """Like ``_run`` but returns success instead of raising, so a primary build
+    attempt can fall back to an alternate invocation without aborting. A missing
+    launcher or an EPERM that surfaces as an ``OSError`` (rather than a nonzero exit)
+    must ALSO fall back -- that is the exact pnpm/corepack failure this exists for --
+    so treat any spawn error as a failed attempt rather than letting it propagate."""
+    resolved = shutil.which(command[0])
+    if resolved:
+        command = [resolved, *command[1:]]
+    try:
+        completed = subprocess.run(command, cwd=str(ROOT), env=env, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        sys.stderr.write(f"primary build attempt could not run ({command[0]}): {exc}\n")
+        return False
+    if completed.returncode != 0:
+        sys.stderr.write(completed.stdout[-2000:] + "\n" + completed.stderr[-2000:] + "\n")
+    return completed.returncode == 0
+
+
 def build_frontend(skip: bool) -> None:
     if skip and (ROOT / "dist" / "index.html").exists():
         return
-    env = dict(os.environ)
-    env["CI"] = "true"
-    env["VITE_API_BASE_URL"] = ""  # same-origin: the offline backend serves the UI
-    _run(["corepack", "pnpm", "run", "build"], env=env)
+    env = production_frontend_env()
+    # Primary path: the package.json "build" script (tsc && vite build) via pnpm.
+    if _run_ok(["corepack", "pnpm", "run", "build"], env=env):
+        return
+    # Fallback: corepack/pnpm launcher shims can fail with EPERM on some Windows
+    # shells. Run the SAME build (tsc typecheck, then vite build) directly through
+    # node with the SAME production env. Fail closed if this path also fails.
+    node = _resolve_node()
+    _run([node, str(ROOT / "node_modules" / "typescript" / "bin" / "tsc")], env=env)
+    _run([node, str(ROOT / "node_modules" / "vite" / "bin" / "vite.js"), "build"], env=env)
+
+
+# The same-origin invariants live in a dependency-free module so the audit-chain
+# guard can import them without dragging in the app's crypto dependencies.
 
 
 def run_pyinstaller() -> Path:
@@ -119,6 +167,10 @@ def run_pyinstaller() -> Path:
 
 
 def assemble(app_dir: Path, public_key_file: Path, *, key_label: str = "unspecified") -> Path:
+    # Fail closed BEFORE embedding the key / zipping: the shipped SPA must reach its
+    # own backend same-origin. This catches a dev-configured (``:8000``) dist that a
+    # reuse or a leaked env var could otherwise smuggle into the package.
+    same_origin_assets = assert_frontend_same_origin(app_dir)
     public_key_hex = public_key_file.read_text(encoding="utf-8").strip()
     if len(bytes.fromhex(public_key_hex)) != 32:
         raise SystemExit("public key must be 32 Ed25519 public bytes (hex)")
@@ -143,6 +195,7 @@ def assemble(app_dir: Path, public_key_file: Path, *, key_label: str = "unspecif
         "source_dirty": bool(_git("status", "--porcelain")),
         "runtime": runtime,
         "frontend": frontend,
+        "frontend_same_origin_assets_scanned": same_origin_assets,
         # Public-key IDENTITY needed to verify licenses. The private signing key
         # is never read, never required, and never present in the package.
         "license_public_key": public_key_hex,
@@ -204,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    reject_reuse_frontend_for_production(args.key_label, args.reuse_frontend)
     build_frontend(skip=args.reuse_frontend)
     app_dir = run_pyinstaller()
     assemble(app_dir, Path(args.public_key), key_label=args.key_label)
