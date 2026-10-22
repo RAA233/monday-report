@@ -1,0 +1,94 @@
+Monday Report
+Copyright (C) 2026 Rashed Albalawi and Emeil Nassrallah
+
+Authors and roles
+-----------------
+  Rashed Albalawi  — Developer
+  Emeil Nassrallah — Founder
+
+This product includes software developed by Rashed Albalawi and
+Emeil Nassrallah.
+
+Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0-or-later).
+See the LICENSE file for the full terms.
+
+ATTRIBUTION REQUIREMENT
+-----------------------
+This NOTICE file must be retained and reproduced in all copies,
+forks, derivative works, and redistributions of this software,
+including when the software is offered as a network service
+(see AGPL-3.0 section 13).
+
+If you modify and run this software on a publicly accessible server,
+AGPL-3.0 section 13 requires you to offer the complete corresponding
+source code of your modified version to its users, and this NOTICE
+must remain intact.
+
+Commercial licensing
+--------------------
+A separate commercial licence is available for organisations that
+cannot comply with the AGPL-3.0 copyleft and network-source
+obligations.
+
+To enquire, open an issue titled "Commercial licence enquiry" at
+  https://github.com/RAA233/monday-report/issues
+and a copyright holder will follow up.
+
+
+================================================================
+THIRD-PARTY NOTICES
+================================================================
+
+The following third-party components are used by this software.
+Each remains under its own licence; this section is informational.
+
+Python runtime dependencies (backend/requirements.txt)
+------------------------------------------------------
+  PyMuPDF (fitz)        AGPL-3.0, or a commercial licence from Artifex
+                        https://pymupdf.readthedocs.io/en/latest/about.html
+                        NOTE: PyMuPDF's AGPL-3.0 terms are a material reason
+                        this project is licensed AGPL-3.0. A distributed
+                        binary that bundles PyMuPDF (for example the packaged
+                        offline build) is subject to those terms. Replacing
+                        PyMuPDF with a permissively licensed PDF backend
+                        (pypdf, pdfplumber) is a prerequisite for any future
+                        permissive relicensing of this project.
+  FastAPI               MIT
+  Uvicorn               BSD-3-Clause
+  Pydantic              MIT
+  python-multipart      Apache-2.0
+  ReportLab             BSD-3-Clause
+  psycopg (3)           LGPL-3.0
+  redis-py              MIT
+
+JavaScript dependencies (package.json)
+--------------------------------------
+  React, React DOM      MIT
+  React Router          MIT
+  lucide-react          ISC
+  Vite                  MIT
+  TypeScript            Apache-2.0
+  Playwright            Apache-2.0
+
+Evaluation data
+---------------
+  Utah FORGE Well 16A(78)-32 Drilling Data
+  Licence: Creative Commons Attribution 4.0 International (CC BY 4.0)
+           https://creativecommons.org/licenses/by/4.0/
+  Source:  Geothermal Data Repository (GDR), submission 1283
+           https://gdr.openei.org/submissions/1283
+  DOI:     10.15121/1776602
+  DOE project: Utah FORGE, EE0007080
+
+  Required citation:
+    McLennan, J., Nash, G., Moore, J., Skowron, G., & Woolsey, S. (2021).
+    Utah FORGE: Well 16A(78)-32 Drilling Data. [Data set].
+    Geothermal Data Repository. Energy and Geoscience Institute at the
+    University of Utah. https://doi.org/10.15121/1776602
+
+  The raw report PDFs are NOT redistributed in this repository and are
+  git-ignored (see .gitignore: *_Daily_Reports/). This repository contains
+  only DERIVED ground-truth values (expected extraction results) in
+  evals/forge/expectations.v1.json, published under CC BY 4.0 attribution
+  as recorded above. Evaluations that need the raw corpus report SKIPPED
+  (never PASS) when it is absent.

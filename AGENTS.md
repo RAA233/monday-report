@@ -23,7 +23,7 @@ The UI gate is `pnpm run test:ui` (`scripts/ui_redesign_e2e.mjs`), which require
 
 ## Commit & Pull Request Guidelines
 
-This checkout has no Git history, so no existing commit convention is available. Use concise Conventional Commit-style messages, for example `feat: add validation queue filter` or `fix: correct upload duplicate warning`. Pull requests should include a short summary, verification steps, linked issue or task, and screenshots for visible UI changes.
+Use Conventional Commit-style messages, for example `feat: add validation queue filter` or `fix: correct upload duplicate warning` — that is the convention the existing history follows. Pull requests should include a short summary, verification steps, a linked issue or task, and screenshots for visible UI changes. Every commit must be covered by the CLA in [CLA.md](CLA.md); see [CONTRIBUTING.md](CONTRIBUTING.md) for the sign-off line, licence headers, and the full contributor workflow.
 
 ## Security & Configuration Tips
 

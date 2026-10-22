@@ -1,169 +1,175 @@
+<div align="center">
+
 # Monday Report
 
-Runnable React/TypeScript MVP scaffold for the Monday Report local AI, chat-first intelligence workspace.
+**Turn a pile of daily drilling reports into an audited, source-cited morning report.**
 
-## What Is Implemented
+[![Licence: AGPL v3](https://img.shields.io/badge/Licence-AGPL%20v3-blue.svg)](LICENSE)
+[![Status: pre-GA](https://img.shields.io/badge/status-pre--GA%20(GA__BLOCKED)-orange.svg)](STATUS.md)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](backend/requirements.txt)
+[![React 19](https://img.shields.io/badge/react-19-61dafb.svg)](package.json)
 
-- React SaaS workspace with local AI chat as the main surface, plus upload, dashboard, failure explorer, validation queue, and architecture screens.
-- Report Studio lets users write morning drilling reports from scratch, switch between DDR/BHA/mud/survey normal formats, review client issue readiness, apply a FORGE-style daily-report structure, preview Monday Report branding, render casing schematics and activity timelines, and export a draft Markdown report.
-- Casing schematic rows and the 24 hr activity timeline are extracted from source DDR/PDF evidence with page-level citations and confidence, shown in Report Studio and the Monday Report with explicit source-derived vs reference provenance, and fall back to labelled reference geometry (never presented as client-confirmed) when no source is found.
-- Directional survey stations (MD, inclination, azimuth, and TVD/DLS/N-S/E-W only when explicitly stated) are extracted source-only from survey tables and labelled narrative with page provenance, confidence, deterministic conflict flags, and an explicit "No source survey stations — confirm or enter from DDR" state.
-- A documented minimum-curvature calculation (`docs/TRAJECTORY_CALCULATION.md`, method `minimum_curvature v1`) derives per-interval and cumulative trajectory geometry from eligible source stations behind an explicit review gate: calculated values render side-by-side with source values (never overwriting them), conflicts and gaps are skipped rather than bridged, relative coordinates are labelled as such, and the output is a deterministic drafting aid, not certified directional-survey software.
-- A review-gated calculated trajectory plan view (plain accessible SVG, no chart dependency) renders one path per calculation segment with equal ft axes (north up, east right), planned/actual dash-and-marker distinction, an anchor marker, explicit "relative to the first calculated station — not absolute well coordinates" labelling, an honest zero-lateral-extent fallback, and no certification claim.
-- A calculated vertical trajectory profile renders one panel per calculation segment plotting horizontal displacement from that segment's anchor (unsigned magnitude, never an absolute position) against calculated TVD increasing downward — segment-aware, review-required, honest about zero-lateral wells, and not certified survey computation.
-- Source-derived hydraulics observations (`docs/HYDRAULICS_EXTRACTION.md`, parser `deterministic_hydraulics v1`) extract explicitly labelled flow rate, SPP, mud weight, ECD, PV, YP, pump rate, and nozzle text with explicit units only (documented kPa/L·min/sg conversions, ambiguous values dropped), page citations, observed/planned/unknown status, pump- and mud-system-aware conflict detection, and review flags — informational and review-required, with Hydraulics and Torque & Drag diagnostics remaining recommended-only.
-- Field-level corrections (`docs/FIELD_CORRECTIONS.md`, `audit:field-corrections`) let an operator correct a **registered** extracted field through an auditable, tenant-scoped, **versioned** overlay: the original source value is preserved, only registry-listed report-identity fields are correctable (unknown/sensitive fields return a stable 422), values are type/length/finite-number validated, re-correcting supersedes the prior record (version history), reverting keeps history, the whole route is serialized in-process (single-active-lineage, no lost writes; cross-process atomicity pending Phase 04), and a redacted hash-chained audit event records who/what/when/why without leaking the raw source, corrected, or reason text — surfaced in the report draft as review-required overlays that never overwrite source lineage, with no anomaly/benchmark/failure/validation mutation. The actor is now the resolved request actor from the authenticated-identity foundation (`docs/AUTHENTICATED_IDENTITY.md`), and the correction routes are permission-gated by the route-level RBAC authority (`docs/ROUTE_RBAC.md`); verified per-user reviewer identity and tenant authorization remain declared blockers, and this is a foundation, not a fully closed append-only/immutable control.
-- Benchmarking adds approved market/operator comparison for drilling rate, configurable Gordon average and Noble top-quartile seed values, variance tables, seven-day trend visuals, anomaly creation, Hydraulics and Torque & Drag recommendations, review-required AI interpretations, and Management of Change evidence export content.
-- Chat calls the FastAPI scaffold when available, exposes local AI runtime status, and falls back to deterministic local analysis when offline.
-- Backend scaffold uses durable local JSON state so API and worker share uploads, jobs, and redacted hash-chain audit logs before PostgreSQL/Redis lands.
-- Browser ZIP/file/folder intake with configurable byte limits, sanitized tenant-scoped storage paths, local byte storage, real SHA-256 hashes, report-family classification, duplicate candidates, configurable OCR routing/extraction, and parser gap warnings.
-- Builtin baseline malware scanner blocks EICAR-style test content, risky executable/script extensions, and macro-enabled Office files before processing; client mode requires explicit scanner configuration.
-- Uploaded source files and extracted child files can be downloaded only through expiring signed URLs; client mode requires a configured signing secret.
-- Worker foundation safely expands ZIP packages with configurable entry and uncompressed-size limits, parses text, CSV, XLSX, DOCX, EML, PyMuPDF-backed embedded-text PDF files, native PDF table rows, and `pdf_report_profile_v1` DDR fields/sections into typed chunks with source lineage. Image/scanned-PDF files route to OCR review when no local engine is configured, or to `ocr_text_v1` chunks when `MONDAY_REPORT_OCR_ENGINE=tesseract` and `MONDAY_REPORT_TESSERACT_CMD` are configured.
-- Extraction scaffold creates cited MWD signal-loss failure records, NPT hours, company attribution, and validation tasks from parsed chunks; NPT hour parsing prefers explicit NPT labels so casing/depth values are not treated as time.
-- Validation API updates extracted records, Monday Report API creates report JSON, and export API blocks unresolved official exports before writing hashed JSON/CSV/HTML/PDF/XLSX artifacts with signed download URLs.
-- Official report exports now include metrics, validation posture, source coverage, FORGE-style casing schematic rows, 24 hr activity timeline, branded HTML/PDF output, and expanded XLSX sections.
-- Official report exports now include Market Benchmark evidence, benchmark source/version, current measurements, variance calculations, triggered anomaly rules, diagnostic recommendations, AI review state, and audit/MOC evidence fields in JSON/CSV/HTML/PDF/XLSX outputs.
-- Client-data readiness endpoint and tracker panel flag demo/local-scaffold blockers before real client packages are accepted, enforce retention policy, require real active infrastructure adapters, and unsafe client mode requires an API key while blocking data reads, chat, report creation, and exports until ready.
-- Local AI defaults to Ollama with `gemma4:e2b`; readiness verifies both endpoint reachability and the pinned model.
-- Parser/OCR fixture eval readiness requires a passing `MONDAY_REPORT_PARSER_EVAL_REPORT`; real-client approval also requires the referenced fixture manifest to carry a reviewed anonymized-client attestation.
-- The locally held Utah FORGE report corpus in `16A(78)-32_Daily_Reports/` (publicly accessible reports, with redistribution rights not confirmed in the local corpus) is ignored by Git; `audit:forge-corpus` parses representative PDFs, verifies drilling/completion markers, and writes `output/forge-corpus/forge_corpus_summary.json`.
-- A reviewed FORGE ground-truth evaluation set (`evals/forge/manifest.v1.json` + `expectations.v1.json`, spec in `docs/FORGE_EVAL_PROMOTION.md`) pins five SHA-256 corpus documents with page-reviewed expected values and explicit absences; `audit:forge-eval-spec` validates the committed specification portably (in `audit:all`), while `audit:forge-evals` runs the real upload→worker→draft pipeline against the local corpus and reports `SKIPPED` (never PASS) when the corpus is absent. The evaluation is **promoted**: after general D1–D4 parser fixes (bracketed well identifiers, casing-context gating with mixed-fraction diameters, corroborated dot-thousands survey depths with `AZM` labels, header-region completion classification) the unchanged ground truth passes **65/65 required checks** on the real corpus, with the two informational report-number checks still failing and non-gating, and `audit:parser-regression` pins the defect classes portably inside `audit:all`. FORGE evidence never substitutes for client readiness evidence.
-- `fixtures:anonymized` creates a generated 13-family fixture pack for local smoke tests only; production client intake must use reviewed anonymized client fixtures, not generated evidence.
-- Partner preview packaging creates one ZIP with the built web app, backend, worker loop, Gemma 4 E2B defaults, sample import package, and import/export smoke script.
-- Client-data approval tooling writes an explicit approved/blocked evidence report from the live readiness endpoint.
-- GA readiness is a truthful, registry-backed gate (`docs/GA_READINESS_INTEGRITY.md`, `evals/ga/blocker_registry.v1.json`, `audit:ga-readiness-integrity`): every known GA blocker is a committed registry entry with category/severity/owner/resolution condition, and the gate emits one check per entry with an explicit disposition (`PASS`/`FAIL`/`BLOCKED`/`SKIPPED`/`NOT_APPLICABLE`/`REVIEW_REQUIRED`). Blocker counts derive from registry categories (not hand-maintained ID sets), `SKIPPED`/missing-evidence/missing-commands never count as pass, `--skip-commands` can never yield `GA_READY`, evidence is bound to a clean git commit/tree with a canonical self-hash and redacted paths, and no waiver can resolve a blocker in this version. A known-but-unimplemented control (RBAC, keyed audit integrity, migration runner, CI, backup, etc.) is a declared `BLOCKED` entry, so the gate reports truthful non-zero blocker counts and **stays `GA_BLOCKED` even with PostgreSQL and Redis provisioned**.
-- Runtime backend status exposes requested versus active repository and queue adapters so PostgreSQL/Redis environment variables cannot masquerade as implemented infrastructure.
-- Authenticated identity foundation (`docs/AUTHENTICATED_IDENTITY.md`, `audit:identity-rbac`): opaque per-user credentials (≥32 random bytes; only a SHA-256 hash + non-secret fingerprint stored; raw token returned once, never logged/audited) are resolved **server-side** to a **request-scoped** identity, isolated per request and enforced with **default-deny** RBAC on the existing roles (`ADMIN`/`ENGINEER`/`VALIDATOR`/`MANAGER`; no all-role fallback, client-supplied identity headers ignored). Admin-only `/auth/users` + `/auth/credentials` (and the local `python -m backend.app.identity_admin` CLI) provision and revoke credentials; the configured-tenant boundary is enforced; audit and field-correction actors reflect the authenticated user; a bootstrap identity is never persisted on startup. In **client mode the legacy shared key is rejected** — an active persisted per-user credential is required (the shared key is a `demo_bootstrap` identity for local/demo use only). This is a **foundation**: multi-tenant authorization and verified reviewer identity remain declared blockers, and `ga:readiness` stays **`GA_BLOCKED`**.
-- Complete route-level RBAC (`docs/ROUTE_RBAC.md`, `audit:route-rbac`): a single generic authorization authority (`backend/app/permissions.py`) with 23 stable permissions and a conservative role→permission matrix (the legacy `VIEWER` role stays unactivated) enforces a permission on **every privileged read and every mutation**; a classified route inventory (`ROUTE_ACCESS_POLICY`) covers all 48 routes, `route_policy_fully_enforced()` proves each `permission_required` route carries its guard, the two download routes are public **signed-capability** endpoints (resource-bound, expiring, GET-only, token verified **first** so an invalid token cannot probe existence or write audit), and every denial writes a redacted audit event (permission/route/method). Permission is checked **before** any resource lookup (no existence leak). The **detailed** `/readiness/client-data` report is `permission_required("view_runtime_status")` (only minimal `/health` stays public; absolute paths scrubbed from readiness detail). `benchmark_permissions()` now delegates to this authority with its historical 12-key shape preserved. Multi-tenant resource authorization, verified reviewer workflow, and keyed audit integrity remain declared blockers; the `rbac-role-separation` control is now **evidence-driven PASS** (resolution condition met; registry unchanged, only the evaluator probe is evidence-based) while the other controls keep `ga:readiness` at **`GA_BLOCKED`**.
-- API-layer tenant resource authorization (`docs/TENANT_AUTHORIZATION.md`, `audit:tenant-authorization`): closes an IDOR gap where every entity carried a `tenant_id` and every request resolved one but no handler compared them. `backend/app/tenant_authorization.py` resolves the request tenant **only** from the server-side identity (never a system/all-tenant fallback; a missing identity denies) and is default-deny. After the permission gate, every resource route compares the looked-up resource's `tenant_id` to the request tenant and hides a missing **or** cross-tenant resource behind the **same existence-hiding 404**; lists, aggregates, the dashboard, the audit log, and the chat evidence set are tenant-filtered; signed download capabilities bind the owning tenant at issuance and redemption; and a genuine cross-tenant attempt is audited (`authz.cross_tenant_denied`) with the request's tenant/actor and no foreign detail. No route accepts a client-supplied tenant and there is no startup backfill. This is the **API-layer** boundary only — multi-tenant storage, workspace membership/ACLs, normalized persistence, and **Postgres RLS** remain out of scope, so `tenant-authorization-enforcement` stays a declared blocker (evidence-driven) and `ga:readiness` stays **`GA_BLOCKED`**.
-- Versioned HMAC audit integrity (`docs/AUDIT_INTEGRITY.md`, `audit:audit-keyed-integrity`): the audit chain is sealed with a versioned, keyed **HMAC-SHA256** (managed key id + version, rotation-aware) instead of the forgeable unkeyed SHA-256 — offline modification or public-SHA forgery of a signed event is now detected. In **client mode no new unkeyed event is ever written and no keyless business mutation persists, for EVERY actor** (request, system, worker, CLI, startup, denial): an edge preflight returns a stable **503** for every non-public request before auth/routing/audit (only minimal `/health` + CORS preflight stay open), a central `require_audit_write_capability` preflight fails every mutation entry point closed **before** touching state, and client-mode-no-key startup is **diagnostic/read-only** (no seed, no audit, no snapshot). **Forward-only keying**: once any keyed event exists a later unkeyed append is refused, and the verifier marks any legacy-after-keyed event `broken`. Legacy events are never re-signed; `integrity_state` (`legacy_valid`/`mixed_valid`/`keyed_valid`/`key_unavailable`/`broken`) is the display authority and the backward-compatible `status` (`sealed`) is linkage-only — never shown as keyed. Key material never lands in the snapshot, logs, errors, or evidence. Honest scope: the no-key path is prevented **before** mutation, but complete business/audit rollback is **not** guaranteed on save failures, whole-snapshot concurrent mutation remains last-writer-risk, and cross-process transactional safety is not provided — HMAC proves **authenticity of recorded events, not transactional consistency**. It adds **no external anchor**, so **tail truncation stays undetected**, `audit-tail-truncation-detection` and the persistence/transaction blockers stay declared, and `ga:readiness` stays **`GA_BLOCKED`**.
-- Deterministic PostgreSQL migration runner (`docs/POSTGRES_MIGRATIONS.md`, `audit:migration-runner`): `python -m backend.app.migrations apply/status/validate --set legacy|baseline` applies a numbered `.sql` set and records each version in a `schema_migrations` table under a whole-run **session-level advisory lock** with **per-migration transactions** (rollback + stop on failure; checksum drift refused and never rewritten) — an explicit operator command, never run on API startup. The immutable legacy set (`db/migrations/`) keeps its original `0003` (which references `projects`/`reports` that no earlier legacy migration creates) **byte-immutable** — its "unpublished draft" status cannot be *proven*, so it is not edited and the legacy sequence stays **un-appliable → validity BLOCKED**; a corrected fresh-install **baseline** (`db/baseline/`, FK targets retargeted to `workspaces`/`monday_reports`) applies cleanly. The runner applies the numbered set, **not** the non-authoritative flattened `db/schema.sql`. Validity is decided by a **real PostgreSQL** execution (legacy fails at 0003; baseline fresh apply, rerun, partial upgrades, failure rollback, concurrency, checksum drift); a supplemental static validator is documented as heuristic-only. `ga_migration_runner`/`ga_migration_validity` are **evidence-driven** and PASS only with committed real-PostgreSQL passing evidence; validity additionally stays BLOCKED while the committed legacy 0003 is invalid. A decisive real-PostgreSQL run has now executed against a disposable **PostgreSQL 16.14** (`pgvector/pgvector:pg16` — `0001` requires the `vector` extension, which stock `postgres:16` lacks) with **64 checks passed, 0 skipped, 0 failed**; the legacy sequence failed on the real server at `0003` (`relation "projects" does not exist`), so `ga_migration_runner` is PASS-capable from committed evidence while `ga_migration_validity` **stays BLOCKED**. Migration checksums are taken over raw file bytes, so `.gitattributes` pins `*.sql text eol=lf` — without it `core.autocrlf` makes the recorded checksums platform-dependent and a Windows-migrated database reports drift on Linux; normalized persistence, active RLS, transaction/atomicity, and backup/restore remain out of scope and `ga:readiness` stays **`GA_BLOCKED`**. A shared verification-isolation preflight (`scripts/verification_isolation.py`, `audit:verification-isolation`) fails closed before any mutating integration command can target the live API (8000)/web (5173)/`.local_data`.
-- Verified reviewer attribution (`docs/VERIFIED_REVIEWER_ATTRIBUTION.md`, `audit:verified-reviewer`): field-correction (record + revert) and validation outcomes are attributed to a **verified authenticated human** reviewer — server-derived and permission-eligible — instead of the single configured actor. In **client mode** a `demo_bootstrap`/configured/system actor (or an inactive user, revoked credential, cross-tenant, or unauthorized reviewer) is rejected with a stable **403 before any outcome mutation or audit append**; the reviewer id, credential **fingerprint** (non-secret), roles, actor source, and verify timestamp are persisted on the outcome and the matching **keyed** audit event, while client-supplied reviewer/tenant/email fields are ignored and no raw token or credential hash is ever stored. The reverting reviewer is kept distinct from the recorder. Demo/local actions stay compatible but are explicitly **labelled unverified** and cannot satisfy readiness; old snapshots load without reviewer fields (no backfill). `ga_verified_reviewer_identity` is evidence-driven PASS for correction/validation; AI-content approval and report issuance are outside this control's resolution condition (a separate future increment); this adds no cryptographic non-repudiation, no external anchor, no transactional persistence — `audit-tail-truncation-detection` and the persistence/transaction blockers stay declared and `ga:readiness` stays **`GA_BLOCKED`**.
-- Fresh environments start without seeded failure records; set client tenant/user identity with environment variables before the first API start.
-- Extract drilling failure/NPT records from uploaded evidence with companies, wells, rigs, BHA/tool context, severity, confidence, validation status, cost impact, and source citations.
-- Deterministic analyst-chat behavior for clear questions, ambiguous comparisons, unsupported prediction requests, risk questions, repeated tools, NPT, and exports.
-- Filter system shared by explorer and chat: query, date, company, tool, severity, and validation state.
-- Rule-based risk scoring for companies and tool serials.
-- Human validation workflow that updates local event state.
-- PostgreSQL/RLS-oriented schema artifact in `db/schema.sql`.
-- Local AI-first execution plan in `docs/MONDAY_REPORT_EXECUTION_PLAN.md`.
-- Implementation-ready product and engineering spec in `docs/MONDAY_REPORT_IMPLEMENTATION_SPEC.md`.
-- Project tracker, phase gates, and audit notes in `docs/PROJECT_TRACKER.md`.
+*Runs entirely on your machine. No cloud, no database, no Docker required.*
 
-## Run Locally
+</div>
 
-```powershell
-$env:CI='true'
-pnpm install
-pnpm run dev
-```
+---
 
-Then open the local URL printed by Vite.
+## What it does
 
-To run the first FastAPI backend slice:
+Drilling operations generate a daily report per rig per day — PDFs, spreadsheets,
+emails, scanned paper. Somebody has to read them all and write the morning
+summary that management actually reads. That person spends hours copying numbers
+between documents, and any number they mistype is invisible downstream.
 
-```powershell
+Monday Report ingests those documents and drafts the morning report for them,
+with **every extracted value carrying a citation back to the page it came from**.
+
+The design rule throughout: *the software never pretends to know something it
+cannot show you the source for.*
+
+- **Ingests** ZIP archives, PDFs, XLSX, DOCX, CSV, email — with hashing,
+  duplicate detection, and malware screening
+- **Extracts** casing schematics, 24-hour activity timelines, directional survey
+  stations, and hydraulics observations — each with page-level citation and a
+  confidence value
+- **Calculates** well trajectory via documented minimum-curvature, rendered as
+  plan-view and vertical-profile diagrams. Calculated values sit **beside**
+  source values, never on top of them, and gaps are left as gaps
+- **Drafts** the Monday Report in five variants, blocks official export while
+  validation tasks are unresolved, and exports to JSON / CSV / HTML / PDF / XLSX
+- **Audits** everything into an HMAC-sealed, hash-chained log
+- **Ships offline** as a signed, machine-bound Windows package for air-gapped
+  sites
+
+### What makes it unusual
+
+Not the drilling domain — the **verification engineering**. The project treats
+"is this actually proven?" as a first-class, machine-checked question:
+
+- **117 effect-level guard scripts** act as the test suite. 13 of them are
+  *fault batteries* that seed a deliberate defect in the subsystem and fail if
+  the paired guard does not catch it — mutation testing applied to the oracles
+  themselves. Extending that coverage is a tracked roadmap item
+- **No `TODO` comments anywhere.** Unfinished work lives in a registry of 28
+  machine-checked controls, so an incomplete feature cannot hide as a code comment
+- **The release gate cannot be bribed.** No environment variable, no config, no
+  unsigned file can turn a blocker green. `SKIPPED` never counts as a pass
+- **CI goes red if the audit chain ever turns green**, because a silently
+  resolved gate must be a reviewed decision rather than drift
+
+If you have ever inherited a project where "all tests pass" meant nothing, this
+repo is an argument about how to fix that.
+
+---
+
+## Status: pre-GA, and honest about it
+
+> **This is a working prototype, not a product you should deploy.**
+> Its own gate reports `GA_BLOCKED`: 20 of 28 controls are open, production
+> database/queue infrastructure is explicitly `NOT_ACCEPTED`, and real customer
+> data is gated off.
+
+**Please read [STATUS.md](STATUS.md) before forming an opinion** — it lists what
+genuinely works, what does not, and why the project refuses to credit itself.
+
+---
+
+## Quickstart
+
+**Requirements:** Node 22+, **pnpm 10+** (pnpm 9 will fail — see
+[CONTRIBUTING.md](CONTRIBUTING.md#3-environment-setup)), Python 3.12.
+
+```bash
+git clone https://github.com/RAA233/monday-report.git
+cd monday-report
+
+corepack enable
+pnpm install --frozen-lockfile
 python -m pip install -r backend/requirements.txt
-pnpm run dev:api
 ```
 
-Useful backend checks:
+Then start the two processes in separate terminals:
 
-```powershell
-Invoke-WebRequest http://127.0.0.1:8000/health -UseBasicParsing
-pnpm run worker:once
-pnpm run audit:phase
-pnpm run test:ui
-pnpm run test:e2e
-pnpm run audit:client-data
-pnpm run audit:bootstrap
-pnpm run audit:state-persistence
-pnpm run audit:signed-url-guards
-pnpm run audit:upload-limits
-pnpm run audit:upload-ownership
-pnpm run audit:upload-idempotency
-pnpm run audit:source-lineage
-pnpm run audit:citation-format
-pnpm run audit:source-citations
-pnpm run audit:tracker-clarity
-pnpm run audit:golden-fixtures
-pnpm run audit:parser-fixture-evals
-pnpm run audit:parser-fixture-report
-pnpm run audit:pdf-parser
-pnpm run audit:parser-regression
-pnpm run audit:forge-corpus
-pnpm run audit:forge-eval-spec
-pnpm run audit:forge-evals
-pnpm run audit:ocr-routing
-pnpm run audit:ocr-extraction
-pnpm run audit:local-ai
-pnpm run audit:partner-package
-pnpm run audit:partner-approval
-pnpm run audit:client-approval
-pnpm run audit:client-ops
-pnpm run audit:report-export-idempotency
-pnpm run audit:report-template
-pnpm run audit:field-corrections
-pnpm run audit:benchmarking
-pnpm run audit:runtime-backends
-pnpm run audit:infra-readiness
-pnpm run audit:ga-readiness
-pnpm run audit:integrity
-pnpm run audit:auth
-pnpm run audit:redaction
-pnpm run audit:malware
-pnpm run audit:storage-paths
-pnpm run audit:archive-safety
-pnpm run audit:retention
-pnpm run audit:all
+```bash
+pnpm run dev:api     # FastAPI  -> http://127.0.0.1:8000
+pnpm run dev         # Vite     -> http://127.0.0.1:5173
 ```
 
-Client-readiness helper:
+Open **http://127.0.0.1:5173**. That is it — state persists to a local JSON
+store under `.local_data/`. PostgreSQL and Redis are optional and only engage in
+approved client mode.
 
-```powershell
-pnpm run fixtures:anonymized
-pnpm run ga:env
-pnpm run audit:ga-readiness
+```bash
+pnpm run build                # tsc && vite build
+pnpm run audit:route-rbac     # run a single verification guard
+pnpm run audit:all            # the full 77-step chain (see note below)
 ```
 
-`pnpm run ga:readiness` runs strict GA approval evidence and exits non-zero until real-client readiness is fully green.
+> **`audit:all` exits non-zero by design.** The expected result is exactly one
+> failure — `GA50 commit-binding-is-ancestor`, a deliberate staleness gate.
+> Any *other* failure is a real regression. [Why.](STATUS.md#3-how-to-read-the-honesty-machinery)
 
-For a production check in a non-interactive shell:
+---
 
-```powershell
-$env:CI='true'
-pnpm run build
+## Architecture at a glance
+
+```
+            Browser (React 19 + TS, Vite)
+                      │  src/redesign/ — 20 routes, one canonical UI
+                      ▼
+            FastAPI  (backend/app/main.py — 48 routes)
+                      │  default-deny RBAC → tenant authz → handler
+                      ▼
+          ┌───────────┴────────────┐
+          ▼                        ▼
+   LocalStateStore          PostgreSQL + Redis
+   (.local_data JSON,        (optional, approved
+    the default)              client mode, RLS)
+                      │
+                      ▼
+          HMAC-SHA256 hash-chained audit log
 ```
 
-To build the single-file partner preview ZIP:
+Deeper: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**. Design notes per
+subsystem live in `docs/` — trajectory maths, hydraulics extraction, audit
+integrity, RBAC, tenant authorisation, migrations.
 
-```powershell
-pnpm run package:partner-preview
-pnpm run audit:partner-package
-pnpm run package:partner-approval
-```
+---
 
-The output is `output/package/Monday_Report_Partner_Preview.zip`, with approval evidence beside it in `output/package/Monday_Report_Partner_Preview_APPROVAL.md` and `.json`. It is for local partner testing only and is not approved for real client data.
+## Want to contribute?
 
-To write the real-client approval evidence report:
+There is a lot of well-marked unfinished work, and the roadmap is explicit about
+effort and value: **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
-```powershell
-pnpm run package:client-approval
-```
+Good first issues: replacing the AGPL PDF backend, wiring the 45 orphaned guard
+scripts into the audit chain, observability (logging / metrics / heartbeat), and
+decomposing the 8,591-line `store.py`.
 
-The output is `output/client-data/Monday_Report_Client_Data_APPROVAL.md` and `.json`. A `BLOCKED` report is expected until `/readiness/client-data` is fully green; see `docs/CLIENT_DATA_READINESS.md` for the required environment.
+Start with **[CONTRIBUTING.md](CONTRIBUTING.md)** — it documents the real
+surprises (no unit-test framework, the guard battery, pnpm 10) and the
+[CLA](CLA.md) you will need to sign.
 
-## Production Next Steps
+Work that was started and deliberately stopped is written up in
+**[docs/unfinished/](docs/unfinished/)**, including why each attempt stopped —
+so you can pick one up without repeating the dead ends.
 
-- Replace local JSON state with PostgreSQL repositories and Redis-backed workers.
-- Replace local file storage with production object storage and queued Python parser workers.
-- Harden OCR/PDF extraction on reviewed anonymized client fixtures, configure a production OCR engine, and complete customer-grade golden fixture coverage using `docs/GOLDEN_FIXTURE_MANIFEST.example.json`; then run `generate_parser_fixture_eval_report.py` and set `MONDAY_REPORT_PARSER_EVAL_REPORT` to the passing report.
-- Build the Phase 06 local-AI extraction router on the reviewed pipeline, using the promoted FORGE evaluation set (65/65 required on the real corpus) as its acceptance target.
-- Add Postgres migrations from `db/schema.sql`.
-- Add auth/SSO, tenant-aware request context, persistent audit hardening, and source preview authorization.
-- Replace deterministic extraction with local LLM provider abstraction and evaluation sets before using customer data.
-- Keep `gemma4:e2b` installed in Ollama for partner testing, or override `MONDAY_REPORT_LOCAL_LLM_MODEL` only after the replacement model is audited.
-- Polish production PDF/XLSX templates and signed export presentation.
-- Set `MONDAY_REPORT_CLIENT_DATA_MODE=client` only after `/readiness/client-data` reports ready with reviewed fixture attestation.
-- For clean client bootstrap, set `MONDAY_REPORT_TENANT_NAME`, `MONDAY_REPORT_TENANT_SLUG`, `MONDAY_REPORT_USER_EMAIL`, and `MONDAY_REPORT_USER_FULL_NAME` before the first API start. Default startup creates a neutral workspace only; failure records are created from uploaded evidence.
+---
+
+## Licence
+
+**GNU Affero General Public License v3.0 or later** — see [LICENSE](LICENSE).
+
+AGPL means: use it, modify it, run it. But if you distribute it **or offer it as
+a network service**, you must release your modified source under the same terms
+and keep the attribution in [NOTICE](NOTICE) intact.
+
+> A **commercial licence** is available for organisations that cannot accept the
+> copyleft and network-source obligations. To enquire, open an issue titled
+> *Commercial licence enquiry*.
+
+Copyright © 2026 **Rashed Albalawi** (Developer) and **Emeil Nassrallah** (Founder).
+
+Evaluation ground truth derives from Utah FORGE Well 16A(78)-32 drilling data,
+used under CC BY 4.0 — full citation in [NOTICE](NOTICE). The raw report corpus
+is not redistributed here.

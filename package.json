@@ -1,7 +1,31 @@
 {
   "name": "monday-report",
-  "private": true,
   "version": "0.1.0",
+  "description": "Auditable geothermal daily-report intelligence: extract, verify, and cite every field.",
+  "license": "AGPL-3.0-or-later",
+  "author": "Rashed Albalawi and Emeil Nassrallah",
+  "contributors": [
+    "Rashed Albalawi (Developer)",
+    "Emeil Nassrallah (Founder)"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RAA233/monday-report.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RAA233/monday-report/issues"
+  },
+  "homepage": "https://github.com/RAA233/monday-report#readme",
+  "keywords": [
+    "geothermal",
+    "drilling",
+    "daily-report",
+    "document-extraction",
+    "audit-trail",
+    "provenance",
+    "fastapi",
+    "react"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
